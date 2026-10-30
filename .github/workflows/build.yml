@@ -1,0 +1,95 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64,     os: windows-latest,   preset: windows-x64,     test: true }
+          - { name: windows-arm64,   os: windows-latest,   preset: windows-arm64,   test: false }
+          - { name: linux-x64,       os: ubuntu-24.04,     preset: linux,           test: true }
+          - { name: linux-arm64,     os: ubuntu-24.04-arm, preset: linux,           test: true }
+          - { name: macos-universal, os: macos-latest,     preset: macos-universal, test: true }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgl-dev libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev wayland-protocols
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        if: matrix.test
+        run: ctest --test-dir build/${{ matrix.preset }} -C Release --output-on-failure
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EasyNotepad-${{ matrix.name }}
+          path: |
+            build/${{ matrix.preset }}/**/EasyNotepad*
+            build/${{ matrix.preset }}/**/resources/**
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mymindstorm/setup-emsdk@v14
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake --preset web
+      - name: Build
+        run: cmake --build --preset web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EasyNotepad-web
+          path: |
+            build/web/index.html
+            build/web/index.js
+            build/web/index.wasm
+            build/web/index.data
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build APK (arm64-v8a, x86_64)
+        working-directory: android
+        run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EasyNotepad-android
+          path: android/app/build/outputs/apk/debug/*.apk

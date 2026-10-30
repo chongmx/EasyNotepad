@@ -1,0 +1,26 @@
+# Build output
+/build/
+/out/
+CMakeUserPresets.json
+
+# IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Android
+android/.gradle/
+android/.idea/
+android/local.properties
+android/app/build/
+android/app/.cxx/
+android/build/
+*.apk
+*.aab
+
+# Reference sources (not part of the build)
+/ref/
+
+# Packaged skills (upload artifacts)
+/.claude/skills/*.zip
