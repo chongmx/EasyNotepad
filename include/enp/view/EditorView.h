@@ -3,6 +3,7 @@
 // shown as AI summaries, the layers map, and keyboard/mouse editing.
 #pragma once
 
+#include "enp/model/Git.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/LayersView.h"
 #include "enp/view/Theme.h"
@@ -35,6 +36,8 @@ private:
         float gutterW;
         float markerW;
         float foldW; // fold arrows, at the right edge of the gutter
+        float blameW = 0.0f;  // git blame column (after the markers), when shown
+        float changeW = 0.0f; // git change bars (before the fold arrows), in a repository
         ImVec2 origin;  // screen position of row 0, column 0 (scrolling applied)
         ImVec2 viewMin; // visible area of the editor child window, in screen space
         ImVec2 viewMax;
@@ -62,6 +65,16 @@ private:
     void drawGutter(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
     void drawHoverTooltip(const model::Document& doc, const Metrics& m);
     void revealCaret(const model::Document& doc, const Metrics& m);
+    // Git: merge-conflict blocks (tints, accept buttons, a bar with next / previous), the change
+    // peek opened from a change bar, and blame.
+    void updateConflicts(const model::Document& doc);
+    void renderConflictBar(const model::Document& doc);
+    void drawConflictBackgrounds(const Metrics& m, int firstRow, int lastRow);
+    void drawConflictActions(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
+    void resolveConflict(int block, int resolution); // model::git::Resolution
+    void jumpToConflict(const model::Document& doc, int direction);
+    void renderChangePeek(const model::Document& doc);
+    void drawBlame(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
 
     viewmodel::NotepadViewModel& vm_;
     const Fonts& fonts_;
@@ -75,8 +88,10 @@ private:
     LayersView layers_;
 public:
     float& sideBarWidth() { return sideBarWidth_; } // remembered with the layout
+    float& blameColumns() { return blameColumns_; } // the blame column's width in characters, remembered too
 private:
     float sideBarWidth_ = 0.0f;   // 0: default on first use
+    float blameColumns_ = 30.0f;  // drag its right edge: 9 (hash only) to 60
     int pendingScrollLine_ = -1;  // minimap: centre this line on the next frame
     int firstVisibleLine_ = 0;    // for the minimap's viewport frame
     int lastVisibleLine_ = 0;
@@ -90,6 +105,13 @@ private:
     std::string findBuffer_;
     std::string replaceBuffer_;
     std::vector<viewmodel::Subscription> subscriptions_;
+    std::vector<model::git::ConflictBlock> conflicts_;
+    std::vector<std::string> conflictLines_; // the document's lines while it has conflicts
+    int conflictsDoc_ = -1;
+    uint64_t conflictsVersion_ = ~0ull;
+    int peekLine_ = -1;
+    bool openPeek_ = false;
+    uint64_t blameRequested_ = ~0ull;
 };
 
 } // namespace enp::view

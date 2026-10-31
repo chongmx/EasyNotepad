@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cfloat>
 #include <cstdio>
+#include <ctime>
 #include <unordered_set>
 
 namespace enp::view {
@@ -279,6 +281,12 @@ void EditorView::render(ImVec2 size)
         renderDiskBar(*doc);
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
+    updateConflicts(*doc);
+    if (!conflicts_.empty()) {
+        const float before = ImGui::GetCursorPosY();
+        renderConflictBar(*doc);
+        size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
+    }
     if (vm_.findVisible.get()) {
         const float before = ImGui::GetCursorPosY();
         renderFindBar();
@@ -294,7 +302,13 @@ void EditorView::render(ImVec2 size)
         ++digits;
     m.markerW = 18.0f * s_;
     m.foldW = 16.0f * s_;
-    m.gutterW = m.markerW + m.foldW + (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 6.0f * s_ : 0.0f);
+    // Git: change bars for files of a real repository, and the blame column when it is on.
+    const bool gitFile = doc->onDisk && !vm_.git().demo() && vm_.git().repo().repository;
+    m.changeW = gitFile ? 7.0f * s_ : 0.0f;
+    blameColumns_ = std::clamp(blameColumns_, 9.0f, 60.0f);
+    m.blameW = gitFile && vm_.git().blameShown(doc->path) ? blameColumns_ * m.charW * 0.85f : 0.0f;
+    m.gutterW = m.markerW + m.blameW + m.changeW + m.foldW +
+                (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 6.0f * s_ : 0.0f);
     const bool sideBar = vm_.showLayersMap.get();
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
@@ -350,9 +364,17 @@ void EditorView::render(ImVec2 size)
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(ImVec2(winPos.x + m.gutterW, winPos.y), m.viewMax, true);
+    if (!conflicts_.empty() && !rows_.empty())
+        drawConflictBackgrounds(m, firstRow, lastRow);
     drawRows(*doc, m, firstRow, lastRow);
     dl->PopClipRect();
     drawGutter(*doc, m, firstRow, lastRow);
+    if (m.blameW > 0.0f && !rows_.empty())
+        drawBlame(*doc, m, firstRow, lastRow);
+    if (!conflicts_.empty() && !rows_.empty())
+        drawConflictActions(*doc, m, firstRow, lastRow);
+    if (focused_ && !conflicts_.empty() && ImGui::IsKeyPressed(ImGuiKey_F8))
+        jumpToConflict(*doc, ImGui::GetIO().KeyShift ? -1 : 1);
     if (hovered && !dragging_)
         drawHoverTooltip(*doc, m);
 
@@ -362,6 +384,7 @@ void EditorView::render(ImVec2 size)
     ImGui::Dummy(ImVec2(contentW, float(rows_.size()) * m.lineH + viewH * 0.5f));
     ImGui::EndChild();
     ImGui::PopFont();
+    renderChangePeek(*vm_.activeDocument());
     if (sideBar) {
         ImGui::SameLine(0.0f, 0.0f);
         renderSideBar(*vm_.activeDocument(), sideSize);
@@ -526,6 +549,22 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
             dragging_ = false;
             if (vm_.regionAt(pos.line))
                 vm_.toggleFold(pos.line);
+            return;
+        }
+        const float changeX = m.viewMin.x + m.gutterW - m.foldW - m.changeW;
+        if (inGutter && m.changeW > 0.0f && io.MousePos.x >= changeX && io.MousePos.x < changeX + m.changeW) {
+            dragging_ = false;
+            int first = 0, last = 0;
+            std::vector<std::string> head;
+            if (vm_.git().changeAt(doc.path, pos.line, first, last, head)) {
+                peekLine_ = pos.line;
+                openPeek_ = true;
+            }
+            return;
+        }
+        if (inGutter && m.blameW > 0.0f && io.MousePos.x >= m.viewMin.x + m.markerW &&
+            io.MousePos.x < m.viewMin.x + m.markerW + m.blameW + 4.0f * s_) {
+            dragging_ = false;
             return;
         }
         if (inGutter) {
@@ -870,6 +909,24 @@ void EditorView::drawGutter(const model::Document& doc, const Metrics& m, int fi
     const std::vector<const model::ReviewFinding*> findings = vm_.review().findingsForFile(doc.path);
     const auto& comments = vm_.review().comments();
     const float iconSize = fontSize * 0.75f;
+    // Git: what changed since the last commit, as bars beside the fold arrows.
+    const std::vector<viewmodel::LineChange>* changes =
+        m.changeW > 0.0f ? &vm_.git().lineChanges(doc.path, (long long)doc.buffer.version(), [&doc]() { return doc.buffer.text(); }) : nullptr;
+    if (changes) {
+        const float bx = m.viewMin.x + m.gutterW - m.foldW - m.changeW + 2.0f * s_;
+        for (int r = firstRow; r <= lastRow; ++r) {
+            const Row& row = rows_[size_t(r)];
+            if (row.fold >= 0 || row.line >= int(changes->size()))
+                continue;
+            const viewmodel::LineChange c = (*changes)[size_t(row.line)];
+            const float y = m.origin.y + float(r) * m.lineH;
+            if (c == viewmodel::LineChange::Added || c == viewmodel::LineChange::Modified)
+                dl->AddRectFilled(ImVec2(bx, y), ImVec2(bx + 3.0f * s_, y + m.lineH),
+                                  c == viewmodel::LineChange::Added ? palette_.diffAddedText : palette_.iconBlue);
+            else if (c == viewmodel::LineChange::DeletedAbove && firstRowOfLine_[size_t(row.line)] == r)
+                dl->AddTriangleFilled(ImVec2(bx, y - 4.0f * s_), ImVec2(bx, y + 4.0f * s_), ImVec2(bx + 5.0f * s_, y), palette_.diffRemovedText);
+        }
+    }
     for (int r = firstRow; r <= lastRow; ++r) {
         const Row& row = rows_[size_t(r)];
         const float y = m.origin.y + float(r) * m.lineH;
@@ -892,7 +949,7 @@ void EditorView::drawGutter(const model::Document& doc, const Metrics& m, int fi
             char number[16];
             std::snprintf(number, sizeof(number), "%d", row.line + 1);
             const float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, number).x;
-            dl->AddText(font, fontSize, ImVec2(m.viewMin.x + m.gutterW - m.foldW - 4.0f * s_ - w, textY),
+            dl->AddText(font, fontSize, ImVec2(m.viewMin.x + m.gutterW - m.foldW - m.changeW - 4.0f * s_ - w, textY),
                         row.line == doc.caret.line ? palette_.gutterTextCurrent : palette_.gutterText, number);
         }
         if (const model::OutlineNode* region = vm_.regionAt(row.line)) {
@@ -1181,6 +1238,298 @@ void EditorView::drawHoverTooltip(const model::Document& doc, const Metrics& m)
         ImGui::EndTooltip();
     }
     ImGui::PopFont();
+}
+
+
+// ---- Git: conflicts, change peek, blame ---------------------------------------------------------
+
+void EditorView::updateConflicts(const model::Document& doc)
+{
+    if (conflictsDoc_ == doc.id && conflictsVersion_ == doc.buffer.version())
+        return;
+    conflictsDoc_ = doc.id;
+    conflictsVersion_ = doc.buffer.version();
+    conflicts_.clear();
+    conflictLines_.clear();
+    // Only files with a conflict marker pay for the full scan.
+    bool any = false;
+    for (int i = 0; i < doc.buffer.lineCount() && !any; ++i)
+        any = doc.buffer.line(i).rfind("<<<<<<<", 0) == 0;
+    if (!any)
+        return;
+    conflictLines_.reserve(size_t(doc.buffer.lineCount()));
+    for (int i = 0; i < doc.buffer.lineCount(); ++i)
+        conflictLines_.push_back(doc.buffer.line(i));
+    conflicts_ = model::git::findConflicts(conflictLines_);
+}
+
+void EditorView::renderConflictBar(const model::Document& doc)
+{
+    int current = 0;
+    for (int i = 0; i < int(conflicts_.size()); ++i)
+        if (conflicts_[size_t(i)].start <= doc.caret.line)
+            current = i + 1;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * s_, 5.0f * s_));
+    panel::beginChild("##conflictBar", ImVec2(0.0f, ImGui::GetFrameHeight() + 10.0f * s_),
+                      (palette_.iconOrange & ~IM_COL32_A_MASK) | (ImU32(40) << IM_COL32_A_SHIFT), ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconOrange), ICON_FA_CODE_MERGE);
+    ImGui::SameLine();
+    if (current > 0)
+        ImGui::Text("Merge conflict %d of %d: choose what to keep with the buttons on each block.", current, int(conflicts_.size()));
+    else
+        ImGui::Text("%d merge conflict(s) in this file: choose what to keep with the buttons on each block.", int(conflicts_.size()));
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_ARROW_UP "  Previous"))
+        jumpToConflict(doc, -1);
+    ImGui::SetItemTooltip("Shift+F8");
+    registerLastItem("conflict:previous", "button", "Previous conflict", [this, &doc]() { jumpToConflict(doc, -1); });
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_ARROW_DOWN "  Next"))
+        jumpToConflict(doc, 1);
+    ImGui::SetItemTooltip("F8");
+    registerLastItem("conflict:next", "button", "Next conflict", [this, &doc]() { jumpToConflict(doc, 1); });
+    ImGui::EndChild();
+}
+
+void EditorView::jumpToConflict(const model::Document& doc, int direction)
+{
+    if (conflicts_.empty())
+        return;
+    int target = -1;
+    if (direction > 0) {
+        for (const model::git::ConflictBlock& b : conflicts_)
+            if (b.start > doc.caret.line) {
+                target = b.start;
+                break;
+            }
+        if (target < 0)
+            target = conflicts_.front().start;
+    } else {
+        for (auto it = conflicts_.rbegin(); it != conflicts_.rend(); ++it)
+            if (it->start < doc.caret.line) {
+                target = it->start;
+                break;
+            }
+        if (target < 0)
+            target = conflicts_.back().start;
+    }
+    vm_.setCaret({target, 0}, false);
+    revealCaret_ = true;
+}
+
+void EditorView::drawConflictBackgrounds(const Metrics& m, int firstRow, int lastRow)
+{
+    // Current side tinted like a change, incoming like an addition, the marker lines dim.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float left = m.viewMin.x + m.gutterW;
+    for (int r = firstRow; r <= lastRow && r < int(rows_.size()); ++r) {
+        const Row& row = rows_[size_t(r)];
+        if (row.fold >= 0)
+            continue;
+        for (const model::git::ConflictBlock& b : conflicts_) {
+            if (row.line < b.start || row.line > b.end)
+                continue;
+            const bool marker = row.line == b.start || row.line == b.middle || row.line == b.end || row.line == b.base;
+            const bool currentSide = row.line < (b.base >= 0 ? b.base : b.middle);
+            const bool baseSide = b.base >= 0 && row.line > b.base && row.line < b.middle;
+            const ImU32 c = marker ? palette_.hover : baseSide ? palette_.hover : currentSide ? palette_.diffChangedBg : palette_.diffAddedBg;
+            const float y = m.origin.y + float(r) * m.lineH;
+            dl->AddRectFilled(ImVec2(left, y), ImVec2(m.viewMax.x, y + m.lineH), c);
+        }
+    }
+}
+
+void EditorView::drawConflictActions(const model::Document& doc, const Metrics& m, int firstRow, int lastRow)
+{
+    // A row of buttons on each <<<<<<< line, right of its text.
+    ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f * vm_.zoom.get());
+    for (int i = 0; i < int(conflicts_.size()); ++i) {
+        const model::git::ConflictBlock& b = conflicts_[size_t(i)];
+        if (b.start >= int(firstRowOfLine_.size()))
+            continue;
+        const int r = firstRowOfLine_[size_t(b.start)];
+        if (r < firstRow || r > lastRow)
+            continue;
+        const float y = m.origin.y + float(r) * m.lineH;
+        const float x = m.origin.x + float(doc.buffer.line(b.start).size() + 3) * m.charW;
+        ImGui::SetCursorScreenPos(ImVec2(std::max(x, m.viewMin.x + m.gutterW + 8.0f * s_), y + (m.lineH - ImGui::GetFrameHeight()) * 0.5f));
+        ImGui::PushID(i);
+        const std::string current = b.current.empty() ? "current" : b.current;
+        const std::string incoming = b.incoming.empty() ? "incoming" : b.incoming;
+        if (ImGui::SmallButton("Accept current"))
+            resolveConflict(i, int(model::git::Resolution::Current));
+        ImGui::SetItemTooltip("Keep %s's lines (yours) and drop the others", current.c_str());
+        registerLastItem("conflict:" + std::to_string(i) + ":current", "button", "Accept current", [this, i]() {
+            resolveConflict(i, int(model::git::Resolution::Current));
+        });
+        ImGui::SameLine(0.0f, 4.0f * s_);
+        if (ImGui::SmallButton("Accept incoming"))
+            resolveConflict(i, int(model::git::Resolution::Incoming));
+        ImGui::SetItemTooltip("Keep %s's lines and drop yours", incoming.c_str());
+        registerLastItem("conflict:" + std::to_string(i) + ":incoming", "button", "Accept incoming", [this, i]() {
+            resolveConflict(i, int(model::git::Resolution::Incoming));
+        });
+        ImGui::SameLine(0.0f, 4.0f * s_);
+        if (ImGui::SmallButton("Accept both"))
+            resolveConflict(i, int(model::git::Resolution::Both));
+        ImGui::SetItemTooltip("Keep both: yours first, then the incoming lines");
+        ImGui::SameLine(0.0f, 4.0f * s_);
+        if (ImGui::SmallButton(ICON_FA_CODE_COMPARE " Compare")) {
+            const int currentEnd = b.base >= 0 ? b.base : b.middle;
+            std::vector<std::string> ours(conflictLines_.begin() + b.start + 1, conflictLines_.begin() + currentEnd);
+            std::vector<std::string> theirs(conflictLines_.begin() + b.middle + 1, conflictLines_.begin() + b.end);
+            vm_.review().setDiff("Conflict " + std::to_string(i + 1) + ": " + current + " vs " + incoming, model::diffLines(ours, theirs));
+            vm_.showPanelTab(viewmodel::PanelTab::Diff);
+        }
+        ImGui::PopID();
+    }
+    ImGui::PopFont();
+}
+
+void EditorView::resolveConflict(int block, int resolution)
+{
+    if (block < 0 || block >= int(conflicts_.size()))
+        return;
+    const model::git::ConflictBlock b = conflicts_[size_t(block)];
+    const std::vector<std::string> lines = model::git::resolveConflict(conflictLines_, b, model::git::Resolution(resolution));
+    vm_.replaceLines(b.start, b.end, lines);
+    conflictsVersion_ = ~0ull; // recompute
+    vm_.statusText.set(conflicts_.size() == 1 ? "Last conflict resolved: save the file and it is marked resolved"
+                                              : "Conflict resolved; " + std::to_string(conflicts_.size() - 1) + " left in this file (F8: next)");
+}
+
+void EditorView::renderChangePeek(const model::Document& doc)
+{
+    if (openPeek_) {
+        ImGui::OpenPopup("##changePeek");
+        openPeek_ = false;
+    }
+    ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f * s_, 0.0f), ImVec2(720.0f * s_, 420.0f * s_));
+    if (!ImGui::BeginPopup("##changePeek"))
+        return;
+    int first = 0, last = -1;
+    std::vector<std::string> head;
+    if (!vm_.git().changeAt(doc.path, peekLine_, first, last, head)) {
+        ImGui::TextDisabled("No change here any more.");
+        ImGui::EndPopup();
+        return;
+    }
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.textDim), ICON_FA_CODE_BRANCH "  Since the last commit:");
+    ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * 0.9f);
+    if (head.empty())
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.diffAddedText), "(these lines are new)");
+    else {
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.textFaint), "It was:");
+        for (size_t i = 0; i < head.size() && i < 20; ++i)
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.diffRemovedText), "- %s", head[i].c_str());
+        if (head.size() > 20)
+            ImGui::TextDisabled("... %d more", int(head.size() - 20));
+    }
+    ImGui::PopFont();
+    ImGui::Spacing();
+    if (ImGui::Button(ICON_FA_ROTATE_LEFT "  Revert this change")) {
+        vm_.replaceLines(first, last, head);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemTooltip("Put these lines back as they were in the last commit (Undo brings your version back)");
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_CODE_COMPARE "  Open diff")) {
+        vm_.git().showChange(vm_.git().repoPath(doc.path), model::git::Area::Changes);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemTooltip("The whole file's changes, where you can stage some of them");
+    ImGui::EndPopup();
+}
+
+void EditorView::drawBlame(const model::Document& doc, const Metrics& m, int firstRow, int lastRow)
+{
+    const std::vector<model::git::BlameLine>& blame = vm_.git().blame(doc.path);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float x0 = m.viewMin.x + m.markerW;
+    const float fontSize = ImGui::GetFontSize() * 0.85f;
+    ImFont* font = ImGui::GetFont();
+    const int lines = doc.buffer.lineCount();
+    const bool fresh = !blame.empty() && int(blame.size()) >= lines - 1 && int(blame.size()) <= lines;
+    if (!fresh && !doc.modified && blameRequested_ != doc.buffer.version()) {
+        blameRequested_ = doc.buffer.version();
+        vm_.git().loadBlame(doc.path, doc.buffer.text());
+    }
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const float edge = x0 + m.blameW;
+    const bool inColumn = mouse.x >= x0 && mouse.x < edge - 4.0f * s_ && ImGui::IsWindowHovered();
+    // As the column narrows it drops the author, then the age; the tooltip always has everything.
+    const bool showAuthor = blameColumns_ >= 22.0f;
+    const bool showAge = blameColumns_ >= 15.0f;
+    const int64_t now = int64_t(std::time(nullptr));
+    for (int r = firstRow; r <= lastRow && r < int(rows_.size()); ++r) {
+        const Row& row = rows_[size_t(r)];
+        if (row.fold >= 0 || firstRowOfLine_[size_t(row.line)] != r)
+            continue;
+        const float y = m.origin.y + float(r) * m.lineH;
+        if (!fresh) {
+            if (r == firstRow)
+                dl->AddText(font, fontSize, ImVec2(x0 + 4.0f * s_, y + (m.lineH - fontSize) * 0.5f), palette_.textFaint,
+                            doc.modified ? "save to update blame" : "loading blame...");
+            continue;
+        }
+        if (row.line >= int(blame.size()))
+            continue;
+        const model::git::BlameLine& b = blame[size_t(row.line)];
+        const bool uncommitted = b.hash.find_first_not_of('0') == std::string::npos;
+        const bool firstOfRun = row.line == 0 || blame[size_t(row.line - 1)].hash != b.hash;
+        if (inColumn && mouse.y >= y && mouse.y < y + m.lineH) {
+            dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + m.blameW, y + m.lineH), palette_.hover);
+            if (uncommitted)
+                ImGui::SetTooltip("Not committed yet");
+            else
+                ImGui::SetTooltip("%s\n%s, %s\n%s\nClick: show this commit in History", b.summary.c_str(), b.author.c_str(),
+                                  model::git::relativeTime(b.time, now).c_str(), b.hash.substr(0, 10).c_str());
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !uncommitted)
+                vm_.gitShowCommitRequested.emit(b.hash);
+        }
+        if (!firstOfRun)
+            continue;
+        std::string text = uncommitted ? std::string(showAge ? "not committed yet" : "new")
+                                       : b.hash.substr(0, 7) + (showAuthor ? " " + b.author : std::string());
+        float ageW = 0.0f;
+        std::string age;
+        if (!uncommitted && showAge) {
+            age = model::git::relativeTime(b.time, now);
+            if (age.size() > 4 && age.compare(age.size() - 4, 4, " ago") == 0)
+                age.resize(age.size() - 4);
+            ageW = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, age.c_str()).x;
+            dl->AddText(font, fontSize, ImVec2(edge - 6.0f * s_ - ageW, y + (m.lineH - fontSize) * 0.5f), palette_.textFaint, age.c_str());
+        }
+        dl->PushClipRect(ImVec2(x0, y), ImVec2(std::max(x0, edge - (ageW > 0.0f ? ageW + 12.0f * s_ : 4.0f * s_)), y + m.lineH), true);
+        dl->AddText(font, fontSize, ImVec2(x0 + 4.0f * s_, y + (m.lineH - fontSize) * 0.5f), uncommitted ? palette_.severityWarning : palette_.textDim,
+                    text.c_str());
+        dl->PopClipRect();
+    }
+    // Its right edge: drag to resize (double-click: back to the full width).
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(ImVec2(edge - 3.0f * s_, m.viewMin.y));
+    ImGui::InvisibleButton("##blameEdge", ImVec2(6.0f * s_, std::max(1.0f, m.viewMax.y - m.viewMin.y)));
+    const bool edgeActive = ImGui::IsItemActive();
+    const bool edgeHovered = ImGui::IsItemHovered();
+    if (edgeHovered || edgeActive)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    if (edgeHovered && !edgeActive)
+        ImGui::SetTooltip("Drag to resize the blame column; double-click for the full width");
+    if (edgeActive && ImGui::GetIO().MouseDelta.x != 0.0f) {
+        blameColumns_ = std::clamp(blameColumns_ + ImGui::GetIO().MouseDelta.x / std::max(1.0f, m.blameW / blameColumns_), 9.0f, 60.0f);
+        vm_.settings().markDirty();
+    }
+    if (edgeHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        blameColumns_ = 30.0f;
+        vm_.settings().markDirty();
+    }
+    registerLastItem("blame:resize", "button", "Resize the blame column", nullptr);
+    ImGui::SetCursorScreenPos(cursor);
+    dl->AddLine(ImVec2(edge - 1.0f, m.viewMin.y), ImVec2(edge - 1.0f, m.viewMax.y),
+                edgeActive || edgeHovered ? palette_.accent : palette_.border, edgeActive || edgeHovered ? 2.0f * s_ : 1.0f);
 }
 
 } // namespace enp::view

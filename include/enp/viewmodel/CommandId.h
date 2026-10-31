@@ -45,6 +45,8 @@ enum class CommandId {
     ToggleTerminal, NewTerminal, KillTerminal, ClearTerminal, PopOutTerminal,
     // Tools
     StartRecording, StopRecording, PlayMacro, HashSha256, Preferences, About, Exit,
+    // Git
+    ShowGit, GitCommit, GitStageAll, GitDiscardAll, GitBranches, GitMerge, GitSync, GitPull, GitPush, GitFetch, ShowGitHistory, GitBlame, GitStash, GitStashPop, GitWriteMessage, GitGuide,
 
     Count
 };

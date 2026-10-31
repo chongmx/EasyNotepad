@@ -2,6 +2,7 @@
 
 #include "enp/view/PanelFrame.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -49,8 +50,11 @@ void drawSide(ImDrawList* dl, ImVec2 min, ImVec2 max, int line, const std::strin
 } // namespace
 
 void renderSideBySideDiff(const char* id, const std::vector<model::DiffRow>& rows, const Fonts& fonts,
-                          const Palette& palette, float zoom, float uiScale, ImVec2 size)
+                          const Palette& palette, float zoom, float uiScale, ImVec2 size, std::vector<bool>* chosen)
 {
+    static int anchor = -1; // Shift-click ranges start here
+    if (chosen)
+        chosen->resize(rows.size(), false);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     panel::beginChild(id, size, palette.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
@@ -83,7 +87,38 @@ void renderSideBySideDiff(const char* id, const std::vector<model::DiffRow>& row
             drawSide(dl, ImVec2(p.x + half + 1.0f, p.y), ImVec2(p.x + width, p.y + lineH), row.rightLine, row.rightText,
                      added ? '+' : ' ', added ? palette.diffAddedBg : (row.rightLine < 0 ? palette.hover : 0),
                      palette.diffAddedText, palette, numberW);
-            ImGui::Dummy(ImVec2(width, lineH));
+            if (chosen && row.kind != model::DiffKind::Same) {
+                ImGui::PushID(i);
+                ImGui::InvisibleButton("##row", ImVec2(width, lineH));
+                if (ImGui::IsItemClicked()) {
+                    std::vector<bool>& c = *chosen;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        // The whole change: every adjacent changed row.
+                        int a = i, b = i;
+                        while (a > 0 && rows[size_t(a - 1)].kind != model::DiffKind::Same)
+                            --a;
+                        while (b + 1 < int(rows.size()) && rows[size_t(b + 1)].kind != model::DiffKind::Same)
+                            ++b;
+                        for (int k = a; k <= b; ++k)
+                            c[size_t(k)] = true;
+                    } else if (ImGui::GetIO().KeyShift && anchor >= 0 && anchor < int(rows.size())) {
+                        for (int k = std::min(anchor, i); k <= std::max(anchor, i); ++k)
+                            c[size_t(k)] = rows[size_t(k)].kind != model::DiffKind::Same;
+                    } else {
+                        c[size_t(i)] = !c[size_t(i)];
+                        anchor = i;
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + lineH), palette.hover);
+                if ((*chosen)[size_t(i)]) {
+                    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + lineH), palette.accentSoft);
+                    dl->AddRectFilled(p, ImVec2(p.x + 3.0f * uiScale, p.y + lineH), palette.accent);
+                }
+                ImGui::SetItemTooltip("Click to choose this line, Shift-click a range, double-click the whole change");
+                ImGui::PopID();
+            } else
+                ImGui::Dummy(ImVec2(width, lineH));
         }
     }
     const ImVec2 winPos = ImGui::GetWindowPos();

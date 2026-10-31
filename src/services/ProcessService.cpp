@@ -23,7 +23,27 @@ void ProcessService::run(const std::string& commandLine, const std::string& work
     std::weak_ptr<std::atomic<bool>> alive = alive_;
     os::dispatch::runAsync([alive, commandLine, workingDirectory, done = std::move(done)]() {
         const os::process::Result r = os::process::run(commandLine, {}, workingDirectory, kTimeoutSeconds);
-        interfaces::ProcessResult result{r.started && !r.timedOut, r.exitCode, r.output,
+        interfaces::ProcessResult result{r.started && !r.timedOut, r.exitCode, r.output, {},
+                                         r.timedOut ? "did not finish within " + std::to_string(kTimeoutSeconds / 60) + " minutes" : r.error};
+        os::dispatch::postToMain([alive, result, done]() {
+            if (auto token = alive.lock(); token && *token)
+                done(result);
+        });
+    });
+}
+
+void ProcessService::run(const interfaces::ProcessRequest& request, std::function<void(const interfaces::ProcessResult&)> done)
+{
+    std::weak_ptr<std::atomic<bool>> alive = alive_;
+    os::dispatch::runAsync([alive, request, done = std::move(done)]() {
+        os::process::Command command;
+        command.arguments = request.arguments;
+        command.environment = request.environment;
+        command.input = request.input;
+        command.workingDirectory = request.workingDirectory;
+        command.timeoutSeconds = kTimeoutSeconds;
+        const os::process::Result r = os::process::run(command);
+        interfaces::ProcessResult result{r.started && !r.timedOut, r.exitCode, r.output, r.errorOutput,
                                          r.timedOut ? "did not finish within " + std::to_string(kTimeoutSeconds / 60) + " minutes" : r.error};
         os::dispatch::postToMain([alive, result, done]() {
             if (auto token = alive.lock(); token && *token)

@@ -18,6 +18,7 @@
 #include "enp/viewmodel/LogicalMapViewModel.h"
 #include "enp/viewmodel/Observable.h"
 #include "enp/viewmodel/PointerViewModel.h"
+#include "enp/viewmodel/GitViewModel.h"
 #include "enp/viewmodel/ReviewViewModel.h"
 #include "enp/viewmodel/Settings.h"
 #include "enp/viewmodel/SyntaxColorSettings.h"
@@ -41,7 +42,7 @@ enum class EditorMode { Code, Map };
 enum class WorkspaceMode { Agent, Code };
 enum class ClipboardAction { Cut, Copy, Paste };
 // Tabs of the bottom panel (VS Code's "Panel").
-enum class PanelTab { Problems, Diff, Comments, Checklist, Terminal, Search }; // append only: saved as numbers
+enum class PanelTab { Problems, Diff, Comments, Checklist, Terminal, Search, History }; // append only: saved as numbers
 
 // A user-defined ribbon button that runs a shell command in the integrated terminal.
 struct CustomAction {
@@ -104,6 +105,21 @@ public:
     Property<int> maxFramesPerSecond{kDefaultMaxFps};
     Property<bool> blinkCaret{true};
     Property<bool> recording{false};
+
+    // ---- Macros and tools ---------------------------------------------------------------------
+    // A macro: typed text, Enter / Backspace / Delete / Tab, caret moves (relative to where the
+    // caret was, so it replays anywhere) and editing commands, recorded between Record and Stop.
+    struct MacroStep {
+        enum class Kind { Text, Newline, Backspace, Delete, Indent, Move, Command };
+        Kind kind = Kind::Text;
+        std::string text;
+        int line = 0, column = 0; // Move: the change of line and column
+        bool extend = false;      // Move: extends the selection
+        CommandId command = CommandId::Count;
+    };
+    const std::vector<MacroStep>& macro() const { return macro_; }
+    void playMacro(int times = 1); // one undo step for all of it
+    Property<std::string> hashResult; // the last SHA-256 (the view shows and clears it)
     Property<float> zoom{1.0f};
     // Reading: how much code is shown. 0 Full, 1 Balanced, 2 Overview, 3 Outline.
     Property<int> detailLevel{0};
@@ -134,6 +150,12 @@ public:
     Event<> preferencesRequested;
     Event<> syntaxColorsRequested;
     Event<> languagePickerRequested;
+    Event<> gitTabRequested;       // the explorer's Git tab
+    Event<> branchPickerRequested;
+    Event<> gitStashRequested;
+    Event<> gitGuideRequested;
+    Event<> gitDiscardAllRequested; // the view asks first
+    Event<std::string> gitShowCommitRequested; // a commit hash (blame): show it in History
     Event<> quitRequested; // safe to quit now (nothing unsaved, or the user decided)
 
     // ---- Unsaved changes ---------------------------------------------------------------------
@@ -156,7 +178,7 @@ public:
 
     // ---- Commands ----------------------------------------------------------------------
     const Command& command(CommandId id) const { return commands_[size_t(id)]; }
-    void execute(CommandId id) const { command(id).execute(); }
+    void execute(CommandId id) const; // (recorded into a macro while recording)
     // Toggle / radio state for ribbon buttons.
     bool isChecked(CommandId id) const;
 
@@ -287,6 +309,15 @@ public:
     void removeCustomAction(int index);
     // Opens the terminal (starting a shell if needed) and runs the action's command.
     void runCustomAction(int index);
+    // Opens the terminal (starting a shell if needed) and runs `command` in it.
+    void runInTerminal(const std::string& command);
+    // A new tab holding `text` (not a file on disk); `pathForLanguage` picks the colouring.
+    void openTextDocument(const std::string& title, const std::string& pathForLanguage, const std::string& text);
+    // Replaces lines [first, last] of the active document with `lines` (last < first: inserts them
+    // before `first`); one undo step.
+    void replaceLines(int first, int last, const std::vector<std::string>& lines);
+    GitViewModel& git() { return git_; }
+    const GitViewModel& git() const { return git_; }
 
     // ---- Agent cursor ----------------------------------------------------------------------
     // Points the agent cursor at a UI element; `seconds` > 0 hides it again after that long.
@@ -405,6 +436,17 @@ private:
     std::vector<std::string> recentFolders_;
     model::Json savedSession_;
     void remember(std::vector<std::string>& list, const std::string& path, size_t max);
+    std::vector<MacroStep> macro_;
+    mutable std::vector<MacroStep> macroRecording_;
+    mutable int macroDepth_ = 0; // only the outermost action of a call is recorded
+    bool playingMacro_ = false;
+    void recordMacro(MacroStep step) const;
+    struct MacroScope {
+        const NotepadViewModel& vm;
+        bool outer;
+        explicit MacroScope(const NotepadViewModel& v) : vm(v), outer(v.macroDepth_++ == 0) {}
+        ~MacroScope() { --vm.macroDepth_; }
+    };
     void recordDiskStamp(model::Document& doc);
     std::optional<std::string> readDiskText(const model::Document& doc) const; // without BOM
     double nextDiskCheck_ = 0.0;
@@ -413,6 +455,7 @@ private:
     // After the store, which they register with (and unregister from when destroyed).
     SyntaxColorSettings syntaxColors_{settings_};
     PointerViewModel pointer_{*this};
+    GitViewModel git_{*this};
 };
 
 } // namespace enp::viewmodel

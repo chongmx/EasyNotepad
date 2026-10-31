@@ -72,7 +72,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::FoldAll: return {"Fold All", "Collapse every region into its summary", "Ctrl+K Ctrl+0"};
     case CommandId::UnfoldAll: return {"Unfold All", "Expand every region", "Ctrl+K Ctrl+J"};
     case CommandId::ToggleFold: return {"Fold", "Fold or unfold the region around the caret", "Ctrl+Shift+["};
-    case CommandId::ToggleLayersMap: return {"Side Bar", "Show or hide the side bar beside the editor (layers or minimap)", ""};
+    case CommandId::ToggleLayersMap: return {"Side Bar", "Show or hide the side bar beside the editor (layers or minimap)", "Ctrl+Alt+B"};
     case CommandId::ShowLayers: return {"Layers", "Side bar: zoomable layers of the file or project, with AI summaries", ""};
     case CommandId::ShowMinimap: return {"Minimap", "Side bar: a zoomed-out strip of the whole file", ""};
     case CommandId::SummarizeFile: return {"Summarize", "Regenerate the AI summaries of this file", ""};
@@ -142,6 +142,23 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::Preferences: return {"Settings", "Preferences", ""};
     case CommandId::About: return {"About", "About EasyNotepad", ""};
     case CommandId::Exit: return {"Exit", "Quit EasyNotepad", "Alt+F4"};
+
+    case CommandId::ShowGit: return {"Git", "Show the Git tab: changes, staging and commit", ""};
+    case CommandId::GitCommit: return {"Commit", "Commit the staged changes", "Ctrl+Enter"};
+    case CommandId::GitStageAll: return {"Stage All", "Stage every change", ""};
+    case CommandId::GitDiscardAll: return {"Discard", "Discard all unstaged changes", ""};
+    case CommandId::GitBranches: return {"Branch", "Switch, create, merge or delete branches", ""};
+    case CommandId::GitMerge: return {"Merge", "Merge another branch into the current one", ""};
+    case CommandId::GitSync: return {"Sync", "Pull then push the current branch", ""};
+    case CommandId::GitPull: return {"Pull", "Pull from the upstream branch", ""};
+    case CommandId::GitPush: return {"Push", "Push the current branch", ""};
+    case CommandId::GitFetch: return {"Fetch", "Fetch from all remotes", ""};
+    case CommandId::ShowGitHistory: return {"History", "Show the commit history", ""};
+    case CommandId::GitBlame: return {"Blame", "Show who last changed each line", ""};
+    case CommandId::GitStash: return {"Stash", "Stash the uncommitted changes", ""};
+    case CommandId::GitStashPop: return {"Pop", "Apply and drop the latest stash", ""};
+    case CommandId::GitWriteMessage: return {"Message", "Let the agent write the commit message", ""};
+    case CommandId::GitGuide: return {"Learn Git", "Step-by-step guide to git, using this app's Git tools", ""};
 
     case CommandId::Count: break;
     }
@@ -277,6 +294,22 @@ const char* commandKey(CommandId id)
     case CommandId::Preferences: return "Preferences";
     case CommandId::About: return "About";
     case CommandId::Exit: return "Exit";
+    case CommandId::ShowGit: return "ShowGit";
+    case CommandId::GitCommit: return "GitCommit";
+    case CommandId::GitStageAll: return "GitStageAll";
+    case CommandId::GitDiscardAll: return "GitDiscardAll";
+    case CommandId::GitBranches: return "GitBranches";
+    case CommandId::GitMerge: return "GitMerge";
+    case CommandId::GitSync: return "GitSync";
+    case CommandId::GitPull: return "GitPull";
+    case CommandId::GitPush: return "GitPush";
+    case CommandId::GitFetch: return "GitFetch";
+    case CommandId::ShowGitHistory: return "ShowGitHistory";
+    case CommandId::GitBlame: return "GitBlame";
+    case CommandId::GitStash: return "GitStash";
+    case CommandId::GitStashPop: return "GitStashPop";
+    case CommandId::GitWriteMessage: return "GitWriteMessage";
+    case CommandId::GitGuide: return "GitGuide";
     case CommandId::Count: break;
     }
     return "";

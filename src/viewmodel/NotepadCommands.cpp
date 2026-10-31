@@ -1,6 +1,7 @@
 // NotepadViewModel: every command and what it is bound to (split from NotepadViewModel.cpp).
 #include "enp/viewmodel/NotepadViewModel.h"
 
+#include "enp/model/Hash.h"
 #include "enp/model/Json.h"
 #include "enp/viewmodel/DummyData.h"
 
@@ -38,7 +39,6 @@ void NotepadViewModel::initCommands()
     using C = CommandId;
     auto hasDoc = [this]() { return activeDocument() != nullptr; };
     auto hasSelection = [this]() { return activeDocument() && activeDocument()->hasSelection(); };
-    auto stub = [this](CommandId id) { return [this, id]() { notImplemented(id); }; };
 
     set(C::NewFile, [this]() { newDocument(); });
     // The dialog starts in the active document's folder, else the workspace, else home.
@@ -356,18 +356,82 @@ void NotepadViewModel::initCommands()
     });
 
     set(C::StartRecording, [this]() {
+        macroRecording_.clear();
         recording.set(true);
-        statusText.set("Recording macro... (dummy)");
+        statusText.set("Recording a macro: type and edit, then Stop");
     }, [this]() { return !recording.get(); });
     set(C::StopRecording, [this]() {
         recording.set(false);
-        statusText.set("Macro recording stopped (dummy)");
+        if (macroRecording_.empty()) {
+            statusText.set("Nothing was recorded; the previous macro is kept");
+            return;
+        }
+        macro_ = std::move(macroRecording_);
+        macroRecording_.clear();
+        settings_.markDirty();
+        statusText.set("Recorded a macro of " + std::to_string(macro_.size()) + " step(s): Play to repeat it");
     }, [this]() { return recording.get(); });
-    set(C::PlayMacro, stub(C::PlayMacro));
-    set(C::HashSha256, stub(C::HashSha256));
+    set(C::PlayMacro, [this]() { playMacro(); }, [this]() { return !macro_.empty() && !recording.get() && activeDocument(); });
+    set(C::HashSha256, [this]() {
+        const model::Document* doc = activeDocument();
+        const std::string text = doc->hasSelection() ? selectedText() : doc->buffer.text();
+        hashResult.set(model::sha256Hex(text));
+        statusText.set(std::string("SHA-256 of the ") + (doc->hasSelection() ? "selection" : "document") + ": " + hashResult.get());
+    }, hasDoc);
+    // Git (GitViewModel; demo data while the guide runs or no folder is open).
+    auto gitReady = [this]() { return git_.available() && git_.repo().repository; };
+    auto hasChanges = [this, gitReady]() { return gitReady() && git_.changeCount() > 0; };
+    set(C::ShowGit, [this]() {
+        showExplorer.set(true);
+        gitTabRequested.emit();
+    });
+    set(C::GitCommit, [this]() {
+        if (git_.commitMessage.empty()) {
+            showExplorer.set(true);
+            gitTabRequested.emit();
+        }
+        git_.commitWithMessage();
+    }, hasChanges);
+    set(C::GitStageAll, [this]() { git_.stage(git_.unstagedPaths()); }, hasChanges);
+    set(C::GitDiscardAll, [this]() { gitDiscardAllRequested.emit(); }, hasChanges);
+    set(C::GitBranches, [this]() { branchPickerRequested.emit(); }, gitReady);
+    set(C::GitMerge, [this]() {
+        branchPickerRequested.emit();
+        statusText.set("Right-click the branch to merge and choose Merge into current");
+    }, gitReady);
+    set(C::GitSync, [this]() { git_.sync(); }, gitReady);
+    set(C::GitPull, [this]() { git_.pull(); }, gitReady);
+    set(C::GitPush, [this]() { git_.push(); }, gitReady);
+    set(C::GitFetch, [this]() { git_.fetch(); }, gitReady);
+    set(C::GitStash, [this]() { gitStashRequested.emit(); }, hasChanges);
+    set(C::GitStashPop, [this]() { git_.stashApply(0, true); }, [this, gitReady]() { return gitReady() && !git_.repo().stashes.empty(); });
+    set(C::GitWriteMessage, [this]() {
+        showExplorer.set(true);
+        gitTabRequested.emit();
+        git_.writeMessage();
+    }, hasChanges);
+    set(C::GitBlame, [this]() {
+        if (const model::Document* doc = activeDocument())
+            git_.toggleBlame(doc->path, doc->buffer.text());
+    }, [this, gitReady]() { return gitReady() && activeDocument() && activeDocument()->onDisk; });
+    set(C::GitGuide, [this]() { gitGuideRequested.emit(); });
+    set(C::ShowGitHistory, [this]() { showPanelTab(PanelTab::History); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
     set(C::Exit, [this]() { requestQuit(); });
+}
+
+void NotepadViewModel::execute(CommandId id) const
+{
+    MacroScope scope(*this);
+    // Editing commands are part of a macro; navigation, files and the recorder itself are not.
+    static const CommandId kRecorded[] = {CommandId::DuplicateLine, CommandId::DeleteLine, CommandId::MoveLineUp,
+                                          CommandId::MoveLineDown, CommandId::SortLines, CommandId::UpperCase,
+                                          CommandId::LowerCase, CommandId::ToggleComment, CommandId::Indent,
+                                          CommandId::Outdent, CommandId::TrimTrailing, CommandId::SelectAll};
+    if (scope.outer && std::find(std::begin(kRecorded), std::end(kRecorded), id) != std::end(kRecorded))
+        recordMacro({MacroStep::Kind::Command, {}, 0, 0, false, id});
+    command(id).execute();
 }
 
 bool NotepadViewModel::isChecked(CommandId id) const
@@ -394,6 +458,8 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::ShowMapView: return editorMode.get() == EditorMode::Map;
     case C::FoldingSyntax: return foldingMode.get() == model::OutlineMode::Syntax;
     case C::FoldingLogical: return foldingMode.get() == model::OutlineMode::Logical;
+    case C::GitBlame: return doc && git_.blameShown(doc->path);
+    case C::ShowGitHistory: return showPanel.get() && panelTab.get() == PanelTab::History;
     case C::DissectProject: return logicalMap_.analyzing.get();
     case C::ShowLayers: return showLayersMap.get() && sideBar.get() == SideBar::Layers;
     case C::ShowMinimap: return showLayersMap.get() && sideBar.get() == SideBar::Minimap;

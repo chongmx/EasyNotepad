@@ -2,6 +2,7 @@
 
 #include "enp/view/DiffView.h"
 #include "enp/view/Icons.h"
+#include "enp/view/UiAutomation.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -68,6 +69,7 @@ void ReviewPanel::renderTab(PanelTab tab)
     case PanelTab::Checklist: renderChecklist(); break;
     case PanelTab::Terminal: break; // TerminalView
     case PanelTab::Search: break;   // SearchPanel
+    case PanelTab::History: break;  // GitView
     }
 }
 
@@ -197,12 +199,57 @@ void ReviewPanel::renderDiff()
         return;
     }
     const model::DiffStats stats = model::diffStats(review.diff());
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(review.diffTitle().c_str());
     ImGui::SameLine();
     ImGui::TextColored(col(palette_.diffAddedText), "+%d", stats.added);
     ImGui::SameLine(0.0f, 4.0f * s_);
     ImGui::TextColored(col(palette_.diffRemovedText), "-%d", stats.removed);
-    renderSideBySideDiff("##reviewDiff", review.diff(), fonts_, palette_, vm_.zoom.get(), s_, ImVec2(0.0f, 0.0f));
+
+    // A working-tree or staged git diff: its changes can be staged, unstaged or discarded in parts.
+    viewmodel::GitViewModel& git = vm_.git();
+    const viewmodel::GitDiffContext& context = git.diffContext();
+    const bool gitDiff = context.active && context.title == review.diffTitle() &&
+                         (context.area == model::git::Area::Changes || context.area == model::git::Area::Staged);
+    if (gitDiff) {
+        if (chosenFor_ != context.title) {
+            chosenFor_ = context.title;
+            chosen_.assign(context.rows.size(), false);
+        }
+        chosen_.resize(context.rows.size(), false);
+        int picked = 0;
+        for (bool b : chosen_)
+            picked += b ? 1 : 0;
+        using Rows = viewmodel::GitViewModel::RowsAction;
+        const bool staged = context.area == model::git::Area::Staged;
+        ImGui::SameLine(0.0f, 16.0f * s_);
+        ImGui::TextDisabled(picked ? "%d line(s) chosen" : "Click lines to choose them", picked);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(picked == 0 || git.busy());
+        if (ImGui::SmallButton(staged ? ICON_FA_MINUS "  Unstage chosen" : ICON_FA_PLUS "  Stage chosen")) {
+            git.applyRows(chosen_, staged ? Rows::Unstage : Rows::Stage);
+            chosen_.assign(chosen_.size(), false);
+        }
+        registerLastItem("diff:stage-chosen", "button", staged ? "Unstage the chosen lines" : "Stage the chosen lines", nullptr);
+        if (!staged) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT "  Discard chosen")) {
+                git.applyRows(chosen_, Rows::Discard);
+                chosen_.assign(chosen_.size(), false);
+            }
+            ImGui::SetItemTooltip("Take the chosen changes out of the file (save the file first if it is open with edits)");
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("All"))
+            for (size_t i = 0; i < chosen_.size(); ++i)
+                chosen_[i] = context.rows[i].kind != model::DiffKind::Same;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("None"))
+            chosen_.assign(chosen_.size(), false);
+    }
+    renderSideBySideDiff("##reviewDiff", review.diff(), fonts_, palette_, vm_.zoom.get(), s_, ImVec2(0.0f, 0.0f),
+                         gitDiff ? &chosen_ : nullptr);
 }
 
 void ReviewPanel::renderComments()

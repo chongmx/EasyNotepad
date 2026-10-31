@@ -13,6 +13,7 @@ public:
     ~ProcessService() override;
     void run(const std::string& commandLine, const std::string& workingDirectory,
              std::function<void(const interfaces::ProcessResult&)> done) override;
+    void run(const interfaces::ProcessRequest& request, std::function<void(const interfaces::ProcessResult&)> done) override;
     std::optional<std::string> setting(const std::string& name) const override;
 
 private:

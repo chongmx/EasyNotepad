@@ -42,9 +42,9 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
 {
     agentCli_ = agentCli;
     processes_ = processService;
+    git_.setServices(processService, fileService, agentCli);
     initCommands();
     pinned_ = {CommandId::DetailOverview, CommandId::ToggleLayersMap, CommandId::RunAllReviews, CommandId::ToggleTerminal};
-    customActions_ = {{"Git Status", "git status"}, {"Git Log", "git log --oneline -10"}};
     bindSettings();
 
     subscriptions_.push_back(review_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
@@ -406,6 +406,7 @@ bool NotepadViewModel::saveDocument(model::Document& doc)
     doc.modified = false;
     recordDiskStamp(doc);
     statusText.set("Saved " + doc.path);
+    git_.documentSaved(doc.path, doc.savedText);
     return true;
 }
 
@@ -581,6 +582,43 @@ void NotepadViewModel::compareWithDisk(model::Document& doc)
     panelTab.set(PanelTab::Diff);
 }
 
+void NotepadViewModel::recordMacro(MacroStep step) const
+{
+    if (!recording.get() || playingMacro_)
+        return;
+    // Typing coalesces into one text step.
+    if (step.kind == MacroStep::Kind::Text && !macroRecording_.empty() && macroRecording_.back().kind == MacroStep::Kind::Text)
+        macroRecording_.back().text += step.text;
+    else
+        macroRecording_.push_back(std::move(step));
+}
+
+void NotepadViewModel::playMacro(int times)
+{
+    model::Document* doc = activeDocument();
+    if (!doc || macro_.empty() || recording.get())
+        return;
+    beginEdit(EditKind::Other); // every step joins this one undo step
+    playingMacro_ = true;
+    for (int t = 0; t < times; ++t)
+        for (const MacroStep& step : macro_) {
+            switch (step.kind) {
+            case MacroStep::Kind::Text: insertText(step.text); break;
+            case MacroStep::Kind::Newline: newline(); break;
+            case MacroStep::Kind::Backspace: backspace(); break;
+            case MacroStep::Kind::Delete: deleteForward(); break;
+            case MacroStep::Kind::Indent: insertIndent(); break;
+            case MacroStep::Kind::Move:
+                setCaret({doc->caret.line + step.line, std::max(0, doc->caret.column + step.column)}, step.extend);
+                break;
+            case MacroStep::Kind::Command: execute(step.command); break;
+            }
+        }
+    playingMacro_ = false;
+    endEdit();
+    statusText.set("Played the macro" + (times > 1 ? " " + std::to_string(times) + " times" : std::string()));
+}
+
 std::string NotepadViewModel::workspaceRelative(const std::string& path) const
 {
     if (workspaceRoot_.empty() || !FileDialogViewModel::isAbsolute(path))
@@ -663,6 +701,7 @@ bool NotepadViewModel::openFolder(const std::string& path)
         const model::Document* doc = activeDocument();
         return doc && doc->onDisk ? absolutePath(doc->path) : std::string();
     });
+    git_.workspaceChanged();
     for (const ExplorerItem& item : explorer_.children)
         if (!item.isDirectory && (item.name == "README.md" || item.name == "readme.md")) {
             openFile(item.path);
@@ -708,7 +747,11 @@ void NotepadViewModel::setCaret(model::TextPos pos, bool extendSelection)
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    MacroScope scope(*this);
+    const model::TextPos before = doc->caret;
     doc->caret = doc->buffer.clamp(pos);
+    if (scope.outer && doc->caret != before)
+        recordMacro({MacroStep::Kind::Move, {}, doc->caret.line - before.line, doc->caret.column - before.column, extendSelection, CommandId::Count});
     if (!extendSelection)
         doc->anchor = doc->caret;
 }
@@ -741,6 +784,9 @@ void NotepadViewModel::insertText(std::string_view text)
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    MacroScope scope(*this);
+    if (scope.outer)
+        recordMacro({MacroStep::Kind::Text, std::string(text), 0, 0, false, CommandId::Count});
     beginEdit(text.size() == 1 && text[0] != '\n' ? EditKind::Typing : EditKind::Other);
     model::TextPos at = doc->buffer.erase(doc->selectionStart(), doc->selectionEnd());
     doc->caret = doc->anchor = doc->buffer.insert(at, text);
@@ -780,6 +826,9 @@ void NotepadViewModel::newline()
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    MacroScope scope(*this);
+    if (scope.outer)
+        recordMacro({MacroStep::Kind::Newline, {}, 0, 0, false, CommandId::Count});
     if (!smartIndent.get()) {
         const std::string indent = leadingWhitespace(doc->buffer.line(doc->selectionStart().line));
         insertText("\n" + indent);
@@ -806,6 +855,9 @@ void NotepadViewModel::insertIndent()
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    MacroScope scope(*this);
+    if (scope.outer)
+        recordMacro({MacroStep::Kind::Indent, {}, 0, 0, false, CommandId::Count});
     if (doc->indent.tabs) {
         insertText("\t");
         return;
@@ -848,6 +900,9 @@ void NotepadViewModel::backspace()
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    MacroScope scope(*this);
+    if (scope.outer)
+        recordMacro({MacroStep::Kind::Backspace, {}, 0, 0, false, CommandId::Count});
     if (doc->hasSelection()) {
         deleteSelection();
         return;
@@ -874,6 +929,9 @@ void NotepadViewModel::deleteForward()
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    MacroScope scope(*this);
+    if (scope.outer)
+        recordMacro({MacroStep::Kind::Delete, {}, 0, 0, false, CommandId::Count});
     if (doc->hasSelection()) {
         deleteSelection();
         return;
@@ -1101,13 +1159,50 @@ void NotepadViewModel::runCustomAction(int index)
         statusText.set("Custom actions need a terminal, which this platform does not have");
         return;
     }
+    runInTerminal(customActions_[size_t(index)].command);
+    statusText.set("Running " + customActions_[size_t(index)].name + ": " + customActions_[size_t(index)].command);
+}
+
+void NotepadViewModel::runInTerminal(const std::string& command)
+{
+    if (!terminal_.supported()) {
+        statusText.set("This platform has no terminal: run it yourself: " + command);
+        return;
+    }
     showPanelTab(PanelTab::Terminal);
     if (!terminal_.active() || terminal_.active()->exited)
         terminal_.newTerminal(0);
-    if (!terminal_.active())
+    if (terminal_.active())
+        terminal_.sendInput(command + "\r");
+}
+
+void NotepadViewModel::replaceLines(int first, int last, const std::vector<std::string>& lines)
+{
+    model::Document* doc = activeDocument();
+    if (!doc || first < 0 || first > doc->buffer.lineCount())
         return;
-    terminal_.sendInput(customActions_[size_t(index)].command + "\r");
-    statusText.set("Running " + customActions_[size_t(index)].name + ": " + customActions_[size_t(index)].command);
+    const int count = doc->buffer.lineCount();
+    std::string text;
+    for (const std::string& l : lines)
+        text += l + "\n";
+    model::TextPos from{first, 0}, to{first, 0};
+    if (last >= first) {
+        to = last + 1 < count ? model::TextPos{last + 1, 0} : model::TextPos{count - 1, int(doc->buffer.line(count - 1).size())};
+        if (last + 1 >= count && !text.empty())
+            text.pop_back(); // the last line has no newline after it
+    }
+    if (first >= count) { // appending after the last line
+        from = to = {count - 1, int(doc->buffer.line(count - 1).size())};
+        text = "\n" + text.substr(0, text.empty() ? 0 : text.size() - 1);
+    }
+    setSelection(from, to);
+    insertText(text);
+}
+
+void NotepadViewModel::openTextDocument(const std::string& title, const std::string& pathForLanguage, const std::string& text)
+{
+    model::Document& doc = addDocument(title, {}, text);
+    doc.language = model::languageFromPath(pathForLanguage);
 }
 
 // ---- Reading ------------------------------------------------------------------------------------
@@ -1308,6 +1403,7 @@ void NotepadViewModel::tick(double now)
     }
     pointer_.tick(now);
     agent_.tick(now);
+    git_.tick(now);
 }
 
 // ---- Settings -----------------------------------------------------------------------------------
@@ -1361,6 +1457,38 @@ void NotepadViewModel::bindSettings()
             if (!preferredIndent_)
                 return model::Json();
             return model::Json::object().set("tabs", preferredIndent_->tabs).set("width", preferredIndent_->width);
+        });
+
+    // {"macro": [{"kind": 0, "text": "...", "line": 0, "column": 0, "extend": false, "command": "DuplicateLine"}]}
+    settings_.section(
+        "macro",
+        [this](const model::Json& j) {
+            macro_.clear();
+            for (const model::Json& step : j.items()) {
+                MacroStep m;
+                m.kind = MacroStep::Kind(std::clamp(int(step.getNumber("kind")), 0, int(MacroStep::Kind::Command)));
+                m.text = step.getString("text");
+                m.line = int(step.getNumber("line"));
+                m.column = int(step.getNumber("column"));
+                m.extend = step.getBool("extend");
+                if (m.kind == MacroStep::Kind::Command && !commandFromKey(step.getString("command"), m.command))
+                    continue;
+                macro_.push_back(std::move(m));
+            }
+        },
+        [this]() {
+            model::Json steps = model::Json::array();
+            for (const MacroStep& m : macro_) {
+                model::Json step = model::Json::object().set("kind", int(m.kind));
+                if (!m.text.empty())
+                    step.set("text", m.text);
+                if (m.kind == MacroStep::Kind::Move)
+                    step.set("line", m.line).set("column", m.column).set("extend", m.extend);
+                if (m.kind == MacroStep::Kind::Command)
+                    step.set("command", commandKey(m.command));
+                steps.push(std::move(step));
+            }
+            return steps;
         });
 
     // {"recent": {"files": [...], "folders": [...]}}

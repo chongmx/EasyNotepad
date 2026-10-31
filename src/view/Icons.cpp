@@ -133,6 +133,22 @@ const char* commandIcon(CommandId id)
     case CommandId::Preferences: return ICON_FA_GEAR;
     case CommandId::About: return ICON_FA_CIRCLE_INFO;
     case CommandId::Exit: return ICON_FA_POWER_OFF;
+    case CommandId::ShowGit: return ICON_FA_CODE_BRANCH;
+    case CommandId::GitCommit: return ICON_FA_CODE_COMMIT;
+    case CommandId::GitStageAll: return ICON_FA_PLUS;
+    case CommandId::GitDiscardAll: return ICON_FA_ROTATE_LEFT;
+    case CommandId::GitBranches: return ICON_FA_CODE_BRANCH;
+    case CommandId::GitMerge: return ICON_FA_CODE_MERGE;
+    case CommandId::GitSync: return ICON_FA_ARROWS_ROTATE;
+    case CommandId::GitPull: return ICON_FA_DOWNLOAD;
+    case CommandId::GitPush: return ICON_FA_UPLOAD;
+    case CommandId::GitFetch: return ICON_FA_CLOUD_ARROW_DOWN;
+    case CommandId::ShowGitHistory: return ICON_FA_CLOCK_ROTATE_LEFT;
+    case CommandId::GitBlame: return ICON_FA_USER_PEN;
+    case CommandId::GitStash: return ICON_FA_BOX_ARCHIVE;
+    case CommandId::GitStashPop: return ICON_FA_BOX_OPEN;
+    case CommandId::GitWriteMessage: return ICON_FA_WAND_MAGIC_SPARKLES;
+    case CommandId::GitGuide: return ICON_FA_GRADUATION_CAP;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;
@@ -221,7 +237,26 @@ ImU32 commandTint(CommandId id, const Palette& p)
         return p.iconPurple;
     case CommandId::ToggleTerminal:
     case CommandId::NewTerminal:
+    case CommandId::GitCommit:
         return p.iconGreen;
+    case CommandId::ShowGit:
+    case CommandId::GitBranches:
+    case CommandId::GitMerge:
+    case CommandId::GitWriteMessage:
+    case CommandId::GitGuide:
+        return p.iconPurple;
+    case CommandId::GitStageAll:
+        return p.iconBlue;
+    case CommandId::GitDiscardAll:
+        return p.iconRed;
+    case CommandId::GitSync:
+    case CommandId::GitPull:
+    case CommandId::GitPush:
+    case CommandId::GitFetch:
+        return p.iconTeal;
+    case CommandId::ShowGitHistory:
+    case CommandId::GitBlame:
+        return p.iconOrange;
     default:
         return p.iconGray;
     }

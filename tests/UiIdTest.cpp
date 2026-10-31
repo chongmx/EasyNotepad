@@ -301,6 +301,33 @@ int main(int argc, char** argv)
                  if (const view::UiElement* tab = view::UiAutomation::instance().find("explorer-tab:Open"))
                      tab->activate();
              }},
+            {"explorer: git tab (demo data)", [](auto&) {
+                 if (const view::UiElement* tab = view::UiAutomation::instance().find("explorer-tab:Git"))
+                     tab->activate();
+             }},
+            {"git: several files selected, merge in progress", [](auto& vm) {
+                 vm.git().setDemoMerge(true);
+                 if (const view::UiElement* row = view::UiAutomation::instance().find("git:file:src/app/Main.cpp"))
+                     row->activate();
+             }},
+            {"git: history log", [](auto& vm) {
+                 vm.git().setDemoMerge(false);
+                 vm.showPanelTab(viewmodel::PanelTab::History);
+             }},
+            {"git: history compare", [](auto&) {
+                 if (const view::UiElement* tab = view::UiAutomation::instance().find("git:history-compare"))
+                     tab->activate();
+             }},
+            {"git: branch picker", [](auto& vm) { vm.execute(viewmodel::CommandId::GitBranches); }},
+            {"git: learn git guide", [](auto& vm) { vm.execute(viewmodel::CommandId::GitGuide); }},
+            {"git: guide closed", [](auto&) {
+                 if (const view::UiElement* toggle = view::UiAutomation::instance().find("git:guide-toggle"))
+                     toggle->activate();
+             }},
+            {"merge conflict markers in the editor", [](auto& vm) {
+                 vm.newDocument();
+                 vm.insertText("a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nb\n<<<<<<< HEAD\nx\n||||||| base\ny\n=======\nz\n>>>>>>> other\n");
+             }},
             {"search tab with results", [](auto& vm) {
                  vm.findInFiles().query = "int";
                  vm.findInFiles().searchNow();
@@ -314,7 +341,9 @@ int main(int argc, char** argv)
                  if (model::Document* doc = vm.activeDocument())
                      doc->diskState = model::Document::DiskState::Deleted;
              }},
+            {"sha-256 dialog", [](auto& vm) { vm.hashResult.set(std::string(64, 'a')); }},
             {"language picker", [](auto& vm) {
+                 vm.hashResult.set({});
                  if (model::Document* doc = vm.activeDocument())
                      doc->diskState = model::Document::DiskState::InSync;
                  vm.execute(viewmodel::CommandId::ChooseLanguage);

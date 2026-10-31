@@ -7,6 +7,7 @@
 #include "enp/view/DocumentListView.h"
 #include "enp/view/EditorView.h"
 #include "enp/view/FileDialogView.h"
+#include "enp/view/GitView.h"
 #include "enp/view/SearchPanel.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
@@ -50,6 +51,7 @@ private:
     void renderPanelActions(float left, float right, float y, float height);
     void renderTerminalWindow(); // the popped-out terminal
     void renderLanguagePicker();
+    void renderHashResult();
     void renderSaveChangesPrompt();
     void renderQuitPrompt();
     void renderAllTabsPopup();
@@ -82,6 +84,7 @@ private:
     MapView map_;
     FileDialogView fileDialogView_;
     SearchPanel searchPanel_;
+    GitView gitView_;
     DocumentListView documentList_;
     AgentPanel agentPanel_;
     ReviewPanel reviewPanel_;
@@ -109,7 +112,7 @@ private:
     std::string explorerFilterKey_; // explorerVisible_ was computed for this filter
     std::vector<std::string> explorerVisible_; // sorted paths matching the filter (and their folders)
     int explorerRevealSerial_ = -1;
-    int explorerTab_ = 0;         // 0 = Files, 1 = Open
+    int explorerTab_ = 0;         // 0 = Files, 1 = Open, 2 = Git
     int explorerTabRequest_ = -1; // switch on the next frame (agents, "Reveal in Files")
     bool explorerCollapse_ = false;
 
@@ -124,6 +127,7 @@ private:
     std::string languageFilter_;
     int syntaxColorsLanguage_ = -1; // index into model::languages(); -1 = all languages
     bool openAbout_ = false;
+    bool openHelpMenu_ = false; // requested by an agent
     bool quitRequested_ = false;
     std::vector<bool> panelHasHeader_; // beginPanel() nesting
     std::vector<viewmodel::Subscription> subscriptions_;

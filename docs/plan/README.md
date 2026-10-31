@@ -18,5 +18,24 @@ it is described as a feature in [../FEATURES.md](../FEATURES.md), marked here, a
 | 09 | [Smaller main view-model](done/09-split-viewmodel.md) | NotepadViewModel is ~1,900 lines doing everything | Done (documents split deferred) |
 | 10 | [One language picker](done/10-language-picker.md) | Seven per-language commands; the ribbon offers 7 of 21 languages | Done |
 | 11 | [One document list](done/11-document-list.md) | The same open-document rows are drawn three ways | Done |
-| 12 | [Files changed on disk](12-external-changes.md) | Edits made outside the editor go unnoticed | |
-| 13 | [Macros and SHA-256](13-macros-and-hash.md) | Stubs | |
+| 12 | [Files changed on disk](done/12-external-changes.md) | Edits made outside the editor go unnoticed | Done |
+| 13 | [Macros and SHA-256](done/13-macros-and-hash.md) | Stubs | Done |
+| 14 | [Git: status, diff and commit](done/14-git-status-and-commit.md) | No source control in the editor; also builds the git foundation 15–18 use | Done |
+| 15 | [Git: branches and sync](done/15-git-branches-and-sync.md) | Switching, creating, merging, pull and push need the terminal | Done |
+| 16 | [Git: merge conflicts](done/16-git-merge-conflicts.md) | Conflicts mean hand-editing markers and remembering commands | Done |
+| 17 | [Git: history, stash and line-level changes](done/17-git-history-stash-lines.md) | No log, blame, stash, gutter markers or partial staging | Done |
+| 18 | [Git: compare and pick files](done/18-git-compare-and-pick.md) | Taking some commits or files from another branch, commit or stash needs several git commands | Done |
+| 19 | [Learn Git: an interactive guide](done/19-learn-git-guide.md) | Beginners need git's ideas explained on the real controls, safely; reviewers need a walkthrough of 14–18 | Done |
+
+**Reviewing items 14–19:** open Help (?) › Learn Git. Each lesson names its plan item, what was built
+and anything left for later, with an "I have checked this part" box; it runs on demo data that Reset
+puts back.
+
+Where the git items differ from their plans:
+- Commit messages go to `git commit -F -` on stdin, not through a temp file; git runs without a shell
+  (exact arguments), so there is no quoting at all.
+- Commit with nothing staged commits everything; the button says so ("Commit all") instead of asking.
+- Branches sort by the time of their last commit, not the reflog.
+- Open tabs show git status by the colour of their title, not a letter.
+- Left for later: fetching on a timer, creating a repository on GitHub, choosing which remote branch a
+  local branch tracks, and a git path setting (the `EASYNOTEPAD_GIT` variable covers it).

@@ -54,6 +54,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
       ribbon_(vm, fonts, palette_, uiScale), editor_(vm, fonts, palette_, uiScale),
       map_(vm, fonts, palette_, uiScale), fileDialogView_(vm.fileDialog(), fonts, palette_, uiScale),
       searchPanel_(vm, fonts, palette_, uiScale),
+      gitView_(vm, fonts, palette_, uiScale),
       documentList_(vm, palette_, uiScale),
       agentPanel_(vm, fonts, palette_, uiScale), reviewPanel_(vm, fonts, palette_, uiScale),
       terminalView_(vm.terminal(), fonts, palette_, uiScale), agentCursor_(vm, fonts, palette_, uiScale),
@@ -95,6 +96,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
     subscriptions_.push_back(vm_.preferencesRequested.subscribe([this]() { openPreferences_ = true; }));
     subscriptions_.push_back(vm_.syntaxColorsRequested.subscribe([this]() { openSyntaxColors_ = true; }));
     subscriptions_.push_back(vm_.languagePickerRequested.subscribe([this]() { openLanguagePicker_ = true; }));
+    subscriptions_.push_back(vm_.gitTabRequested.subscribe([this]() { explorerTabRequest_ = 2; }));
     documentList_.onReveal = [this](int index) {
         vm_.showExplorer.set(true);
         vm_.activate(index);
@@ -115,6 +117,8 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
             load("planWidth", planWidth_);
             load("conversationWidth", conversationWidth_);
             load("sideBarWidth", editor_.sideBarWidth());
+            if (const model::Json* v = j.find("blameColumns"); v && v->isNumber())
+                editor_.blameColumns() = float(v->asNumber());
         },
         [this]() {
             return model::Json::object()
@@ -123,7 +127,8 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
                 .set("panelHeight", panelHeight_ / s_)
                 .set("planWidth", planWidth_ / s_)
                 .set("conversationWidth", conversationWidth_ / s_)
-                .set("sideBarWidth", editor_.sideBarWidth() / s_);
+                .set("sideBarWidth", editor_.sideBarWidth() / s_)
+                .set("blameColumns", double(editor_.blameColumns()));
         });
     subscriptions_.push_back(vm_.aboutRequested.subscribe([this]() { openAbout_ = true; }));
     subscriptions_.push_back(vm_.quitRequested.subscribe([this]() { quitRequested_ = true; }));
@@ -182,6 +187,8 @@ void MainView::render()
     renderCommentPopup();
     renderTerminalWindow();
     renderLanguagePicker();
+    renderHashResult();
+    gitView_.renderPopups();
     documentList_.renderMenu();
     renderSaveChangesPrompt();
     renderQuitPrompt();
@@ -246,6 +253,7 @@ void MainView::handleShortcuts()
         {ImGuiMod_Shift | ImGuiKey_F2, C::PreviousBookmark, Global},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_E, C::ToggleExplorer, Global},
         {ImGuiMod_Ctrl | ImGuiKey_J, C::TogglePanel, Always},
+        {ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_B, C::ToggleLayersMap, Global},
         {ImGuiMod_Ctrl | ImGuiKey_GraveAccent, C::ToggleTerminal, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_GraveAccent, C::NewTerminal, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_I, C::ToggleAgentPanel, Global},
@@ -419,8 +427,21 @@ void MainView::renderTopBar()
     if (flatButton(ICON_FA_GEAR, "Preferences"))
         vm_.execute(CommandId::Preferences);
     ImGui::SameLine(0.0f, 2.0f * s_);
-    if (flatButton(ICON_FA_CIRCLE_QUESTION, "About EasyNotepad"))
-        vm_.execute(CommandId::About);
+    // Help: the tour, the git guide and About.
+    if (flatButton(ICON_FA_CIRCLE_QUESTION, "Help") || openHelpMenu_)
+        ImGui::OpenPopup("##helpMenu");
+    openHelpMenu_ = false;
+    registerLastItem("help-menu", "button", "Help", [this]() { openHelpMenu_ = true; });
+    if (ImGui::BeginPopup("##helpMenu")) {
+        if (ImGui::MenuItem(ICON_FA_HAND_POINTER "  Take the tour"))
+            vm_.execute(CommandId::StartTour);
+        if (ImGui::MenuItem(ICON_FA_GRADUATION_CAP "  Learn Git"))
+            vm_.execute(CommandId::GitGuide);
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  About EasyNotepad"))
+            vm_.execute(CommandId::About);
+        ImGui::EndPopup();
+    }
     ImGui::SameLine(0.0f, 8.0f * s_);
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%s", version);
@@ -554,7 +575,14 @@ float MainView::renderDocumentTabs(float x0, float x1, float y, float height)
         const float textX = min.x + pad + ImGui::CalcTextSize(icon).x + 6.0f * s_;
         const float textEnd = max.x - closeSize - 8.0f * s_;
         dl->PushClipRect(ImVec2(textX, min.y), ImVec2(textEnd, max.y), true);
-        dl->AddText(ImVec2(textX, textY), active ? palette_.text : palette_.textDim, doc.title.c_str());
+        // Git: a changed file's title takes its status colour (as in the Files tree).
+        const char gitStatus = doc.onDisk ? vm_.git().statusOf(doc.path) : 0;
+        const ImU32 titleColor = gitStatus == 'A' || gitStatus == 'U' ? palette_.diffAddedText
+                                 : gitStatus == '!'                   ? palette_.iconOrange
+                                 : gitStatus == 'M' || gitStatus == 'R' ? palette_.severityWarning
+                                 : active                             ? palette_.text
+                                                                      : palette_.textDim;
+        dl->AddText(ImVec2(textX, textY), titleColor, doc.title.c_str());
         if (!hints[size_t(i)].empty())
             dl->AddText(ImVec2(textX + ImGui::CalcTextSize(doc.title.c_str()).x + 6.0f * s_, textY), palette_.textFaint,
                         hints[size_t(i)].c_str());
@@ -650,6 +678,36 @@ void MainView::renderTerminalWindow()
     ImGui::End();
     if (!open)
         vm_.terminalPoppedOut.set(false);
+}
+
+void MainView::renderHashResult()
+{
+    if (!vm_.hashResult.get().empty() && !ImGui::IsPopupOpen("SHA-256"))
+        ImGui::OpenPopup("SHA-256");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("SHA-256", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+    if (vm_.hashResult.get().empty()) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    const model::Document* doc = vm_.activeDocument();
+    ImGui::TextDisabled("Of the %s", doc && doc->hasSelection() ? "selection" : "whole document");
+    std::string value = vm_.hashResult.get();
+    ImGui::PushFont(fonts_.mono, Fonts::kEditorSize);
+    ImGui::SetNextItemWidth(ImGui::CalcTextSize(value.c_str()).x + 16.0f * s_);
+    ImGui::InputText("##hash", &value, ImGuiInputTextFlags_ReadOnly);
+    ImGui::PopFont();
+    if (ImGui::Button(ICON_FA_COPY "  Copy"))
+        ImGui::SetClipboardText(vm_.hashResult.get().c_str());
+    ImGui::SameLine();
+    if (ImGui::Button("Close") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        vm_.hashResult.set({});
+        ImGui::CloseCurrentPopup();
+    }
+    registerLastItem("dialog:hash:close", "button", "Close", [this]() { vm_.hashResult.set({}); });
+    ImGui::EndPopup();
 }
 
 void MainView::renderLanguagePicker()
@@ -1132,6 +1190,7 @@ void MainView::renderBottomPanel(float width, float height)
         {PanelTab::Checklist, "CHECKLIST", std::to_string(done) + "/" + std::to_string(review.checklist().size())},
         {PanelTab::Terminal, "TERMINAL", terminals > 1 ? std::to_string(terminals) : std::string()},
         {PanelTab::Search, "SEARCH", vm_.findInFiles().hitCount() ? std::to_string(vm_.findInFiles().hitCount()) : std::string()},
+        {PanelTab::History, "HISTORY", {}},
     };
     const PanelTab current = vm_.panelTab.get();
     ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f);
@@ -1188,6 +1247,8 @@ void MainView::renderBottomPanel(float width, float height)
         terminalView_.render(ImGui::GetContentRegionAvail(), vm_.zoom.get());
     else if (current == PanelTab::Search)
         searchPanel_.render();
+    else if (current == PanelTab::History)
+        gitView_.renderHistory();
     else
         reviewPanel_.renderTab(current);
     ImGui::EndChild();
@@ -1342,6 +1403,12 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
                               holdsActive ? withAlpha(palette_.accent, 70) : palette_.hover, ts.y);
             dl->AddText(ImVec2(x, yc - ts.y * 0.5f), holdsActive ? palette_.text : palette_.textDim, badge.c_str());
         }
+        if (!root && vm_.git().folderChanged(item.path)) {
+            // Git: something inside changed since the last commit.
+            const float x = ImGui::GetItemRectMax().x - (!open && openInside > 0 ? 34.0f : 10.0f) * s_;
+            dl->AddCircleFilled(ImVec2(x, (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f), 3.0f * s_,
+                                withAlpha(palette_.severityWarning, 200));
+        }
         if (open) {
             for (const viewmodel::ExplorerItem& child : item.children)
                 renderExplorerItem(child);
@@ -1370,6 +1437,21 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
     float right = rowMax.x - 6.0f * s_;
     const float yc = (rowMin.y + rowMax.y) * 0.5f;
     const auto findings = vm_.review().findingsForFile(item.path);
+    // Git: the file's status letter at the far right, and its name tinted to match.
+    const char gitStatus = vm_.git().statusOf(item.path);
+    ImU32 gitColor = 0;
+    if (gitStatus) {
+        gitColor = gitStatus == 'A' || gitStatus == 'U' ? palette_.diffAddedText : gitStatus == 'D' ? palette_.diffRemovedText
+                   : gitStatus == '!'                   ? palette_.iconOrange
+                                                        : palette_.severityWarning;
+        const char letter[2] = {gitStatus == '!' ? 'C' : gitStatus, 0};
+        const float w = ImGui::CalcTextSize(letter).x;
+        dl->AddText(ImVec2(right - w, yc - ImGui::GetTextLineHeight() * 0.5f), gitColor, letter);
+        if (rowHovered)
+            ImGui::SetTooltip("%s\n%s", item.path.c_str(), gitStatus == 'U' ? "Untracked: new, not in git yet" : gitStatus == 'A' ? "Added"
+                                                       : gitStatus == 'D' ? "Deleted" : gitStatus == '!' ? "Merge conflict" : "Modified since the last commit");
+        right -= w + 6.0f * s_;
+    }
     {
         // Open documents read brighter than the rest of the tree.
         const float reserved = (openDoc ? ImGui::GetTextLineHeight() + 4.0f * s_ : 0.0f) +
@@ -1387,7 +1469,8 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
                 name.pop_back();
             name += "...";
         }
-        dl->AddText(ImVec2(nameX, textY), openDoc || selected ? palette_.text : palette_.textDim, name.c_str());
+        dl->AddText(ImVec2(nameX, textY), gitColor && !selected ? gitColor : openDoc || selected ? palette_.text : palette_.textDim,
+                    name.c_str());
         if (name != item.name && rowHovered)
             ImGui::SetTooltip("%s", item.path.c_str());
     }
@@ -1437,19 +1520,34 @@ void MainView::renderExplorer()
     const int count = int(vm_.documents().size());
     const int request = explorerTabRequest_;
     explorerTabRequest_ = -1;
+    // Three tabs share a narrow panel: tighter padding than the default.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * s_, ImGui::GetStyle().FramePadding.y));
     if (ImGui::BeginTabBar("##explorerTabs")) {
-        if (ImGui::BeginTabItem(ICON_FA_FOLDER_TREE "  Files", nullptr, request == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
+        if (ImGui::BeginTabItem(ICON_FA_FOLDER_TREE " Files###files", nullptr, request == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
             explorerTab_ = 0;
             ImGui::EndTabItem();
         }
         registerLastItem("explorer-tab:Files", "tab", "Files", [this]() { explorerTabRequest_ = 0; });
-        const std::string openLabel = std::string(ICON_FA_LAYER_GROUP "  Open  ") + std::to_string(count) + "###open";
+        const std::string openLabel = std::string(ICON_FA_LAYER_GROUP " Open ") + std::to_string(count) + "###open";
         if (ImGui::BeginTabItem(openLabel.c_str(), nullptr, request == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
             explorerTab_ = 1;
             ImGui::EndTabItem();
         }
         registerLastItem("explorer-tab:Open", "tab", "Open documents", [this]() { explorerTabRequest_ = 1; });
+        const int changes = gitView_.changeCount();
+        const std::string gitLabel = std::string(ICON_FA_CODE_BRANCH " Git") + (changes ? " " + std::to_string(changes) : "") + "###git";
+        if (ImGui::BeginTabItem(gitLabel.c_str(), nullptr, request == 2 ? ImGuiTabItemFlags_SetSelected : 0)) {
+            explorerTab_ = 2;
+            ImGui::EndTabItem();
+        }
+        registerLastItem("explorer-tab:Git", "tab", "Git", [this]() { explorerTabRequest_ = 2; });
         ImGui::EndTabBar();
+    }
+    ImGui::PopStyleVar();
+    if (explorerTab_ == 2) {
+        gitView_.renderChanges();
+        ImGui::PopID();
+        return;
     }
 
     // Toolbar: filter (both views); reveal and collapse for the tree.
@@ -1532,6 +1630,49 @@ void MainView::renderStatusBar()
     dl->AddRectFilled(bMin, bMax, withAlpha(modeColor, ImGui::IsItemHovered() ? 70 : 40), 4.0f * s_);
     dl->AddText(ImVec2(bMin.x + 7.0f * s_, textY), modeColor, badge);
 
+    // Git branch chip: branch, ahead/behind, a dot when there are changes; click for the branch picker.
+    float messageX = bMax.x;
+    if (gitView_.repository()) {
+        std::string branchText = std::string(ICON_FA_CODE_BRANCH " ") + gitView_.branch();
+        if (gitView_.merging())
+            branchText += "  MERGING";
+        if (gitView_.ahead() || gitView_.behind())
+            branchText += "  " ICON_FA_ARROW_UP + std::to_string(gitView_.ahead()) + " " ICON_FA_ARROW_DOWN + std::to_string(gitView_.behind());
+        const float dotW = gitView_.changeCount() ? 14.0f * s_ : 0.0f;
+        const ImVec2 gMin(bMax.x + 6.0f * s_, origin.y + 1.0f);
+        const ImVec2 gMax(gMin.x + ImGui::CalcTextSize(branchText.c_str()).x + dotW + 16.0f * s_, origin.y + h);
+        ImGui::SetCursorScreenPos(gMin);
+        if (ImGui::InvisibleButton("##branchChip", ImVec2(gMax.x - gMin.x, gMax.y - gMin.y)))
+            gitView_.openBranchPicker(ImVec2(gMin.x, origin.y), true);
+        ImGui::SetItemTooltip("Branches: switch, create, merge");
+        registerLastItem("status:branch", "button", "Branches", [this]() { vm_.execute(CommandId::GitBranches); });
+        if (ImGui::IsItemHovered())
+            dl->AddRectFilled(gMin, gMax, palette_.hover);
+        dl->AddText(ImVec2(gMin.x + 8.0f * s_, textY), gitView_.merging() ? palette_.severityWarning : palette_.text, branchText.c_str());
+        if (dotW > 0.0f) // uncommitted changes, in the modified colour
+            dl->AddCircleFilled(ImVec2(gMax.x - 8.0f * s_ - dotW * 0.5f, origin.y + h * 0.5f), 3.5f * s_, palette_.severityWarning);
+        dl->AddLine(ImVec2(gMax.x, origin.y + 5.0f * s_), ImVec2(gMax.x, origin.y + h - 5.0f * s_), palette_.border);
+        messageX = gMax.x;
+    }
+
+    // Demo data (the guide, or no folder open): say so plainly.
+    if (gitView_.demo()) {
+        const bool learning = gitView_.guideRunning();
+        const char* demoText = learning ? ICON_FA_GRADUATION_CAP " LEARNING GIT · DEMO DATA" : ICON_FA_FLASK " DEMO DATA";
+        const ImU32 demoColor = learning ? palette_.iconPurple : palette_.iconOrange;
+        const ImVec2 dMin(messageX + 6.0f * s_, origin.y + 3.0f * s_);
+        const ImVec2 dMax(dMin.x + ImGui::CalcTextSize(demoText).x + 14.0f * s_, origin.y + h - 3.0f * s_);
+        ImGui::SetCursorScreenPos(dMin);
+        if (ImGui::InvisibleButton("##demoBadge", ImVec2(dMax.x - dMin.x, dMax.y - dMin.y)))
+            vm_.execute(CommandId::GitGuide);
+        ImGui::SetItemTooltip(learning ? "Learn Git is running on made-up files and branches; your real project is not touched."
+                                       : "No folder is open, so the Git views show made-up data. Click to learn git with it.");
+        registerLastItem("status:demo", "button", "Demo data", [this]() { vm_.execute(CommandId::GitGuide); });
+        dl->AddRectFilled(dMin, dMax, withAlpha(demoColor, ImGui::IsItemHovered() ? 70 : 40), 4.0f * s_);
+        dl->AddText(ImVec2(dMin.x + 7.0f * s_, textY), demoColor, demoText);
+        messageX = dMax.x;
+    }
+
     // Right-hand segments, Notepad++ style.
     struct Segment {
         std::string text;
@@ -1591,8 +1732,8 @@ void MainView::renderStatusBar()
     }
 
     // Status message between the badge and the segments.
-    dl->PushClipRect(ImVec2(bMax.x + 8.0f * s_, origin.y), ImVec2(x - 4.0f * s_, origin.y + h), true);
-    dl->AddText(ImVec2(bMax.x + 10.0f * s_, textY), palette_.textDim, vm_.statusText.get().c_str());
+    dl->PushClipRect(ImVec2(messageX + 8.0f * s_, origin.y), ImVec2(x - 4.0f * s_, origin.y + h), true);
+    dl->AddText(ImVec2(messageX + 10.0f * s_, textY), palette_.textDim, vm_.statusText.get().c_str());
     dl->PopClipRect();
     ImGui::PopFont();
 

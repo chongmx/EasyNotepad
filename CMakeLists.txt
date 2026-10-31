@@ -203,8 +203,10 @@ add_library(enp_model STATIC
     src/model/Highlighter.cpp
     src/model/Indent.cpp
     src/model/Search.cpp
+    src/model/Hash.cpp
     src/model/Json.cpp
     src/model/LogicalMap.cpp
+    src/model/Git.cpp
 )
 target_include_directories(enp_model PUBLIC include)
 
@@ -238,6 +240,7 @@ add_library(enp_viewmodel STATIC
     src/viewmodel/Settings.cpp
     src/viewmodel/EditHistory.cpp
     src/viewmodel/PointerViewModel.cpp
+    src/viewmodel/GitViewModel.cpp
     src/viewmodel/SyntaxColorSettings.cpp
     src/viewmodel/FindInFilesViewModel.cpp
     src/viewmodel/NotepadViewModel.cpp
@@ -264,6 +267,7 @@ add_library(enp_view STATIC
     src/view/PanelFrame.cpp
     src/view/FileDialogView.cpp
     src/view/SearchPanel.cpp
+    src/view/GitView.cpp
     src/view/DocumentListView.cpp
     src/view/AgentCursorView.cpp
     src/view/MainView.cpp

@@ -1,5 +1,7 @@
 #include "AutomationController.h"
 
+#include "enp/model/Git.h"
+#include "enp/os/Process.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/DummyData.h"
 
@@ -44,6 +46,7 @@ const char* panelTabName(viewmodel::PanelTab tab)
     case viewmodel::PanelTab::Checklist: return "Checklist";
     case viewmodel::PanelTab::Terminal: return "Terminal";
     case viewmodel::PanelTab::Search: return "Search";
+    case viewmodel::PanelTab::History: return "History";
     }
     return "";
 }
@@ -202,8 +205,274 @@ const std::vector<AutomationTool>& automationTools()
         {"send_keys", "Sends raw keys to the active terminal: text, or named keys {Enter}, {Esc}, {Tab}, {Up}, {Down}, "
                       "{Left}, {Right}, {F1}..{F12}, {Ctrl+C} (for interactive programs like top, htop, vim).",
          schema({{"keys", "Text with optional {Key} names"}}, {"keys"})},
+        {"git_status", "The repository as the Git tab shows it: branch, upstream, ahead/behind, an operation in progress "
+                       "(merge, rebase...), changed files (path, status M/A/D/R/U/!, area staged/changes/untracked/conflicts), "
+                       "stashes, and whether this is demo data (Learn Git, or no folder open). Git actions run in the "
+                       "background: call this again to see their result.",
+         schema({})},
+        {"git_diff", "The unified diff of a file (or of everything): working tree against the index, or staged against HEAD.",
+         schema({{"path", "Repository-relative path (optional: all files)"}, {"staged", "\"true\" for the staged changes"}})},
+        {"git_stage", "Stages files for the next commit.", schema({{"paths", "Comma-separated paths, or \"all\""}}, {"paths"})},
+        {"git_unstage", "Takes files out of the next commit; their edits stay.", schema({{"paths", "Comma-separated paths"}}, {"paths"})},
+        {"git_commit", "Commits the staged changes (all changes when nothing is staged) with a message. Nothing is pushed "
+                       "unless push is \"true\".",
+         schema({{"message", "The commit message: a summary line, optionally a blank line and a body"},
+                 {"amend", "\"true\" to amend the last commit"}, {"push", "\"true\" to push afterwards"}},
+                {"message"})},
+        {"git_branches", "Local branches (current, upstream, ahead/behind, merged, gone), remote branches and tags.", schema({})},
+        {"git_switch", "Switches to a branch (a remote one gets a local tracking branch), or creates one.",
+         schema({{"name", "Branch name"}, {"create", "\"true\" to create it from the current commit"}}, {"name"})},
+        {"git_sync", "Talks to the server: fetch, pull, push or sync (pull then push).",
+         schema({{"action", "fetch, pull, push or sync"}}, {"action"})},
+        {"git_log", "Recent commits on the current branch (hash, parents, author, time, refs, message).",
+         schema({}, {}, {{"limit", "How many (default 30)"}})},
+        {"git_conflicts", "Files with merge conflicts and their conflict blocks (1-based lines; current and incoming text).", schema({})},
+        {"git_resolve", "Resolves one conflict block of a file in the editor (the file is opened; save it to mark it resolved).",
+         schema({{"path", "Repository-relative path"}, {"side", "current, incoming or both"}}, {"path", "side"},
+                {{"block", "1-based block number (default 1)"}})},
+        {"git_stash", "Stash: push (put changes aside, optionally only some paths), pop, or list.",
+         schema({{"action", "push, pop or list"}, {"message", "Name for push"}, {"paths", "Comma-separated paths for push (optional)"}},
+                {"action"})},
+        {"git_compare", "What `target` has that `base` lacks: commits and files. Loads in the background; call again for results.",
+         schema({{"base", "Branch, tag or commit (default: current branch)"}, {"target", "Branch, tag or commit"}}, {"target"})},
+        {"git_take_files", "Copies files' versions from a branch, tag or commit into the working tree (optionally staged).",
+         schema({{"from", "Branch, tag or commit"}, {"paths", "Comma-separated paths"}, {"stage", "\"true\" to stage them"}},
+                {"from", "paths"})},
+        {"git_cherry_pick", "Copies commits onto the current branch, in the order given (oldest first).",
+         schema({{"hashes", "Comma-separated commit hashes"}}, {"hashes"})},
     };
     return tools;
+}
+
+std::vector<std::string> splitList(const std::string& text)
+{
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find(',', start);
+        std::string item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        while (!item.empty() && item.front() == ' ')
+            item.erase(item.begin());
+        while (!item.empty() && item.back() == ' ')
+            item.pop_back();
+        if (!item.empty())
+            out.push_back(item);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return out;
+}
+
+Json handleGit(viewmodel::NotepadViewModel& vm, const std::string& method, const Json& params)
+{
+    using model::git::Area;
+    viewmodel::GitViewModel& git = vm.git();
+    const viewmodel::GitRepository& repo = git.repo();
+    auto flag = [&](const char* key) {
+        const Json* v = params.find(key);
+        return v && (v->asBool() || v->asString() == "true");
+    };
+    auto areaName = [](Area a) {
+        return a == Area::Staged ? "staged" : a == Area::Changes ? "changes" : a == Area::Untracked ? "untracked" : "conflicts";
+    };
+    const Json started = Json::object().set("started", true).set("note", "runs in the background: call git_status for the result");
+    if (!git.available())
+        return error("git was not found (install it, or set EASYNOTEPAD_GIT): " + git.unavailableReason());
+    if (method == "git_status") {
+        Json changes = Json::array();
+        for (const model::git::Change& c : repo.status.changes)
+            changes.push(Json::object().set("path", c.path).set("status", std::string(1, c.status)).set("area", areaName(c.group)));
+        const char* ops[] = {"none", "merge", "rebase", "cherry-pick", "revert"};
+        return Json::object()
+            .set("demo", git.demo())
+            .set("repository", repo.repository)
+            .set("busy", git.busy())
+            .set("branch", repo.status.branch)
+            .set("detached", repo.status.detached)
+            .set("upstream", repo.status.upstream)
+            .set("ahead", repo.status.ahead)
+            .set("behind", repo.status.behind)
+            .set("operation", ops[int(repo.operation)])
+            .set("operationLabel", repo.operationLabel)
+            .set("changes", std::move(changes))
+            .set("stashes", int(repo.stashes.size()))
+            .set("lastMessage", vm.statusText.get())
+            .set("problem", git.problem().kind == viewmodel::GitProblem::Kind::None ? std::string() : git.problem().detail);
+    }
+    if (!repo.repository)
+        return error("this folder is not a git repository (the Git tab can initialize one)");
+    if (method == "git_diff") {
+        if (git.demo())
+            return error("demo data has no real diff");
+        os::process::Command c;
+        c.arguments = {"git", "-c", "core.quotepath=off", "diff"};
+        if (flag("staged"))
+            c.arguments.push_back("--cached");
+        if (!params.getString("path").empty())
+            c.arguments.insert(c.arguments.end(), {"--", params.getString("path")});
+        c.workingDirectory = repo.root;
+        c.timeoutSeconds = 30;
+        const os::process::Result r = os::process::run(c);
+        if (r.exitCode != 0)
+            return error(r.errorOutput.empty() ? r.error : r.errorOutput);
+        return Json::object().set("diff", r.output.size() > 200000 ? r.output.substr(0, 200000) + "\n[cut]" : r.output);
+    }
+    if (method == "git_stage") {
+        const std::string paths = params.getString("paths");
+        git.stage(paths == "all" ? git.unstagedPaths() : splitList(paths));
+        return started;
+    }
+    if (method == "git_unstage") {
+        git.unstage(splitList(params.getString("paths")));
+        return started;
+    }
+    if (method == "git_commit") {
+        if (params.getString("message").empty())
+            return error("'message' is required");
+        git.commit(params.getString("message"), flag("amend"),
+                   flag("push") ? viewmodel::AfterCommitWhat::Push : viewmodel::AfterCommitWhat::Nothing);
+        return started;
+    }
+    if (method == "git_branches") {
+        Json local = Json::array(), remote = Json::array(), tags = Json::array();
+        for (const model::git::Branch& b : repo.branches) {
+            if (b.kind == model::git::RefKind::Local)
+                local.push(Json::object()
+                               .set("name", b.name)
+                               .set("current", b.current)
+                               .set("upstream", b.upstream)
+                               .set("ahead", b.ahead)
+                               .set("behind", b.behind)
+                               .set("merged", b.merged)
+                               .set("gone", b.gone));
+            else
+                (b.kind == model::git::RefKind::Remote ? remote : tags).push(b.name);
+        }
+        return Json::object().set("local", std::move(local)).set("remote", std::move(remote)).set("tags", std::move(tags));
+    }
+    if (method == "git_switch") {
+        const std::string name = params.getString("name");
+        if (!model::git::validBranchName(name))
+            return error("not a valid branch name: " + name);
+        if (flag("create"))
+            git.createBranch(name, {}, true);
+        else
+            git.switchTo(name);
+        return started;
+    }
+    if (method == "git_sync") {
+        const std::string action = params.getString("action");
+        if (action == "fetch")
+            git.fetch();
+        else if (action == "pull")
+            git.pull();
+        else if (action == "push")
+            git.push();
+        else if (action == "sync")
+            git.sync();
+        else
+            return error("action must be fetch, pull, push or sync");
+        return started;
+    }
+    if (method == "git_log") {
+        if (!repo.logLoaded) {
+            git.loadLog(false, {});
+            return Json::object().set("loading", true).set("note", "call git_log again in a moment");
+        }
+        const Json* limitValue = params.find("limit");
+        const int limit = limitValue && limitValue->isNumber() ? int(limitValue->asNumber()) : 30;
+        Json commits = Json::array();
+        for (int i = 0; i < int(repo.log.size()) && i < limit; ++i) {
+            const model::git::Commit& c = repo.log[size_t(i)];
+            Json parents = Json::array();
+            for (const std::string& p : c.parents)
+                parents.push(p);
+            commits.push(Json::object()
+                             .set("hash", c.hash)
+                             .set("parents", std::move(parents))
+                             .set("author", c.author)
+                             .set("when", c.when)
+                             .set("refs", c.refs)
+                             .set("message", c.message));
+        }
+        return Json::object().set("commits", std::move(commits));
+    }
+    if (method == "git_conflicts" || method == "git_resolve") {
+        Json files = Json::array();
+        for (const model::git::Change& c : repo.status.changes) {
+            if (c.group != Area::Conflicts)
+                continue;
+            const std::string text = vm.readWorkspaceFile(git.workspacePath(c.path));
+            const std::vector<std::string> lines = model::git::lines(text);
+            const std::vector<model::git::ConflictBlock> blocks = model::git::findConflicts(lines);
+            if (method == "git_resolve" && c.path == params.getString("path")) {
+                const Json* blockValue = params.find("block");
+                const int block = (blockValue && blockValue->isNumber() ? int(blockValue->asNumber()) : 1) - 1;
+                if (block < 0 || block >= int(blocks.size()))
+                    return error("no conflict block " + std::to_string(block + 1) + " in " + c.path);
+                const std::string side = params.getString("side");
+                const model::git::Resolution res = side == "incoming" ? model::git::Resolution::Incoming
+                                                   : side == "both"   ? model::git::Resolution::Both
+                                                                      : model::git::Resolution::Current;
+                vm.openFile(git.workspacePath(c.path));
+                vm.replaceLines(blocks[size_t(block)].start, blocks[size_t(block)].end,
+                                model::git::resolveConflict(lines, blocks[size_t(block)], res));
+                return Json::object()
+                    .set("resolved", block + 1)
+                    .set("left", int(blocks.size()) - 1)
+                    .set("note", "the file is edited in the editor: save it to mark it resolved");
+            }
+            Json list = Json::array();
+            for (const model::git::ConflictBlock& b : blocks) {
+                std::string current, incoming;
+                for (int i = b.start + 1; i < (b.base >= 0 ? b.base : b.middle); ++i)
+                    current += lines[size_t(i)] + "\n";
+                for (int i = b.middle + 1; i < b.end; ++i)
+                    incoming += lines[size_t(i)] + "\n";
+                list.push(Json::object().set("startLine", b.start + 1).set("endLine", b.end + 1).set("current", current).set("incoming", incoming));
+            }
+            files.push(Json::object().set("path", c.path).set("blocks", std::move(list)));
+        }
+        if (method == "git_resolve")
+            return error(params.getString("path") + " has no merge conflict");
+        return Json::object().set("files", std::move(files));
+    }
+    if (method == "git_stash") {
+        const std::string action = params.getString("action");
+        if (action == "push")
+            git.stashPush(params.getString("message"), splitList(params.getString("paths")), true, false);
+        else if (action == "pop")
+            git.stashApply(0, true);
+        else if (action == "list") {
+            Json list = Json::array();
+            for (const model::git::Stash& s : repo.stashes)
+                list.push(Json::object().set("ref", s.ref).set("message", s.message).set("branch", s.branch).set("when", s.when));
+            return Json::object().set("stashes", std::move(list));
+        } else
+            return error("action must be push, pop or list");
+        return started;
+    }
+    if (method == "git_compare") {
+        const std::string base = params.getString("base").empty() ? repo.status.branch : params.getString("base");
+        git.compare(base, params.getString("target"));
+        Json commits = Json::array(), files = Json::array();
+        for (const model::git::Commit& c : repo.compareCommits)
+            commits.push(Json::object().set("hash", c.hash).set("message", c.message).set("when", c.when));
+        for (const model::git::FileChange& f : repo.compareFiles)
+            files.push(Json::object().set("path", f.path).set("status", std::string(1, f.status)).set("added", f.added).set("removed", f.removed));
+        return Json::object().set("base", base).set("target", params.getString("target")).set("busy", git.busy())
+            .set("commits", std::move(commits)).set("files", std::move(files));
+    }
+    if (method == "git_take_files") {
+        git.takeFiles(params.getString("from"), splitList(params.getString("paths")), flag("stage"));
+        return started;
+    }
+    if (method == "git_cherry_pick") {
+        git.cherryPick(splitList(params.getString("hashes")));
+        return started;
+    }
+    return error("unknown git tool " + method);
 }
 
 Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method, const Json& params)
@@ -308,6 +577,8 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
         vm.terminal().sendInput(command + "\r");
         return Json::object().set("sent", command);
     }
+    if (method.rfind("git_", 0) == 0)
+        return handleGit(vm, method, params);
     if (method == "set_language") {
         if (!vm.activeDocument())
             return error("no document is open");

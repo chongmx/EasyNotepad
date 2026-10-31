@@ -7,6 +7,7 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include <string>
+#include <vector>
 
 namespace enp::view {
 
@@ -20,6 +21,8 @@ private:
     void renderProblems();
     void renderToolChips();
     void renderDiff();
+    std::vector<bool> chosen_; // git diff rows picked for staging
+    std::string chosenFor_;
     void renderComments();
     void renderChecklist();
 

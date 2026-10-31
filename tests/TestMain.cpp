@@ -2,7 +2,9 @@
 #include "FakeTerminalService.h"
 
 #include "enp/model/Diff.h"
+#include "enp/model/Git.h"
 #include "enp/model/Document.h"
+#include "enp/model/Hash.h"
 #include "enp/model/Highlighter.h"
 #include "enp/model/Indent.h"
 #include "enp/model/Language.h"
@@ -20,6 +22,7 @@
 #include "enp/os/Os.h"
 #include "enp/services/AutomationServer.h"
 #include "enp/services/FileService.h"
+#include "enp/services/ProcessService.h"
 
 #include "AutomationController.h"
 #include "McpBridge.h"
@@ -678,6 +681,55 @@ std::vector<int> fullScan(const model::TextBuffer& b, const model::LanguageSpec&
         model::highlightLine(b.line(l), spec, state, toks);
     }
     return states;
+}
+
+TEST(sha256_and_macros)
+{
+    // FIPS 180-4 test vectors.
+    CHECK_EQ(model::sha256Hex(""), std::string("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    CHECK_EQ(model::sha256Hex("abc"), std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+    CHECK_EQ(model::sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+             std::string("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"));
+    CHECK_EQ(model::sha256Hex(std::string(1000000, 'a')), std::string("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"));
+
+    services::FileService files;
+    const std::string path = scratchDirectory() + "/enp-test-settings/macro.json";
+    std::remove(path.c_str());
+    {
+        viewmodel::NotepadViewModel vm(nullptr, &files);
+        vm.setSettingsPath(path);
+        vm.newDocument();
+        model::Document& doc = *vm.activeDocument();
+        vm.insertText("alpha\nbeta\ngamma\ndelta");
+        vm.setCaret({0, 0}, false);
+        // Record: prefix the line with "- ", duplicate it (the caret goes to the copy), then go to
+        // the start of the next line.
+        vm.execute(CommandId::StartRecording);
+        vm.insertText("-");
+        vm.insertText(" ");
+        vm.execute(CommandId::DuplicateLine);
+        vm.setCaret({doc.caret.line + 1, 0}, false);
+        vm.execute(CommandId::StopRecording);
+        CHECK_EQ(vm.macro().size(), size_t(3)); // text (coalesced), command, move
+        CHECK_EQ(doc.buffer.text(), std::string("- alpha\n- alpha\nbeta\ngamma\ndelta"));
+        // Play at line 2 ("beta"), twice: one undo step for both.
+        vm.setCaret({2, 0}, false);
+        vm.playMacro(2);
+        CHECK_EQ(doc.buffer.text(), std::string("- alpha\n- alpha\n- beta\n- beta\n- gamma\n- gamma\ndelta"));
+        vm.execute(CommandId::Undo);
+        CHECK_EQ(doc.buffer.text(), std::string("- alpha\n- alpha\nbeta\ngamma\ndelta"));
+        // SHA-256 of the selection.
+        vm.setSelection({2, 0}, {2, 4});
+        vm.execute(CommandId::HashSha256);
+        CHECK_EQ(vm.hashResult.get(), model::sha256Hex("beta"));
+    }
+    // The macro is remembered.
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    vm.setSettingsPath(path);
+    CHECK_EQ(vm.macro().size(), size_t(3));
+    CHECK(vm.macro()[1].kind == viewmodel::NotepadViewModel::MacroStep::Kind::Command &&
+          vm.macro()[1].command == CommandId::DuplicateLine);
+    std::remove(path.c_str());
 }
 
 TEST(files_changed_on_disk)
@@ -1586,7 +1638,7 @@ struct FakeProcesses : interfaces::IProcessService {
     {
         lastCommand = commandLine;
         lastDirectory = workingDirectory;
-        done({true, 1, output, {}});
+        done({true, 1, output, {}, {}});
     }
     std::optional<std::string> setting(const std::string& name) const override
     {
@@ -2186,8 +2238,13 @@ TEST(pty_runs_full_screen_programs)
 #if defined(_WIN32)
     std::printf("  (skipped: top / htop are POSIX programs)\n");
 #else
-    // top: header, task summary and the process table on the alternate screen; 'q' quits.
+    // top: header, task summary and the process table; 'q' quits. Linux (procps) top only: the
+    // BSD top of macOS takes other options and prints another layout.
+#if defined(__APPLE__)
+    const FullScreenRun top;
+#else
     const FullScreenRun top = runFullScreen("top", {"-d", "1"}, "q");
+#endif
     if (!top.ran) {
         std::printf("  (skipped: top not found)\n");
     } else {
@@ -2218,6 +2275,349 @@ TEST(pty_runs_full_screen_programs)
 }
 
 } // namespace
+
+// ---- Git ----------------------------------------------------------------------------------------
+
+TEST(git_status_parses_porcelain_v2)
+{
+    using namespace model::git;
+    std::string s;
+    auto rec = [&](const std::string& r) { s += r + '\0'; };
+    rec("# branch.oid 1234567890abcdef1234567890abcdef12345678");
+    rec("# branch.head main");
+    rec("# branch.upstream origin/main");
+    rec("# branch.ab +2 -1");
+    rec("1 M. N... 100644 100644 100644 aaa bbb src/staged file.cpp");
+    rec("1 .M N... 100644 100644 100644 aaa bbb src/changed.cpp");
+    rec("1 MM N... 100644 100644 100644 aaa bbb both.cpp");
+    rec("2 R. N... 100644 100644 100644 aaa bbb R100 new name.txt");
+    rec("old name.txt");
+    rec("u UU N... 100644 100644 100644 100644 a b c conflict.txt");
+    rec("? untracked dir/é.txt");
+    const Status st = parseStatus(s);
+    CHECK_EQ(st.branch, std::string("main"));
+    CHECK_EQ(st.upstream, std::string("origin/main"));
+    CHECK(st.ahead == 2 && st.behind == 1 && !st.detached && !st.initial);
+    CHECK_EQ(st.changes.size(), size_t(7));
+    CHECK(st.changes[0].path == "src/staged file.cpp" && st.changes[0].group == Area::Staged && st.changes[0].status == 'M');
+    CHECK(st.changes[1].path == "src/changed.cpp" && st.changes[1].group == Area::Changes);
+    CHECK(st.changes[2].group == Area::Staged && st.changes[3].group == Area::Changes && st.changes[3].path == "both.cpp");
+    CHECK(st.changes[4].status == 'R' && st.changes[4].path == "new name.txt" && st.changes[4].origPath == "old name.txt");
+    CHECK(st.changes[5].group == Area::Conflicts && st.changes[5].path == "conflict.txt");
+    CHECK(st.changes[6].group == Area::Untracked && st.changes[6].path == "untracked dir/\xc3\xa9.txt");
+
+    std::string d;
+    for (const char* r : {"# branch.oid (initial)", "# branch.head (detached)"})
+        d += std::string(r) + '\0';
+    const Status detached = parseStatus(d);
+    CHECK(detached.initial && detached.detached);
+}
+
+TEST(git_branches_log_and_stashes_parse)
+{
+    using namespace model::git;
+    // Fields joined with NUL, as for-each-ref prints them with %00.
+    auto join = [](std::initializer_list<const char*> fields, char end) {
+        std::string out;
+        bool first = true;
+        for (const char* f : fields) {
+            if (!first)
+                out += '\0';
+            first = false;
+            out += f;
+        }
+        return out + end;
+    };
+    const std::string branches = join({"refs/heads/main", "main", "origin/main", "ahead 1, behind 2", "*", "100"}, '\n') +
+                                 join({"refs/heads/old", "old", "origin/old", "gone", " ", "50"}, '\n') +
+                                 join({"refs/remotes/origin/HEAD", "origin/HEAD", "", "", " ", "1"}, '\n') +
+                                 join({"refs/remotes/origin/main", "origin/main", "", "", " ", "1"}, '\n') +
+                                 join({"refs/tags/v1.0", "v1.0", "", "", " ", "1"}, '\n');
+    const std::vector<Branch> b = parseBranches(branches);
+    CHECK_EQ(b.size(), size_t(4)); // origin/HEAD is skipped
+    CHECK(b[0].name == "main" && b[0].current && b[0].ahead == 1 && b[0].behind == 2 && b[0].lastUsed == 100);
+    CHECK(b[1].gone && !b[1].current);
+    CHECK(b[2].kind == RefKind::Remote && b[3].kind == RefKind::Tag);
+
+    // Three commits: a merge (m) of a side commit (s) into a main line (a -> r).
+    const std::string log = "m\x1fm\x1f" "a s\x1f" "Ann\x1f" "300\x1fHEAD -> main\x1fMerge side\x1e\n"
+                            "s\x1fs\x1fr\x1f" "Bob\x1f" "200\x1f\x1fSide work\x1e\n"
+                            "a\x1f" "a\x1fr\x1f" "Ann\x1f" "250\x1f\x1fMain work\x1e\n"
+                            "r\x1fr\x1f\x1f" "Ann\x1f" "100\x1ftag: v1\x1fRoot\x1e\n";
+    std::vector<Commit> commits = parseLog(log);
+    CHECK_EQ(commits.size(), size_t(4));
+    CHECK(commits[0].parents.size() == 2 && commits[0].message == "Merge side" && commits[0].time == 300);
+    CHECK(commits[3].parents.empty() && commits[3].refs == "tag: v1");
+    layoutGraph(commits);
+    CHECK(commits[0].lane == 0 && commits[1].lane == 1 && commits[2].lane == 0 && commits[3].lane == 0);
+    // The merge sends a line to each parent's lane; both lines meet again at the root.
+    CHECK(std::find(commits[0].edges.begin(), commits[0].edges.end(), std::make_pair(0, 1)) != commits[0].edges.end());
+    CHECK(std::find(commits[2].edges.begin(), commits[2].edges.end(), std::make_pair(1, 0)) != commits[2].edges.end());
+
+    const std::vector<Stash> stashes = parseStashList("stash@{0}\x1fOn main: half-done ribbon\x1f" "50\n"
+                                                      "stash@{1}\x1fWIP on feature/x: 1a2b3c4 subject\x1f" "40\n");
+    CHECK_EQ(stashes.size(), size_t(2));
+    CHECK(stashes[0].message == "half-done ribbon" && stashes[0].branch == "main" && stashes[0].time == 50);
+    CHECK(stashes[1].message == "WIP on feature/x" && stashes[1].branch == "feature/x");
+
+    const std::string names = join({"M", "a.cpp", "R087", "old.h", "new.h", "A", "b.txt"}, '\0');
+    const std::string nums = join({"3\t1\ta.cpp", "2\t2\t", "old.h", "new.h", "-\t-\tb.txt"}, '\0');
+    const std::vector<FileChange> files = parseFileChanges(names, nums);
+    CHECK_EQ(files.size(), size_t(3));
+    CHECK(files[0].path == "a.cpp" && files[0].added == 3 && files[0].removed == 1);
+    CHECK(files[1].path == "new.h" && files[1].status == 'R' && files[1].added == 2);
+    CHECK(files[2].status == 'A' && files[2].added == 0);
+}
+
+TEST(git_blame_names_and_times)
+{
+    using namespace model::git;
+    const std::string h1(40, 'a'), h2(40, 'b');
+    const std::string blame = h1 + " 1 1 2\nauthor Ann\nauthor-time 100\nsummary First\n\tline one\n" + h1 +
+                              " 2 2\n\tline two\n" + h2 + " 3 3 1\nauthor Bob\nauthor-time 200\nsummary Second\n\tline three\n";
+    const std::vector<BlameLine> lines = parseBlame(blame);
+    CHECK_EQ(lines.size(), size_t(3));
+    CHECK(lines[0].author == "Ann" && lines[1].hash == h1 && lines[1].summary == "First" && lines[2].author == "Bob");
+
+    CHECK(validBranchName("feature/login-button") && validBranchName("v1.2"));
+    for (const char* bad : {"", "has space", "a..b", "-x", "x/", "x.lock", "a~1", "a^", "a:b", "@", "x@{1}", "a\\b"})
+        CHECK(!validBranchName(bad));
+    CHECK_EQ(relativeTime(1000, 1030), std::string("just now"));
+    CHECK_EQ(relativeTime(0, 7200), std::string("2 hours ago"));
+    CHECK_EQ(relativeTime(0, 90000), std::string("yesterday"));
+    CHECK_EQ(relativeTime(0, 60), std::string("1 minute ago"));
+}
+
+TEST(git_conflict_blocks_resolve)
+{
+    using namespace model::git;
+    const std::vector<std::string> text = {"keep", "<<<<<<< HEAD", "ours 1", "ours 2", "=======", "theirs", ">>>>>>> feature",
+                                           "middle", "<<<<<<< HEAD", "a", "||||||| base", "b", "=======", "c", ">>>>>>> other",
+                                           "======= not a marker without a block", "end"};
+    const std::vector<ConflictBlock> blocks = findConflicts(text);
+    CHECK_EQ(blocks.size(), size_t(2));
+    CHECK(blocks[0].start == 1 && blocks[0].middle == 4 && blocks[0].end == 6 && blocks[0].incoming == "feature");
+    CHECK(blocks[1].base == 10 && blocks[1].current == "HEAD");
+    CHECK(resolveConflict(text, blocks[0], Resolution::Current) == (std::vector<std::string>{"ours 1", "ours 2"}));
+    CHECK(resolveConflict(text, blocks[0], Resolution::Incoming) == (std::vector<std::string>{"theirs"}));
+    CHECK(resolveConflict(text, blocks[0], Resolution::Both) == (std::vector<std::string>{"ours 1", "ours 2", "theirs"}));
+    CHECK(resolveConflict(text, blocks[1], Resolution::Current) == (std::vector<std::string>{"a"})); // the base is dropped
+}
+
+TEST(git_partial_patch_keeps_unchosen_rows)
+{
+    using namespace model::git;
+    const std::string oldText = "one\ntwo\nthree\nfour\nfive\n";
+    const std::string newText = "ONE\ntwo\nthree\nfour\nFIVE\nsix\n";
+    const std::vector<model::DiffRow> rows = model::diffLines(model::splitLines(oldText), model::splitLines(newText));
+    std::vector<bool> chosen(rows.size(), false);
+    const std::pair<int, int> first = hunkAt(rows, 0);
+    for (int i = first.first; i <= first.second; ++i)
+        chosen[size_t(i)] = true;
+    const std::string patch = buildPatch("f.txt", oldText, rows, chosen);
+    CHECK(patch.find("-one\n+ONE\n") != std::string::npos);
+    CHECK(patch.find(" five\n") != std::string::npos); // the second change is left out: context
+    CHECK(patch.find("six") == std::string::npos);
+    CHECK(patch.find("@@ -1,5 +1,5 @@") != std::string::npos);
+    // Without a final newline the last old line is marked.
+    const std::string noEol = "a\nb";
+    const std::vector<model::DiffRow> r2 = model::diffLines(model::splitLines(noEol), model::splitLines("a\nB"));
+    const std::string p2 = buildPatch("g.txt", noEol, r2, std::vector<bool>(r2.size(), true));
+    CHECK(p2.find("-b\n\\ No newline at end of file\n") != std::string::npos);
+}
+
+namespace {
+
+std::string fileName(const std::string& path)
+{
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// Runs git directly (test set-up), in `dir`.
+std::string gitIn(const std::string& dir, std::vector<std::string> args)
+{
+    os::process::Command c;
+    c.arguments = {"git", "-c", "core.autocrlf=false"};
+    c.arguments.insert(c.arguments.end(), args.begin(), args.end());
+    c.workingDirectory = dir;
+    return os::process::run(c).output;
+}
+
+// Pumps the main-thread queue (where git's results arrive) until `done` or a timeout.
+bool pumpUntil(viewmodel::NotepadViewModel& vm, const std::function<bool()>& done, int milliseconds = 20000)
+{
+    for (int waited = 0; waited < milliseconds; waited += 5) {
+        os::dispatch::pump();
+        if (done() && !vm.git().busy())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(git_end_to_end_in_a_real_repository)
+{
+    if (os::process::findExecutable("git").empty()) {
+        std::printf("  (git not installed: skipped)\n");
+        return;
+    }
+    using model::git::Area;
+    services::FileService files;
+    services::ProcessService processes;
+    const std::string dir = scratchDirectory() + "/enp-git-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    os::fs::createDirectories(dir);
+    viewmodel::NotepadViewModel vm(nullptr, &files, nullptr, &processes);
+    viewmodel::GitViewModel& git = vm.git();
+    CHECK(git.demo()); // no folder yet: the demo repository
+    CHECK(vm.openFolder(dir));
+    CHECK(pumpUntil(vm, [&]() { return git.available(); }));
+    CHECK(!git.demo() && !git.repo().repository);
+
+    // A new repository; its first file is untracked, then staged, then committed.
+    git.init();
+    CHECK(pumpUntil(vm, [&]() { return git.repo().repository; }));
+    gitIn(dir, {"config", "user.name", "Test"});
+    gitIn(dir, {"config", "user.email", "test@example.com"});
+    gitIn(dir, {"config", "core.autocrlf", "false"});
+    files.write(dir + "/a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\n", nullptr);
+    git.refresh();
+    CHECK(pumpUntil(vm, [&]() { return !git.repo().status.changes.empty(); }));
+    CHECK(git.repo().status.changes.size() == 1 && git.repo().status.changes[0].group == Area::Untracked);
+    git.stage({"a.txt"});
+    CHECK(pumpUntil(vm, [&]() { return !git.repo().status.changes.empty() && git.repo().status.changes[0].group == Area::Staged; }));
+    git.commitMessage = "First \"quoted\" $commit\n\nWith a body.";
+    git.commitWithMessage();
+    CHECK(pumpUntil(vm, [&]() { return git.repo().status.changes.empty() && !git.repo().status.initial; }));
+    CHECK_EQ(gitIn(dir, {"log", "-1", "--format=%B"}), std::string("First \"quoted\" $commit\n\nWith a body.\n\n"));
+    CHECK(git.commitMessage.empty());
+
+    // Two separate changes; stage only the first through the Diff tab's rows.
+    files.write(dir + "/a.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n", nullptr);
+    git.refresh();
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 1; }));
+    git.showChange("a.txt", Area::Changes);
+    CHECK(pumpUntil(vm, [&]() { return git.diffContext().active; }));
+    std::vector<bool> chosen(git.diffContext().rows.size(), false);
+    const std::pair<int, int> hunk = model::git::hunkAt(git.diffContext().rows, 0);
+    for (int i = hunk.first; i <= hunk.second; ++i)
+        chosen[size_t(i)] = true;
+    git.applyRows(chosen, viewmodel::GitViewModel::RowsAction::Stage);
+    CHECK(pumpUntil(vm, [&]() { return git.repo().status.changes.size() == 2; })); // staged and still changed
+    const std::string cached = gitIn(dir, {"diff", "--cached"});
+    CHECK(cached.find("+ONE") != std::string::npos && cached.find("SEVEN") == std::string::npos);
+    // Unstage it again by rows, then discard the working change of the last line.
+    git.showChange("a.txt", Area::Staged);
+    CHECK(pumpUntil(vm, [&]() { return git.diffContext().active && git.diffContext().area == Area::Staged; }));
+    git.applyRows(std::vector<bool>(git.diffContext().rows.size(), true), viewmodel::GitViewModel::RowsAction::Unstage);
+    CHECK(pumpUntil(vm, [&]() { return gitIn(dir, {"diff", "--cached"}).empty(); }));
+    git.discard({"a.txt"});
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 0; }));
+    CHECK_EQ(*files.read(dir + "/a.txt"), std::string("one\ntwo\nthree\nfour\nfive\nsix\nseven\n"));
+
+    // Branches: create and switch, commit there, back to the first branch.
+    const std::string mainBranch = git.repo().status.branch;
+    git.createBranch("feature/x", {}, true);
+    CHECK(pumpUntil(vm, [&]() { return git.repo().status.branch == "feature/x"; }));
+    files.write(dir + "/a.txt", "one\ntwo\nTHREE from feature\nfour\nfive\nsix\nseven\n", nullptr);
+    files.write(dir + "/b.txt", "new on feature\n", nullptr);
+    git.stage({"a.txt", "b.txt"});
+    git.commit("Feature work", false);
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 0 && git.repo().status.branch == "feature/x"; }));
+    git.switchTo(mainBranch);
+    CHECK(pumpUntil(vm, [&]() { return git.repo().status.branch == mainBranch; }));
+
+    // Compare and take one file from the branch, staged.
+    git.compare(mainBranch, "feature/x");
+    CHECK(pumpUntil(vm, [&]() { return git.repo().compareFiles.size() == 2; }));
+    CHECK_EQ(git.repo().compareCommits.size(), size_t(1));
+    git.takeFiles("feature/x", {"b.txt"}, true);
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 1; }));
+    CHECK(git.repo().status.changes[0].path == "b.txt" && git.repo().status.changes[0].group == Area::Staged);
+    git.commit("Take b.txt from feature", false);
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 0; }));
+
+    // A conflicting change on the main branch, then merging the feature stops with a conflict.
+    files.write(dir + "/a.txt", "one\ntwo\nTHREE from main\nfour\nfive\nsix\nseven\n", nullptr);
+    git.stage({"a.txt"});
+    git.commit("Main work", false);
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 0; }));
+    git.merge("feature/x");
+    CHECK(pumpUntil(vm, [&]() { return git.repo().operation == viewmodel::GitOperation::Merge; }));
+    CHECK(git.repo().status.changes.size() == 1 && git.repo().status.changes[0].group == Area::Conflicts);
+    const std::vector<std::string> conflicted = model::git::lines(*files.read(dir + "/a.txt"));
+    const std::vector<model::git::ConflictBlock> blocks = model::git::findConflicts(conflicted);
+    CHECK_EQ(blocks.size(), size_t(1));
+    // Resolve by keeping both sides, mark resolved, continue.
+    std::vector<std::string> resolved(conflicted.begin(), conflicted.begin() + blocks[0].start);
+    for (const std::string& l : model::git::resolveConflict(conflicted, blocks[0], model::git::Resolution::Both))
+        resolved.push_back(l);
+    resolved.insert(resolved.end(), conflicted.begin() + blocks[0].end + 1, conflicted.end());
+    std::string text;
+    for (const std::string& l : resolved)
+        text += l + "\n";
+    files.write(dir + "/a.txt", text, nullptr);
+    git.stage({"a.txt"});
+    CHECK(pumpUntil(vm, [&]() { return !git.repo().status.changes.empty() && git.repo().status.changes[0].group == Area::Staged; }));
+    git.continueOperation();
+    CHECK(pumpUntil(vm, [&]() { return git.repo().operation == viewmodel::GitOperation::None && git.changeCount() == 0; }));
+    CHECK(files.read(dir + "/a.txt")->find("THREE from main\nTHREE from feature") != std::string::npos);
+    CHECK(gitIn(dir, {"log", "-1", "--format=%P"}).find(' ') != std::string::npos); // a merge commit
+
+    // Stash only one of two changed files, then pop it back.
+    files.write(dir + "/a.txt", "changed a\n", nullptr);
+    files.write(dir + "/b.txt", "changed b\n", nullptr);
+    git.refresh();
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 2; }));
+    git.stashPush("only a", {"a.txt"}, true, false);
+    CHECK(pumpUntil(vm, [&]() { return git.repo().stashes.size() == 1 && git.changeCount() == 1; }));
+    CHECK(git.repo().stashes[0].message == "only a" && git.repo().status.changes[0].path == "b.txt");
+    git.stashApply(0, true);
+    CHECK(pumpUntil(vm, [&]() { return git.repo().stashes.empty() && git.changeCount() == 2; }));
+
+    // History: the log, the graph, and a commit's files.
+    git.loadLog(false, {});
+    CHECK(pumpUntil(vm, [&]() { return git.repo().logLoaded && git.repo().log.size() >= 5; }));
+    CHECK_EQ(git.repo().log.front().parents.size(), size_t(2));
+    git.loadCommitFiles(0);
+    CHECK(pumpUntil(vm, [&]() { return !git.repo().log.front().files.empty(); }));
+
+    // The merged branch can be deleted without force.
+    git.deleteBranch("feature/x", false);
+    CHECK(pumpUntil(vm, [&]() { return git.localBranchNames().size() == 1; }));
+
+    // The connector sees the same state.
+    const model::Json status = app::handleAutomation(vm, "git_status", model::Json::object());
+    CHECK_EQ(status.getString("branch"), mainBranch);
+    CHECK(status.find("changes") && status.find("changes")->isArray());
+
+    // A remote (a bare repository next to it): publish the branch, then clone it elsewhere.
+    const std::string bare = dir + "-origin.git";
+    gitIn(scratchDirectory(), {"init", "--bare", "-q", bare});
+    git.addRemote("origin", bare);
+    git.loadRemotes();
+    CHECK(pumpUntil(vm, [&]() { return git.remotes().size() == 1; }));
+    git.stage({"a.txt", "b.txt"});
+    git.commit("Before publishing", false);
+    CHECK(pumpUntil(vm, [&]() { return git.changeCount() == 0; }));
+    CHECK(git.repo().status.upstream.empty());
+    git.push();
+    CHECK(pumpUntil(vm, [&]() { return !git.repo().status.upstream.empty(); }));
+    CHECK_EQ(git.repo().status.upstream, "origin/" + mainBranch);
+    CHECK_EQ(viewmodel::GitViewModel::cloneName("https://example.com/team/project.git/"), std::string("project"));
+    git.clone(bare, scratchDirectory(), fileName(dir) + "-clone");
+    CHECK(pumpUntil(vm, [&]() { return vm.workspaceRoot().find("-clone") != std::string::npos && git.repo().repository; }));
+    CHECK(pumpUntil(vm, [&]() { return !git.repo().log.empty() || (git.loadLog(false, {}), false); }));
+
+    // The guide switches to demo data and back.
+    git.setLearning(true);
+    CHECK(git.demo() && git.repo().status.branch == "feature/git-ui");
+    git.setLearning(false);
+    CHECK(!git.demo() && git.repo().status.branch == mainBranch);
+    CHECK(git.repo().status.upstream == "origin/" + mainBranch); // the clone tracks origin
+}
 
 int main(int argc, char** argv)
 {

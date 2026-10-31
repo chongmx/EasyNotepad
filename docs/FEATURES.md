@@ -162,3 +162,124 @@ button on hover, middle-click to close (asking first when unsaved), drag to reor
 filter, and Enter to pick the first match (overflow list). Right-clicking a tab or a row opens the
 same menu: Close, Close Others, Close to the Right, Close Saved, Close All, Copy Path (the full path)
 and Reveal in Explorer.
+
+## Files changed by other programs
+
+When another program (git, a formatter, an agent) changes an open file, EasyNotepad notices within
+a couple of seconds:
+
+- If you have no unsaved changes in it, it simply reloads, keeping your place.
+- If you do, a bar above the editor says so and offers **Reload** (take the file's version),
+  **Keep mine** (your next save replaces the file) or **Compare** (the Diff tab, the file on disk
+  against your text). Until you choose, saving refuses to overwrite the other program's change.
+- If the file is deleted, the bar says so; **Keep editing** and saving recreate it. If it comes back
+  by itself, the bar goes away.
+
+## Macros and SHA-256
+
+**Record** (Tools tab) starts a macro: what you type, Enter, Backspace, Delete, Tab, caret moves and
+editing commands (duplicate, delete or move lines, sort, change case, comment, indent, trim, select
+all) are recorded until **Stop**. Caret moves are recorded relative to where the caret was, so
+**Play** repeats the macro wherever the caret is now (record "edit this line, go to the next one",
+then press Play on each following line). A whole playback is one undo step. Stopping without having
+recorded anything keeps the previous macro, and the last macro is remembered between sessions.
+
+**SHA-256** (Tools > Utilities) shows the hash of the selection, or of the whole document when
+nothing is selected, with a **Copy** button.
+
+## Git: changes, staging and commits
+
+The **Git** tab of the Explorer (next to Files and Open) shows the folder's repository: **Staged**,
+**Changes**, **Untracked** and, during a merge, **Conflicts**, each file with a coloured letter
+(M modified, A added, D deleted, R renamed, U untracked, C conflict). The same letters colour the
+Files tree (folders holding changes get a dot) and the titles of open tabs.
+
+- Click a file to see what changed in the **Diff** tab (the open document's unsaved text included);
+  double-click opens it. Ctrl-click and Shift-click select several; a bar then stages, unstages,
+  stashes or discards them all.
+- Hover a row for **+** (stage), **−** (unstage), **↶** (discard, asks first); each group's header
+  does the same for every file in it. Right-click for more, including **Take this file from** any
+  branch or tag.
+- In the Diff tab, click lines (Shift-click a range, double-click a whole change) and **Stage
+  chosen**, **Unstage chosen** or **Discard chosen**: commit part of a file.
+- Write the message and press **Commit** (Ctrl+Enter); with nothing staged it commits everything.
+  **Amend** changes the last commit; the menu beside it commits and pushes or syncs. The magic-wand
+  button asks the agent to write the message from the staged changes (without an agent it lists the
+  files).
+- A folder that is not a repository offers **Initialize repository** and **Clone a repository**.
+
+Everything runs the `git` you have installed (set `EASYNOTEPAD_GIT` to use another), with your
+settings, credentials and hooks. The view refreshes after saves, after each action and every few
+seconds while it is on screen.
+
+## Git: branches and the server
+
+The status bar shows the branch, how many commits are waiting to be pushed (↑) and pulled (↓), and a
+dot when there are uncommitted changes. Click it (or the branch name in the Git tab) for the branch
+list:
+
+- Type to filter; click a branch to switch (a remote branch gets a local branch that tracks it; a tag
+  is opened "detached"). If your changes are in the way, you are offered **Stash and switch**.
+- **New branch** (from the current one, or from a commit in History), **Rename**, **Delete** (asks;
+  a branch with unmerged commits asks again), **Merge into current**, **Rebase current onto this**,
+  **Compare with current**, and deleting a branch on the server.
+- Labels show branches that are **merged** and whose server copy is **gone**; **Clean up...** deletes
+  just those, after you tick them. Branches sort by recent use or by name.
+
+**Sync** pulls then pushes; **Publish** appears instead for a branch the server does not have yet.
+Pull, Push, Fetch and **Force push (with lease)** are in the Git ribbon tab and the Git tab's ⋯ menu.
+When the server needs a password, git does not hang: you are offered **Run in terminal**, where it
+can ask. When someone pushed first, you are offered **Pull, then push**. **Remotes...** lists, adds,
+renames and removes remotes and changes their addresses; **Clone a repository...** copies one into a
+new folder and opens it.
+
+## Git: merge conflicts
+
+When a merge, rebase, cherry-pick or revert stops on conflicts, a banner in the Git tab says so,
+counts the conflicts left and offers **Continue** (once all are resolved), **Abort** (asks first)
+and, for a rebase or cherry-pick, **Skip** and "commit 3 of 7". In the editor each conflict block is
+tinted (yours and the incoming side) with **Accept current**, **Accept incoming**, **Accept both**
+and **Compare** above it; a bar counts them, and **F8** / **Shift+F8** jump between them. Saving a
+file with no conflict markers left marks it resolved.
+
+## Git: history, blame, stash and changed lines
+
+- The **History** tab of the bottom panel lists commits with a branch graph, refs, author and age;
+  filter by message, author or hash, choose this branch or all, or one file's history. A commit shows
+  its files with line counts and offers **Checkout**, **Cherry-pick**, **Revert**, **Create branch
+  here**, **Reset** (soft, mixed, or hard after asking), **Create tag**, and comparing it with your
+  files.
+- **Blame** (Git ribbon tab; click again to hide it) adds a column to the editor: who last changed
+  each line and when; hover for the commit's message, click to find it in History. Drag its right
+  edge to resize it (remembered); narrower, it drops the author, then the age, down to the hash.
+  Double-click the edge for the full width. **Ctrl+Alt+B** hides the Layers / Minimap side bar to
+  make room.
+- A thin bar beside the line numbers marks lines added or changed since the last commit (a red mark
+  where lines were deleted). Click it to see what was there, **Revert this change** or open the diff.
+- **Stash...** puts changes aside, with a name, all changes or only the selected files, with or
+  without untracked files, optionally keeping staged changes. The Stashes list shows each stash's
+  files; right-click a stash to apply, pop, apply on a new branch or drop it.
+
+## Git: compare and take work from elsewhere
+
+**Compare** (in History, or "Compare with current" on a branch) shows what another branch, tag or
+commit has that yours lacks: its commits, to tick and **Cherry-pick**, and the files that differ, to
+tick and **Take** into your folder (optionally staged; asks first if you have edits there). Wherever a
+file is listed under a commit, a stash or a comparison, right-click it to **Open this version**,
+**Compare with my copy**, **Restore this file from here**, or **Apply only this file's change**.
+Nothing is committed for you: what you take shows up under Changes or Staged.
+
+Agents get the same through the connector: `git_status`, `git_diff`, `git_stage`, `git_unstage`,
+`git_commit`, `git_branches`, `git_switch`, `git_sync`, `git_log`, `git_conflicts`, `git_resolve`,
+`git_stash`, `git_compare`, `git_take_files` and `git_cherry_pick`.
+
+## Learn Git
+
+**Help (?) › Learn Git** (also in the Git ribbon tab and the Git tab) opens a guide in twelve short
+lessons, from "What is git?" to tidying up branches, for people who have never used git. It always
+runs on **demo data**, a made-up repository, so nothing real is touched; a banner, a status bar badge
+and the guide itself say so, and **Reset demo data** starts it again. Each lesson explains one idea
+with a small picture, **Show me** points at the real control, and a **Try it** task ticks itself when
+done. While the guide is open, pointing at any git control outlines it and explains it ("What's
+this?"), and every action is described in plain words ("What just happened"). Each lesson also lists
+which part of the implementation it covers, with a box to tick, for reviewing.

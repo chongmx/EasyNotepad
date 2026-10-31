@@ -96,6 +96,15 @@ std::vector<RibbonView::Tab> RibbonView::tabs() const
         {"Discuss", {C::AddReviewComment}, {}},
         {"Findings", {C::PreviousFinding, C::NextFinding}, {C::ClearFindings}},
     };
+    static const Group git[] = {
+        {"Changes", {C::GitCommit, C::GitStageAll, C::GitDiscardAll}, {C::ShowGit}},
+        {"Branch", {C::GitBranches, C::GitMerge}, {}},
+        {"Sync", {C::GitSync, C::GitPull, C::GitPush, C::GitFetch}, {}},
+        {"Inspect", {C::ShowGitHistory, C::GitBlame}, {}},
+        {"Stash", {C::GitStash, C::GitStashPop}, {}},
+        {"Assist", {C::GitWriteMessage}, {}},
+        {"Learn", {C::GitGuide}, {}},
+    };
     // Reading comes first after the workspace's home tab: this editor is built around it.
     static const Group read[] = {
         {"View", {C::ShowCodeView, C::ShowMapView}, {C::RefreshMap}},
@@ -130,6 +139,7 @@ std::vector<RibbonView::Tab> RibbonView::tabs() const
              {"Bookmarks", {C::ToggleBookmark, C::PreviousBookmark, C::NextBookmark}, {C::ClearBookmarks}},
          }},
         {"Review", {std::begin(review), std::end(review)}},
+        {"Git", {std::begin(git), std::end(git)}},
         {"View", {std::begin(view), std::end(view)}},
         {"Document",
          {
@@ -157,6 +167,7 @@ std::vector<RibbonView::Tab> RibbonView::tabs() const
          }},
         {"Read", {std::begin(read), std::end(read)}},
         {"Review", {std::begin(review), std::end(review)}},
+        {"Git", {std::begin(git), std::end(git)}},
         {"Files",
          {
              {"File", {C::NewFile, C::OpenFile, C::Save}, {C::SaveAs, C::SaveAll, C::OpenFolder, C::CloseFile}},
