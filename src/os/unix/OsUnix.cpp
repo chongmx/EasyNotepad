@@ -184,6 +184,12 @@ void openFile(const std::string& title, const std::vector<FileFilter>& filters, 
 
 namespace shell {
 
+bool revealInFileManager(const std::string& path)
+{
+    // The folder (a file's folder) in the default file manager.
+    return openExternal(fs::isDirectory(path) ? path : fs::path::parent(path));
+}
+
 bool openExternal(const std::string& urlOrPath)
 {
 #if defined(ENP_OS_MACOS)

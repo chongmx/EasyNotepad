@@ -125,6 +125,12 @@ void openFile(const std::string&, const std::vector<FileFilter>&, OpenFileCallba
 
 namespace shell {
 
+bool revealInFileManager(const std::string& path)
+{
+    // The folder (a file's folder) in the default file manager.
+    return openExternal(fs::isDirectory(path) ? path : fs::path::parent(path));
+}
+
 bool openExternal(const std::string& urlOrPath)
 {
     if (!detail::isUrl(urlOrPath))

@@ -66,6 +66,7 @@ void FileDialogViewModel::show(FileDialogMode mode, const std::string& folder, c
     error.set({});
     history_.clear();
     folder_ = slashes(files_ ? files_->absolute(folder.empty() ? "." : folder) : folder);
+    findPlaces();
     load();
     visible.set(true);
 }
@@ -108,25 +109,25 @@ std::vector<FileDialogViewModel::Entry> FileDialogViewModel::visibleEntries() co
     return out;
 }
 
-std::vector<std::pair<std::string, std::string>> FileDialogViewModel::places() const
+void FileDialogViewModel::findPlaces()
 {
-    std::vector<std::pair<std::string, std::string>> out;
+    std::vector<std::pair<std::string, std::string>>& out = places_;
+    out.clear();
     if (!owner_.workspaceRoot().empty())
         out.emplace_back("Workspace", slashes(owner_.workspaceRoot()));
     const std::string home = owner_.homeDirectory();
     if (!home.empty())
         out.emplace_back("Home", slashes(home));
 #if defined(_WIN32)
+    // Drive letters from the system's list: no drive is touched (a disconnected network drive or an
+    // empty card reader can take seconds to answer, or ask for a disk).
     if (files_)
-        for (char d = 'C'; d <= 'Z'; ++d) {
-            const std::string drive = std::string(1, d) + ":/";
-            if (files_->isDirectory(drive))
-                out.emplace_back(std::string(1, d) + ":", drive);
-        }
+        for (const std::string& root : files_->roots())
+            if (root.size() == 3 && root[1] == ':')
+                out.emplace_back(root.substr(0, 2), root);
 #else
     out.emplace_back("/", "/");
 #endif
-    return out;
 }
 
 void FileDialogViewModel::goTo(const std::string& folder)
@@ -196,7 +197,8 @@ bool FileDialogViewModel::confirm()
         return false;
     }
     if (mode_ == FileDialogMode::Open) {
-        if (files_ && !files_->read(path)) {
+        const std::optional<interfaces::FileStamp> stamp = files_ ? files_->stamp(path) : std::nullopt;
+        if (files_ && stamp && !stamp->exists) {
             error.set("Cannot open " + path);
             return false;
         }
@@ -205,7 +207,8 @@ bool FileDialogViewModel::confirm()
         return true;
     }
     // Save As.
-    if (files_ && files_->read(path) && !confirmOverwrite) {
+    const std::optional<interfaces::FileStamp> existing = files_ ? files_->stamp(path) : std::nullopt;
+    if (existing && existing->exists && !confirmOverwrite) {
         confirmOverwrite = true;
         error.set(fileName + " already exists. Save again to replace it.");
         return false;

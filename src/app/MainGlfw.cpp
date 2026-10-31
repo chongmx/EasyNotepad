@@ -122,6 +122,11 @@ void mainLoopStep(void* arg)
     }
 #endif
     glfwSwapBuffers(state->window);
+#if !defined(__EMSCRIPTEN__)
+    static int framesShown = 0;
+    if (++framesShown == 2 && state->frame) // once, after the window has really been drawn
+        state->frame->settle();
+#endif
 
     if (state->app->quitRequested())
         glfwSetWindowShouldClose(state->window, GLFW_TRUE);
@@ -186,11 +191,27 @@ int main(int argc, char** argv)
 #endif
 
     const float scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
-    GLFWwindow* window = glfwCreateWindow(int(1440 * scale), int(900 * scale), "EasyNotepad", nullptr, nullptr);
+    // 1440 x 900 (scaled), but never larger than the screen: a window taller than the work area is
+    // clamped by the system, and its size and the app's idea of it disagree until the user resizes.
+    int width = int(1440 * scale), height = int(900 * scale);
+    int areaX = 0, areaY = 0, areaW = 0, areaH = 0;
+#if !defined(__EMSCRIPTEN__)
+    if (GLFWmonitor* monitor = glfwGetPrimaryMonitor())
+        glfwGetMonitorWorkarea(monitor, &areaX, &areaY, &areaW, &areaH);
+    if (areaW > 0 && areaH > 0) {
+        width = std::min(width, int(areaW * 0.92f));
+        height = std::min(height, int(areaH * 0.88f));
+    }
+#endif
+    GLFWwindow* window = glfwCreateWindow(width, height, "EasyNotepad", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
     }
+#if !defined(__EMSCRIPTEN__)
+    if (areaW > 0 && areaH > 0)
+        glfwSetWindowPos(window, areaX + (areaW - width) / 2, areaY + (areaH - height) / 2);
+#endif
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -244,10 +265,14 @@ int main(int argc, char** argv)
 
     enp::os::dispatch::setWakeCallback(nullptr);
     state->app.reset();
+    // Undo in reverse order of set-up: the frame wrapped ImGui's window procedure (installed by
+    // ImGui_ImplGlfw_Init), so it goes first. Restoring it after ImGui's shutdown would put back a
+    // procedure whose context is gone, and destroying the window then crashes (on Windows a crash
+    // report makes closing take seconds).
+    state->frame.reset();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
-    state->frame.reset();
     glfwDestroyWindow(window);
     glfwTerminate();
     g_state = nullptr;

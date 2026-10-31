@@ -127,13 +127,21 @@ GlfwWindowFrame::GlfwWindowFrame(GLFWwindow* window, bool wantCustomTitleBar)
 #endif
     }
     glfwShowWindow(window_);
+#if defined(_WIN32)
+    if (mode_ == Mode::Win32Caption) // again now that it is visible: some systems size it only then
+        SetWindowPos(glfwGetWin32Window(window_), nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
 }
 
 GlfwWindowFrame::~GlfwWindowFrame()
 {
 #if defined(_WIN32)
     if (mode_ == Mode::Win32Caption) {
-        SetWindowLongPtrW(glfwGetWin32Window(window_), GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_glfwProc));
+        // Only when ours is still installed: never put back a procedure someone else has removed.
+        HWND hwnd = glfwGetWin32Window(window_);
+        if (reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC)) == &captionWindowProc)
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_glfwProc));
         g_frame = nullptr;
     }
 #endif
@@ -155,6 +163,24 @@ void GlfwWindowFrame::toggleMaximize()
         glfwRestoreWindow(window_);
     else
         glfwMaximizeWindow(window_);
+}
+
+void GlfwWindowFrame::settle()
+{
+#if defined(_WIN32)
+    if (mode_ != Mode::Win32Caption)
+        return;
+    HWND hwnd = glfwGetWin32Window(window_);
+    if (IsZoomed(hwnd)) {
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
+    }
+    RECT r;
+    GetWindowRect(hwnd, &r);
+    const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+    SetWindowPos(hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top + 1, flags);
+    SetWindowPos(hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, flags);
+#endif
 }
 
 void GlfwWindowFrame::close()

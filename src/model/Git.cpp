@@ -115,11 +115,11 @@ Status parseStatus(std::string_view text)
             continue;
         }
         if (r[0] == '?') {
-            status.changes.push_back({std::string(r.substr(2)), 'U', Area::Untracked, {}});
+            status.changes.push_back({std::string(r.substr(2)), 'U', Area::Untracked, {}, {}});
             continue;
         }
         if (r[0] == 'u') {
-            status.changes.push_back({std::string(afterFields(r, 10)), '!', Area::Conflicts, {}});
+            status.changes.push_back({std::string(afterFields(r, 10)), '!', Area::Conflicts, {}, {}});
             continue;
         }
         if (r[0] != '1' && r[0] != '2')
@@ -129,10 +129,23 @@ Status parseStatus(std::string_view text)
         std::string orig;
         if (r[0] == '2' && i + 1 < records.size())
             orig = std::string(records[++i]);
+        // <sub> is "N..." for a file, "S<c><m><u>" for a submodule: new commit, modified, untracked.
+        std::string submodule;
+        if (r.size() > 8 && r[5] == 'S') {
+            auto add = [&](const char* what) { submodule += (submodule.empty() ? "" : ", ") + std::string(what); };
+            if (r[6] == 'C')
+                add("new commits");
+            if (r[7] == 'M')
+                add("modified files");
+            if (r[8] == 'U')
+                add("untracked files");
+            if (submodule.empty())
+                submodule = "submodule";
+        }
         if (x != '.')
-            status.changes.push_back({path, simpleStatus(x), Area::Staged, orig});
+            status.changes.push_back({path, simpleStatus(x), Area::Staged, orig, submodule.empty() ? std::string() : "new commit staged"});
         if (y != '.')
-            status.changes.push_back({path, simpleStatus(y), Area::Changes, {}});
+            status.changes.push_back({path, simpleStatus(y), Area::Changes, {}, submodule});
     }
     return status;
 }

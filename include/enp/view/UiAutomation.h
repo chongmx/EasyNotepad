@@ -40,6 +40,10 @@ private:
     std::vector<UiElement> current_;
 };
 
+// The current window's title-bar × as element `id`, so agents can close the window (the agent
+// cursor shows the click). Returns true once after such a click: the caller closes the window.
+bool registerWindowClose(const std::string& id, const std::string& label);
+
 // Shorthand for registering the last submitted ImGui item.
 void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate,
                       bool enabled = true);

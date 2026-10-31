@@ -29,6 +29,11 @@ FileInfo stat(const std::string& path);
 // Directories first, then files; both sorted case-insensitively. Excludes "." and "..".
 std::vector<DirEntry> listDirectory(const std::string& path, std::string* error = nullptr);
 bool createDirectories(const std::string& path);
+// Renames or moves a file or folder; fails if `to` exists.
+bool renamePath(const std::string& from, const std::string& to, std::string* error = nullptr);
+// Deletes a file, or a folder with everything in it. On Windows it goes to the Recycle Bin
+// (`*recycled` is set); elsewhere it is gone.
+bool deletePath(const std::string& path, bool* recycled = nullptr, std::string* error = nullptr);
 
 std::string currentDirectory();
 std::string executableDirectory();

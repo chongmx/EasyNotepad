@@ -189,6 +189,8 @@ void MainView::render()
     renderLanguagePicker();
     renderHashResult();
     gitView_.renderPopups();
+    renderExplorerPrompt();
+    renderCloseFolderPrompt();
     documentList_.renderMenu();
     renderSaveChangesPrompt();
     renderQuitPrompt();
@@ -330,7 +332,7 @@ void MainView::renderTopBar()
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, origin.y + h));
     if (ImGui::BeginPopup("##fileMenu")) {
         const CommandId items[] = {CommandId::NewFile, CommandId::OpenFile, CommandId::OpenFolder, CommandId::Save,
-                                   CommandId::SaveAs, CommandId::SaveAll, CommandId::CloseFile};
+                                   CommandId::SaveAs, CommandId::SaveAll, CommandId::CloseFile, CommandId::CloseFolder};
         for (CommandId id : items) {
             const std::string label = std::string(commandIcon(id)) + "  " + commandInfo(id).tooltip;
             if (ImGui::MenuItem(label.c_str(), commandInfo(id).shortcut, false, vm_.command(id).canExecute()))
@@ -813,6 +815,52 @@ void MainView::renderSaveChangesPrompt()
     if (choice) {
         ImGui::CloseCurrentPopup();
         vm_.resolvePendingClose(*choice);
+    }
+    ImGui::EndPopup();
+}
+
+void MainView::renderCloseFolderPrompt()
+{
+    using Choice = viewmodel::NotepadViewModel::CloseChoice;
+    const bool pending = vm_.closeFolderPending.get();
+    if (pending && !ImGui::IsPopupOpen("Close the folder?"))
+        ImGui::OpenPopup("Close the folder?");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Close the folder?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+    if (!pending) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    const auto unsaved = vm_.unsavedDocuments();
+    ImGui::Text(ICON_FA_CIRCLE_EXCLAMATION "  %d document(s) have unsaved changes:", int(unsaved.size()));
+    bool allSavable = true;
+    for (const model::Document* doc : unsaved) {
+        const bool savable = vm_.canSaveInPlace(*doc);
+        allSavable = allSavable && savable;
+        ImGui::BulletText("%s%s", doc->path.empty() ? doc->title.c_str() : doc->path.c_str(), savable ? "" : "  (untitled)");
+    }
+    ImGui::Spacing();
+    std::optional<Choice> choice;
+    ImGui::BeginDisabled(!allSavable);
+    if (ImGui::Button(ICON_FA_FLOPPY_DISK "  Save All and Close"))
+        choice = Choice::Save;
+    ImGui::EndDisabled();
+    if (!allSavable)
+        ImGui::SetItemTooltip("Untitled documents need Save As first");
+    registerLastItem("dialog:close-folder:save", "button", "Save All and Close", [this]() { vm_.resolveCloseFolder(Choice::Save); }, allSavable);
+    ImGui::SameLine();
+    if (ImGui::Button("Close Without Saving"))
+        choice = Choice::Discard;
+    registerLastItem("dialog:close-folder:discard", "button", "Close Without Saving", [this]() { vm_.resolveCloseFolder(Choice::Discard); });
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        choice = Choice::Cancel;
+    registerLastItem("dialog:close-folder:cancel", "button", "Cancel", [this]() { vm_.resolveCloseFolder(Choice::Cancel); });
+    if (choice) {
+        ImGui::CloseCurrentPopup();
+        vm_.resolveCloseFolder(*choice);
     }
     ImGui::EndPopup();
 }
@@ -1393,6 +1441,10 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
                                                                ImGuiTreeNodeFlags_SpanAvailWidth);
         ImGui::PopStyleColor();
         registerLastItem("folder:" + item.path, "button", item.name, nullptr);
+        if (ImGui::BeginPopupContextItem(("##folderMenu" + item.path).c_str())) {
+            explorerMenu(item, root);
+            ImGui::EndPopup();
+        }
         if (!open && openInside > 0) {
             // A collapsed folder with open documents: how many, and an accent when the active one is inside.
             const std::string badge = std::to_string(openInside);
@@ -1429,6 +1481,10 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
     ImGui::TreeNodeEx(id.c_str(), flags);
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
         vm_.openFile(item.path);
+    if (ImGui::BeginPopupContextItem(("##fileMenu" + item.path).c_str())) {
+        explorerMenu(item, false);
+        ImGui::EndPopup();
+    }
     registerLastItem("file:" + item.path, "file", item.name, [this, path = item.path]() { vm_.openFile(path); });
     const ImVec2 rowMin = ImGui::GetItemRectMin(), rowMax = ImGui::GetItemRectMax();
     const bool rowHovered = ImGui::IsItemHovered();
@@ -1573,9 +1629,34 @@ void MainView::renderExplorer()
 
     ImGui::BeginChild("##explorerBody", ImVec2(0.0f, 0.0f));
     if (files) {
+        if (vm_.noFolder()) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("No folder open.");
+            ImGui::Spacing();
+            if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Open a folder", ImVec2(-1.0f, 0.0f)))
+                vm_.execute(CommandId::OpenFolder);
+            registerLastItem("explorer:open-folder", "button", "Open a folder", [this]() { vm_.execute(CommandId::OpenFolder); });
+            if (!vm_.recentFolders().empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Recent");
+                for (const std::string& path : vm_.recentFolders()) {
+                    ImGui::PushID(path.c_str());
+                    if (ImGui::Selectable((ICON_FA_FOLDER "  " + path.substr(path.find_last_of('/') + 1)).c_str()))
+                        vm_.openRecent(path);
+                    ImGui::SetItemTooltip("%s", path.c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
         ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 14.0f * s_);
-        renderExplorerItem(vm_.explorer());
+        if (!vm_.noFolder())
+            renderExplorerItem(vm_.explorer());
         ImGui::PopStyleVar();
+        // Right-click below the tree: the opened folder's menu (new file, new folder, ...).
+        if (!vm_.noFolder() && ImGui::BeginPopupContextWindow("##explorerBlank", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+            explorerMenu(vm_.explorer(), true);
+            ImGui::EndPopup();
+        }
         if (!explorerFilter_.empty() && !explorerVisible(vm_.explorer()))
             ImGui::TextDisabled("No files match \"%s\"", explorerFilter_.c_str());
         explorerRevealSerial_ = vm_.revealSerial();
@@ -1585,6 +1666,190 @@ void MainView::renderExplorer()
     }
     ImGui::EndChild();
     ImGui::PopID();
+}
+
+// ---- Explorer: right-click menu ------------------------------------------------------------------
+
+void MainView::explorerMenu(const viewmodel::ExplorerItem& item, bool root)
+{
+    // `item` is a file, a folder, or (root) the opened folder itself.
+    const bool editable = vm_.canEditFiles();
+    const bool folder = item.isDirectory || root;
+    const std::string path = root ? std::string() : item.path;
+    const std::string parentFolder = [&]() {
+        const size_t slash = path.find_last_of('/');
+        return slash == std::string::npos ? std::string() : path.substr(0, slash);
+    }();
+    const std::string here = folder ? path : parentFolder; // where New File / New Folder go
+    const std::string name = root ? std::string("the folder") : item.name;
+    viewmodel::GitViewModel& git = vm_.git();
+    const bool gitReady = !git.demo() && git.available() && git.repo().repository;
+
+    if (!folder) {
+        const int openIndex = vm_.documentIndex(path);
+        if (openIndex < 0 && ImGui::MenuItem(ICON_FA_FILE "  Open"))
+            vm_.openFile(path);
+        if (openIndex >= 0 && ImGui::MenuItem(ICON_FA_XMARK "  Close"))
+            vm_.requestCloseDocument(openIndex);
+        const char status = vm_.git().statusOf(path);
+        if (gitReady && status && ImGui::MenuItem(ICON_FA_CODE_COMPARE "  Open changes"))
+            git.showChange(git.repoPath(path), status == 'U' ? model::git::Area::Untracked : model::git::Area::Changes);
+        ImGui::Separator();
+    }
+    ImGui::BeginDisabled(!editable);
+    if (ImGui::MenuItem(ICON_FA_FILE_CIRCLE_PLUS "  New File..."))
+        explorerAsk("New file in " + (here.empty() ? std::string("the folder") : here), "File name, e.g. notes.md", {}, "Create",
+                    [this, here](const std::string& n) { vm_.createFile(here, n); });
+    if (ImGui::MenuItem(ICON_FA_FOLDER_PLUS "  New Folder..."))
+        explorerAsk("New folder in " + (here.empty() ? std::string("the folder") : here), "Folder name", {}, "Create",
+                    [this, here](const std::string& n) { vm_.createFolder(here, n); });
+    ImGui::EndDisabled();
+    if (folder) {
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_MAGNIFYING_GLASS "  Find in Folder...", nullptr, false, vm_.canEditFiles()))
+            vm_.findInFolder(path);
+        if (ImGui::MenuItem(ICON_FA_TERMINAL "  Open Terminal Here", nullptr, false, vm_.canEditFiles() && vm_.terminal().supported()))
+            vm_.openTerminalIn(path);
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem(ICON_FA_COPY "  Copy Path"))
+        ImGui::SetClipboardText(vm_.absolutePath(path.empty() ? "." : path).c_str());
+    if (!root && ImGui::MenuItem(ICON_FA_COPY "  Copy Relative Path"))
+        ImGui::SetClipboardText(path.c_str());
+#if defined(_WIN32)
+    const char* revealLabel = ICON_FA_FOLDER_OPEN "  Reveal in File Explorer";
+#elif defined(__APPLE__)
+    const char* revealLabel = ICON_FA_FOLDER_OPEN "  Reveal in Finder";
+#else
+    const char* revealLabel = ICON_FA_FOLDER_OPEN "  Open in File Manager";
+#endif
+    if (ImGui::MenuItem(revealLabel, nullptr, false, vm_.canEditFiles()))
+        vm_.revealInFileManager(path.empty() ? "." : path);
+
+    // Git, for what changed under this file or folder.
+    if (gitReady) {
+        std::vector<std::string> changed, staged;
+        const std::string prefix = git.repoPath(path);
+        for (const model::git::Change& c : git.repo().status.changes) {
+            const bool inside = folder ? (prefix.empty() || c.path.rfind(prefix + "/", 0) == 0) : c.path == prefix;
+            if (!inside)
+                continue;
+            (c.group == model::git::Area::Staged ? staged : changed).push_back(c.path);
+        }
+        ImGui::Separator();
+        if (ImGui::BeginMenu(ICON_FA_CODE_BRANCH "  Git")) {
+            if (ImGui::MenuItem(ICON_FA_PLUS "  Stage", nullptr, false, !changed.empty()))
+                git.stage(changed);
+            if (ImGui::MenuItem(ICON_FA_MINUS "  Unstage", nullptr, false, !staged.empty()))
+                git.unstage(staged);
+            if (ImGui::MenuItem(ICON_FA_ROTATE_LEFT "  Discard Changes...", nullptr, false, !changed.empty()))
+                explorerConfirm("Discard changes?",
+                                "Discard the changes to " + (changed.size() == 1 ? changed[0] : std::to_string(changed.size()) + " files") +
+                                    "? This cannot be undone.",
+                                "Discard", [this, changed]() { vm_.git().discard(changed); });
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_CLOCK_ROTATE_LEFT "  File History", nullptr, false, !root))
+                vm_.gitFileHistoryRequested.emit(prefix);
+            if (!folder && ImGui::MenuItem(ICON_FA_USER_PEN "  Blame")) {
+                vm_.openFile(path);
+                if (const model::Document* doc = vm_.activeDocument())
+                    git.toggleBlame(doc->path, doc->buffer.text());
+            }
+            ImGui::EndMenu();
+        }
+    }
+    if (!root) {
+        ImGui::Separator();
+        ImGui::BeginDisabled(!editable);
+        if (ImGui::MenuItem(ICON_FA_PEN "  Rename..."))
+            explorerAsk("Rename " + name, "New name", item.name, "Rename",
+                        [this, path](const std::string& n) { vm_.renamePath(path, n); });
+        if (ImGui::MenuItem(ICON_FA_TRASH "  Delete...")) {
+            int unsaved = 0;
+            for (const auto& d : vm_.documents())
+                if (d->modified && (d->path == path || d->path.rfind(path + "/", 0) == 0))
+                    ++unsaved;
+#if defined(_WIN32)
+            std::string text = "Move " + path + " to the Recycle Bin?";
+#else
+            std::string text = "Delete " + path + (folder ? " and everything in it" : "") + "? This cannot be undone.";
+#endif
+            if (unsaved)
+                text += " Its unsaved changes in " + std::to_string(unsaved) + " open document(s) are lost.";
+            explorerConfirm("Delete " + name + "?", text, "Delete", [this, path]() { vm_.deletePath(path); });
+        }
+        ImGui::EndDisabled();
+    }
+    if (root && vm_.folderOpen()) {
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_FOLDER_CLOSED "  Close Folder"))
+            vm_.requestCloseFolder();
+    }
+    if (!editable)
+        ImGui::TextDisabled("Open a folder to create, rename or delete files");
+}
+
+void MainView::explorerAsk(std::string title, std::string hint, std::string value, std::string button,
+                           std::function<void(const std::string&)> action)
+{
+    explorerPrompt_ = {std::move(title), std::move(hint), std::move(value), std::move(button), false, std::move(action), {}};
+    openExplorerPrompt_ = true;
+}
+
+void MainView::explorerConfirm(std::string title, std::string text, std::string button, std::function<void()> action)
+{
+    explorerPrompt_ = {std::move(title), std::move(text), {}, std::move(button), true, {}, std::move(action)};
+    openExplorerPrompt_ = true;
+}
+
+void MainView::renderExplorerPrompt()
+{
+    if (openExplorerPrompt_) {
+        ImGui::OpenPopup("##explorerPrompt");
+        openExplorerPrompt_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(420.0f * s_, 0.0f));
+    if (!ImGui::BeginPopupModal("##explorerPrompt", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    ExplorerPrompt& p = explorerPrompt_;
+    bool accept = false;
+    if (p.confirm) {
+        ImGui::TextColored(col(palette_.severityWarning), ICON_FA_TRIANGLE_EXCLAMATION "  %s", p.title.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", p.hint.c_str());
+    } else {
+        ImGui::TextUnformatted(p.title.c_str());
+        ImGui::Spacing();
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::SetNextItemWidth(-1.0f);
+        accept = ImGui::InputTextWithHint("##value", p.hint.c_str(), &p.value, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        registerLastItem("explorer-prompt:value", "textbox", p.title, nullptr);
+    }
+    ImGui::Spacing();
+    const float w = 100.0f * s_;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 2.0f * w - ImGui::GetStyle().ItemSpacing.x);
+    ImGui::BeginDisabled(!p.confirm && p.value.empty());
+    if (p.confirm)
+        ImGui::PushStyleColor(ImGuiCol_Button, col(withAlpha(palette_.severityError, 170)));
+    accept = ImGui::Button(p.button.c_str(), ImVec2(w, 0.0f)) || (accept && !p.value.empty());
+    if (p.confirm)
+        ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    registerLastItem("explorer-prompt:ok", "button", p.button, nullptr);
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Cancel", ImVec2(w, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    registerLastItem("explorer-prompt:cancel", "button", "Cancel", nullptr);
+    if (accept) {
+        if (p.confirm && p.onConfirm)
+            p.onConfirm();
+        else if (!p.confirm && p.onValue)
+            p.onValue(p.value);
+    }
+    if (accept || cancel)
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 void MainView::renderOpenDocuments()
@@ -1834,6 +2099,8 @@ void MainView::renderPreferencesPopup()
     bool open = true;
     if (!ImGui::BeginPopupModal("Preferences", &open, ImGuiWindowFlags_AlwaysAutoResize))
         return;
+    if (registerWindowClose("dialog:preferences:close", "Close Preferences"))
+        ImGui::CloseCurrentPopup();
     auto toggle = [](const char* label, viewmodel::Property<bool>& property) {
         bool value = property.get();
         if (ImGui::Checkbox(label, &value))
@@ -1950,6 +2217,8 @@ void MainView::renderSyntaxColorsPopup()
     bool open = true;
     if (!ImGui::BeginPopupModal("Syntax Colours", &open))
         return;
+    if (registerWindowClose("dialog:syntax-colours:close", "Close Syntax Colours"))
+        ImGui::CloseCurrentPopup();
     const bool dark = vm_.darkTheme.get();
     const auto& all = model::languages();
     const bool allLanguages = syntaxColorsLanguage_ < 0 || syntaxColorsLanguage_ >= int(all.size());
@@ -2096,6 +2365,8 @@ void MainView::renderAboutPopup()
     bool open = true;
     if (!ImGui::BeginPopupModal("About EasyNotepad", &open, ImGuiWindowFlags_AlwaysAutoResize))
         return;
+    if (registerWindowClose("dialog:about:close", "Close About"))
+        ImGui::CloseCurrentPopup();
     ImGui::TextColored(col(palette_.accent), ICON_FA_PEN_TO_SQUARE);
     ImGui::SameLine();
     ImGui::Text("EasyNotepad %s", ENP_VERSION);

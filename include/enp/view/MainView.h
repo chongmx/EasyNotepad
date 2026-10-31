@@ -18,6 +18,7 @@
 #include "enp/view/Theme.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -54,10 +55,17 @@ private:
     void renderHashResult();
     void renderSaveChangesPrompt();
     void renderQuitPrompt();
+    void renderCloseFolderPrompt();
     void renderAllTabsPopup();
     void renderExplorer();
     void renderOpenDocuments(); // the explorer's "Open" tab
     void renderExplorerItem(const viewmodel::ExplorerItem& item);
+    // Right-click menu of a file, a folder, or (root) the opened folder; and its questions.
+    void explorerMenu(const viewmodel::ExplorerItem& item, bool root);
+    void explorerAsk(std::string title, std::string hint, std::string value, std::string button,
+                     std::function<void(const std::string&)> action);
+    void explorerConfirm(std::string title, std::string text, std::string button, std::function<void()> action);
+    void renderExplorerPrompt();
     bool explorerVisible(const viewmodel::ExplorerItem& item); // under the filter
     void renderPreview(ImVec2 size);
     void renderStatusBar();
@@ -115,6 +123,13 @@ private:
     int explorerTab_ = 0;         // 0 = Files, 1 = Open, 2 = Git
     int explorerTabRequest_ = -1; // switch on the next frame (agents, "Reveal in Files")
     bool explorerCollapse_ = false;
+    struct ExplorerPrompt {
+        std::string title, hint, value, button;
+        bool confirm = false; // a yes/no question (hint is its text), else a name to type
+        std::function<void(const std::string&)> onValue;
+        std::function<void()> onConfirm;
+    } explorerPrompt_;
+    bool openExplorerPrompt_ = false;
 
     std::string rendererInfo_;
     std::string commentDraft_;

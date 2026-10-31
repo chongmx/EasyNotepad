@@ -481,6 +481,8 @@ void RibbonView::renderCustomizeDialog()
     bool open = true;
     if (!ImGui::BeginPopupModal("Customize Ribbon", &open, ImGuiWindowFlags_NoSavedSettings))
         return;
+    if (registerWindowClose("dialog:customize-ribbon:close", "Close Customize Ribbon"))
+        ImGui::CloseCurrentPopup();
     const float columnW = ImGui::GetContentRegionAvail().x * 0.5f - 6.0f * s_;
     const float listH = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
 

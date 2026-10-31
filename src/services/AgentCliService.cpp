@@ -3,6 +3,8 @@
 #include "enp/os/Os.h"
 #include "enp/os/Process.h"
 
+#include <chrono>
+
 namespace enp::services {
 
 namespace {
@@ -24,10 +26,16 @@ AgentCliService::~AgentCliService()
 
 bool AgentCliService::available() const
 {
+    const double now = double(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch()).count()) / 1000.0;
+    if (now - checkedAt_ < 30.0)
+        return available_;
+    checkedAt_ = now;
     std::string executable = command_.substr(0, command_.find(' '));
     if (executable.size() > 1 && executable.front() == '"')
         executable = command_.substr(1, command_.find('"', 1) - 1);
-    return !os::process::findExecutable(executable).empty() || os::fs::exists(executable);
+    available_ = !os::process::findExecutable(executable).empty() || os::fs::exists(executable);
+    return available_;
 }
 
 void AgentCliService::run(const std::string& prompt, const std::string& workingDirectory,

@@ -1,5 +1,7 @@
 #include "enp/services/FileService.h"
 
+#include "enp/os/Shell.h"
+
 #include "enp/os/Fs.h"
 
 namespace enp::services {
@@ -36,6 +38,26 @@ std::string FileService::absolute(const std::string& path)
 bool FileService::createDirectories(const std::string& path)
 {
     return os::fs::createDirectories(path);
+}
+
+bool FileService::rename(const std::string& from, const std::string& to, std::string* error)
+{
+    return os::fs::renamePath(from, to, error);
+}
+
+bool FileService::remove(const std::string& path, bool* recycled, std::string* error)
+{
+    return os::fs::deletePath(path, recycled, error);
+}
+
+bool FileService::reveal(const std::string& path)
+{
+    return os::shell::revealInFileManager(path);
+}
+
+std::vector<std::string> FileService::roots()
+{
+    return os::fs::rootDirectories();
 }
 
 std::string FileService::homeDirectory()

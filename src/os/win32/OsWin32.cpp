@@ -97,6 +97,8 @@ namespace detail {
 bool platformInit(const InitParams&, std::vector<std::string>& outArguments)
 {
     SetConsoleOutputCP(CP_UTF8);
+    // A drive without media (card reader, DVD) fails at once instead of showing an error box.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; argv && i < argc; ++i)
@@ -254,6 +256,44 @@ std::string appDataDirectory()
     return dir;
 }
 
+bool renamePath(const std::string& from, const std::string& to, std::string* error)
+{
+    if (exists(to)) {
+        if (error)
+            *error = "already exists";
+        return false;
+    }
+    if (!MoveFileExW(widen(from).c_str(), widen(to).c_str(), MOVEFILE_COPY_ALLOWED)) {
+        if (error)
+            *error = "error " + std::to_string(GetLastError());
+        return false;
+    }
+    return true;
+}
+
+bool deletePath(const std::string& path, bool* recycled, std::string* error)
+{
+    // To the Recycle Bin, silently (the app asked already); the path list ends in two NULs.
+    std::wstring from = widen(path);
+    for (wchar_t& c : from)
+        if (c == L'/')
+            c = L'\\';
+    from.push_back(L'\0');
+    SHFILEOPSTRUCTW op{};
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.c_str();
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    const int rc = SHFileOperationW(&op);
+    if (rc != 0 || op.fAnyOperationsAborted) {
+        if (error)
+            *error = "error " + std::to_string(rc);
+        return false;
+    }
+    if (recycled)
+        *recycled = true;
+    return true;
+}
+
 std::vector<std::string> rootDirectories()
 {
     std::vector<std::string> roots{homeDirectory()};
@@ -321,6 +361,17 @@ void openFile(const std::string& title, const std::vector<FileFilter>& filters, 
 // ---- Shell -------------------------------------------------------------------------
 
 namespace shell {
+
+bool revealInFileManager(const std::string& path)
+{
+    std::wstring target = widen(path);
+    for (wchar_t& c : target)
+        if (c == L'/')
+            c = L'\\';
+    const std::wstring args = L"/select,\"" + target + L"\"";
+    auto rc = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL));
+    return rc > 32;
+}
 
 bool openExternal(const std::string& urlOrPath)
 {

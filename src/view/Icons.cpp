@@ -149,6 +149,7 @@ const char* commandIcon(CommandId id)
     case CommandId::GitStashPop: return ICON_FA_BOX_OPEN;
     case CommandId::GitWriteMessage: return ICON_FA_WAND_MAGIC_SPARKLES;
     case CommandId::GitGuide: return ICON_FA_GRADUATION_CAP;
+    case CommandId::CloseFolder: return ICON_FA_FOLDER_CLOSED;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;

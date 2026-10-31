@@ -68,7 +68,8 @@ void GitViewModel::setServices(interfaces::IProcessService* processes, interface
     agent_ = agent;
 }
 
-bool GitViewModel::owner_workspaceEmpty() const { return owner_.workspaceRoot().empty(); }
+// Demo data stands in for the sample workspace only; after Close Folder there is simply no repository.
+bool GitViewModel::owner_workspaceEmpty() const { return owner_.workspaceRoot().empty() && !owner_.noFolder(); }
 
 void GitViewModel::note(const std::string& text) { owner_.statusText.set((demo() ? "Demo: " : "Git: ") + text); }
 
@@ -334,9 +335,10 @@ void GitViewModel::loadDemo()
     d.status.upstream = "origin/feature/git-ui";
     d.status.ahead = 2;
     d.status.changes = {
-        {"include/enp/model/Git.h", 'A', Area::Staged, {}},   {"src/app/Main.cpp", 'M', Area::Changes, {}},
-        {"src/view/MainView.cpp", 'M', Area::Changes, {}},    {"docs/notes.txt", 'D', Area::Changes, {}},
-        {"src/model/Git.cpp", 'U', Area::Untracked, {}},      {"src/view/GitView.cpp", 'U', Area::Untracked, {}},
+        {"include/enp/model/Git.h", 'A', Area::Staged, {}, {}},   {"src/app/Main.cpp", 'M', Area::Changes, {}, {}},
+        {"src/view/MainView.cpp", 'M', Area::Changes, {}, {}},    {"docs/notes.txt", 'D', Area::Changes, {}, {}},
+        {"src/model/Git.cpp", 'U', Area::Untracked, {}, {}},      {"src/view/GitView.cpp", 'U', Area::Untracked, {}, {}},
+        {"3rdparty/imgui", 'M', Area::Changes, {}, "new commits"},
     };
     auto local = [&](const char* name, const char* upstream, int ahead, int behind, bool merged, bool gone, int minutes) {
         Branch b;
@@ -437,7 +439,7 @@ void GitViewModel::setDemoMerge(bool on)
     auto& changes = demo_.status.changes;
     changes.erase(std::remove_if(changes.begin(), changes.end(), [](const Change& c) { return c.group == Area::Conflicts; }), changes.end());
     if (on) {
-        changes.push_back({"src/view/RibbonView.cpp", '!', Area::Conflicts, {}});
+        changes.push_back({"src/view/RibbonView.cpp", '!', Area::Conflicts, {}, {}});
         note("merging main into " + demo_.status.branch + ": RibbonView.cpp changed on both sides, so it needs you (see Conflicts)");
     }
 }
@@ -699,6 +701,25 @@ void GitViewModel::init()
     });
 }
 
+void GitViewModel::updateSubmodule(const std::string& path)
+{
+    if (demo()) {
+        note("updated the submodule " + path + " to the commit this repository records");
+        return;
+    }
+    act({"submodule", "update", "--init", "--recursive", "--", path},
+        "updated the submodule " + path + " to the commit this repository records");
+}
+
+void GitViewModel::showStatusText()
+{
+    if (demo()) {
+        lastOutput_ = "On branch " + demo_.status.branch + "\n(demo data)\n";
+        return;
+    }
+    run({"status"}, [this](const interfaces::ProcessResult& r) { lastOutput_ = r.output + r.errorOutput; }, {}, true);
+}
+
 void GitViewModel::openFile(const std::string& path)
 {
     if (demo()) {
@@ -724,9 +745,28 @@ void GitViewModel::showChange(const std::string& path, Area area)
         owner_.showPanelTab(PanelTab::Diff);
     };
     char status = 'M';
+    std::string submodule;
     for (const Change& c : repo().status.changes)
-        if (c.path == path && c.group == area)
+        if (c.path == path && c.group == area) {
             status = c.status;
+            submodule = c.submodule;
+        }
+    if (!submodule.empty() && !demo()) {
+        // A submodule: the commits between the recorded one and its current one, and its own changes.
+        std::vector<std::string> args{"diff", "--submodule=log"};
+        if (area == Area::Staged)
+            args.push_back("--cached");
+        args.insert(args.end(), {"--", path});
+        run(args, [this, path, area, submodule](const interfaces::ProcessResult& r) {
+            std::string text = "Submodule " + path + ": " + submodule + "\n\n" + r.output;
+            if (r.output.empty())
+                text += "(no commit change; its own files changed: open the submodule's folder to see them)\n";
+            diff_ = {};
+            owner_.review().setDiff(path + ": submodule", model::diffLines({}, model::splitLines(text)));
+            owner_.showPanelTab(PanelTab::Diff);
+        }, {}, true);
+        return;
+    }
     if (demo()) {
         const std::string before = "int main(int argc, char** argv)\n{\n    enp::app::Application app(argc, argv);\n"
                                    "    if (!app.start(1280, 800))\n        return 1;\n    app.shutdown();\n    return app.run();\n}\n";
@@ -1254,7 +1294,7 @@ void GitViewModel::stashApply(int index, bool pop)
     if (demo()) {
         for (const FileChange& f : demo_.stashes[size_t(index)].files)
             if (!demoChange(f.path, Area::Changes) && !demoChange(f.path, Area::Untracked))
-                demo_.status.changes.push_back({f.path, f.status == 'U' ? 'U' : f.status, f.status == 'U' ? Area::Untracked : Area::Changes, {}});
+                demo_.status.changes.push_back({f.path, f.status == 'U' ? 'U' : f.status, f.status == 'U' ? Area::Untracked : Area::Changes, {}, {}});
         const std::string message = demo_.stashes[size_t(index)].message;
         if (pop) {
             demo_.stashes.erase(demo_.stashes.begin() + index);
@@ -1531,7 +1571,7 @@ void GitViewModel::takeFiles(const std::string& ref, const std::vector<std::stri
         for (const std::string& p : paths) {
             Change* c = demoChange(p, Area::Changes);
             if (!c && !demoChange(p, Area::Staged))
-                demo_.status.changes.push_back({p, 'M', stage ? Area::Staged : Area::Changes, {}});
+                demo_.status.changes.push_back({p, 'M', stage ? Area::Staged : Area::Changes, {}, {}});
             else if (c && stage)
                 c->group = Area::Staged;
         }

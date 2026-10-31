@@ -1,5 +1,7 @@
 #include "enp/view/UiAutomation.h"
 
+#include <algorithm>
+
 namespace enp::view {
 
 UiAutomation& UiAutomation::instance()
@@ -35,6 +37,28 @@ const UiElement* UiAutomation::find(std::string_view id) const
         if (e.id == id)
             return &e;
     return nullptr;
+}
+
+bool registerWindowClose(const std::string& id, const std::string& label)
+{
+    static std::vector<std::string> requested; // clicked by an agent, not yet handled
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const float size = ImGui::GetFontSize();
+    const float titleH = ImGui::GetFontSize() + style.FramePadding.y * 2.0f;
+    UiElement e;
+    e.id = id;
+    e.role = "button";
+    e.label = label;
+    e.min = ImVec2(pos.x + ImGui::GetWindowWidth() - style.FramePadding.x - size, pos.y + (titleH - size) * 0.5f);
+    e.max = ImVec2(e.min.x + size, e.min.y + size);
+    e.activate = [id]() { requested.push_back(id); };
+    UiAutomation::instance().add(std::move(e));
+    const auto it = std::find(requested.begin(), requested.end(), id);
+    if (it == requested.end())
+        return false;
+    requested.erase(it);
+    return true;
 }
 
 void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate, bool enabled)

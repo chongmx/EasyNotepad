@@ -156,6 +156,7 @@ public:
     Event<> gitGuideRequested;
     Event<> gitDiscardAllRequested; // the view asks first
     Event<std::string> gitShowCommitRequested; // a commit hash (blame): show it in History
+    Event<std::string> gitFileHistoryRequested; // a repository path: its history in History
     Event<> quitRequested; // safe to quit now (nothing unsaved, or the user decided)
 
     // ---- Unsaved changes ---------------------------------------------------------------------
@@ -164,6 +165,14 @@ public:
     enum class CloseChoice { Save, Discard, Cancel };
     Property<int> pendingClose{-1};          // id of the document waiting for an answer, -1: none
     Property<bool> quitConfirmPending{false};
+    // Close Folder with unsaved documents: the view asks, then resolveCloseFolder().
+    Property<bool> closeFolderPending{false};
+    void requestCloseFolder();
+    void resolveCloseFolder(CloseChoice choice);
+    void closeFolder(); // closes every document, unsaved or not
+    bool folderOpen() const { return !workspaceRoot_.empty(); }
+    // No folder, after Close Folder (rather than the sample workspace shown at first start).
+    bool noFolder() const { return workspaceRoot_.empty() && explorer_.children.empty(); }
     void requestCloseDocument(int index);    // closes at once when there is nothing to lose
     void resolvePendingClose(CloseChoice choice);
     void requestQuit();
@@ -313,6 +322,16 @@ public:
     void runInTerminal(const std::string& command);
     // A new tab holding `text` (not a file on disk); `pathForLanguage` picks the colouring.
     void openTextDocument(const std::string& title, const std::string& pathForLanguage, const std::string& text);
+    // Explorer actions on workspace paths (folder "" is the workspace itself). They report problems in
+    // the status bar and return false.
+    bool createFile(const std::string& folder, const std::string& name);   // and opens it
+    bool createFolder(const std::string& folder, const std::string& name);
+    bool renamePath(const std::string& path, const std::string& newName); // open documents follow
+    bool deletePath(const std::string& path);                             // closes its open documents
+    void revealInFileManager(const std::string& path);
+    void openTerminalIn(const std::string& folder);
+    void findInFolder(const std::string& folder);
+    bool canEditFiles() const { return files_ && !workspaceRoot_.empty(); }
     // Replaces lines [first, last] of the active document with `lines` (last < first: inserts them
     // before `first`); one undo step.
     void replaceLines(int first, int last, const std::vector<std::string>& lines);

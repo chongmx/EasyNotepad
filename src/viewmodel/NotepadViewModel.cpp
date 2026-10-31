@@ -209,6 +209,45 @@ void NotepadViewModel::resolveQuit(CloseChoice choice)
     quitRequested.emit();
 }
 
+void NotepadViewModel::requestCloseFolder()
+{
+    if (workspaceRoot_.empty())
+        return;
+    if (unsavedDocuments().empty())
+        closeFolder();
+    else
+        closeFolderPending.set(true);
+}
+
+void NotepadViewModel::resolveCloseFolder(CloseChoice choice)
+{
+    closeFolderPending.set(false);
+    if (choice == CloseChoice::Cancel)
+        return;
+    if (choice == CloseChoice::Save)
+        for (auto& doc : documents_)
+            if (doc->modified && (!canSaveInPlace(*doc) || !saveDocument(*doc))) {
+                activate(documentIndexById(doc->id));
+                statusText.set("Not closing the folder: \"" + doc->title + "\" could not be saved");
+                return;
+            }
+    closeFolder();
+}
+
+void NotepadViewModel::closeFolder()
+{
+    const std::string closed = workspaceRoot_;
+    for (auto& doc : documents_)
+        doc->modified = false; // answered already: closing discards
+    while (!documents_.empty())
+        closeDocument(0);
+    workspaceRoot_.clear();
+    explorer_ = ExplorerItem{"", "", true, {}}; // empty: "No folder open", not the samples
+    findInFiles_.folder.clear();
+    git_.workspaceChanged();
+    statusText.set(closed.empty() ? "No folder open" : "Closed the folder " + closed);
+}
+
 void NotepadViewModel::closeWhere(const std::function<bool(int index, const model::Document&)>& close)
 {
     const model::Document* active = activeDocument();
@@ -1197,6 +1236,131 @@ void NotepadViewModel::replaceLines(int first, int last, const std::vector<std::
     }
     setSelection(from, to);
     insertText(text);
+}
+
+namespace {
+bool validName(const std::string& name)
+{
+    return !name.empty() && name != "." && name != ".." && name.find_first_of("/\\:*?\"<>|") == std::string::npos;
+}
+} // namespace
+
+bool NotepadViewModel::createFile(const std::string& folder, const std::string& name)
+{
+    if (!canEditFiles() || !validName(name)) {
+        statusText.set("Not a valid file name: " + name);
+        return false;
+    }
+    const std::string path = folder.empty() ? name : folder + "/" + name;
+    const std::optional<interfaces::FileStamp> stamp = files_->stamp(absolutePath(path));
+    if (stamp && stamp->exists) {
+        statusText.set(path + " already exists");
+        return false;
+    }
+    std::string error;
+    if (!files_->write(absolutePath(path), "", &error)) {
+        statusText.set("Cannot create " + path + ": " + error);
+        return false;
+    }
+    refreshExplorer();
+    openFile(path);
+    statusText.set("Created " + path);
+    git_.requestRefresh();
+    return true;
+}
+
+bool NotepadViewModel::createFolder(const std::string& folder, const std::string& name)
+{
+    if (!canEditFiles() || !validName(name)) {
+        statusText.set("Not a valid folder name: " + name);
+        return false;
+    }
+    const std::string path = folder.empty() ? name : folder + "/" + name;
+    if (files_->isDirectory(absolutePath(path)) || !files_->createDirectories(absolutePath(path))) {
+        statusText.set("Cannot create the folder " + path);
+        return false;
+    }
+    refreshExplorer();
+    statusText.set("Created the folder " + path);
+    return true;
+}
+
+bool NotepadViewModel::renamePath(const std::string& path, const std::string& newName)
+{
+    if (!canEditFiles() || !validName(newName)) {
+        statusText.set("Not a valid name: " + newName);
+        return false;
+    }
+    const size_t slash = path.find_last_of('/');
+    const std::string target = (slash == std::string::npos ? std::string() : path.substr(0, slash + 1)) + newName;
+    if (target == path)
+        return true;
+    std::string error;
+    if (!files_->rename(absolutePath(path), absolutePath(target), &error)) {
+        statusText.set("Cannot rename " + path + ": " + error);
+        return false;
+    }
+    // Open documents (the file, or files inside the folder) follow.
+    for (auto& doc : documents_) {
+        if (doc->path == path) {
+            doc->path = target;
+            doc->title = newName;
+            doc->language = model::languageFromPath(target);
+        } else if (doc->path.rfind(path + "/", 0) == 0)
+            doc->path = target + doc->path.substr(path.size());
+        else
+            continue;
+        recordDiskStamp(*doc);
+    }
+    refreshExplorer();
+    statusText.set("Renamed " + path + " to " + newName);
+    git_.requestRefresh();
+    return true;
+}
+
+bool NotepadViewModel::deletePath(const std::string& path)
+{
+    if (!canEditFiles() || path.empty())
+        return false;
+    // Its open documents close first (the view asked about unsaved ones).
+    for (int i = int(documents_.size()) - 1; i >= 0; --i) {
+        const std::string& p = documents_[size_t(i)]->path;
+        if (p == path || p.rfind(path + "/", 0) == 0)
+            closeDocument(i);
+    }
+    bool recycled = false;
+    std::string error;
+    if (!files_->remove(absolutePath(path), &recycled, &error)) {
+        statusText.set("Cannot delete " + path + ": " + error);
+        return false;
+    }
+    refreshExplorer();
+    statusText.set(recycled ? "Moved " + path + " to the Recycle Bin" : "Deleted " + path);
+    git_.requestRefresh();
+    return true;
+}
+
+void NotepadViewModel::revealInFileManager(const std::string& path)
+{
+    if (files_ && !workspaceRoot_.empty() && !files_->reveal(absolutePath(path)))
+        statusText.set("Cannot show " + path + " in the file manager");
+}
+
+void NotepadViewModel::openTerminalIn(const std::string& folder)
+{
+    const std::string dir = absolutePath(folder.empty() ? "." : folder);
+#if defined(_WIN32)
+    runInTerminal("cd /d \"" + dir + "\"");
+#else
+    runInTerminal("cd '" + dir + "'");
+#endif
+}
+
+void NotepadViewModel::findInFolder(const std::string& folder)
+{
+    findInFiles_.folder = folder;
+    showPanelTab(PanelTab::Search);
+    searchFocusRequested.emit();
 }
 
 void NotepadViewModel::openTextDocument(const std::string& title, const std::string& pathForLanguage, const std::string& text)

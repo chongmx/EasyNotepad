@@ -50,6 +50,7 @@ void NotepadViewModel::initCommands()
     };
     set(C::OpenFile, [this, startFolder]() { fileDialog_.show(FileDialogMode::Open, startFolder()); },
         [this]() { return files_ != nullptr; });
+    set(C::CloseFolder, [this]() { requestCloseFolder(); }, [this]() { return !workspaceRoot_.empty(); });
     set(C::OpenFolder, [this]() {
         fileDialog_.show(FileDialogMode::OpenFolder, workspaceRoot_.empty() ? homeDirectory() : FileDialogViewModel::parent(workspaceRoot_));
     }, [this]() { return files_ != nullptr; });

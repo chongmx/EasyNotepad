@@ -207,6 +207,10 @@ Files tree (folders holding changes get a dot) and the titles of open tabs.
   button asks the agent to write the message from the staged changes (without an agent it lists the
   files).
 - A folder that is not a repository offers **Initialize repository** and **Clone a repository**.
+- **Submodules** (repositories inside this one) show with a cube icon and what changed in them: new
+  commits, modified files or untracked files. Click one for the commits it moved between; right-click
+  > **Update submodule** checks out the commit this repository records.
+- **⋯ > Show git status** shows git's own summary text.
 
 Everything runs the `git` you have installed (set `EASYNOTEPAD_GIT` to use another), with your
 settings, credentials and hooks. The view refreshes after saves, after each action and every few
@@ -283,3 +287,26 @@ with a small picture, **Show me** points at the real control, and a **Try it** t
 done. While the guide is open, pointing at any git control outlines it and explains it ("What's
 this?"), and every action is described in plain words ("What just happened"). Each lesson also lists
 which part of the implementation it covers, with a box to tick, for reviewing.
+
+## Explorer right-click menu
+
+Right-click a file, a folder, or the empty space under the tree (the opened folder itself):
+
+- **Open**, and **Open changes** for a file git sees as changed.
+- **New File...** (opened at once) and **New Folder...**, in that folder.
+- **Find in Folder...**: the Search tab, limited to that folder (shown above the results, with a
+  button to search all files again). **Open Terminal Here**.
+- **Copy Path**, **Copy Relative Path**, **Reveal in File Explorer** (Finder on macOS, the file
+  manager on Linux).
+- **Git**: stage, unstage or discard (asks) what changed in it, its file history, and blame.
+- **Rename...** (open documents follow the new name) and **Delete...** (asks first; on Windows it goes
+  to the Recycle Bin, elsewhere it is deleted; open documents in it close).
+
+Creating, renaming and deleting need an opened folder; in the sample workspace the menu says so.
+
+## Closing a folder, and dialogs
+
+**File › Close Folder** (also on the right-click menu of the empty Explorer space) closes the folder
+and its documents, asking first to save or discard unsaved changes. The Explorer then shows "No folder
+open" with **Open a folder** and the recent folders. An open file's right-click menu in the Explorer
+has **Close**. Every dialog's **×** closes it (agents can use it too, through the connector).

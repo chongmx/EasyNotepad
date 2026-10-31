@@ -46,8 +46,11 @@ void AgentCursorView::render()
     const UiElement* target = UiAutomation::instance().find(p.target);
     const ImVec2 targetMin = target ? target->min : ImVec2(viewport->GetCenter().x - 1.0f, viewport->GetCenter().y - 1.0f);
     const ImVec2 targetMax = target ? target->max : ImVec2(targetMin.x + 2.0f, targetMin.y + 2.0f);
-    // Aim slightly inside the element, the way a person points at a button.
-    const ImVec2 aim(targetMin.x + (targetMax.x - targetMin.x) * 0.55f, targetMin.y + (targetMax.y - targetMin.y) * 0.6f);
+    // Aim slightly inside the element, the way a person points at a button. An element that went
+    // away (the dialog its click closed) leaves the cursor where it was.
+    const ImVec2 aim = !target && pos_.x >= 0.0f && p.serial == serial_
+                           ? pos_
+                           : ImVec2(targetMin.x + (targetMax.x - targetMin.x) * 0.55f, targetMin.y + (targetMax.y - targetMin.y) * 0.6f);
     const double now = ImGui::GetTime();
     if (p.serial != serial_) {
         serial_ = p.serial;

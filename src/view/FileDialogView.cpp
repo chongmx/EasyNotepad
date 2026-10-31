@@ -44,11 +44,16 @@ void FileDialogView::render()
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(780.0f * s_, 500.0f * s_), ImGuiCond_Appearing);
     bool open = true;
-    if (!ImGui::BeginPopupModal(title, &open))
+    const bool shown = ImGui::BeginPopupModal(title, &open);
+    // The title bar's ×: ImGui closes the popup and returns false in the same frame, so tell the
+    // view-model here (else it stays visible and the dialog reopens on the next frame).
+    if (!open && wanted)
+        vm_.cancel();
+    if (!shown)
         return;
-    if (!wanted || !open) { // closed by the view-model (or an agent), or with the title bar's ×
-        if (!open)
-            vm_.cancel();
+    if (registerWindowClose("dialog:file:close", "Close the dialog"))
+        vm_.cancel();
+    if (!wanted || !open) { // closed by the view-model (or an agent)
         ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
         return;

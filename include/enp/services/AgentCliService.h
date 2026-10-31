@@ -21,6 +21,9 @@ public:
 
 private:
     std::string command_;
+    // Searching PATH is slow when it holds network folders: the answer is kept for a while.
+    mutable bool available_ = false;
+    mutable double checkedAt_ = -1.0e9;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 };
 

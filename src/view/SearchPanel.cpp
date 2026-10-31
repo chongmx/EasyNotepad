@@ -53,6 +53,20 @@ void SearchPanel::render()
     ImGui::SetNextItemWidth(-1.0f);
     run = ImGui::InputTextWithHint("##include", "Files: *.cpp;*.h", &find.include, ImGuiInputTextFlags_EnterReturnsTrue) || run;
     registerLastItem("search:include", "textbox", "Files to include", nullptr);
+    if (!find.folder.empty()) {
+        // Explorer > Find in Folder: only that folder, until cleared.
+        ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0.0f));
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.accent), ICON_FA_FOLDER "  Only in %s", find.folder.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_XMARK "  All files")) {
+            find.folder.clear();
+            run = !find.query.empty();
+        }
+        ImGui::SetItemTooltip("Search every file again");
+        registerLastItem("search:folder-clear", "button", "Search every file", nullptr);
+    }
     if (showReplace_) {
         ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0.0f));
         ImGui::SameLine();

@@ -12,7 +12,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::Save: return {"Save", "Save the current document", "Ctrl+S"};
     case CommandId::SaveAll: return {"Save All", "Save all open documents", "Ctrl+Shift+S"};
     case CommandId::SaveAs: return {"Save As", "Save the document under a new name", "Ctrl+Alt+S"};
-    case CommandId::OpenFolder: return {"Open Folder", "Open a folder as the workspace", "Ctrl+Alt+O"};
+    case CommandId::OpenFolder: return {"Open Folder", "Open a folder", "Ctrl+Alt+O"};
     case CommandId::CloseFile: return {"Close", "Close the current document", "Ctrl+W"};
     case CommandId::CloseOthers: return {"Close Others", "Close every other document (unsaved ones stay open)", ""};
     case CommandId::CloseAll: return {"Close All", "Close all documents (unsaved ones stay open)", ""};
@@ -159,6 +159,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::GitStashPop: return {"Pop", "Apply and drop the latest stash", ""};
     case CommandId::GitWriteMessage: return {"Message", "Let the agent write the commit message", ""};
     case CommandId::GitGuide: return {"Learn Git", "Step-by-step guide to git, using this app's Git tools", ""};
+    case CommandId::CloseFolder: return {"Close Folder", "Close the folder and its documents", ""};
 
     case CommandId::Count: break;
     }
@@ -310,6 +311,7 @@ const char* commandKey(CommandId id)
     case CommandId::GitStashPop: return "GitStashPop";
     case CommandId::GitWriteMessage: return "GitWriteMessage";
     case CommandId::GitGuide: return "GitGuide";
+    case CommandId::CloseFolder: return "CloseFolder";
     case CommandId::Count: break;
     }
     return "";

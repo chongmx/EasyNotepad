@@ -33,6 +33,20 @@ public:
     virtual std::string absolute(const std::string& path) = 0;
     virtual bool createDirectories(const std::string& path) = 0;
     virtual std::string homeDirectory() { return {}; }
+    // Starting points for browsing (drive letters on Windows), found without touching the drives.
+    virtual std::vector<std::string> roots() { return {}; }
+    virtual bool rename(const std::string& from, const std::string& to, std::string* error = nullptr)
+    {
+        (void)from, (void)to, (void)error;
+        return false;
+    }
+    // A file or a whole folder; `*recycled` when it went to the Recycle Bin / Trash.
+    virtual bool remove(const std::string& path, bool* recycled = nullptr, std::string* error = nullptr)
+    {
+        (void)path, (void)recycled, (void)error;
+        return false;
+    }
+    virtual bool reveal(const std::string& path) { (void)path; return false; } // in the system's file manager
     // nullopt where the platform cannot tell.
     virtual std::optional<FileStamp> stamp(const std::string& path) { (void)path; return std::nullopt; }
 };

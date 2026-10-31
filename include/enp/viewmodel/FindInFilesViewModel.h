@@ -36,6 +36,7 @@ public:
     std::string query;
     std::string replacement;
     std::string include; // "*.cpp;*.h"; empty: all files
+    std::string folder;  // workspace-relative: only files under it (Explorer > Find in Folder); empty: all
     model::SearchOptions options;
 
     Property<bool> running{false};

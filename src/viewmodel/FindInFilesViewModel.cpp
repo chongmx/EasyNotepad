@@ -56,7 +56,7 @@ std::vector<FindInFilesViewModel::Source> FindInFilesViewModel::collect() const
     // Open documents first, in their current text (unsaved edits included).
     for (const auto& doc : owner_.documents()) {
         const std::string path = doc->path.empty() ? doc->title : doc->path;
-        if (!model::matchesFilter(fileNameOf(path), include))
+        if (!model::matchesFilter(fileNameOf(path), include) || (!folder.empty() && path.rfind(folder + "/", 0) != 0))
             continue;
         sources.push_back({path, {}, doc->buffer.text(), true});
     }
@@ -69,7 +69,7 @@ std::vector<FindInFilesViewModel::Source> FindInFilesViewModel::collect() const
                 self(self, child);
             return;
         }
-        if (!model::matchesFilter(item.name, include))
+        if (!model::matchesFilter(item.name, include) || (!folder.empty() && item.path.rfind(folder + "/", 0) != 0))
             return;
         for (const Source& s : sources)
             if (s.path == item.path)

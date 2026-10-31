@@ -1,6 +1,7 @@
 // POSIX file-system backend shared by Linux, macOS, Android and the web (Emscripten MEMFS).
 #include "../OsInternal.h"
 
+#include <cstdio>
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -132,6 +133,59 @@ std::vector<DirEntry> listDirectory(const std::string& p, std::string* error)
         return lessCaseInsensitive(a.name, b.name);
     });
     return entries;
+}
+
+bool renamePath(const std::string& from, const std::string& to, std::string* error)
+{
+    struct stat st{};
+    if (::lstat(to.c_str(), &st) == 0) {
+        if (error)
+            *error = "already exists";
+        return false;
+    }
+    if (::rename(from.c_str(), to.c_str()) != 0) {
+        if (error)
+            *error = std::strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+bool deletePath(const std::string& path, bool* recycled, std::string* error)
+{
+    if (recycled)
+        *recycled = false;
+    struct stat st{};
+    if (::lstat(path.c_str(), &st) != 0) {
+        if (error)
+            *error = std::strerror(errno);
+        return false;
+    }
+    // A folder's contents first; a link to a folder is removed itself, never followed.
+    if (S_ISDIR(st.st_mode)) {
+        if (DIR* dir = ::opendir(path.c_str())) {
+            std::vector<std::string> names;
+            while (dirent* e = ::readdir(dir))
+                if (std::strcmp(e->d_name, ".") != 0 && std::strcmp(e->d_name, "..") != 0)
+                    names.emplace_back(e->d_name);
+            ::closedir(dir);
+            for (const std::string& n : names)
+                if (!deletePath(path + "/" + n, nullptr, error))
+                    return false;
+        }
+        if (::rmdir(path.c_str()) != 0) {
+            if (error)
+                *error = std::strerror(errno);
+            return false;
+        }
+        return true;
+    }
+    if (::unlink(path.c_str()) != 0) {
+        if (error)
+            *error = std::strerror(errno);
+        return false;
+    }
+    return true;
 }
 
 bool createDirectories(const std::string& p)

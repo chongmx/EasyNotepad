@@ -21,6 +21,8 @@ struct Change {
     char status = 'M';    // M A D R U (untracked) ! (conflict)
     Area group = Area::Changes;
     std::string origPath; // renames: where it came from
+    // A submodule: what changed in it, e.g. "new commits, modified files" (empty for a plain file).
+    std::string submodule;
 };
 
 struct Status {

@@ -29,6 +29,10 @@ public:
     void minimize() override;
     void toggleMaximize() override;
     void close() override;
+    // After the first frame: resize by a pixel and back. Some drivers keep the OpenGL surface at the
+    // size it had before the caption was removed (the window was hidden then) until the window is
+    // resized while visible; until then the top strip is cut off and clicks land a caption lower.
+    void settle();
     void setDragRegions(std::vector<view::ScreenRect> regions) override { dragRegions_ = std::move(regions); }
     void beginDrag() override;
     ImGuiMouseCursor resizeCursor() const override;

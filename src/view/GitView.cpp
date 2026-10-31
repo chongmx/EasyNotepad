@@ -75,6 +75,7 @@ GitView::GitView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Pale
         git().loadLog(historyBranch_ == 1, historyPath_);
         vm_.showPanelTab(viewmodel::PanelTab::History);
     }));
+    subscriptions_.push_back(vm_.gitFileHistoryRequested.subscribe([this](const std::string& path) { showFileHistory(path); }));
     subscriptions_.push_back(vm_.gitDiscardAllRequested.subscribe([this]() { discardWithConfirm(git().unstagedPaths()); }));
     subscriptions_.push_back(vm_.branchPickerRequested.subscribe([this]() {
         const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -398,6 +399,20 @@ void GitView::renderChanges()
     git().setVisible(true);
     if (demo())
         renderDemoBanner();
+    if (vm_.noFolder() && !demo()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("No folder open.");
+        ImGui::TextWrapped("Open a folder to see its changes, branches and history.");
+        ImGui::Spacing();
+        if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Open a folder", ImVec2(-1.0f, 0.0f)))
+            vm_.execute(viewmodel::CommandId::OpenFolder);
+        if (ImGui::Button(ICON_FA_CLONE "  Clone a repository...", ImVec2(-1.0f, 0.0f)))
+            openClone_ = true;
+        if (ImGui::Button(ICON_FA_GRADUATION_CAP "  Learn git with demo data", ImVec2(-1.0f, 0.0f)))
+            openGuide();
+        ImGui::PopID();
+        return;
+    }
     if (!git().available()) {
         ImGui::Spacing();
         ImGui::TextColored(col(palette_.severityWarning), ICON_FA_TRIANGLE_EXCLAMATION "  Git was not found.");
@@ -521,6 +536,11 @@ void GitView::renderMoreMenu()
     }
     if (ImGui::MenuItem(ICON_FA_CLONE "  Clone a repository..."))
         openClone_ = true;
+    if (ImGui::MenuItem(ICON_FA_LIST "  Show git status")) {
+        git().showStatusText();
+        showOutput_ = true;
+    }
+    ImGui::SetItemTooltip("git's own summary: branch, staged, changed, untracked and submodules");
     if (ImGui::MenuItem(ICON_FA_TERMINAL "  Show git's last output", nullptr, false, !git().lastOutput().empty()))
         showOutput_ = true;
     if (demo()) {
@@ -791,9 +811,14 @@ void GitView::renderRow(const Change& change, int index)
             clickRow(change);
     }
     const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem); // still true over its own buttons
-    registerLastItem("git:file:" + change.path, "row", change.path, [this, change]() { clickRow(change); });
-    ImGui::SetItemTooltip("%s%s\nClick: what changed  ·  double-click: open  ·  Ctrl/Shift-click: select several",
-                          change.path.c_str(), change.origPath.empty() ? "" : ("\nrenamed from " + change.origPath).c_str());
+    registerLastItem((change.submodule.empty() ? "git:file:" : "git:submodule:") + change.path, "row", change.path,
+                     [this, change]() { clickRow(change); });
+    if (!change.submodule.empty())
+        ImGui::SetItemTooltip("%s\nSubmodule (a repository inside this one): %s\nClick: its new commits  ·  right-click: update it",
+                              change.path.c_str(), change.submodule.c_str());
+    else
+        ImGui::SetItemTooltip("%s%s\nClick: what changed  ·  double-click: open  ·  Ctrl/Shift-click: select several",
+                              change.path.c_str(), change.origPath.empty() ? "" : ("\nrenamed from " + change.origPath).c_str());
     if (ImGui::BeginPopupContextItem("##fileMenu")) {
         const std::vector<std::string> list = targets(change);
         const std::string count = list.size() > 1 ? " " + plural(int(list.size()), "file", "files") : std::string();
@@ -807,6 +832,15 @@ void GitView::renderRow(const Change& change, int index)
                 selected_ = {change.path};
             stashSelectedOnly_ = true;
             openStash_ = true;
+        }
+        if (!change.submodule.empty()) {
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_CUBE "  Update submodule"))
+                confirm("Update " + change.path + "?",
+                        "The submodule goes back to the commit this repository records (git submodule update). Commits and "
+                        "changes inside it that are not recorded here are no longer checked out.",
+                        "Update", [this, path = change.path]() { git().updateSubmodule(path); }, false);
+            ImGui::SetItemTooltip("Check out the commit this repository records for it");
         }
         ImGui::Separator();
         if (ImGui::MenuItem(ICON_FA_CODE_COMPARE "  Open diff"))
@@ -835,8 +869,9 @@ void GitView::renderRow(const Change& change, int index)
     // Name, folder (dim), then the hover actions and the status letter at the right.
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float textY = start.y + (ImGui::GetItemRectSize().y - ImGui::GetTextLineHeight()) * 0.5f;
-    const std::string name = fileName(change.path);
-    const ImU32 nameColor = change.status == 'D' ? palette_.textDim : palette_.text;
+    const bool submodule = !change.submodule.empty();
+    const std::string name = (submodule ? ICON_FA_CUBE "  " : "") + fileName(change.path);
+    const ImU32 nameColor = change.status == 'D' ? palette_.textDim : submodule ? palette_.iconPurple : palette_.text;
     float x = start.x + 4.0f * s_;
     dl->AddText(ImVec2(x, textY), nameColor, name.c_str());
     const float nameW = ImGui::CalcTextSize(name.c_str()).x;
@@ -851,7 +886,8 @@ void GitView::renderRow(const Change& change, int index)
     const float rightLimit = ImGui::GetWindowPos().x + right - letterW - (showActions ? actions * button : 0.0f);
     dl->PushClipRect(ImVec2(x, start.y), ImVec2(std::max(x, rightLimit - 4.0f * s_), start.y + 100.0f), true);
     ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f);
-    dl->AddText(ImVec2(x, textY + 1.0f * s_), palette_.textFaint, folderOf(change.path).c_str());
+    dl->AddText(ImVec2(x, textY + 1.0f * s_), palette_.textFaint,
+                submodule ? ("submodule: " + change.submodule).c_str() : folderOf(change.path).c_str());
     ImGui::PopFont();
     dl->PopClipRect();
     const char letter[2] = {change.status == '!' ? 'C' : change.status, 0};
@@ -1475,8 +1511,9 @@ void GitView::renderHistory()
     ImGui::PushID("gitHistory");
     git().setVisible(true);
     if (!repository()) {
-        ImGui::TextDisabled(git().available() ? "This folder is not a git repository: the Git tab in the Explorer can create one."
-                                              : "Git was not found: install it, or set EASYNOTEPAD_GIT to its path.");
+        ImGui::TextDisabled(vm_.noFolder()     ? "No folder open: open one to see its history."
+                            : git().available() ? "This folder is not a git repository: the Git tab in the Explorer can create one."
+                                                : "Git was not found: install it, or set EASYNOTEPAD_GIT to its path.");
         ImGui::PopID();
         return;
     }
@@ -1887,6 +1924,10 @@ const Explanation kExplanations[] = {
     {"git:group:CONFLICTS", "Conflicts", "Both sides changed the same lines. Open the file, keep what you want, then mark it resolved."},
     {"git:file@", "A file in a commit, stash or comparison",
      "Click to see what changed. Right-click to open that version, compare it with yours, or bring just this file over."},
+    {"git:submodule:", "A submodule",
+     "Another repository kept inside this one (for example a library), pinned to one of its commits. \"New commits\": it "
+     "points to a newer commit than the one recorded; stage it to record that. \"Modified files\" / \"untracked files\": "
+     "its own files changed. Click for its commits; right-click > Update submodule goes back to the recorded commit."},
     {"git:file:", "A changed file",
      "Click to see what changed. Hover for buttons: + stage, arrow discard. Ctrl-click or Shift-click to select several."},
     {"git:selection-", "Selected files", "These buttons act on every selected file at once."},
@@ -2023,8 +2064,8 @@ const Lesson kLessons[] = {
      ""},
     {ICON_FA_PEN, "Changes",
      "Git compares your files with the last commit. Anything different is a change: M modified, A added, "
-     "D deleted, U untracked (a new file git is not tracking yet). Changes are only edits on your disk; nothing "
-     "is saved in git yet.",
+     "D deleted, U untracked (a new file git is not tracking yet). A cube is a submodule: a repository inside this "
+     "one. Changes are only edits on your disk; nothing is saved in git yet.",
      "Git tab: the Changes and Untracked groups. Click a file to see exactly what changed in the Diff tab.",
      "Click a changed file to see its diff.", Diagram::Flow, kFiles, "14",
      "The groups, the coloured letters (also in the Files tree and on tabs), and the real diff in the Diff tab: index "
@@ -2412,6 +2453,8 @@ void GitView::renderGuide()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * s_, 12.0f * s_));
     const bool visible = ImGui::Begin(ICON_FA_GRADUATION_CAP "  Learn Git###gitGuide", &open, flags);
     ImGui::PopStyleVar();
+    if (registerWindowClose("git-guide:close", "Close Learn Git"))
+        open = false;
     if (visible) {
         const Lesson& l = kLessons[size_t(lesson_)];
         auto go = [&](int lesson) {

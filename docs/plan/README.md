@@ -26,6 +26,7 @@ it is described as a feature in [../FEATURES.md](../FEATURES.md), marked here, a
 | 17 | [Git: history, stash and line-level changes](done/17-git-history-stash-lines.md) | No log, blame, stash, gutter markers or partial staging | Done |
 | 18 | [Git: compare and pick files](done/18-git-compare-and-pick.md) | Taking some commits or files from another branch, commit or stash needs several git commands | Done |
 | 19 | [Learn Git: an interactive guide](done/19-learn-git-guide.md) | Beginners need git's ideas explained on the real controls, safely; reviewers need a walkthrough of 14–18 | Done |
+| 20 | [Shared control: agent pointers and taking turns](20-shared-control.md) | Several agents and the user share one app: own pointers, the whole app reachable, one agent acting at a time, the user first | Planned |
 
 **Reviewing items 14–19:** open Help (?) › Learn Git. Each lesson names its plan item, what was built
 and anything left for later, with an "I have checked this part" box; it runs on demo data that Reset

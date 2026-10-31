@@ -1,5 +1,5 @@
 // The in-app file dialog (the same on every platform, the web build included, and drivable by
-// agents): browse folders, then Open a file, Save As, or Open a folder as the workspace.
+// agents): browse folders, then Open a file, Save As, or Open a folder.
 #pragma once
 
 #include "enp/interfaces/IFileService.h"
@@ -37,7 +37,8 @@ public:
     // Folders first, then files; in Open mode a typed name (not a path) filters them.
     std::vector<Entry> visibleEntries() const;
     // Workspace, Home and (Windows) drives: label and absolute path.
-    std::vector<std::pair<std::string, std::string>> places() const;
+    // Computed when the dialog opens: checking drives can be slow (network, empty card readers).
+    const std::vector<std::pair<std::string, std::string>>& places() const { return places_; }
 
     void goTo(const std::string& folder); // absolute, or relative to the current folder
     void up();
@@ -66,6 +67,8 @@ private:
     std::string folder_;
     std::vector<Entry> entries_;
     std::vector<std::string> history_;
+    std::vector<std::pair<std::string, std::string>> places_;
+    void findPlaces();
 };
 
 } // namespace enp::viewmodel

@@ -2276,6 +2276,72 @@ TEST(pty_runs_full_screen_programs)
 
 } // namespace
 
+TEST(explorer_creates_renames_and_deletes)
+{
+    services::FileService files;
+    const std::string dir = scratchDirectory() + "/enp-explorer-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    os::fs::createDirectories(dir + "/src");
+    files.write(dir + "/src/a.txt", "alpha needle\n", nullptr);
+    files.write(dir + "/b.txt", "beta needle\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(!vm.canEditFiles()); // the sample workspace: nothing on disk to change
+    CHECK(vm.openFolder(dir));
+    CHECK(vm.canEditFiles());
+
+    // New file (opened at once), new folder; invalid names and existing files are refused.
+    CHECK(vm.createFile("src", "new.md"));
+    CHECK(os::fs::exists(dir + "/src/new.md") && vm.activeDocument() && vm.activeDocument()->path == "src/new.md");
+    CHECK(!vm.createFile("src", "new.md"));
+    CHECK(!vm.createFile("", "bad/name"));
+    CHECK(vm.createFolder("", "docs") && os::fs::isDirectory(dir + "/docs"));
+
+    // Rename: the open document follows, also when its folder is renamed.
+    CHECK(vm.renamePath("src/new.md", "renamed.md"));
+    CHECK(os::fs::exists(dir + "/src/renamed.md") && !os::fs::exists(dir + "/src/new.md"));
+    CHECK(vm.activeDocument()->path == "src/renamed.md" && vm.activeDocument()->title == "renamed.md");
+    CHECK(vm.renamePath("src", "source"));
+    CHECK(vm.activeDocument()->path == "source/renamed.md" && os::fs::exists(dir + "/source/a.txt"));
+
+    // Find in Folder searches only under that folder.
+    vm.findInFiles().query = "needle";
+    vm.findInFolder("source");
+    vm.findInFiles().searchNow();
+    CHECK(vm.findInFiles().results().size() == 1 && vm.findInFiles().results()[0].path == "source/a.txt");
+    vm.findInFiles().folder.clear();
+    vm.findInFiles().searchNow();
+    CHECK_EQ(vm.findInFiles().results().size(), size_t(2));
+
+    // Delete a folder with an open document in it: the document closes, the folder goes.
+    const size_t before = vm.documents().size();
+    CHECK(vm.deletePath("source"));
+    CHECK(!os::fs::exists(dir + "/source") && vm.documents().size() == before - 1);
+    CHECK(vm.deletePath("b.txt") && !os::fs::exists(dir + "/b.txt"));
+}
+
+TEST(close_folder_asks_about_unsaved_documents)
+{
+    using Choice = viewmodel::NotepadViewModel::CloseChoice;
+    services::FileService files;
+    const std::string dir = scratchDirectory() + "/enp-closefolder-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    os::fs::createDirectories(dir);
+    files.write(dir + "/a.txt", "a\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(!vm.noFolder()); // first start: the sample workspace
+    CHECK(vm.openFolder(dir));
+    vm.openFile("a.txt");
+    vm.insertText("edit ");
+    vm.execute(CommandId::CloseFolder);
+    CHECK(vm.closeFolderPending.get() && vm.folderOpen()); // unsaved: asks first
+    vm.resolveCloseFolder(Choice::Cancel);
+    CHECK(vm.folderOpen() && !vm.documents().empty());
+    vm.execute(CommandId::CloseFolder);
+    vm.resolveCloseFolder(Choice::Save);
+    CHECK(!vm.folderOpen() && vm.documents().empty() && vm.noFolder());
+    CHECK_EQ(*files.read(dir + "/a.txt"), std::string("edit a\n"));
+    CHECK(!vm.command(CommandId::CloseFolder).canExecute());
+    CHECK(vm.openFolder(dir) && !vm.noFolder());
+}
+
 // ---- Git ----------------------------------------------------------------------------------------
 
 TEST(git_status_parses_porcelain_v2)
@@ -2294,17 +2360,22 @@ TEST(git_status_parses_porcelain_v2)
     rec("old name.txt");
     rec("u UU N... 100644 100644 100644 100644 a b c conflict.txt");
     rec("? untracked dir/é.txt");
+    rec("1 .M SCMU 160000 160000 160000 aaa aaa 3rdparty/lib");
+    rec("1 M. SC.. 160000 160000 160000 aaa bbb 3rdparty/other");
     const Status st = parseStatus(s);
     CHECK_EQ(st.branch, std::string("main"));
     CHECK_EQ(st.upstream, std::string("origin/main"));
     CHECK(st.ahead == 2 && st.behind == 1 && !st.detached && !st.initial);
-    CHECK_EQ(st.changes.size(), size_t(7));
+    CHECK_EQ(st.changes.size(), size_t(9));
     CHECK(st.changes[0].path == "src/staged file.cpp" && st.changes[0].group == Area::Staged && st.changes[0].status == 'M');
     CHECK(st.changes[1].path == "src/changed.cpp" && st.changes[1].group == Area::Changes);
     CHECK(st.changes[2].group == Area::Staged && st.changes[3].group == Area::Changes && st.changes[3].path == "both.cpp");
     CHECK(st.changes[4].status == 'R' && st.changes[4].path == "new name.txt" && st.changes[4].origPath == "old name.txt");
     CHECK(st.changes[5].group == Area::Conflicts && st.changes[5].path == "conflict.txt");
     CHECK(st.changes[6].group == Area::Untracked && st.changes[6].path == "untracked dir/\xc3\xa9.txt");
+    CHECK(st.changes[7].path == "3rdparty/lib" && st.changes[7].submodule == "new commits, modified files, untracked files");
+    CHECK(st.changes[8].group == Area::Staged && st.changes[8].submodule == "new commit staged");
+    CHECK(st.changes[0].submodule.empty());
 
     std::string d;
     for (const char* r : {"# branch.oid (initial)", "# branch.head (detached)"})

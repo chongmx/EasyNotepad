@@ -118,6 +118,8 @@ public:
     void commit(const std::string& message, bool amend, AfterCommit after = AfterCommit::Nothing);
     void init();
     void showChange(const std::string& path, model::git::Area area); // in the Diff tab
+    void updateSubmodule(const std::string& path);                     // checks out the recorded commit
+    void showStatusText();                                             // `git status` in lastOutput()
     void openFile(const std::string& path);
     std::string workspacePath(const std::string& repoPath) const;
     std::string repoPath(const std::string& workspacePath) const;
