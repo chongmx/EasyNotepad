@@ -2,6 +2,7 @@
 
 #include "enp/view/DiffView.h"
 #include "enp/view/Icons.h"
+#include "enp/view/UiAutomation.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -51,7 +52,7 @@ void AgentPanel::renderHeader(bool compact)
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::Combo("##model", &model, agent.modelNames().data(), int(agent.modelNames().size())))
         agent.modelIndex.set(model);
-    ImGui::SetItemTooltip("Model (dummy: not connected)");
+    ImGui::SetItemTooltip(agent.live() ? "Model (chosen by the agent CLI)" : "Model (sample data)");
     ImGui::SameLine();
     int autonomy = agent.autonomyIndex.get();
     ImGui::SetNextItemWidth(comboW);
@@ -110,7 +111,22 @@ void AgentPanel::renderMessages(float height)
     ImGui::BeginChild("##messages", ImVec2(0.0f, height), ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleVar();
     const float width = ImGui::GetContentRegionAvail().x;
-    if (agent.messages().empty()) {
+    if (agent.messages().empty() && agent.live()) {
+        // A real workspace: say where the prompt goes (or how to connect an agent).
+        viewmodel::LogicalMapViewModel& logic = vm_.logicalMap();
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(width);
+        if (logic.agentAvailable()) {
+            ImGui::TextDisabled("%s  Ask about this code.", ICON_FA_LIGHTBULB);
+            ImGui::TextDisabled("Your question goes to %s in this folder, with the file you are on as context.",
+                                logic.agentCommand().c_str());
+        } else {
+            ImGui::TextDisabled("%s  No agent CLI found (%s).", ICON_FA_PLUG, logic.agentCommand().c_str());
+            ImGui::TextDisabled("Install Claude Code, or set EASYNOTEPAD_AGENT_CLI to your agent's command. Agents can also "
+                                "work in the editor through the MCP connector (EasyNotepad --mcp).");
+        }
+        ImGui::PopTextWrapPos();
+    } else if (agent.messages().empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("%s  Describe what you want to build or fix.", ICON_FA_LIGHTBULB);
         ImGui::TextDisabled("The agent plans, edits and runs the review tools;");
@@ -148,6 +164,7 @@ void AgentPanel::renderComposer()
     const bool send = ImGui::InputTextMultiline(
         "##prompt", &prompt_, ImVec2(ImGui::GetContentRegionAvail().x - buttonW - 4.0f * s_, inputH),
         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine | ImGuiInputTextFlags_WordWrap);
+    registerLastItem("agent-prompt", "textbox", "Ask the agent", [this]() { focusPrompt(); });
     if (prompt_.empty() && !ImGui::IsItemActive()) {
         const ImVec2 p = ImGui::GetItemRectMin();
         ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + ImGui::GetStyle().FramePadding.x, p.y + ImGui::GetStyle().FramePadding.y),

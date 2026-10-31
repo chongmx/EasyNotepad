@@ -1,129 +1,134 @@
 # EasyNotepad
 
-A natively compiled text editor written in C++17 with [Dear ImGui](https://github.com/ocornut/imgui), OpenGL
-and GLFW, inspired by Notepad++ (see `ref/`, not part of the build). One code base targets
-**Windows, Linux, macOS, Android and the Web (WebAssembly)** on **x86_64 and aarch64**.
+A native code editor built around **reading** code, with an **AI agent as a first-class
+collaborator**. Written in C++17 with Dear ImGui, OpenGL and GLFW; one code base for Windows, Linux,
+macOS, Android and the web, on x86_64 and aarch64.
 
-The menu system is a flat ribbon banner: a **Workspace** block on the left, tabs with a command search box,
-and groups of large icon buttons with captions (a caption with a caret opens more commands).
+> **Status: early preview.** Files, the terminal and the agent connector are real. AI summaries,
+> the agent's replies and the review tools still use placeholders until their command-line
+> services are connected.
 
-> **Status: UI preview.** The view and view-models run on in-memory sample data (`DummyData.cpp`).
-> No services are connected yet: files are not read or written, the agent replies are canned, and the
-> review tools return fixed findings.
+## Read code at the level of detail you want
 
-## Title bar
+- **Detail levels**: Full, Balanced, Overview and Outline. Code folds into **one-line AI summaries**
+  of what each function or block does, so you read intent first and code second.
+- **Fold anything** from the gutter, the ribbon or the keyboard. A folded region is a summary pill;
+  click it to expand.
+- **Layers** beside the editor: the code as nested parts you zoom into, each with its AI summary.
+  Scope it to the **file** (namespaces, types, functions, blocks, sections) or the whole **project**
+  (folders, files, then their parts); pick **Compact**, **Summary** or **Detailed** cards; zoom in with
+  a card's chevron, out with the breadcrumb; click a card to jump to that code.
+- **Logical folding**: besides the usual syntax folding, functions fold into their **steps**
+  (the paragraphs of the function, titled by their comments), so a long function reads as a short
+  list of what it does.
+- Prefer the classic view? Switch the side bar to a **minimap** of the whole file, or hide it.
 
-The window draws its own title bar (logo, File menu, quick actions, document tabs, workspace switch,
-window buttons), so the chrome matches the theme.
+## See the program, not the files
 
-| Platform | How |
-|----------|-----|
-| Windows | native frame kept, caption removed (`WM_NCCALCSIZE`) and the empty title-bar areas reported as caption (`WM_NCHITTEST`): Snap layouts, double-click to maximize, Win+arrows, edge resize and the shadow stay native |
-| Linux X11 | undecorated window; move, double-click maximize and edge resize implemented in `GlfwWindowFrame` |
-| macOS, Wayland, GLFW < 3.4 | native title bar kept |
+- **Logical map**: the project dissected into what it *does*: system, modules, components,
+  functions and their steps, with the "uses" and "calls" relations between them. Switch the editor
+  from **Code** to **Map** and the code becomes diagrams: layered boxes with summaries and arrows.
+  Click to zoom in, down to a function's flow of steps; the bottom level opens the code. Going back
+  to the map shows where your caret is.
+- **Agent dissection**: one click asks your agent CLI (`claude -p` by default) to refine the map:
+  better summaries and responsibilities, plus a **Features** lens with the program's user-facing
+  features, each a flow through the components. The result is cached in the project
+  (`.easynotepad/logical-map.json`).
+- The same map is available as the **Logic** scope of the Layers side bar.
 
-Start with `--native-titlebar` to keep the OS title bar everywhere.
+## Work with an agent
 
-## Workspaces
+- **Two workspaces.** *Agent*: describe the goal, and the agent plans, edits and runs the reviews, while you
+  accept or reject each change in a side-by-side diff. *Code*: classic editing, with the agent in a side panel.
+- **Agent cursor.** The agent has its own glowing cursor. It can point at the control you need,
+  explain what it does, give you a **tour**, or click things for you, all without touching your
+  mouse or keyboard.
+- **MCP connector.** Any MCP-capable agent can read and operate the running editor: state, on-screen
+  elements, documents and outlines; click, point, run commands, type, use the terminal.
 
-| Workspace | Layout | For |
-|-----------|--------|-----|
-| **Agent** | plan & proposed changes · conversation · preview (side-by-side diff or editor) · review | describing a goal, letting the agent edit, reviewing and accepting/rejecting each change |
-| **Code**  | explorer · editor · agent side panel · review | manual editing in the classic Notepad++ style, asking the agent about the code at hand |
+## Review code
 
-Switch with the Workspace block, the Agent/Code buttons in the title bar, the status-bar badge, or
-`Ctrl+Shift+M`. Start in a given workspace with `EasyNotepad --workspace=agent` (or `=code`).
+Lint, static analysis, security, style and complexity checks plus an AI review, collected in one
+Problems list with gutter markers and squiggles; side-by-side diffs against the saved file or the
+agent's proposal; inline review comments; a review checklist.
 
-## Code review tools
+## Everyday editing
 
-- **Analyzers**: Lint, Static Analysis, Security, Style, Complexity, plus an **AI review** by the agent.
-  Findings appear in the Problems list (filter by tool, errors first, mark resolved), as gutter markers
-  and squiggles in the editor, and as counts in the explorer.
-- **Diff**: side-by-side comparison against the saved file (*Vs Saved*) or the agent's proposal (*Changes*).
-- **Comments**: inline review comments on a line (`Ctrl+Alt+M`), shown in the gutter and the Comments tab.
-- **Checklist**: a per-review checklist with progress.
+A Notepad++-style editor: tabs that stay readable however many files are open (they scroll, show
+the folder when names clash, reorder by dragging, and list everything in an overflow menu), an
+explorer tree that marks open and unsaved files and follows the active one, find and replace, bookmarks, line operations,
+multiple encodings and line endings, word wrap, zoom, and an **integrated terminal** with your real
+shell (PowerShell, cmd, Git Bash, WSL, bash, zsh) in a VS Code-style bottom panel. Full-screen
+terminal programs such as `top`, `htop` and `vim` work (xterm-compatible emulator, alternate
+screen, colours, mouse-free keys), and the terminal can **pop out** into its own window.
 
-## Editor
+The app draws only when something changes, and caps how often it redraws (Preferences >
+Performance), so an idle editor costs next to no CPU, even without a GPU.
 
-Tabs, line numbers, current-line highlight, syntax colouring (C/C++, Python, JavaScript, JSON, CMake,
-Markdown), selection with mouse and keyboard, smart Home, word movement, auto-indent, undo/redo,
-find/replace with match highlighting, bookmarks, line operations (duplicate, delete, move, sort, case,
-comment, indent), word wrap, whitespace and indent guides, zoom, line-ending / encoding / language
-selection from the ribbon or the status bar.
+## Languages and colours
 
-## Repository layout
+Syntax colouring and folding for **C/C++, C#, Java, JavaScript, TypeScript, Python, Rust, Go, Lua,
+Shell, PowerShell, SQL, HTML, XML, CSS, JSON, YAML, TOML/INI, CSV/TSV, CMake and Markdown**,
+compiled in and driven by one language table (adding a language is adding an entry). Folding
+follows each language: braces, indentation, `if`/`endif`-style keywords, tags, Markdown sections and
+code fences, `[sections]`, and `#region` markers everywhere. CSV columns each get their own colour.
 
-```
-include/enp/          public headers, one folder per layer
-  os/                 OS abstraction layer (fs, dialog, shell, dispatch, log, platform)
-  model/              TextBuffer, Document, Diff, Review, Agent data
-  viewmodel/          NotepadViewModel, AgentViewModel, ReviewViewModel, commands, dummy data
-  view/               MainView, RibbonView, EditorView, AgentPanel, ReviewPanel, DiffView, theme
-src/                  layer implementations; app/ holds Application and the platform entry points
-resources/fonts/      Roboto, Cousine, Font Awesome 6 (shared by all platforms)
-android/ web/         Gradle project (NativeActivity) and the WebAssembly host page
-tests/                unit tests for the model and view-models
-3rdparty/             imgui and IconFontCppHeaders (submodules), glad
-ref/                  reference sources (Notepad++), git-ignored
-```
+**Smart indentation** follows the language too: Enter indents after `{`, `(`, `[`, a Python or YAML
+`:`, an open HTML tag or `if(` / `function` / `then` / `do`; typing `}`, `</`, `endif(`, `end`, `fi`
+or `else:` moves the line back to its opener; Enter between braces puts the closer on its own line;
+doc comments continue with ` * `; Markdown lists continue (and end on an empty item). Each file keeps
+its own style, detected from its content (2 or 4 spaces, tabs), shown and changed in the status bar,
+with a saved default for new files (for example 2 spaces everywhere).
 
-File naming: one class per file, PascalCase (`TextBuffer.cpp`, `NotepadViewModel.h`); service contracts
-will use an `I` prefix (`IDocumentService.h`).
+Every colour is yours to change: **Colours** (View tab, or the language menu in the status bar)
+recolours keywords, strings, comments, keys, tags, columns and the rest, for all languages at once
+or for one language, separately for the dark and light themes, with a live preview. Your colours
+are saved in `settings.json` in the app's data folder.
 
-## Architecture (MVVM)
+## A ribbon you can make your own
 
-| Layer         | Depends on        | Responsibility                                          |
-|---------------|-------------------|---------------------------------------------------------|
-| **os**        | operating system  | files, dialogs, shell, threads, logging                 |
-| **model**     | –                 | text buffer, documents, diff, review and agent data     |
-| **viewmodel** | model             | presentation state (`Property`), `Command`s, events     |
-| **view**      | viewmodel, ImGui  | immediate-mode rendering and input                      |
+Commands are organised in a flat ribbon (Home, Read, Edit, Review, View, Document, Tools; in the Agent
+workspace: Agent, Read, Review, Files, View) with a command search box. **My Tools** holds the
+commands you pin and **custom actions**: buttons that run your own shell commands in the terminal.
 
-Next step: an `interfaces/` layer (`IDocumentService`, `ISettingsService`, `IAgentService`,
-`IReviewService`, …) and `services/` implementations on top of the OS layer, injected into the
-view-models in place of `DummyData`.
+## Connect an agent (MCP)
 
-## Getting the code
+Start EasyNotepad, then register the connector with your MCP client as a stdio server:
 
 ```sh
-git clone --recursive <repo-url>
-# or, in an existing clone:
-git submodule update --init --recursive
+# Claude Code
+claude mcp add easynotepad -- "/path/to/EasyNotepad" --mcp
 ```
 
-GLFW is used from the system if installed, otherwise CMake downloads GLFW 3.4.
+The connector is a command-line program: `EasyNotepad --mcp`. Its tools include `get_state`,
+`list_elements`, `click`, `point`, `open_file`, `read_document`, `set_language`, `search_files`, `read_terminal`, `send_keys`, `read_outline`, `set_detail_level`,
+`execute_command`, `type_text` and `run_in_terminal`. It talks to the running app over a local-only
+endpoint protected by a per-session token. Start the app with `--no-automation` to turn it off.
+
+## Open a folder
+
+`EasyNotepad <folder> [files...]` opens a folder as the workspace (dropping a folder on the window
+works too); files are read from and saved to disk. Without a folder, a small sample project is shown.
 
 ## Building
 
 ```sh
-scripts/build.sh                 # native build, Release (Linux, macOS, Git Bash/MSYS2 on Windows)
-scripts/build.sh --test --run    # build, run unit tests, launch
-scripts/build.sh web             # WebAssembly (activated emsdk required)
-scripts/build.sh android         # APK (Gradle + Android SDK required)
+git clone --recursive <repo-url>
+scripts/build.sh --test --run     # build, run the tests, launch
 ```
 
-Plain CMake works on every desktop platform:
+Binaries go to `bin/<os>/<arch>/`. CMake presets cover Windows (MSVC x64/ARM64, MinGW), Linux
+(native and aarch64 cross), macOS (universal) and the web; `android/` is a Gradle project.
 
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-ctest --test-dir build
-```
+The agent CLI used for dissection is set with `EASYNOTEPAD_AGENT_CLI` (default `claude -p`); it
+gets the prompt on stdin and answers with JSON.
 
-Presets: `windows-x64`, `windows-arm64` (MSVC, newest installed Visual Studio, so they keep working when
-CI images move to a new Visual Studio release), `windows-mingw`, `linux`, `linux-arm64-cross`,
-`macos-universal`, `web`. Platform prerequisites are the same as MDViewer's (Linux: GL/X11/Wayland dev
-packages; macOS: `brew install cmake ninja`).
+Launch options: `--workspace=agent|code`, `--detail=Full|Balanced|Overview|Outline`,
+`--panel=terminal`, `--tour`, `--native-titlebar`, `--no-automation`.
 
-## Shortcuts
+## Architecture
 
-| Keys | Action | Keys | Action |
-|------|--------|------|--------|
-| `Ctrl+N` / `Ctrl+S` / `Ctrl+W` | new / save / close | `Ctrl+F`, `Ctrl+H`, `F3` | find, replace, next |
-| `Ctrl+Z` / `Ctrl+Y` | undo / redo | `Ctrl+G` | go to line |
-| `Ctrl+D` | duplicate line | `Ctrl+Shift+L` | delete line |
-| `Ctrl+Shift+Up/Down` | move lines | `Ctrl+Q` | toggle comment |
-| `Ctrl+F2`, `F2` | bookmark, next bookmark | `Ctrl+=`, `Ctrl+-`, `Ctrl+0` | zoom |
-| `F7`, `Ctrl+Shift+F7` | lint, run all reviews | `F8` / `Shift+F8` | next / previous finding |
-| `Ctrl+I` | ask the agent | `Ctrl+Shift+M` | switch workspace |
-| `Ctrl+PageDown/Up` | next / previous tab | `Ctrl+Shift+E/R/I` | explorer / review / agent panel |
+MVVM in layers: **os** (files, sockets, pseudo-terminals) → **model** (text, outline, terminal
+emulator, diff) → **interfaces / services** → **view-models** → **view** (ImGui). Services are
+**command-line based**: they wrap CLI tools (shells, linters, the agent) behind `I*Service`
+interfaces. Unit tests and a headless UI test (ImGui ID conflicts and usage errors) run in CI.

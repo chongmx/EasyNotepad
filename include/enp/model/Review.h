@@ -3,6 +3,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace enp::model {
 
@@ -39,5 +40,11 @@ struct ChecklistItem {
     std::string text;
     bool done = false;
 };
+
+// Findings from compiler-style tool output: "path:line[:column]: [severity:] message [rule]" per
+// line (gcc, clang, clang-tidy, flake8, ruff, eslint --format unix, shellcheck -f gcc, ...).
+// Absolute paths under `workspaceRoot` become workspace-relative. Lines that do not match are
+// ignored.
+std::vector<ReviewFinding> parseToolOutput(const std::string& output, ReviewTool tool, const std::string& workspaceRoot);
 
 } // namespace enp::model

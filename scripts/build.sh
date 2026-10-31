@@ -19,8 +19,9 @@
 #   -b, --build-dir <dir>          Parent directory for build trees (default: build/)
 #   -h, --help                     Show this help
 #
-# Build output goes to <build-dir>/<host-or-target>-<config>/, e.g. build/linux-release,
-# build/windows-debug, build/web-release (Android: android/app/build/outputs/apk/).
+# Binaries go to bin/<os>/<arch>/ (e.g. bin/windows/x64/EasyNotepad.exe, bin/linux/arm64/EasyNotepad,
+# bin/web/wasm32/index.html, bin/android/*.apk), each with its resources/ folder.
+# Intermediate build trees go to <build-dir>/<host-or-target>-<config>/, e.g. build/linux-release.
 # Under WSL with the checkout on a Windows drive (/mnt/c/...), the default build dir is
 # ~/.cache/easynotepad-build, because building on /mnt is slow and Windows file locks break it.
 set -euo pipefail
@@ -138,7 +139,6 @@ case "$TARGET" in
         need emcmake "Install and activate emsdk: source <emsdk>/emsdk_env.sh"
         need cmake "Install CMake 3.22 or newer."
         configure_and_build emcmake cmake
-        echo "==> Serve it with: (cd \"$BUILD_DIR\" && python3 -m http.server 8080) then open http://localhost:8080"
         ;;
 
     android)
@@ -151,8 +151,11 @@ case "$TARGET" in
         fi
         echo "==> gradle $task"
         (cd "$ROOT/android" && gradle "$task")
-        echo "==> APKs:"
-        ls -1 "$ROOT"/android/app/build/outputs/apk/*/*.apk
+        OUT_DIR="$ROOT/bin/android"
+        mkdir -p "$OUT_DIR"
+        cp "$ROOT"/android/app/build/outputs/apk/*/*.apk "$OUT_DIR"/
+        echo "==> APKs in $OUT_DIR:"
+        ls -1 "$OUT_DIR"/*.apk
         exit 0
         ;;
 
@@ -161,10 +164,15 @@ case "$TARGET" in
         ;;
 esac
 
-EXE="$BUILD_DIR/EasyNotepad"
+# Binaries land in bin/<os>/<arch>/ (ENP_OUTPUT_DIR in CMakeLists.txt).
+OUT_DIR="$(sed -n 's/^ENP_OUTPUT_DIR:PATH=//p' "$BUILD_DIR/CMakeCache.txt")"
+EXE="$OUT_DIR/EasyNotepad"
 [[ "$HOST" == "windows" && "$TARGET" == "native" ]] && EXE="$EXE.exe"
-[[ "$TARGET" == "web" ]] && EXE="$BUILD_DIR/index.html"
+[[ "$TARGET" == "web" ]] && EXE="$OUT_DIR/index.html"
 echo "==> Built: $EXE"
+if [[ "$TARGET" == "web" ]]; then
+    echo "==> Serve it with: (cd \"$OUT_DIR\" && python3 -m http.server 8080) then open http://localhost:8080"
+fi
 
 if [[ "$RUN_TESTS" == 1 ]]; then
     [[ "$TARGET" == "native" ]] || die "--test is only available for the native target"

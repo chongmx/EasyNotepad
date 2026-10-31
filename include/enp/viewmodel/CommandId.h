@@ -2,11 +2,14 @@
 // command search box. Icons are a view concern and live in view/Icons.
 #pragma once
 
+#include <string_view>
+
 namespace enp::viewmodel {
 
 enum class CommandId {
     // File
-    NewFile, OpenFile, Save, SaveAll, CloseFile,
+    NewFile, OpenFile, OpenFolder, Save, SaveAs, SaveAll, CloseFile,
+    CloseOthers, CloseAll, CloseSaved, NextDocument, PreviousDocument,
     // Clipboard / history
     Cut, Copy, Paste, Undo, Redo, SelectAll,
     // Line operations
@@ -16,21 +19,30 @@ enum class CommandId {
     Find, FindNext, FindPrevious, Replace, FindInFiles, GoToLine,
     ToggleBookmark, NextBookmark, PreviousBookmark, ClearBookmarks,
     // View
-    ToggleExplorer, ToggleReviewPanel, ToggleAgentPanel,
+    ToggleExplorer, TogglePanel, ToggleAgentPanel, ToggleMaximizePanel,
     ToggleWordWrap, ToggleWhitespace, ToggleLineNumbers, ToggleIndentGuides,
-    ZoomIn, ZoomOut, ZoomReset, ToggleTheme,
+    ZoomIn, ZoomOut, ZoomReset, ToggleTheme, SyntaxColors,
+    // Reading
+    DetailFull, DetailBalanced, DetailOverview, DetailOutline,
+    FoldAll, UnfoldAll, ToggleFold, ToggleLayersMap, ShowLayers, ShowMinimap, SummarizeFile,
+    ShowCodeView, ShowMapView, FoldingSyntax, FoldingLogical, DissectProject, RefreshMap,
     // Document format
     EolCrLf, EolLf, EolCr,
     EncodingUtf8, EncodingUtf8Bom, EncodingUtf16Le, EncodingUtf16Be, EncodingAnsi,
-    LanguagePlainText, LanguageCpp, LanguagePython, LanguageJavaScript, LanguageMarkdown, LanguageJson, LanguageCMake,
+    // Indentation
+    ToggleSmartIndent, IndentWithSpaces, IndentWithTabs, IndentWidth2, IndentWidth4, IndentWidth8,
+    DetectIndentation, ConvertIndentation,
+    ChooseLanguage,
     // Review
     RunLint, RunStaticAnalysis, RunSecurityScan, RunStyleCheck, RunComplexity, RunAgentReview, RunAllReviews,
     CompareWithSaved, CompareAgentChanges, AddReviewComment, NextFinding, PreviousFinding, ClearFindings,
     // Agent
     NewChat, AskAgent, ExplainSelection, RefactorSelection, GenerateTests, FixFindings,
-    AcceptAllChanges, RejectAllChanges, StopAgent,
+    AcceptAllChanges, RejectAllChanges, StopAgent, StartTour,
     // Workspace
     SwitchToAgentMode, SwitchToCodeMode, ToggleWorkspaceMode,
+    // Terminal
+    ToggleTerminal, NewTerminal, KillTerminal, ClearTerminal, PopOutTerminal,
     // Tools
     StartRecording, StopRecording, PlayMacro, HashSha256, Preferences, About, Exit,
 
@@ -44,5 +56,8 @@ struct CommandInfo {
 };
 
 const CommandInfo& commandInfo(CommandId id);
+// Stable identifier (the enumerator name, e.g. "ToggleTerminal") used by automation and the MCP connector.
+const char* commandKey(CommandId id);
+bool commandFromKey(std::string_view key, CommandId& id);
 
 } // namespace enp::viewmodel

@@ -2,6 +2,7 @@
 // Runs on dummy data until the agent service exists.
 #pragma once
 
+#include "enp/interfaces/IAgentCliService.h"
 #include "enp/model/Agent.h"
 #include "enp/viewmodel/Observable.h"
 
@@ -14,6 +15,10 @@ class AgentViewModel {
 public:
     AgentViewModel();
 
+    // A real workspace: drops the sample session; prompts go to the agent CLI in `workingDirectory`.
+    void goLive(interfaces::IAgentCliService* cli, const std::string& workingDirectory);
+    bool live() const { return live_; }
+
     Property<bool> busy{false};
     Property<int> selectedChange{0}; // index into changes(), -1 when none
     Property<int> modelIndex{0};
@@ -22,6 +27,8 @@ public:
     // A change was accepted: the path and its new contents.
     Event<std::string, std::string> changeAccepted;
     Event<std::string> statusMessage;
+    // The agent answered `prompt` (lets the app point at the controls the answer is about).
+    Event<std::string> replied;
 
     static const std::vector<const char*>& modelNames();
     static const std::vector<const char*>& autonomyNames();
@@ -52,6 +59,11 @@ private:
     double replyAt_ = -1.0;
     double now_ = 0.0;
     int replyCount_ = 0;
+    bool live_ = false;
+    interfaces::IAgentCliService* cli_ = nullptr;
+    std::string workingDirectory_;
+    int generation_ = 0; // a stopped or replaced request's answer is dropped
+    void askCli(const std::string& prompt, const std::string& context);
 };
 
 } // namespace enp::viewmodel

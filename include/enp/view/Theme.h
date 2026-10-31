@@ -1,7 +1,11 @@
 // Colour palettes for the chrome (title bar, ribbon, panels) and the editor.
 #pragma once
 
+#include "enp/model/Language.h"
+
 #include "imgui.h"
+
+#include <cstdint>
 
 namespace enp::view {
 
@@ -55,6 +59,7 @@ struct Palette {
     ImU32 synComment;
     ImU32 synPreprocessor;
     ImU32 synHeading;
+    ImU32 syntax[size_t(model::Token::Count)]; // default colour of every token class
 
     // Review / diff
     ImU32 severityError;
@@ -70,6 +75,9 @@ struct Palette {
     ImU32 bubbleUser;
     ImU32 bubbleAgent;
     ImU32 bubbleTool;
+
+    // Terminal: the 16 ANSI colours as 0xRRGGBB (VS Code's defaults).
+    uint32_t ansi[16];
 
     ImVec4 clearColor;
 };

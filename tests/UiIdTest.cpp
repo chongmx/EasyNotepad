@@ -10,7 +10,10 @@
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
+#include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/NotepadViewModel.h"
+
+#include "FakeTerminalService.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -90,6 +93,7 @@ public:
         io.DeltaTime = 1.0f / 60.0f;
         io.AddMousePosEvent(pos.x, pos.y);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
+        terminalService_.pump();
         ImGui::NewFrame();
         // Conflicts are evaluated in NewFrame() for the item hovered in the previous frame.
         ImGuiContext& g = *GImGui;
@@ -97,7 +101,7 @@ public:
             failures_.push_back({"conflicting ID 0x" + hex(g.DebugDrawIdConflictsId), where_, lastPos_});
         view_->render();
         if (g.HoveredId != 0 && frame_.inDragRegion(pos) && reportedIds_.insert(g.HoveredId).second)
-            failures_.push_back({"item 0x" + hex(g.HoveredId) + " lies inside a title-bar drag region", where_, pos});
+            failures_.push_back({"item 0x" + hex(g.HoveredId) + " (window \"" + std::string(g.HoveredWindow ? g.HoveredWindow->Name : "?") + "\") lies inside a title-bar drag region", where_, pos});
         ImGui::Render();
         if (g.ErrorCountCurrentFrame > 0) {
             const std::string message = lastError();
@@ -167,7 +171,8 @@ private:
         }
     }
 
-    viewmodel::NotepadViewModel vm_;
+    tests::FakeTerminalService terminalService_; // declared before vm_, which uses it
+    viewmodel::NotepadViewModel vm_{&terminalService_};
     view::Fonts fonts_;
     FakeFrame frame_;
     std::unique_ptr<view::MainView> view_;
@@ -208,9 +213,9 @@ int main(int argc, char** argv)
                 h.setContext(modeName + " workspace, ribbon tab clicked at x=" + std::to_string(int(x)));
                 h.sweep(0.0f, ribbonTop, kWidth, ribbonBottom);
             }
-            for (viewmodel::ReviewTab tab : {viewmodel::ReviewTab::Problems, viewmodel::ReviewTab::Diff,
-                                             viewmodel::ReviewTab::Comments, viewmodel::ReviewTab::Checklist}) {
-                h.vm().reviewTab.set(tab);
+            for (viewmodel::PanelTab tab : {viewmodel::PanelTab::Problems, viewmodel::PanelTab::Diff,
+                                             viewmodel::PanelTab::Comments, viewmodel::PanelTab::Checklist}) {
+                h.vm().panelTab.set(tab);
                 h.setContext(modeName + " workspace, review tab " + std::to_string(int(tab)));
                 h.frame(ImVec2(-100.0f, -100.0f));
                 h.frame(ImVec2(-100.0f, -100.0f));
@@ -224,7 +229,45 @@ int main(int argc, char** argv)
             std::function<void(viewmodel::NotepadViewModel&)> apply;
         };
         const State states[] = {
-            {"light theme", [](auto& vm) { vm.darkTheme.set(false); }},
+            {"Overview detail (folded summaries)", [](auto& vm) { vm.detailLevel.set(2); }},
+            {"Outline detail", [](auto& vm) { vm.detailLevel.set(3); }},
+            {"layers: project scope, detailed, zoomed in", [](auto& vm) {
+                 auto& layers = vm.layers();
+                 layers.scope.set(viewmodel::LayerScope::Project);
+                 layers.density.set(viewmodel::LayerDensity::Detailed);
+                 for (int child : layers.nodes()[0].children)
+                     if (layers.nodes()[size_t(child)].title == "src")
+                         layers.zoomIn(child);
+             }},
+            {"layers: file scope, compact", [](auto& vm) {
+                 vm.layers().scope.set(viewmodel::LayerScope::File);
+                 vm.layers().density.set(viewmodel::LayerDensity::Compact);
+             }},
+            {"logical folding, logic scope", [](auto& vm) {
+                 vm.execute(viewmodel::CommandId::FoldingLogical);
+                 vm.layers().scope.set(viewmodel::LayerScope::Logic);
+             }},
+            {"map view", [](auto& vm) { vm.execute(viewmodel::CommandId::ShowMapView); }},
+            {"map view zoomed into a module", [](auto& vm) {
+                 auto& logic = vm.logicalMap();
+                 logic.zoomTo(model::LogicalMap::kArchitectureRoot);
+                 if (const model::LogicalNode* root = logic.map().find(logic.focus()); root && !root->children.empty())
+                     logic.zoomIn(root->children.front());
+             }},
+            {"code view again", [](auto& vm) {
+                 vm.execute(viewmodel::CommandId::ShowCodeView);
+                 vm.execute(viewmodel::CommandId::FoldingSyntax);
+             }},
+            {"minimap side bar", [](auto& vm) { vm.execute(viewmodel::CommandId::ShowMinimap); }},
+            {"side bar hidden", [](auto& vm) {
+                 vm.showLayersMap.set(false);
+                 vm.sideBar.set(viewmodel::NotepadViewModel::SideBar::Layers);
+             }},
+            {"light theme", [](auto& vm) {
+                 vm.showLayersMap.set(true);
+                 vm.detailLevel.set(1);
+                 vm.darkTheme.set(false);
+             }},
             {"find and replace bar", [](auto& vm) {
                  vm.findQuery.set("word");
                  vm.execute(viewmodel::CommandId::Replace);
@@ -234,14 +277,68 @@ int main(int argc, char** argv)
                  vm.showWhitespace.set(true);
                  vm.zoom.set(2.0f);
              }},
+            {"terminal with two shells", [](auto& vm) {
+                 vm.showPanelTab(viewmodel::PanelTab::Terminal);
+                 vm.terminal().newTerminal(1);
+             }},
+            {"terminal popped out", [](auto& vm) { vm.execute(viewmodel::CommandId::PopOutTerminal); }},
+            {"terminal back in the panel", [](auto& vm) { vm.execute(viewmodel::CommandId::PopOutTerminal); }},
+            {"panel maximized", [](auto& vm) { vm.panelMaximized.set(true); }},
             {"side panels hidden", [](auto& vm) {
+                 vm.panelMaximized.set(false);
                  vm.showExplorer.set(false);
                  vm.showAgentPanel.set(false);
-                 vm.showReviewPanel.set(false);
+                 vm.showPanel.set(false);
+             }},
+            {"many documents (scrolling tabs, namesakes)", [](auto& vm) {
+                 vm.showExplorer.set(true);
+                 for (int i = 0; i < 24; ++i)
+                     vm.openFile("src/many/File" + std::to_string(i) + ".cpp");
+                 vm.openFile("src/other/File3.cpp"); // a namesake
+                 vm.activate(5);
+             }},
+            {"explorer: open documents tab", [](auto&) {
+                 if (const view::UiElement* tab = view::UiAutomation::instance().find("explorer-tab:Open"))
+                     tab->activate();
+             }},
+            {"search tab with results", [](auto& vm) {
+                 vm.findInFiles().query = "int";
+                 vm.findInFiles().searchNow();
+                 vm.showPanelTab(viewmodel::PanelTab::Search);
+             }},
+            {"changed on disk bar", [](auto& vm) {
+                 if (model::Document* doc = vm.activeDocument())
+                     doc->diskState = model::Document::DiskState::Changed;
+             }},
+            {"deleted on disk bar", [](auto& vm) {
+                 if (model::Document* doc = vm.activeDocument())
+                     doc->diskState = model::Document::DiskState::Deleted;
+             }},
+            {"language picker", [](auto& vm) {
+                 if (model::Document* doc = vm.activeDocument())
+                     doc->diskState = model::Document::DiskState::InSync;
+                 vm.execute(viewmodel::CommandId::ChooseLanguage);
+             }},
+            {"open file dialog", [](auto& vm) { vm.fileDialog().show(viewmodel::FileDialogMode::Open, "."); }},
+            {"save as dialog", [](auto& vm) { vm.fileDialog().show(viewmodel::FileDialogMode::SaveAs, ".", "name.txt"); }},
+            {"save changes prompt", [](auto& vm) {
+                 vm.fileDialog().cancel();
+                 vm.openFile("src/prompt.cpp");
+                 vm.insertText("x");
+                 vm.requestCloseDocument(vm.activeIndex.get());
+             }},
+            {"quit prompt", [](auto& vm) {
+                 vm.resolvePendingClose(viewmodel::NotepadViewModel::CloseChoice::Cancel);
+                 vm.requestQuit();
              }},
             {"no documents open", [](auto& vm) {
+                 vm.resolveQuit(viewmodel::NotepadViewModel::CloseChoice::Cancel);
                  while (!vm.documents().empty())
                      vm.closeDocument(0);
+             }},
+            {"syntax colours dialog (modal, last)", [](auto& vm) {
+                 vm.openFile("CMakeLists.txt");
+                 vm.execute(viewmodel::CommandId::SyntaxColors);
              }},
         };
         for (const State& state : states) {

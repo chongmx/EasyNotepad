@@ -1,5 +1,11 @@
 #include "enp/view/EditorView.h"
 
+#include "enp/view/PanelFrame.h"
+
+#include "enp/model/Highlighter.h"
+#include "enp/view/SyntaxColors.h"
+#include "enp/view/UiAutomation.h"
+
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
 
@@ -16,227 +22,15 @@ using viewmodel::CommandId;
 
 namespace {
 
-constexpr int kTabSize = 4;
+int tabStop = 4; // of the document being drawn (its indent width); set by render() and renderMinimap()
 constexpr float kLineSpacing = 1.45f;
 constexpr float kTopPadding = 4.0f;
 
 // ---- Syntax colouring -------------------------------------------------------------------------
 
-enum class Tok : unsigned char { Text, Keyword, Type, String, Number, Comment, Preproc, Heading };
-
-bool isIdentStart(char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_'; }
 bool isIdent(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
 bool isWordChar(char c) { return isIdent(c) || (static_cast<unsigned char>(c) & 0x80) != 0; }
 bool isBlank(char c) { return c == ' ' || c == '\t'; }
-
-const std::unordered_set<std::string>& keywords(model::Language language)
-{
-    static const std::unordered_set<std::string> none;
-    static const std::unordered_set<std::string> cpp = {
-        "alignas", "auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr", "continue",
-        "default", "delete", "do", "double", "else", "enum", "explicit", "extern", "false", "final", "float", "for",
-        "friend", "if", "inline", "int", "long", "namespace", "new", "noexcept", "nullptr", "operator", "override",
-        "private", "protected", "public", "return", "short", "signed", "sizeof", "static", "static_cast", "struct",
-        "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using",
-        "virtual", "void", "volatile", "while", "size_t"};
-    static const std::unordered_set<std::string> python = {
-        "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except",
-        "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not",
-        "or", "pass", "raise", "return", "True", "try", "while", "with", "yield", "self"};
-    static const std::unordered_set<std::string> js = {
-        "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "do", "else", "export",
-        "extends", "false", "finally", "for", "from", "function", "if", "import", "in", "instanceof", "let", "new",
-        "null", "of", "return", "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "while"};
-    static const std::unordered_set<std::string> json = {"true", "false", "null"};
-    switch (language) {
-    case model::Language::Cpp: return cpp;
-    case model::Language::Python: return python;
-    case model::Language::JavaScript: return js;
-    case model::Language::Json: return json;
-    default: return none;
-    }
-}
-
-void fill(std::vector<Tok>& toks, size_t begin, size_t end, Tok tok)
-{
-    std::fill(toks.begin() + std::ptrdiff_t(std::min(begin, toks.size())),
-              toks.begin() + std::ptrdiff_t(std::min(end, toks.size())), tok);
-}
-
-void highlightMarkdown(const std::string& line, std::vector<Tok>& out)
-{
-    const size_t n = line.size();
-    if (line.rfind("    ", 0) == 0) {
-        fill(out, 0, n, Tok::String);
-        return;
-    }
-    size_t ws = 0;
-    while (ws < n && isBlank(line[ws]))
-        ++ws;
-    if (ws < n && line[ws] == '#') {
-        fill(out, 0, n, Tok::Heading);
-        return;
-    }
-    if (ws < n && line[ws] == '>') {
-        fill(out, 0, n, Tok::Comment);
-        return;
-    }
-    if (ws + 1 < n && (line[ws] == '-' || line[ws] == '*') && line[ws + 1] == ' ')
-        out[ws] = Tok::Keyword;
-    for (size_t i = 0; i < n;) {
-        if (line[i] == '`') {
-            size_t j = line.find('`', i + 1);
-            j = j == std::string::npos ? n : j + 1;
-            fill(out, i, j, Tok::String);
-            i = j;
-        } else if (line.compare(i, 2, "**") == 0 && line.find("**", i + 2) != std::string::npos) {
-            const size_t j = line.find("**", i + 2) + 2;
-            fill(out, i, j, Tok::Keyword);
-            i = j;
-        } else {
-            ++i;
-        }
-    }
-}
-
-// Colour class of every byte of `line`; `inBlock` carries /* */ comments across lines.
-void highlight(const std::string& line, model::Language language, bool& inBlock, std::vector<Tok>& out)
-{
-    using L = model::Language;
-    out.assign(line.size(), Tok::Text);
-    if (language == L::PlainText)
-        return;
-    if (language == L::Markdown) {
-        highlightMarkdown(line, out);
-        return;
-    }
-    const bool cLike = language == L::Cpp || language == L::JavaScript || language == L::Json;
-    const bool hashComments = language == L::Python || language == L::CMake;
-    const auto& kw = keywords(language);
-    const size_t n = line.size();
-    size_t i = 0;
-
-    if (inBlock) {
-        const size_t end = line.find("*/");
-        if (end == std::string::npos) {
-            fill(out, 0, n, Tok::Comment);
-            return;
-        }
-        fill(out, 0, end + 2, Tok::Comment);
-        i = end + 2;
-        inBlock = false;
-    }
-    if (language == L::Cpp) {
-        size_t ws = i;
-        while (ws < n && isBlank(line[ws]))
-            ++ws;
-        if (ws < n && line[ws] == '#') {
-            size_t j = ws + 1;
-            while (j < n && isIdent(line[j]))
-                ++j;
-            fill(out, ws, j, Tok::Preproc);
-            const size_t lt = line.find('<', j);
-            const size_t gt = lt == std::string::npos ? lt : line.find('>', lt);
-            if (gt != std::string::npos)
-                fill(out, lt, gt + 1, Tok::String);
-            i = j;
-        }
-    }
-
-    while (i < n) {
-        const char c = line[i];
-        if (cLike && c == '/' && i + 1 < n && line[i + 1] == '/') {
-            fill(out, i, n, Tok::Comment);
-            return;
-        }
-        if (cLike && c == '/' && i + 1 < n && line[i + 1] == '*') {
-            const size_t end = line.find("*/", i + 2);
-            if (end == std::string::npos) {
-                fill(out, i, n, Tok::Comment);
-                inBlock = true;
-                return;
-            }
-            fill(out, i, end + 2, Tok::Comment);
-            i = end + 2;
-            continue;
-        }
-        if (hashComments && c == '#') {
-            fill(out, i, n, Tok::Comment);
-            return;
-        }
-        if (c == '"' || c == '\'' || (language == L::JavaScript && c == '`')) {
-            size_t j = i + 1;
-            while (j < n && line[j] != c)
-                j += line[j] == '\\' ? 2 : 1;
-            j = std::min(j + 1, n);
-            Tok tok = Tok::String;
-            if (language == L::Json) {
-                size_t after = j;
-                while (after < n && isBlank(line[after]))
-                    ++after;
-                if (after < n && line[after] == ':')
-                    tok = Tok::Type;
-            }
-            fill(out, i, j, tok);
-            i = j;
-            continue;
-        }
-        if (std::isdigit(static_cast<unsigned char>(c))) {
-            size_t j = i;
-            while (j < n && (isIdent(line[j]) || line[j] == '.'))
-                ++j;
-            fill(out, i, j, Tok::Number);
-            i = j;
-            continue;
-        }
-        if (language == L::CMake && c == '$' && i + 1 < n && line[i + 1] == '{') {
-            const size_t end = line.find('}', i);
-            const size_t j = end == std::string::npos ? n : end + 1;
-            fill(out, i, j, Tok::Type);
-            i = j;
-            continue;
-        }
-        if (isIdentStart(c)) {
-            size_t j = i;
-            while (j < n && isIdent(line[j]))
-                ++j;
-            const std::string word = line.substr(i, j - i);
-            const bool call = j < n && line[j] == '(';
-            const bool scope = j + 1 < n && line[j] == ':' && line[j + 1] == ':';
-            if (kw.count(word))
-                fill(out, i, j, Tok::Keyword);
-            else if (language == L::CMake && call)
-                fill(out, i, j, Tok::Keyword);
-            else if (language == L::CMake && std::all_of(word.begin(), word.end(), [](char ch) {
-                         return !std::islower(static_cast<unsigned char>(ch));
-                     }))
-                fill(out, i, j, Tok::Type);
-            else if ((language == L::Cpp || language == L::JavaScript) &&
-                     (std::isupper(static_cast<unsigned char>(c)) || scope))
-                fill(out, i, j, Tok::Type);
-            else if (call)
-                fill(out, i, j, Tok::Preproc); // function names
-            i = j;
-            continue;
-        }
-        ++i;
-    }
-}
-
-ImU32 tokColor(Tok tok, const Palette& p)
-{
-    switch (tok) {
-    case Tok::Keyword: return p.synKeyword;
-    case Tok::Type: return p.synType;
-    case Tok::String: return p.synString;
-    case Tok::Number: return p.synNumber;
-    case Tok::Comment: return p.synComment;
-    case Tok::Preproc: return p.synPreprocessor;
-    case Tok::Heading: return p.synHeading;
-    case Tok::Text: break;
-    }
-    return p.synText;
-}
 
 // ---- Columns ----------------------------------------------------------------------------------
 
@@ -246,7 +40,7 @@ int visualColumn(const std::string& s, int byteColumn)
     const int end = std::min(byteColumn, int(s.size()));
     for (int i = 0; i < end; ++i) {
         if (s[size_t(i)] == '\t')
-            v = (v / kTabSize + 1) * kTabSize;
+            v = (v / tabStop + 1) * tabStop;
         else if (!model::isUtf8Continuation(s[size_t(i)]))
             ++v;
     }
@@ -341,7 +135,7 @@ void squiggle(ImDrawList* dl, float x0, float x1, float y, ImU32 color, float sc
 } // namespace
 
 EditorView::EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
-    : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale)
+    : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale), layers_(vm, fonts, palette, uiScale)
 {
     subscriptions_.push_back(vm_.caretRevealRequested.subscribe([this]() { revealCaret_ = true; }));
     subscriptions_.push_back(vm_.focusFindRequested.subscribe([this]() { focusFind_ = true; }));
@@ -363,9 +157,32 @@ void EditorView::buildRows(const model::Document& doc, int wrapColumns)
     const int lines = doc.buffer.lineCount();
     firstRowOfLine_.assign(size_t(lines), 0);
     maxColumns_ = 0;
+
+    // Folded regions: their lines are hidden behind one summary row after the header.
+    std::vector<const model::OutlineNode*> foldAt(size_t(lines), nullptr);
+    if (!doc.folded.empty())
+        for (const model::OutlineNode& n : vm_.outline())
+            if (vm_.isFolded(n) && n.endLine < lines && !foldAt[size_t(n.startLine)])
+                foldAt[size_t(n.startLine)] = &n; // outermost wins (parents come first)
+    int hiddenUntil = -1;
+    int summaryRow = 0;
+
     for (int l = 0; l < lines; ++l) {
+        if (l <= hiddenUntil) {
+            firstRowOfLine_[size_t(l)] = summaryRow;
+            continue;
+        }
         const std::string& s = doc.buffer.line(l);
         firstRowOfLine_[size_t(l)] = int(rows_.size());
+        if (const model::OutlineNode* fold = foldAt[size_t(l)]) {
+            // Header (unwrapped) followed by the summary row.
+            rows_.push_back({l, 0, int(s.size())});
+            maxColumns_ = std::max(maxColumns_, visualColumn(s, int(s.size())));
+            summaryRow = int(rows_.size());
+            rows_.push_back({fold->endLine, 0, 0, fold->startLine});
+            hiddenUntil = fold->endLine;
+            continue;
+        }
         const int total = visualColumn(s, int(s.size()));
         maxColumns_ = std::max(maxColumns_, total);
         if (wrapColumns <= 0 || total <= wrapColumns) {
@@ -378,7 +195,7 @@ void EditorView::buildRows(const model::Document& doc, int wrapColumns)
             int v = v0, end = begin, lastBreak = -1;
             while (end < int(s.size())) {
                 const int next = nextBoundary(s, end);
-                const int nv = s[size_t(end)] == '\t' ? (v / kTabSize + 1) * kTabSize : v + 1;
+                const int nv = s[size_t(end)] == '\t' ? (v / tabStop + 1) * tabStop : v + 1;
                 if (nv - v0 > wrapColumns)
                     break;
                 if (s[size_t(end)] == ' ')
@@ -423,7 +240,7 @@ int EditorView::columnAtX(const model::Document& doc, const Row& row, float vcol
     int i = row.begin;
     while (i < row.end) {
         const int next = nextBoundary(s, i);
-        const int nv = s[size_t(i)] == '\t' ? (v / kTabSize + 1) * kTabSize : v + 1;
+        const int nv = s[size_t(i)] == '\t' ? (v / tabStop + 1) * tabStop : v + 1;
         if (target < (float(v) + float(nv)) * 0.5f)
             return i;
         v = nv;
@@ -432,12 +249,18 @@ int EditorView::columnAtX(const model::Document& doc, const Row& row, float vcol
     return row.end;
 }
 
+int EditorView::rowAt(ImVec2 mouse, const Metrics& m) const
+{
+    return std::clamp(int(std::floor((mouse.y - m.origin.y) / m.lineH)), 0, std::max(0, int(rows_.size()) - 1));
+}
+
 TextPos EditorView::hitTest(const model::Document& doc, ImVec2 mouse, const Metrics& m) const
 {
     if (rows_.empty())
         return {};
-    const int r = std::clamp(int(std::floor((mouse.y - m.origin.y) / m.lineH)), 0, int(rows_.size()) - 1);
-    const Row& row = rows_[size_t(r)];
+    const Row& row = rows_[size_t(rowAt(mouse, m))];
+    if (row.fold >= 0)
+        return {row.line, 0};
     return {row.line, columnAtX(doc, row, (mouse.x - m.origin.x) / m.charW)};
 }
 
@@ -449,6 +272,12 @@ void EditorView::render(ImVec2 size)
     if (!doc) {
         renderEmptyState(size);
         return;
+    }
+    tabStop = std::max(1, doc->indent.width);
+    if (doc->diskState != model::Document::DiskState::InSync) {
+        const float before = ImGui::GetCursorPosY();
+        renderDiskBar(*doc);
+        size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
     if (vm_.findVisible.get()) {
         const float before = ImGui::GetCursorPosY();
@@ -464,16 +293,22 @@ void EditorView::render(ImVec2 size)
     for (int n = doc->buffer.lineCount(); n >= 10; n /= 10)
         ++digits;
     m.markerW = 18.0f * s_;
-    m.gutterW = m.markerW + (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 14.0f * s_ : 4.0f * s_);
+    m.foldW = 16.0f * s_;
+    m.gutterW = m.markerW + m.foldW + (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 6.0f * s_ : 0.0f);
+    const bool sideBar = vm_.showLayersMap.get();
+    if (sideBarWidth_ <= 0.0f)
+        sideBarWidth_ = 280.0f * s_;
+    sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
+    const float sideW = sideBar ? sideBarWidth_ : 0.0f;
+    const ImVec2 sideSize(sideW, size.y);
+    size.x -= sideW;
 
     const bool wrap = vm_.wordWrap.get();
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, palette_.editorBg);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     const std::string childId = "##editor" + std::to_string(doc->id);
-    ImGui::BeginChild(childId.c_str(), size, ImGuiChildFlags_None,
+    panel::beginChild(childId.c_str(), size, palette_.editorBg, ImGuiChildFlags_None,
                       (wrap ? ImGuiWindowFlags_None : ImGuiWindowFlags_HorizontalScrollbar) | ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
     if (focusRequested_ && !vm_.findVisible.get()) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
@@ -498,11 +333,21 @@ void EditorView::render(ImVec2 size)
 
     doc = vm_.activeDocument(); // input may have edited the text
     buildRows(*doc, wrapColumns);
+    if (pendingScrollLine_ >= 0) { // from the minimap: centre that line
+        const float rowY = float(rowOf({pendingScrollLine_, 0})) * m.lineH;
+        ImGui::SetScrollY(std::max(0.0f, rowY - viewH * 0.5f));
+        pendingScrollLine_ = -1;
+    }
     if (revealCaret_)
         revealCaret(*doc, m);
 
     const int firstRow = std::clamp(int((ImGui::GetScrollY() - kTopPadding * s_) / m.lineH), 0, int(rows_.size()) - 1);
     const int lastRow = std::min(int(rows_.size()) - 1, firstRow + m.visibleRows + 1);
+    if (!rows_.empty()) {
+        const Row& first = rows_[size_t(firstRow)];
+        firstVisibleLine_ = first.fold >= 0 ? first.fold : first.line;
+        lastVisibleLine_ = rows_[size_t(std::min(lastRow, int(rows_.size()) - 1))].line;
+    }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(ImVec2(winPos.x + m.gutterW, winPos.y), m.viewMax, true);
     drawRows(*doc, m, firstRow, lastRow);
@@ -517,13 +362,15 @@ void EditorView::render(ImVec2 size)
     ImGui::Dummy(ImVec2(contentW, float(rows_.size()) * m.lineH + viewH * 0.5f));
     ImGui::EndChild();
     ImGui::PopFont();
+    if (sideBar) {
+        ImGui::SameLine(0.0f, 0.0f);
+        renderSideBar(*vm_.activeDocument(), sideSize);
+    }
 }
 
 void EditorView::renderEmptyState(ImVec2 size)
 {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, palette_.editorBg);
-    ImGui::BeginChild("##editorEmpty", size);
-    ImGui::PopStyleColor();
+    panel::beginChild("##editorEmpty", size, palette_.editorBg);
     const char* text = "No document open";
     const ImVec2 textSize = ImGui::CalcTextSize(text);
     ImGui::SetCursorPos(ImVec2((size.x - textSize.x) * 0.5f, size.y * 0.4f));
@@ -538,16 +385,48 @@ void EditorView::renderEmptyState(ImVec2 size)
     ImGui::EndChild();
 }
 
+void EditorView::renderDiskBar(model::Document& doc)
+{
+    // The file changed (or vanished) on disk while it has unsaved edits here.
+    const bool deleted = doc.diskState == model::Document::DiskState::Deleted;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * s_, 5.0f * s_));
+    panel::beginChild("##diskBar", ImVec2(0.0f, ImGui::GetFrameHeight() + 10.0f * s_), (palette_.severityWarning & ~IM_COL32_A_MASK) | (ImU32(40) << IM_COL32_A_SHIFT),
+                      ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityWarning), ICON_FA_TRIANGLE_EXCLAMATION);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(deleted ? "This file was deleted on disk. Saving recreates it."
+                                   : "This file changed on disk, and you have unsaved changes here.");
+    ImGui::SameLine();
+    if (deleted) {
+        if (ImGui::SmallButton("Keep editing"))
+            vm_.keepMine(doc);
+        registerLastItem("disk-bar:keep", "button", "Keep editing", [this, &doc]() { vm_.keepMine(doc); });
+    } else {
+        if (ImGui::SmallButton(ICON_FA_ROTATE "  Reload"))
+            vm_.reloadFromDisk(doc);
+        registerLastItem("disk-bar:reload", "button", "Reload", [this, &doc]() { vm_.reloadFromDisk(doc); });
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Keep mine"))
+            vm_.keepMine(doc);
+        registerLastItem("disk-bar:keep", "button", "Keep mine", [this, &doc]() { vm_.keepMine(doc); });
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_CODE_COMPARE "  Compare"))
+            vm_.compareWithDisk(doc);
+        registerLastItem("disk-bar:compare", "button", "Compare", [this, &doc]() { vm_.compareWithDisk(doc); });
+    }
+    ImGui::EndChild();
+}
+
 void EditorView::renderFindBar()
 {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, palette_.panelHeaderBg);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * s_, 5.0f * s_));
     const float rows = vm_.replaceVisible.get() ? 2.0f : 1.0f;
     const float h = rows * ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().ItemSpacing.y + 10.0f * s_;
-    ImGui::BeginChild("##findBar", ImVec2(0.0f, h), ImGuiChildFlags_AlwaysUseWindowPadding,
+    panel::beginChild("##findBar", ImVec2(0.0f, h), palette_.panelHeaderBg, ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 
     const float inputW = 280.0f * s_;
     bool findActive = false;
@@ -629,10 +508,26 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
     if (hovered && !inGutter)
         ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
 
+    const Row* hoveredRow = hovered && !rows_.empty() ? &rows_[size_t(rowAt(io.MousePos, m))] : nullptr;
+    const bool inFoldColumn = inGutter && io.MousePos.x >= m.viewMin.x + m.gutterW - m.foldW;
+    if (hoveredRow && (hoveredRow->fold >= 0 || (inFoldColumn && vm_.regionAt(hoveredRow->line))))
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         lastActivity_ = ImGui::GetTime();
         preferredVcol_ = -1.0f;
         const TextPos pos = hitTest(doc, io.MousePos, m);
+        if (hoveredRow && hoveredRow->fold >= 0) { // a summary: expand it
+            dragging_ = false;
+            vm_.setFolded(hoveredRow->fold, false);
+            return;
+        }
+        if (inFoldColumn) {
+            dragging_ = false;
+            if (vm_.regionAt(pos.line))
+                vm_.toggleFold(pos.line);
+            return;
+        }
         if (inGutter) {
             dragging_ = false;
             if (io.MousePos.x < m.viewMin.x + m.markerW) {
@@ -765,7 +660,7 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         else if (doc.hasSelection() && doc.anchor.line != doc.caret.line)
             vm_.execute(CommandId::Indent);
         else
-            vm_.insertText(std::string(size_t(kTabSize - visualColumn(buffer.line(caret.line), caret.column) % kTabSize), ' '));
+            vm_.insertIndent();
         acted = horizontal = true;
     }
     if (pressed(ImGuiKey_Escape)) {
@@ -831,12 +726,13 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
     const float fontSize = ImGui::GetFontSize();
     const float textLeft = m.viewMin.x + m.gutterW;
 
-    // Block-comment state at the first visible line.
-    bool inBlock = false;
-    std::vector<Tok> toks;
+    // Highlighter state (block comments, strings, fences) at the first visible line.
+    int inBlock = 0;
+    std::vector<model::Token> toks;
+    const model::LanguageSpec& spec = model::languageSpec(doc.language);
+    const SyntaxColors colors = resolveSyntaxColors(palette_, vm_, doc.language);
     const int firstLine = rows_[size_t(firstRow)].line;
-    for (int l = 0; l < firstLine; ++l)
-        highlight(doc.buffer.line(l), doc.language, inBlock, toks);
+    inBlock = doc.highlightCache.stateAt(doc.buffer, spec, firstLine); // cached: no re-scan from line 1
 
     const std::vector<const model::ReviewFinding*> findings = vm_.review().findingsForFile(doc.path);
     const auto& matches = vm_.findMatches();
@@ -847,12 +743,19 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
 
     for (int r = firstRow; r <= lastRow; ++r) {
         const Row& row = rows_[size_t(r)];
+        const float y = m.origin.y + float(r) * m.lineH;
+        if (row.fold >= 0) {
+            // The line after the folded ones starts in the state the cache knows.
+            inBlock = doc.highlightCache.stateAt(doc.buffer, spec, row.line + 1);
+            lastLine = row.line;
+            drawSummaryRow(doc, row, m, y);
+            continue;
+        }
         const std::string& text = doc.buffer.line(row.line);
         if (row.line != lastLine) {
-            highlight(text, doc.language, inBlock, toks);
+            model::highlightLine(text, spec, inBlock, toks);
             lastLine = row.line;
         }
-        const float y = m.origin.y + float(r) * m.lineH;
         const bool lastRowOfLine = r + 1 >= int(rows_.size()) || rows_[size_t(r + 1)].line != row.line;
 
         if (row.line == doc.caret.line)
@@ -883,7 +786,7 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
                 ++lead;
             if (lead < int(text.size())) {
                 const int leadCols = visualColumn(text, lead);
-                for (int k = kTabSize; k < leadCols; k += kTabSize) {
+                for (int k = tabStop; k < leadCols; k += tabStop) {
                     const float x = std::floor(m.origin.x + float(k) * m.charW) + 0.5f;
                     dl->AddLine(ImVec2(x, y), ImVec2(x, y + m.lineH), palette_.indentGuide);
                 }
@@ -895,13 +798,13 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
         const int rowStartCol = visualColumn(text, row.begin);
         int vcol = 0;
         for (int b = row.begin; b < row.end;) {
-            const Tok tok = toks[size_t(b)];
+            const model::Token tok = toks[size_t(b)];
             int e = b + 1;
             while (e < row.end && toks[size_t(e)] == tok && text[size_t(e)] != '\t')
                 ++e;
             if (text[size_t(b)] == '\t') {
                 const int abs = rowStartCol + vcol;
-                const int next = (abs / kTabSize + 1) * kTabSize;
+                const int next = (abs / tabStop + 1) * tabStop;
                 if (vm_.showWhitespace.get()) {
                     const float x0 = m.origin.x + float(vcol) * m.charW + 2.0f * s_;
                     const float x1 = m.origin.x + float(next - rowStartCol) * m.charW - 2.0f * s_;
@@ -913,7 +816,7 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
                 b = e;
                 continue;
             }
-            dl->AddText(font, fontSize, ImVec2(m.origin.x + float(vcol) * m.charW, textY), tokColor(tok, palette_),
+            dl->AddText(font, fontSize, ImVec2(m.origin.x + float(vcol) * m.charW, textY), colors[size_t(tok)],
                         text.data() + b, text.data() + e);
             if (vm_.showWhitespace.get()) {
                 int v = vcol;
@@ -941,11 +844,12 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
     }
 
     // Caret
-    const bool blinkOn = std::fmod(ImGui::GetTime() - lastActivity_, 1.0) < 0.6;
+    const bool blinkOn = !vm_.blinkCaret.get() || std::fmod(ImGui::GetTime() - lastActivity_, 1.0) < 0.6;
     if (focused_ && blinkOn) {
         const int r = rowOf(doc.caret);
         if (r >= firstRow && r <= lastRow) {
-            const float x = std::floor(rowX(doc, rows_[size_t(r)], doc.caret.column, m));
+            const Row& caretRow = rows_[size_t(r)];
+            const float x = caretRow.fold >= 0 ? m.origin.x : std::floor(rowX(doc, caretRow, doc.caret.column, m));
             const float y = m.origin.y + float(r) * m.lineH;
             dl->AddRectFilled(ImVec2(x, y + 2.0f * s_), ImVec2(x + std::max(1.5f, 2.0f * s_), y + m.lineH - 2.0f * s_), palette_.caret);
         }
@@ -968,20 +872,39 @@ void EditorView::drawGutter(const model::Document& doc, const Metrics& m, int fi
     const float iconSize = fontSize * 0.75f;
     for (int r = firstRow; r <= lastRow; ++r) {
         const Row& row = rows_[size_t(r)];
+        const float y = m.origin.y + float(r) * m.lineH;
+        const float cy = y + m.lineH * 0.5f;
+        const float cx = m.viewMin.x + m.markerW * 0.5f + 1.0f * s_;
+        if (row.fold >= 0) {
+            // Findings hidden inside a folded region still show on its summary.
+            const model::ReviewFinding* worst = nullptr;
+            for (const model::ReviewFinding* f : findings)
+                if (f->line > row.fold && f->line <= row.line && (!worst || f->severity > worst->severity))
+                    worst = f;
+            if (worst)
+                dl->AddCircleFilled(ImVec2(cx, cy), 3.5f * s_, severityColor(worst->severity, palette_));
+            continue;
+        }
         if (firstRowOfLine_[size_t(row.line)] != r)
             continue;
-        const float y = m.origin.y + float(r) * m.lineH;
         const float textY = y + (m.lineH - fontSize) * 0.5f;
         if (vm_.showLineNumbers.get()) {
             char number[16];
             std::snprintf(number, sizeof(number), "%d", row.line + 1);
             const float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, number).x;
-            dl->AddText(font, fontSize, ImVec2(m.viewMin.x + m.gutterW - 10.0f * s_ - w, textY),
+            dl->AddText(font, fontSize, ImVec2(m.viewMin.x + m.gutterW - m.foldW - 4.0f * s_ - w, textY),
                         row.line == doc.caret.line ? palette_.gutterTextCurrent : palette_.gutterText, number);
         }
+        if (const model::OutlineNode* region = vm_.regionAt(row.line)) {
+            const bool folded = vm_.isFolded(*region);
+            const float arrowSize = fontSize * 0.62f;
+            const bool gutterHovered = ImGui::IsMouseHoveringRect(m.viewMin, ImVec2(m.viewMin.x + m.gutterW, m.viewMax.y));
+            if (folded || gutterHovered)
+                dl->AddText(font, arrowSize,
+                            ImVec2(m.viewMin.x + m.gutterW - m.foldW * 0.5f - arrowSize * 0.35f, cy - arrowSize * 0.5f),
+                            folded ? palette_.accent : palette_.gutterText, folded ? ICON_FA_CHEVRON_RIGHT : ICON_FA_CHEVRON_DOWN);
+        }
 
-        const float cx = m.viewMin.x + m.markerW * 0.5f + 1.0f * s_;
-        const float cy = y + m.lineH * 0.5f;
         if (doc.bookmarks.count(row.line)) {
             dl->AddText(font, iconSize, ImVec2(cx - iconSize * 0.4f, cy - iconSize * 0.5f), palette_.bookmark, ICON_FA_BOOKMARK);
             continue;
@@ -1000,6 +923,227 @@ void EditorView::drawGutter(const model::Document& doc, const Metrics& m, int fi
                 break;
             }
     }
+}
+
+void EditorView::drawSummaryRow(const model::Document& doc, const Row& row, const Metrics& m, float y)
+{
+    const model::OutlineNode* region = vm_.regionAt(row.fold);
+    if (!region)
+        return;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float fontSize = ImGui::GetFontSize();
+    // Indented one level deeper than the header, like the body it stands for.
+    const std::string& header = doc.buffer.line(row.fold);
+    int lead = 0;
+    while (lead < int(header.size()) && isBlank(header[size_t(lead)]))
+        ++lead;
+    const float x0 = m.origin.x + float(visualColumn(header, lead) + tabStop) * m.charW - 6.0f * s_;
+    const std::string summary = vm_.summary(*region);
+    const std::string count = "  " + std::to_string(region->lineCount() - 1) + " lines";
+    const float textW = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, summary.c_str()).x;
+    const float countW = font->CalcTextSizeA(fontSize * 0.85f, FLT_MAX, 0.0f, count.c_str()).x;
+    const float iconW = fontSize * 1.4f;
+    const ImVec2 min(x0, y + 2.0f * s_);
+    const ImVec2 max(x0 + iconW + textW + countW + 16.0f * s_, y + m.lineH - 2.0f * s_);
+    const bool hovered = ImGui::IsMouseHoveringRect(min, max) && ImGui::IsWindowHovered();
+    UiAutomation::instance().add({"fold:" + std::to_string(row.fold + 1), "region", region->title, min, max, true,
+                                  [this, start = row.fold]() { vm_.setFolded(start, false); }});
+    dl->AddRectFilled(min, max, hovered ? palette_.selection : palette_.accentSoft, 5.0f * s_);
+    dl->AddRect(min, max, (palette_.accent & ~IM_COL32_A_MASK) | (ImU32(hovered ? 160 : 70) << IM_COL32_A_SHIFT), 5.0f * s_);
+    const float textY = y + (m.lineH - fontSize) * 0.5f;
+    dl->AddText(font, fontSize * 0.9f, ImVec2(min.x + 7.0f * s_, textY + fontSize * 0.05f), palette_.modeAgent,
+                ICON_FA_WAND_MAGIC_SPARKLES);
+    dl->AddText(font, fontSize, ImVec2(min.x + 6.0f * s_ + iconW, textY), palette_.text, summary.c_str());
+    dl->AddText(font, fontSize * 0.85f, ImVec2(min.x + 6.0f * s_ + iconW + textW, textY + fontSize * 0.1f), palette_.textFaint,
+                count.c_str());
+    if (hovered) {
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        if (ImGui::BeginTooltip()) {
+            ImGui::TextUnformatted(region->title.c_str());
+            ImGui::TextDisabled("%s, lines %d-%d. Click to expand.", model::outlineKindName(region->kind),
+                                region->startLine + 1, region->endLine + 1);
+            ImGui::TextDisabled(vm_.workspaceRoot().empty() ? "Summary from sample data."
+                                                            : "Summary from the code's comments and structure.");
+            ImGui::EndTooltip();
+        }
+        ImGui::PopFont();
+    }
+}
+
+void EditorView::renderSideBar(const model::Document& doc, ImVec2 size)
+{
+    using SideBar = viewmodel::NotepadViewModel::SideBar;
+    ImDrawList* parentDl = ImGui::GetWindowDrawList();
+
+    // Resize handle on the left edge.
+    const ImVec2 handle = ImGui::GetCursorScreenPos();
+    const float handleW = 5.0f * s_;
+    ImGui::InvisibleButton("##sideBarResize", ImVec2(handleW, std::max(1.0f, size.y)));
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        parentDl->AddLine(ImVec2(handle.x + handleW * 0.5f, handle.y), ImVec2(handle.x + handleW * 0.5f, handle.y + size.y),
+                          palette_.accent, 2.0f * s_);
+    }
+    if (ImGui::IsItemActive())
+        sideBarWidth_ -= ImGui::GetIO().MouseDelta.x;
+    if (ImGui::IsItemDeactivated())
+        vm_.settings().markDirty(); // remembered with the layout
+    ImGui::SameLine(0.0f, 0.0f);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    panel::beginChild("##sideBar", ImVec2(size.x - handleW, size.y), palette_.panelBg, ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetWindowPos();
+    const float w = ImGui::GetWindowWidth(), h = ImGui::GetWindowHeight();
+    dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x, p.y + h), palette_.border);
+    UiAutomation::instance().add({"layers-map", "panel", "Side bar", p, ImVec2(p.x + w, p.y + h), true, {}});
+
+    // Header: mode tabs on the left, hide on the right; same margin as the rows below.
+    ImGui::PushFont(fonts_.ui, Fonts::kUiSize * 0.84f);
+    const float headerH = 30.0f * s_;
+    const float margin = 8.0f * s_;
+    panel::fill(dl, p, ImVec2(p.x + w, p.y + headerH), palette_.panelHeaderBg);
+    dl->AddLine(ImVec2(p.x, p.y + headerH - 1.0f), ImVec2(p.x + w, p.y + headerH - 1.0f), palette_.border);
+    const SideBar mode = vm_.sideBar.get();
+    struct Tab {
+        const char* label;
+        SideBar mode;
+        viewmodel::CommandId command;
+    };
+    const Tab tabs[] = {{ICON_FA_LAYER_GROUP "  Layers", SideBar::Layers, viewmodel::CommandId::ShowLayers},
+                        {ICON_FA_BARS_STAGGERED "  Minimap", SideBar::Minimap, viewmodel::CommandId::ShowMinimap}};
+    float x = p.x + margin;
+    const float tabH = headerH - 10.0f * s_;
+    for (const Tab& t : tabs) {
+        const ImVec2 ts = ImGui::CalcTextSize(t.label);
+        const float tw = ts.x + 18.0f * s_;
+        const ImVec2 a(x, p.y + 5.0f * s_);
+        ImGui::SetCursorScreenPos(a);
+        ImGui::PushID(t.label);
+        if (ImGui::InvisibleButton("##mode", ImVec2(tw, tabH)))
+            vm_.execute(t.command);
+        ImGui::PopID();
+        const bool active = t.mode == mode;
+        const bool hovered = ImGui::IsItemHovered();
+        registerLastItem(std::string("command:") + viewmodel::commandKey(t.command), "tab", t.label,
+                         [this, c = t.command]() { vm_.execute(c); });
+        if (active)
+            dl->AddRectFilled(a, ImVec2(a.x + tw, a.y + tabH), palette_.tabActiveBg, 5.0f * s_);
+        else if (hovered)
+            dl->AddRectFilled(a, ImVec2(a.x + tw, a.y + tabH), palette_.hover, 5.0f * s_);
+        dl->AddText(ImVec2(std::floor(a.x + 9.0f * s_), std::floor(a.y + (tabH - ts.y) * 0.5f)),
+                    active || hovered ? palette_.text : palette_.textDim, t.label);
+        x += tw + 2.0f * s_;
+    }
+    // Hide.
+    const float closeW = tabH;
+    const ImVec2 c0(p.x + w - margin - closeW, p.y + 5.0f * s_);
+    ImGui::SetCursorScreenPos(c0);
+    if (ImGui::InvisibleButton("##hideSideBar", ImVec2(closeW, tabH)))
+        vm_.showLayersMap.set(false);
+    const bool closeHovered = ImGui::IsItemHovered();
+    ImGui::SetItemTooltip("Hide the side bar (Read > Side Bar brings it back)");
+    registerLastItem("command:ToggleLayersMap", "button", "Hide side bar", [this]() { vm_.showLayersMap.set(false); });
+    if (closeHovered)
+        dl->AddRectFilled(c0, ImVec2(c0.x + closeW, c0.y + tabH), palette_.hover, 5.0f * s_);
+    const ImVec2 xs = ImGui::CalcTextSize(ICON_FA_XMARK);
+    dl->AddText(ImVec2(std::floor(c0.x + (closeW - xs.x) * 0.5f), std::floor(c0.y + (tabH - xs.y) * 0.5f)),
+                closeHovered ? palette_.text : palette_.textDim, ICON_FA_XMARK);
+    ImGui::PopFont();
+
+    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + headerH));
+    const ImVec2 body(w, std::max(1.0f, h - headerH));
+    if (mode == SideBar::Layers)
+        layers_.render(body);
+    else
+        renderMinimap(doc, body);
+    ImGui::EndChild();
+}
+
+void EditorView::renderMinimap(const model::Document& doc, ImVec2 size)
+{
+    tabStop = std::max(1, doc.indent.width);
+    panel::beginChild("##minimap", size, palette_.editorBg, ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetWindowPos();
+    const float w = ImGui::GetWindowWidth(), h = ImGui::GetWindowHeight();
+    const float pad = 6.0f * s_;
+    const float lineH = 2.0f * s_;
+    const float charW = std::clamp((w - 2.0f * pad) / 110.0f, 1.0f * s_, 2.5f * s_); // ~110 columns across
+    const int lines = doc.buffer.lineCount();
+    const float total = float(lines) * lineH;
+    UiAutomation::instance().add({"minimap", "panel", "Minimap", p, ImVec2(p.x + w, p.y + h), true, {}});
+
+    // Long files: the strip scrolls with the editor, keeping the viewport frame in sync.
+    const int visibleLines = std::max(1, lastVisibleLine_ - firstVisibleLine_ + 1);
+    const float maxOffset = std::max(0.0f, total - (h - 2.0f * pad));
+    const float scrollFraction = lines > visibleLines ? float(firstVisibleLine_) / float(lines - visibleLines) : 0.0f;
+    const float offset = maxOffset * std::clamp(scrollFraction, 0.0f, 1.0f);
+    const float top = p.y + pad - offset;
+    const int first = std::clamp(int(offset / lineH), 0, std::max(0, lines - 1));
+    const int last = std::min(lines - 1, first + int(h / lineH) + 1);
+
+    // Syntax-coloured blocks per token run (whitespace stays empty).
+    int inBlock = 0;
+    std::vector<model::Token> toks;
+    const model::LanguageSpec& spec = model::languageSpec(doc.language);
+    const SyntaxColors colors = resolveSyntaxColors(palette_, vm_, doc.language);
+    inBlock = doc.highlightCache.stateAt(doc.buffer, spec, first);
+    const int maxCols = int((w - 2.0f * pad) / charW);
+    for (int l = first; l <= last; ++l) {
+        const std::string& text = doc.buffer.line(l);
+        model::highlightLine(text, spec, inBlock, toks);
+        const float y = top + float(l) * lineH;
+        int col = 0;
+        for (int i = 0; i < int(text.size()) && col < maxCols;) {
+            if (text[size_t(i)] == '\t') {
+                col = (col / tabStop + 1) * tabStop;
+                ++i;
+                continue;
+            }
+            if (isBlank(text[size_t(i)])) {
+                ++col;
+                ++i;
+                continue;
+            }
+            const model::Token tok = toks[size_t(i)];
+            const int startCol = col;
+            while (i < int(text.size()) && !isBlank(text[size_t(i)]) && toks[size_t(i)] == tok) {
+                i = nextBoundary(text, i);
+                ++col;
+            }
+            const ImU32 c = (colors[size_t(tok)] & ~IM_COL32_A_MASK) | (ImU32(170) << IM_COL32_A_SHIFT);
+            dl->AddRectFilled(ImVec2(p.x + pad + float(startCol) * charW, y),
+                              ImVec2(p.x + pad + float(std::min(col, maxCols)) * charW, y + lineH * 0.75f), c);
+        }
+    }
+
+    // Markers on the right edge: findings and the caret line.
+    for (const model::ReviewFinding* f : vm_.review().findingsForFile(doc.path)) {
+        const float y = top + float(f->line) * lineH;
+        dl->AddRectFilled(ImVec2(p.x + w - 4.0f * s_, y - 1.0f * s_), ImVec2(p.x + w - 1.0f * s_, y + 2.0f * s_),
+                          severityColor(f->severity, palette_));
+    }
+    const float caretY = top + float(doc.caret.line) * lineH;
+    dl->AddRectFilled(ImVec2(p.x, caretY), ImVec2(p.x + w, caretY + lineH), palette_.currentLine);
+
+    // Viewport frame; click or drag to scroll.
+    const ImVec2 v0(p.x + 1.0f, top + float(firstVisibleLine_) * lineH);
+    const ImVec2 v1(p.x + w - 1.0f, top + float(lastVisibleLine_ + 1) * lineH);
+    ImGui::SetCursorScreenPos(p);
+    ImGui::InvisibleButton("##minimapArea", ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemActive()) {
+        pendingScrollLine_ = std::clamp(int((ImGui::GetIO().MousePos.y - top) / lineH), 0, std::max(0, lines - 1));
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    dl->AddRectFilled(v0, v1, hovered || ImGui::IsItemActive() ? palette_.selection : palette_.hover);
+    dl->AddRect(v0, v1, palette_.border);
+    ImGui::EndChild();
 }
 
 void EditorView::drawHoverTooltip(const model::Document& doc, const Metrics& m)

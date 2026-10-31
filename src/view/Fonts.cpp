@@ -21,6 +21,35 @@ ImFont* addFont(const char* asset, float size, const ImFontConfig& config, const
     return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(buffer, int(data->size()), size, &config, ranges);
 }
 
+// Glyphs the bundled fonts lack (terminal programs draw with box drawing, block elements, arrows,
+// geometric shapes and braille: htop's sort arrow, btop's graphs) come from a system font when
+// one is installed. With dynamic fonts only the glyphs actually used are rasterized.
+void mergeSymbolFallback(float size)
+{
+    static const char* const kCandidates[] = {
+#if defined(_WIN32)
+        "C:/Windows/Fonts/seguisym.ttf", "C:/Windows/Fonts/consola.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Apple Symbols.ttf",
+#else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+#endif
+    };
+    for (const char* path : kCandidates) {
+        std::optional<std::string> data = os::fs::readFile(path);
+        if (!data || data->empty())
+            continue;
+        void* buffer = IM_ALLOC(data->size());
+        std::memcpy(buffer, data->data(), data->size());
+        ImFontConfig config;
+        config.MergeMode = true;
+        ImGui::GetIO().Fonts->AddFontFromMemoryTTF(buffer, int(data->size()), size, &config);
+        return;
+    }
+}
+
 bool mergeIcons(float size)
 {
     static const ImWchar iconRanges[] = {ICON_MIN_FA, ICON_MAX_16_FA, 0};
@@ -46,10 +75,12 @@ Fonts Fonts::load()
     fonts.hasIcons = mergeIcons(kUiSize);
 
     fonts.mono = addFont("fonts/Cousine-Regular.ttf", kEditorSize, ImFontConfig());
-    if (fonts.mono)
+    if (fonts.mono) {
         mergeIcons(kEditorSize);
-    else
+        mergeSymbolFallback(kEditorSize);
+    } else {
         fonts.mono = fonts.ui;
+    }
 
     return fonts;
 }

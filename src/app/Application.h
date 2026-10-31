@@ -1,7 +1,9 @@
-// Platform-independent application shell: composes the view-model and view, and runs one UI
-// frame at a time for the platform main loops. No services are wired in yet.
+// Platform-independent application shell: composes services, view-model and view, and runs one
+// UI frame at a time for the platform main loops.
 #pragma once
 
+#include "enp/services/AutomationServer.h"
+#include "enp/services/ServiceContainer.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
@@ -35,11 +37,19 @@ public:
 
     ImVec4 clearColor() const;
     bool quitRequested() const;
+    void requestQuit(); // asks about unsaved documents first
+    // Something moves on screen by itself (agent at work, tour, pointer, analysis): keep drawing.
+    bool animating() const;
+    int maxFramesPerSecond() const; // 0: uncapped
+    bool blinkCaret() const;
 
 private:
+    services::ServiceContainer services_; // outlives the view-model that uses it
     std::unique_ptr<viewmodel::NotepadViewModel> viewModel_;
     view::Fonts fonts_;
     std::unique_ptr<view::MainView> view_;
+    // Local endpoint for the MCP connector (`EasyNotepad --mcp`); stopped before the view-model goes.
+    std::unique_ptr<services::AutomationServer> automation_;
 };
 
 } // namespace enp::app

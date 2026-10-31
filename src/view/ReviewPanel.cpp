@@ -13,7 +13,7 @@ namespace enp::view {
 using model::ReviewTool;
 using model::Severity;
 using viewmodel::CommandId;
-using viewmodel::ReviewTab;
+using viewmodel::PanelTab;
 
 namespace {
 
@@ -59,50 +59,16 @@ ReviewPanel::ReviewPanel(viewmodel::NotepadViewModel& vm, const Fonts& fonts, co
 {
 }
 
-void ReviewPanel::render(ImVec2 size)
+void ReviewPanel::renderTab(PanelTab tab)
 {
-    viewmodel::ReviewViewModel& review = vm_.review();
-    const ReviewTab requested = vm_.reviewTab.get();
-    const bool forceSelect = requested != shownTab_;
-
-    if (!ImGui::BeginTabBar("##reviewTabs"))
-        return;
-    auto tab = [&](ReviewTab id, const std::string& label) {
-        const ImGuiTabItemFlags flags = forceSelect && requested == id ? ImGuiTabItemFlags_SetSelected : 0;
-        const bool open = ImGui::BeginTabItem(label.c_str(), nullptr, flags);
-        if (open) {
-            shownTab_ = id;
-            if (!forceSelect)
-                vm_.reviewTab.set(id);
-        }
-        return open;
-    };
-
-    const int open = review.count(Severity::Error) + review.count(Severity::Warning) + review.count(Severity::Info);
-    if (tab(ReviewTab::Problems, ICON_FA_LIST_CHECK "  Problems  " + std::to_string(open) + "###problems")) {
-        renderProblems();
-        ImGui::EndTabItem();
+    switch (tab) {
+    case PanelTab::Problems: renderProblems(); break;
+    case PanelTab::Diff: renderDiff(); break;
+    case PanelTab::Comments: renderComments(); break;
+    case PanelTab::Checklist: renderChecklist(); break;
+    case PanelTab::Terminal: break; // TerminalView
+    case PanelTab::Search: break;   // SearchPanel
     }
-    if (tab(ReviewTab::Diff, ICON_FA_CODE_COMPARE "  Diff###diff")) {
-        renderDiff();
-        ImGui::EndTabItem();
-    }
-    int openComments = 0;
-    for (const model::ReviewComment& c : review.comments())
-        openComments += c.resolved ? 0 : 1;
-    if (tab(ReviewTab::Comments, ICON_FA_COMMENTS "  Comments  " + std::to_string(openComments) + "###comments")) {
-        renderComments();
-        ImGui::EndTabItem();
-    }
-    int done = 0;
-    for (const model::ChecklistItem& item : review.checklist())
-        done += item.done ? 1 : 0;
-    if (tab(ReviewTab::Checklist, ICON_FA_CLIPBOARD_CHECK "  Checklist  " + std::to_string(done) + "/" +
-                                      std::to_string(review.checklist().size()) + "###checklist")) {
-        renderChecklist();
-        ImGui::EndTabItem();
-    }
-    ImGui::EndTabBar();
 }
 
 // ---- Problems -----------------------------------------------------------------------------------

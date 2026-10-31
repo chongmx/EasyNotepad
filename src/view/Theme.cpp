@@ -1,5 +1,8 @@
 #include "enp/view/Theme.h"
 
+#include <algorithm>
+#include <iterator>
+
 namespace enp::view {
 
 namespace {
@@ -44,6 +47,14 @@ Palette applyTheme(bool dark)
         c[ImGuiCol_TableRowBgAlt] = vec(255, 255, 255, 6);
         c[ImGuiCol_ScrollbarBg] = vec(0, 0, 0, 0);
         c[ImGuiCol_ScrollbarGrab] = vec(70, 76, 86);
+        // Window title bars (dialogs, popped-out windows) in the app's chrome colours, not ImGui's blue.
+        c[ImGuiCol_TitleBg] = vec(24, 27, 31);
+        c[ImGuiCol_TitleBgActive] = vec(34, 38, 44);
+        c[ImGuiCol_TitleBgCollapsed] = vec(24, 27, 31);
+        c[ImGuiCol_ResizeGrip] = vec(255, 255, 255, 14);
+        c[ImGuiCol_ResizeGripHovered] = vec(59, 130, 246, 120);
+        c[ImGuiCol_ResizeGripActive] = vec(59, 130, 246, 200);
+        c[ImGuiCol_NavWindowingHighlight] = vec(59, 130, 246, 180);
 
         p.titleBarBg = rgba(24, 27, 31);
         p.ribbonBg = rgba(34, 38, 44);
@@ -90,6 +101,17 @@ Palette applyTheme(bool dark)
         p.synComment = rgba(106, 115, 125);
         p.synPreprocessor = rgba(97, 175, 239);
         p.synHeading = rgba(97, 175, 239);
+        {
+            const ImU32 colors[] = {
+                p.synText, p.synKeyword, p.synType, rgba(97, 175, 239), rgba(224, 108, 117), p.synString,
+                p.synNumber, p.synComment, rgba(86, 182, 194), rgba(224, 108, 117), p.synHeading,
+                rgba(198, 120, 221), rgba(152, 195, 121), rgba(86, 182, 194), rgba(224, 108, 117), rgba(209, 154, 102),
+                // CSV columns
+                rgba(97, 175, 239), rgba(152, 195, 121), rgba(229, 192, 123), rgba(198, 120, 221), rgba(86, 182, 194),
+                rgba(224, 108, 117)};
+            static_assert(sizeof(colors) / sizeof(colors[0]) == size_t(model::Token::Count), "one colour per token");
+            std::copy(std::begin(colors), std::end(colors), p.syntax);
+        }
 
         p.severityError = rgba(248, 81, 73);
         p.severityWarning = rgba(234, 179, 8);
@@ -103,6 +125,10 @@ Palette applyTheme(bool dark)
         p.bubbleUser = rgba(59, 130, 246, 50);
         p.bubbleAgent = rgba(44, 49, 56);
         p.bubbleTool = rgba(255, 255, 255, 8);
+        static const uint32_t ansiDark[16] = {0x000000, 0xCD3131, 0x0DBC79, 0xE5E510, 0x2472C8, 0xBC3FBC,
+                                              0x11A8CD, 0xE5E5E5, 0x666666, 0xF14C4C, 0x23D18B, 0xF5F543,
+                                              0x3B8EEA, 0xD670D6, 0x29B8DB, 0xE5E5E5};
+        std::copy(std::begin(ansiDark), std::end(ansiDark), p.ansi);
         p.clearColor = vec(24, 27, 31);
     } else {
         ImGui::StyleColorsLight(&style);
@@ -130,6 +156,12 @@ Palette applyTheme(bool dark)
         c[ImGuiCol_TableBorderLight] = vec(228, 232, 237);
         c[ImGuiCol_TableRowBgAlt] = vec(0, 0, 0, 6);
         c[ImGuiCol_ScrollbarBg] = vec(0, 0, 0, 0);
+        c[ImGuiCol_TitleBg] = vec(232, 235, 239);
+        c[ImGuiCol_TitleBgActive] = vec(222, 226, 232);
+        c[ImGuiCol_TitleBgCollapsed] = vec(232, 235, 239);
+        c[ImGuiCol_ResizeGrip] = vec(0, 0, 0, 14);
+        c[ImGuiCol_ResizeGripHovered] = vec(37, 99, 235, 110);
+        c[ImGuiCol_ResizeGripActive] = vec(37, 99, 235, 190);
 
         p.titleBarBg = rgba(232, 235, 239);
         p.ribbonBg = rgba(246, 247, 249);
@@ -176,6 +208,17 @@ Palette applyTheme(bool dark)
         p.synComment = rgba(140, 148, 158);
         p.synPreprocessor = rgba(64, 120, 242);
         p.synHeading = rgba(64, 120, 242);
+        {
+            const ImU32 colors[] = {
+                p.synText, p.synKeyword, p.synType, rgba(64, 120, 242), rgba(228, 86, 73), p.synString,
+                p.synNumber, p.synComment, rgba(1, 132, 188), rgba(228, 86, 73), p.synHeading,
+                rgba(166, 38, 164), rgba(80, 161, 79), rgba(1, 132, 188), rgba(228, 86, 73), rgba(152, 104, 1),
+                // CSV columns
+                rgba(64, 120, 242), rgba(80, 161, 79), rgba(183, 107, 1), rgba(166, 38, 164), rgba(1, 132, 188),
+                rgba(228, 86, 73)};
+            static_assert(sizeof(colors) / sizeof(colors[0]) == size_t(model::Token::Count), "one colour per token");
+            std::copy(std::begin(colors), std::end(colors), p.syntax);
+        }
 
         p.severityError = rgba(220, 38, 38);
         p.severityWarning = rgba(202, 138, 4);
@@ -189,6 +232,10 @@ Palette applyTheme(bool dark)
         p.bubbleUser = rgba(37, 99, 235, 28);
         p.bubbleAgent = rgba(236, 239, 243);
         p.bubbleTool = rgba(0, 0, 0, 6);
+        static const uint32_t ansiLight[16] = {0x000000, 0xCD3131, 0x00BC00, 0x949800, 0x0451A5, 0xBC05BC,
+                                               0x0598BC, 0x555555, 0x666666, 0xCD3131, 0x14CE14, 0xB5BA00,
+                                               0x0451A5, 0xBC05BC, 0x0598BC, 0xA5A5A5};
+        std::copy(std::begin(ansiLight), std::end(ansiLight), p.ansi);
         p.clearColor = vec(232, 235, 239);
     }
     return p;

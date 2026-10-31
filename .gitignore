@@ -1,5 +1,6 @@
 # Build output
 /build/
+/bin/
 /out/
 CMakeUserPresets.json
 

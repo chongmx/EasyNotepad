@@ -7,6 +7,13 @@
 #   ifndef _WIN32_WINNT
 #       define _WIN32_WINNT 0x0A00 // GetDpiForWindow / GetSystemMetricsForDpi
 #   endif
+// glfw3native.h includes <windows.h>: without NOMINMAX, MSVC's min/max macros break std::max.
+#   ifndef NOMINMAX
+#       define NOMINMAX
+#   endif
+#   ifndef WIN32_LEAN_AND_MEAN
+#       define WIN32_LEAN_AND_MEAN
+#   endif
 #   define GLFW_EXPOSE_NATIVE_WIN32
 #   include <GLFW/glfw3native.h>
 #   include <dwmapi.h>

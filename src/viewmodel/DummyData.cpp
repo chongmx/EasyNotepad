@@ -2,6 +2,10 @@
 
 #include "enp/model/TextBuffer.h"
 
+#include <algorithm>
+#include <cctype>
+#include <set>
+
 namespace enp::viewmodel::dummy {
 
 namespace {
@@ -475,6 +479,188 @@ std::vector<model::FileChange> changes()
         change("src/TextUtils.cpp", utils, newUtils),
         change("tests/TextUtilsTest.cpp", "", kTextUtilsTest),
     };
+}
+
+std::string summarize(const std::string& path, const model::OutlineNode& node, const model::TextBuffer& buffer,
+                      const std::vector<std::string>& parts)
+{
+    static const std::pair<const char*, const char*> canned[] = {
+        {"struct Options", "Command-line settings: input path, how many words to show (default 10) and case folding."},
+        {"Options parseArguments", "Reads --top N and --case-sensitive; any other argument becomes the input path. --top uses atoi, so bad numbers silently become 0."},
+        {"void printReport", "Sorts words by count, highest first, and prints the top N as aligned columns through a 64-byte sprintf buffer."},
+        {"int main", "Checks the arguments, opens the file, counts normalised words in a std::map, then prints the report; exits with 1 on usage or open errors."},
+        {"std::string toLower", "Returns a lower-case copy, converting each byte with std::tolower (ASCII only)."},
+        {"std::string stripPunctuation", "Trims punctuation from both ends of a word and returns the middle."},
+        {"namespace text", "String helpers used by the word counter: toLower and stripPunctuation."},
+        {"def list_documents", "Walks the corpus folder and collects the path of every .txt file."},
+        {"def word_count", "Counts words by running `wc -w` through the shell, which is unsafe for untrusted paths."},
+        {"def main", "Indexes every document's word count into index.json and prints a one-line summary."},
+        {"if __name__", "Runs main() when the file is executed as a script."},
+        {"Welcome to EasyNotepad", "Introduces the two workspaces, the reading tools and the review tools."},
+        {"Agent workspace", "Describe the goal; the agent plans, edits and reviews, and you accept each change."},
+        {"Code workspace", "Classic editing in the spirit of Notepad++, with the agent in a side panel."},
+        {"Review tools", "Analyzers, AI review, side-by-side diffs, inline comments and a checklist."},
+    };
+    if (!node.hint.empty())
+        return node.hint; // the author's own explanation (a step's leading comment)
+    for (const auto& [key, text] : canned)
+        if (node.title.find(key) != std::string::npos)
+            return text;
+    if (node.title.rfind("namespace", 0) == 0 && path == "src/main.cpp")
+        return "File-local helpers: the Options struct, argument parsing and the frequency report.";
+
+    const int body = node.endLine - node.startLine;
+    // Real code usually explains itself in the comment right above a definition: use it.
+    {
+        std::vector<std::string> comment;
+        for (int l = node.startLine - 1; l >= 0 && l >= node.startLine - 8; --l) {
+            std::string t = buffer.line(l);
+            const size_t b = t.find_first_not_of(" 	");
+            if (b == std::string::npos)
+                break;
+            t = t.substr(b);
+            if (t.rfind("//", 0) == 0)
+                t = t.substr(t.rfind("///", 0) == 0 ? 3 : 2);
+            else if (t.rfind("#", 0) == 0 && node.kind != model::OutlineKind::Section)
+                t = t.substr(1);
+            else
+                break;
+            const size_t c = t.find_first_not_of(" ");
+            comment.insert(comment.begin(), c == std::string::npos ? std::string() : t.substr(c));
+        }
+        std::string text;
+        for (const std::string& part : comment)
+            if (!part.empty() && part.find("----") == std::string::npos)
+                text += (text.empty() ? "" : " ") + part;
+        if (!text.empty()) {
+            if (text.size() > 160)
+                text = text.substr(0, 157) + "...";
+            return text;
+        }
+    }
+    if ((node.kind == model::OutlineKind::Namespace || node.kind == model::OutlineKind::Type) && !parts.empty()) {
+        std::string out = std::to_string(parts.size()) + (parts.size() == 1 ? " part: " : " parts: ");
+        for (size_t i = 0; i < parts.size() && i < 4; ++i)
+            out += (i ? ", " : "") + parts[i];
+        return out + (parts.size() > 4 ? ", ..." : ".");
+    }
+    if (node.kind == model::OutlineKind::Section) {
+        for (int l = node.startLine + 1; l <= node.endLine; ++l) {
+            std::string text = buffer.line(l);
+            if (text.empty() || text[0] == '#')
+                continue;
+            if (text.size() > 110)
+                text = text.substr(0, 107) + "...";
+            return text;
+        }
+        return std::to_string(body) + " lines.";
+    }
+    // Heuristic stand-in: the functions it calls.
+    static const std::set<std::string> keywords = {"if", "for", "while", "switch", "return", "sizeof", "catch", "print"};
+    std::vector<std::string> calls;
+    for (int l = node.startLine + 1; l <= node.endLine && calls.size() < 3; ++l) {
+        const std::string& s = buffer.line(l);
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] != '(' || i == 0)
+                continue;
+            size_t b = i;
+            while (b > 0 && (std::isalnum(static_cast<unsigned char>(s[b - 1])) || s[b - 1] == '_' || s[b - 1] == ':' || s[b - 1] == '.'))
+                --b;
+            const std::string name = s.substr(b, i - b);
+            if (!name.empty() && !keywords.count(name) &&
+                std::find(calls.begin(), calls.end(), name) == calls.end() && calls.size() < 3)
+                calls.push_back(name);
+        }
+    }
+    // The line count is shown next to every summary, so the text sticks to what the code does.
+    if (calls.empty())
+        return node.kind == model::OutlineKind::Type ? "Declarations and data members." : "Straight-line code, no calls.";
+    std::string out = "Calls ";
+    for (size_t i = 0; i < calls.size(); ++i)
+        out += (i ? ", " : "") + calls[i];
+    return out + ".";
+}
+
+std::string summarizeFile(const std::string& path, const std::vector<model::OutlineNode>& outline)
+{
+    static const std::pair<const char*, const char*> canned[] = {
+        {"src/main.cpp", "Command-line word counter: parses the options, counts normalised words and prints the top N."},
+        {"src/TextUtils.cpp", "Implements the string helpers: ASCII lower-casing and punctuation trimming."},
+        {"src/TextUtils.h", "Declares toLower and stripPunctuation for the word counter."},
+        {"scripts/build_index.py", "Python script that writes each corpus document's word count to index.json."},
+        {"docs/README.md", "Explains what EasyDemo does, how to run it and how the code is laid out."},
+        {"CMakeLists.txt", "Builds the easydemo executable and its unit-test target."},
+        {"config.json", "Run settings (corpus folder, top N, case) and a telemetry endpoint with a committed API key."},
+        {"Welcome.md", "Introduction to EasyNotepad: the two workspaces, reading tools and review tools."},
+    };
+    for (const auto& [file, text] : canned)
+        if (path == file)
+            return text;
+    if (outline.empty())
+        return "No nested structure.";
+    std::vector<const model::OutlineNode*> top;
+    for (const model::OutlineNode& n : outline)
+        if (n.depth == 0)
+            top.push_back(&n);
+    std::string out = top.size() == 1 ? "One top-level part: " : std::to_string(top.size()) + " top-level parts: ";
+    for (size_t i = 0; i < top.size() && i < 3; ++i)
+        out += (i ? ", " : "") + top[i]->title;
+    return out + (top.size() > 3 ? ", ..." : ".");
+}
+
+std::string fileHeaderSummary(const std::string& path, const model::TextBuffer& buffer)
+{
+    const std::string canned = summarizeFile(path, {});
+    if (canned != "No nested structure.")
+        return canned;
+    const bool markdown = model::languageFromPath(path) == model::Language::Markdown;
+    std::string text;
+    for (int l = 0; l < buffer.lineCount() && l < 40; ++l) {
+        std::string t = buffer.line(l);
+        const size_t b = t.find_first_not_of(" \t");
+        t = b == std::string::npos ? std::string() : t.substr(b);
+        if (markdown) {
+            if (t.empty() || t[0] == '#' || t.rfind("```", 0) == 0) {
+                if (!text.empty())
+                    break;
+                continue;
+            }
+        } else if (t.rfind("//", 0) == 0) {
+            t = t.substr(t.rfind("///", 0) == 0 ? 3 : 2);
+        } else if (t.rfind("#!", 0) == 0 || t.rfind("#include", 0) == 0 || t.rfind("#pragma", 0) == 0 || t.empty()) {
+            if (!text.empty())
+                break;
+            continue;
+        } else if (t[0] == '#') {
+            t = t.substr(1);
+        } else {
+            break; // code before any comment
+        }
+        const size_t c = t.find_first_not_of(" ");
+        if (c != std::string::npos)
+            text += (text.empty() ? "" : " ") + t.substr(c);
+        if (text.size() > 200)
+            break;
+    }
+    if (text.size() > 160)
+        text = text.substr(0, 157) + "...";
+    return text;
+}
+
+std::string summarizeFolder(const std::string& name, const std::vector<std::string>& children)
+{
+    if (name == kWorkspaceName)
+        return "Sample word-frequency counter in C++, with a Python indexer, docs and build files.";
+    if (name == "src")
+        return "The C++ program: entry point and string helpers.";
+    if (name == "scripts")
+        return "Helper scripts for preparing the corpus.";
+    if (name == "docs")
+        return "Project documentation.";
+    std::string out = "Contains ";
+    for (size_t i = 0; i < children.size() && i < 4; ++i)
+        out += (i ? ", " : "") + children[i];
+    return out + (children.size() > 4 ? ", ..." : ".");
 }
 
 std::string agentReply(int n, const std::string& prompt)

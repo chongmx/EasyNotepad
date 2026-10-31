@@ -1,5 +1,7 @@
 #include "enp/view/DiffView.h"
 
+#include "enp/view/PanelFrame.h"
+
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -49,11 +51,9 @@ void drawSide(ImDrawList* dl, ImVec2 min, ImVec2 max, int line, const std::strin
 void renderSideBySideDiff(const char* id, const std::vector<model::DiffRow>& rows, const Fonts& fonts,
                           const Palette& palette, float zoom, float uiScale, ImVec2 size)
 {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, palette.editorBg);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::BeginChild(id, size, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    panel::beginChild(id, size, palette.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 
     if (rows.empty()) {
         ImGui::SetCursorPos(ImVec2(12.0f * uiScale, 10.0f * uiScale));

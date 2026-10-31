@@ -1,10 +1,12 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
+#include "enp/model/Json.h"
 #include "enp/viewmodel/DummyData.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace enp::viewmodel {
@@ -15,23 +17,6 @@ constexpr int kIndentWidth = 4;
 constexpr float kMinZoom = 0.5f;
 constexpr float kMaxZoom = 3.0f;
 constexpr size_t kMaxUndo = 500;
-
-const char* lineCommentToken(model::Language language)
-{
-    switch (language) {
-    case model::Language::Cpp:
-    case model::Language::JavaScript:
-    case model::Language::Json:
-        return "//";
-    case model::Language::Python:
-    case model::Language::CMake:
-        return "#";
-    case model::Language::PlainText:
-    case model::Language::Markdown:
-        break;
-    }
-    return nullptr;
-}
 
 std::string leadingWhitespace(const std::string& line)
 {
@@ -49,278 +34,58 @@ std::string fileName(const std::string& path)
 
 } // namespace
 
-NotepadViewModel::NotepadViewModel()
-    : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace())
+NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService, interfaces::IFileService* fileService,
+                                   interfaces::IAgentCliService* agentCli, interfaces::IProcessService* processService)
+    : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace()), files_(fileService), terminal_(terminalService),
+      logicalMap_(*this, agentCli), fileDialog_(*this, fileService),
+      findInFiles_(*this, fileService), settings_(fileService)
 {
+    agentCli_ = agentCli;
+    processes_ = processService;
     initCommands();
+    pinned_ = {CommandId::DetailOverview, CommandId::ToggleLayersMap, CommandId::RunAllReviews, CommandId::ToggleTerminal};
+    customActions_ = {{"Git Status", "git status"}, {"Git Log", "git log --oneline -10"}};
+    bindSettings();
 
     subscriptions_.push_back(review_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
+    subscriptions_.push_back(terminal_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
+    subscriptions_.push_back(agent_.replied.subscribe([this](const std::string& prompt) { pointer_.guideFor(prompt); }));
+    subscriptions_.push_back(logicalMap_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
+    subscriptions_.push_back(foldingMode.subscribe([this](const model::OutlineMode& mode) {
+        for (auto& doc : documents_)
+            doc->detailLevel = -1; // regions changed: re-apply the detail level
+        if (model::Document* doc = activeDocument())
+            applyDetailLevel(*doc);
+        statusText.set(mode == model::OutlineMode::Logical
+                           ? "Logical folding: function bodies fold into their steps"
+                           : "Syntax folding: regions follow the code's structure");
+    }));
+    subscriptions_.push_back(editorMode.subscribe([this](const EditorMode& mode) {
+        if (mode == EditorMode::Map)
+            logicalMap_.revealCaret(); // context aware: start where the user is reading
+    }));
     subscriptions_.push_back(review_.navigateRequested.subscribe(
         [this](const std::string& path, const int& line) { navigateTo(path, line); }));
     subscriptions_.push_back(agent_.changeAccepted.subscribe(
         [this](const std::string& path, const std::string& text) { applyText(path, text); }));
     subscriptions_.push_back(findQuery.subscribe([this](const std::string&) { refreshFind(); }));
     subscriptions_.push_back(matchCase.subscribe([this](const bool&) { refreshFind(); }));
-    subscriptions_.push_back(activeIndex.subscribe([this](const int&) { refreshFind(); }));
+    subscriptions_.push_back(activeIndex.subscribe([this](const int&) {
+        refreshFind();
+        if (model::Document* doc = activeDocument(); doc && doc->detailLevel != detailLevel.get())
+            applyDetailLevel(*doc);
+    }));
+    subscriptions_.push_back(detailLevel.subscribe([this](const int& level) {
+        if (model::Document* doc = activeDocument())
+            applyDetailLevel(*doc);
+        statusText.set(std::string("Detail: ") + detailLevelName(level) + " - " + detailLevelDescription(level));
+    }));
 }
 
-NotepadViewModel::~NotepadViewModel() = default;
-
-// ---- Commands -----------------------------------------------------------------------------------
-
-void NotepadViewModel::set(CommandId id, std::function<void()> execute, std::function<bool()> canExecute)
+NotepadViewModel::~NotepadViewModel()
 {
-    commands_[size_t(id)] = Command(std::move(execute), std::move(canExecute));
-}
-
-void NotepadViewModel::notImplemented(CommandId id)
-{
-    statusText.set(std::string(commandInfo(id).label) + ": not available yet (no services connected)");
-}
-
-void NotepadViewModel::initCommands()
-{
-    using C = CommandId;
-    auto hasDoc = [this]() { return activeDocument() != nullptr; };
-    auto hasSelection = [this]() { return activeDocument() && activeDocument()->hasSelection(); };
-    auto stub = [this](CommandId id) { return [this, id]() { notImplemented(id); }; };
-
-    set(C::NewFile, [this]() { newDocument(); });
-    set(C::OpenFile, stub(C::OpenFile));
-    set(C::Save, [this]() {
-        model::Document* doc = activeDocument();
-        doc->savedText = doc->buffer.text();
-        doc->modified = false;
-        statusText.set("Saved " + doc->title + " (dummy: nothing was written to disk)");
-    }, hasDoc);
-    set(C::SaveAll, [this]() {
-        for (auto& doc : documents_) {
-            doc->savedText = doc->buffer.text();
-            doc->modified = false;
-        }
-        statusText.set("Saved all documents (dummy: nothing was written to disk)");
-    }, hasDoc);
-    set(C::CloseFile, [this]() { closeDocument(activeIndex.get()); }, hasDoc);
-
-    set(C::Cut, [this]() { clipboardRequested.emit(ClipboardAction::Cut); }, hasSelection);
-    set(C::Copy, [this]() { clipboardRequested.emit(ClipboardAction::Copy); }, hasSelection);
-    set(C::Paste, [this]() { clipboardRequested.emit(ClipboardAction::Paste); }, hasDoc);
-    set(C::Undo, [this]() { undo(); }, [this]() { return canUndo(); });
-    set(C::Redo, [this]() { redo(); }, [this]() { return canRedo(); });
-    set(C::SelectAll, [this]() { selectAll(); }, hasDoc);
-
-    set(C::DuplicateLine, [this]() { duplicateLines(); }, hasDoc);
-    set(C::DeleteLine, [this]() { deleteLines(); }, hasDoc);
-    set(C::MoveLineUp, [this]() { moveLines(-1); }, hasDoc);
-    set(C::MoveLineDown, [this]() { moveLines(+1); }, hasDoc);
-    set(C::SortLines, [this]() {
-        transformLines([](std::vector<std::string>& lines) { std::sort(lines.begin(), lines.end()); });
-    }, hasDoc);
-    set(C::UpperCase, [this]() {
-        transformSelection([](std::string s) {
-            for (char& c : s)
-                c = char(std::toupper(static_cast<unsigned char>(c)));
-            return s;
-        });
-    }, hasDoc);
-    set(C::LowerCase, [this]() {
-        transformSelection([](std::string s) {
-            for (char& c : s)
-                c = char(std::tolower(static_cast<unsigned char>(c)));
-            return s;
-        });
-    }, hasDoc);
-    set(C::ToggleComment, [this]() { toggleComment(); }, hasDoc);
-    set(C::Indent, [this]() {
-        transformLines([](std::vector<std::string>& lines) {
-            for (std::string& l : lines)
-                if (!l.empty())
-                    l.insert(0, size_t(kIndentWidth), ' ');
-        });
-    }, hasDoc);
-    set(C::Outdent, [this]() {
-        transformLines([](std::vector<std::string>& lines) {
-            for (std::string& l : lines) {
-                if (!l.empty() && l[0] == '\t') {
-                    l.erase(0, 1);
-                    continue;
-                }
-                size_t n = 0;
-                while (n < l.size() && n < size_t(kIndentWidth) && l[n] == ' ')
-                    ++n;
-                l.erase(0, n);
-            }
-        });
-    }, hasDoc);
-    set(C::TrimTrailing, [this]() { trimTrailing(); }, hasDoc);
-
-    set(C::Find, [this]() {
-        if (model::Document* doc = activeDocument(); doc && doc->hasSelection() && doc->anchor.line == doc->caret.line)
-            findQuery.set(selectedText());
-        findVisible.set(true);
-        replaceVisible.set(false);
-        focusFindRequested.emit();
-    }, hasDoc);
-    set(C::Replace, [this]() {
-        findVisible.set(true);
-        replaceVisible.set(true);
-        focusFindRequested.emit();
-    }, hasDoc);
-    set(C::FindNext, [this]() { findNext(+1); }, hasDoc);
-    set(C::FindPrevious, [this]() { findNext(-1); }, hasDoc);
-    set(C::FindInFiles, stub(C::FindInFiles));
-    set(C::GoToLine, [this]() { goToLineRequested.emit(); }, hasDoc);
-    set(C::ToggleBookmark, [this]() { toggleBookmark(); }, hasDoc);
-    set(C::NextBookmark, [this]() { jumpToBookmark(+1); }, hasDoc);
-    set(C::PreviousBookmark, [this]() { jumpToBookmark(-1); }, hasDoc);
-    set(C::ClearBookmarks, [this]() { activeDocument()->bookmarks.clear(); }, hasDoc);
-
-    set(C::ToggleExplorer, [this]() { showExplorer.set(!showExplorer.get()); });
-    set(C::ToggleReviewPanel, [this]() { showReviewPanel.set(!showReviewPanel.get()); });
-    set(C::ToggleAgentPanel, [this]() { showAgentPanel.set(!showAgentPanel.get()); });
-    set(C::ToggleWordWrap, [this]() { wordWrap.set(!wordWrap.get()); });
-    set(C::ToggleWhitespace, [this]() { showWhitespace.set(!showWhitespace.get()); });
-    set(C::ToggleLineNumbers, [this]() { showLineNumbers.set(!showLineNumbers.get()); });
-    set(C::ToggleIndentGuides, [this]() { showIndentGuides.set(!showIndentGuides.get()); });
-    set(C::ZoomIn, [this]() { setZoom(zoom.get() + 0.1f); }, [this]() { return zoom.get() < kMaxZoom; });
-    set(C::ZoomOut, [this]() { setZoom(zoom.get() - 0.1f); }, [this]() { return zoom.get() > kMinZoom; });
-    set(C::ZoomReset, [this]() { setZoom(1.0f); });
-    set(C::ToggleTheme, [this]() { darkTheme.set(!darkTheme.get()); });
-
-    auto setEol = [this](model::EolMode eol) {
-        return [this, eol]() {
-            activeDocument()->eol = eol;
-            statusText.set(std::string("Line endings: ") + model::eolName(eol));
-        };
-    };
-    set(C::EolCrLf, setEol(model::EolMode::CrLf), hasDoc);
-    set(C::EolLf, setEol(model::EolMode::Lf), hasDoc);
-    set(C::EolCr, setEol(model::EolMode::Cr), hasDoc);
-    auto setEncoding = [this](model::Encoding encoding) {
-        return [this, encoding]() {
-            activeDocument()->encoding = encoding;
-            statusText.set(std::string("Encoding: ") + model::encodingName(encoding));
-        };
-    };
-    set(C::EncodingUtf8, setEncoding(model::Encoding::Utf8), hasDoc);
-    set(C::EncodingUtf8Bom, setEncoding(model::Encoding::Utf8Bom), hasDoc);
-    set(C::EncodingUtf16Le, setEncoding(model::Encoding::Utf16Le), hasDoc);
-    set(C::EncodingUtf16Be, setEncoding(model::Encoding::Utf16Be), hasDoc);
-    set(C::EncodingAnsi, setEncoding(model::Encoding::Ansi), hasDoc);
-    auto setLanguage = [this](model::Language language) {
-        return [this, language]() { activeDocument()->language = language; };
-    };
-    set(C::LanguagePlainText, setLanguage(model::Language::PlainText), hasDoc);
-    set(C::LanguageCpp, setLanguage(model::Language::Cpp), hasDoc);
-    set(C::LanguagePython, setLanguage(model::Language::Python), hasDoc);
-    set(C::LanguageJavaScript, setLanguage(model::Language::JavaScript), hasDoc);
-    set(C::LanguageMarkdown, setLanguage(model::Language::Markdown), hasDoc);
-    set(C::LanguageJson, setLanguage(model::Language::Json), hasDoc);
-    set(C::LanguageCMake, setLanguage(model::Language::CMake), hasDoc);
-
-    auto runTool = [this](model::ReviewTool tool) {
-        return [this, tool]() {
-            review_.runTool(tool);
-            showReviewPanel.set(true);
-            reviewTab.set(ReviewTab::Problems);
-        };
-    };
-    set(C::RunLint, runTool(model::ReviewTool::Lint));
-    set(C::RunStaticAnalysis, runTool(model::ReviewTool::StaticAnalysis));
-    set(C::RunSecurityScan, runTool(model::ReviewTool::Security));
-    set(C::RunStyleCheck, runTool(model::ReviewTool::Style));
-    set(C::RunComplexity, runTool(model::ReviewTool::Complexity));
-    set(C::RunAgentReview, runTool(model::ReviewTool::AgentReview));
-    set(C::RunAllReviews, [this]() {
-        review_.runAll();
-        showReviewPanel.set(true);
-        reviewTab.set(ReviewTab::Problems);
-    });
-    set(C::CompareWithSaved, [this]() { compareWithSaved(); }, hasDoc);
-    set(C::CompareAgentChanges, [this]() {
-        if (const model::FileChange* change = agent_.currentChange())
-            review_.setDiff("Agent change: " + change->path, change->diff);
-        showReviewPanel.set(true);
-        reviewTab.set(ReviewTab::Diff);
-    }, [this]() { return agent_.currentChange() != nullptr; });
-    set(C::AddReviewComment, [this]() { addCommentRequested.emit(); }, hasDoc);
-    set(C::NextFinding, [this]() { review_.nextFinding(+1); });
-    set(C::PreviousFinding, [this]() { review_.nextFinding(-1); });
-    set(C::ClearFindings, [this]() { review_.clearFindings(); }, [this]() { return !review_.findings().empty(); });
-
-    auto notBusy = [this]() { return !agent_.busy.get(); };
-    set(C::NewChat, [this]() { agent_.newChat(); });
-    set(C::AskAgent, [this]() {
-        if (workspace.get() == WorkspaceMode::Code)
-            showAgentPanel.set(true);
-        focusPromptRequested.emit();
-    });
-    set(C::ExplainSelection, [this]() { askAgent("Explain this code."); }, [=]() { return hasDoc() && notBusy(); });
-    set(C::RefactorSelection, [this]() { askAgent("Refactor this code for readability without changing behaviour."); },
-        [=]() { return hasDoc() && notBusy(); });
-    set(C::GenerateTests, [this]() { askAgent("Write unit tests for this file."); }, [=]() { return hasDoc() && notBusy(); });
-    set(C::FixFindings, [this]() {
-        askAgent("Fix the open review findings (" + std::to_string(review_.visibleFindings().size()) + ").");
-    }, notBusy);
-    set(C::AcceptAllChanges, [this]() { agent_.acceptAll(); }, [this]() { return agent_.pendingChangeCount() > 0; });
-    set(C::RejectAllChanges, [this]() { agent_.rejectAll(); }, [this]() { return agent_.pendingChangeCount() > 0; });
-    set(C::StopAgent, [this]() { agent_.stop(); }, [this]() { return agent_.busy.get(); });
-
-    set(C::SwitchToAgentMode, [this]() { workspace.set(WorkspaceMode::Agent); });
-    set(C::SwitchToCodeMode, [this]() { workspace.set(WorkspaceMode::Code); });
-    set(C::ToggleWorkspaceMode, [this]() {
-        workspace.set(workspace.get() == WorkspaceMode::Agent ? WorkspaceMode::Code : WorkspaceMode::Agent);
-    });
-
-    set(C::StartRecording, [this]() {
-        recording.set(true);
-        statusText.set("Recording macro... (dummy)");
-    }, [this]() { return !recording.get(); });
-    set(C::StopRecording, [this]() {
-        recording.set(false);
-        statusText.set("Macro recording stopped (dummy)");
-    }, [this]() { return recording.get(); });
-    set(C::PlayMacro, stub(C::PlayMacro));
-    set(C::HashSha256, stub(C::HashSha256));
-    set(C::Preferences, [this]() { preferencesRequested.emit(); });
-    set(C::About, [this]() { aboutRequested.emit(); });
-    set(C::Exit, [this]() { quitRequested.emit(); });
-}
-
-bool NotepadViewModel::isChecked(CommandId id) const
-{
-    using C = CommandId;
-    const model::Document* doc = activeDocument();
-    switch (id) {
-    case C::ToggleExplorer: return showExplorer.get();
-    case C::ToggleReviewPanel: return showReviewPanel.get();
-    case C::ToggleAgentPanel: return showAgentPanel.get();
-    case C::ToggleWordWrap: return wordWrap.get();
-    case C::ToggleWhitespace: return showWhitespace.get();
-    case C::ToggleLineNumbers: return showLineNumbers.get();
-    case C::ToggleIndentGuides: return showIndentGuides.get();
-    case C::ToggleTheme: return darkTheme.get();
-    case C::StartRecording: return recording.get();
-    case C::SwitchToAgentMode: return workspace.get() == WorkspaceMode::Agent;
-    case C::SwitchToCodeMode: return workspace.get() == WorkspaceMode::Code;
-    case C::EolCrLf: return doc && doc->eol == model::EolMode::CrLf;
-    case C::EolLf: return doc && doc->eol == model::EolMode::Lf;
-    case C::EolCr: return doc && doc->eol == model::EolMode::Cr;
-    case C::EncodingUtf8: return doc && doc->encoding == model::Encoding::Utf8;
-    case C::EncodingUtf8Bom: return doc && doc->encoding == model::Encoding::Utf8Bom;
-    case C::EncodingUtf16Le: return doc && doc->encoding == model::Encoding::Utf16Le;
-    case C::EncodingUtf16Be: return doc && doc->encoding == model::Encoding::Utf16Be;
-    case C::EncodingAnsi: return doc && doc->encoding == model::Encoding::Ansi;
-    case C::LanguagePlainText: return doc && doc->language == model::Language::PlainText;
-    case C::LanguageCpp: return doc && doc->language == model::Language::Cpp;
-    case C::LanguagePython: return doc && doc->language == model::Language::Python;
-    case C::LanguageJavaScript: return doc && doc->language == model::Language::JavaScript;
-    case C::LanguageMarkdown: return doc && doc->language == model::Language::Markdown;
-    case C::LanguageJson: return doc && doc->language == model::Language::Json;
-    case C::LanguageCMake: return doc && doc->language == model::Language::CMake;
-    default: return false;
-    }
+    settings_.markDirty(); // the session (carets, the active tab) is always written on exit
 }
 
 // ---- Documents ----------------------------------------------------------------------------------
@@ -346,9 +111,9 @@ model::Document& NotepadViewModel::addDocument(std::string title, std::string pa
     doc->buffer.setText(text);
     doc->savedText = doc->buffer.text();
     doc->language = model::languageFromPath(doc->path.empty() ? doc->title : doc->path);
-    if (doc->language == model::Language::Python || doc->language == model::Language::Markdown ||
-        doc->language == model::Language::Json)
+    if (model::languageSpec(doc->language).lfByDefault)
         doc->eol = model::EolMode::Lf;
+    applyDetectedIndent(*doc);
     documents_.push_back(std::move(doc));
     activate(int(documents_.size()) - 1);
     return *documents_.back();
@@ -359,14 +124,201 @@ void NotepadViewModel::activate(int index)
     if (index < 0 || index >= int(documents_.size()))
         return;
     activeIndex.set(index);
+    ++revealSerial_;
     caretRevealRequested.emit();
+}
+
+int NotepadViewModel::documentIndexById(int id) const
+{
+    for (int i = 0; i < int(documents_.size()); ++i)
+        if (documents_[size_t(i)]->id == id)
+            return i;
+    return -1;
+}
+
+bool NotepadViewModel::canSaveInPlace(const model::Document& doc) const
+{
+    return !doc.path.empty();
+}
+
+void NotepadViewModel::requestCloseDocument(int index)
+{
+    if (index < 0 || index >= int(documents_.size()))
+        return;
+    const model::Document& doc = *documents_[size_t(index)];
+    if (!doc.modified) {
+        closeDocument(index);
+        return;
+    }
+    activate(index); // show what is about to be lost
+    pendingClose.set(doc.id);
+}
+
+void NotepadViewModel::resolvePendingClose(CloseChoice choice)
+{
+    const int index = documentIndexById(pendingClose.get());
+    pendingClose.set(-1);
+    if (index < 0 || choice == CloseChoice::Cancel)
+        return;
+    model::Document& doc = *documents_[size_t(index)];
+    if (choice == CloseChoice::Save) {
+        if (!canSaveInPlace(doc)) {
+            if (files_) { // untitled: Save As, closing it once saved
+                execute(CommandId::SaveAs);
+                fileDialog_.closeAfterSave = doc.id;
+            }
+            return;
+        }
+        if (!saveDocument(doc))
+            return; // not saved: keep it open
+    }
+    closeDocument(index);
+}
+
+std::vector<const model::Document*> NotepadViewModel::unsavedDocuments() const
+{
+    std::vector<const model::Document*> out;
+    for (const auto& doc : documents_)
+        if (doc->modified)
+            out.push_back(doc.get());
+    return out;
+}
+
+void NotepadViewModel::requestQuit()
+{
+    if (unsavedDocuments().empty()) {
+        quitRequested.emit();
+        return;
+    }
+    quitConfirmPending.set(true);
+}
+
+void NotepadViewModel::resolveQuit(CloseChoice choice)
+{
+    quitConfirmPending.set(false);
+    if (choice == CloseChoice::Cancel)
+        return;
+    if (choice == CloseChoice::Save) {
+        for (auto& doc : documents_)
+            if (doc->modified && (!canSaveInPlace(*doc) || !saveDocument(*doc))) {
+                activate(documentIndexById(doc->id));
+                statusText.set("Not quitting: \"" + doc->title + "\" could not be saved");
+                return;
+            }
+    }
+    quitRequested.emit();
+}
+
+void NotepadViewModel::closeWhere(const std::function<bool(int index, const model::Document&)>& close)
+{
+    const model::Document* active = activeDocument();
+    std::vector<std::unique_ptr<model::Document>> kept;
+    int unsaved = 0;
+    int keptActive = -1;
+    for (int i = 0; i < int(documents_.size()); ++i) {
+        std::unique_ptr<model::Document>& doc = documents_[size_t(i)];
+        if (close(i, *doc) && !doc->modified) {
+            history_.forget(doc->id);
+            continue;
+        }
+        if (close(i, *doc))
+            ++unsaved;
+        if (doc.get() == active)
+            keptActive = int(kept.size());
+        kept.push_back(std::move(doc));
+    }
+    documents_ = std::move(kept);
+    if (unsaved > 0)
+        statusText.set("Kept " + std::to_string(unsaved) + " document(s) open: unsaved changes");
+    activeIndex.set(-1); // force notification
+    activeIndex.set(documents_.empty() ? -1 : keptActive >= 0 ? keptActive : 0);
+    ++revealSerial_;
+}
+
+void NotepadViewModel::closeOthers(int index)
+{
+    if (index < 0 || index >= int(documents_.size()))
+        return;
+    activate(index);
+    closeWhere([index](int i, const model::Document&) { return i != index; });
+}
+
+void NotepadViewModel::closeToTheRight(int index)
+{
+    closeWhere([index](int i, const model::Document&) { return i > index; });
+}
+
+void NotepadViewModel::closeSaved()
+{
+    closeWhere([](int, const model::Document&) { return true; }); // modified ones are kept anyway
+    statusText.set(documents_.empty() ? "Closed all documents" : "Closed the saved documents");
+}
+
+void NotepadViewModel::closeAll()
+{
+    closeWhere([](int, const model::Document&) { return true; });
+}
+
+void NotepadViewModel::moveDocument(int from, int to)
+{
+    const int count = int(documents_.size());
+    if (from < 0 || from >= count || to < 0 || to >= count || from == to)
+        return;
+    const model::Document* active = activeDocument();
+    std::unique_ptr<model::Document> doc = std::move(documents_[size_t(from)]);
+    documents_.erase(documents_.begin() + from);
+    documents_.insert(documents_.begin() + to, std::move(doc));
+    for (int i = 0; i < count; ++i)
+        if (documents_[size_t(i)].get() == active)
+            activeIndex.set(i);
+}
+
+int NotepadViewModel::documentIndex(const std::string& path) const
+{
+    for (int i = 0; i < int(documents_.size()); ++i)
+        if (documents_[size_t(i)]->path == path && !path.empty())
+            return i;
+    return -1;
+}
+
+std::string NotepadViewModel::documentHint(int index) const
+{
+    if (index < 0 || index >= int(documents_.size()))
+        return {};
+    const model::Document& doc = *documents_[size_t(index)];
+    auto folders = [](const std::string& path) {
+        std::vector<std::string> parts;
+        size_t start = 0;
+        for (size_t slash = path.find('/'); slash != std::string::npos; slash = path.find('/', start)) {
+            parts.push_back(path.substr(start, slash - start));
+            start = slash + 1;
+        }
+        return parts; // without the file name
+    };
+    const std::vector<std::string> mine = folders(doc.path);
+    size_t depth = 0; // how many trailing folders tell this one apart from every namesake
+    for (int i = 0; i < int(documents_.size()); ++i) {
+        const model::Document& other = *documents_[size_t(i)];
+        if (i == index || other.title != doc.title)
+            continue;
+        const std::vector<std::string> theirs = folders(other.path);
+        size_t k = 1;
+        while (k <= mine.size() && k <= theirs.size() && mine[mine.size() - k] == theirs[theirs.size() - k])
+            ++k;
+        depth = std::max(depth, std::min(k, mine.size()));
+    }
+    std::string hint;
+    for (size_t k = mine.size() - depth; k < mine.size(); ++k)
+        hint += (hint.empty() ? "" : "/") + mine[k];
+    return hint;
 }
 
 void NotepadViewModel::closeDocument(int index)
 {
+    settings_.markDirty(); // the session
     if (index < 0 || index >= int(documents_.size()))
         return;
-    history_.erase(documents_[size_t(index)]->id);
+    history_.forget(documents_[size_t(index)]->id);
     documents_.erase(documents_.begin() + index);
     int active = activeIndex.get();
     if (index < active || active >= int(documents_.size()))
@@ -385,19 +337,351 @@ void NotepadViewModel::openFile(const std::string& path)
     for (int i = 0; i < int(documents_.size()); ++i)
         if (documents_[size_t(i)]->path == path) {
             activate(i);
+            if (documents_[size_t(i)]->onDisk)
+                remember(recentFiles_, absolutePath(path), kMaxRecentFiles); // opened again: most recent
             return;
         }
-    addDocument(fileName(path), path, dummy::fileContent(path));
-    statusText.set("Opened " + path + " (sample content)");
+    const bool absolute = FileDialogViewModel::isAbsolute(path);
+    if (absolute && !workspaceRelative(path).empty() && workspaceRelative(path) != path) {
+        openFile(workspaceRelative(path)); // inside the workspace: one document per file, relative path
+        return;
+    }
+    if ((workspaceRoot_.empty() && !absolute) || !files_) {
+        addDocument(fileName(path), path, dummy::fileContent(path));
+        statusText.set("Opened " + path + " (sample content)");
+        return;
+    }
+    std::string error;
+    std::optional<std::string> text = files_->read(absolutePath(path), &error);
+    if (!text) {
+        statusText.set("Cannot open " + path + ": " + error);
+        return;
+    }
+    // Keep the file's conventions: BOM and line endings are restored on save.
+    bool bom = text->rfind("\xEF\xBB\xBF", 0) == 0;
+    if (bom)
+        text->erase(0, 3);
+    const bool crlf = text->find("\r\n") != std::string::npos;
+    model::Document& doc = addDocument(fileName(path), path, *text);
+    doc.onDisk = true;
+    recordDiskStamp(doc);
+    remember(recentFiles_, absolutePath(path), kMaxRecentFiles);
+    doc.eol = crlf ? model::EolMode::CrLf : model::EolMode::Lf;
+    doc.encoding = bom ? model::Encoding::Utf8Bom : model::Encoding::Utf8;
+    statusText.set("Opened " + path);
+}
+
+std::string NotepadViewModel::absolutePath(const std::string& path) const
+{
+    const bool absolute = !path.empty() && (path[0] == '/' || (path.size() > 1 && path[1] == ':'));
+    return absolute || workspaceRoot_.empty() ? path : workspaceRoot_ + "/" + path;
+}
+
+bool NotepadViewModel::saveDocument(model::Document& doc)
+{
+    if (!doc.onDisk || !files_) {
+        doc.savedText = doc.buffer.text();
+        doc.modified = false;
+        statusText.set("Saved " + doc.title + " (sample document: nothing was written to disk)");
+        return true;
+    }
+    if (doc.hasDiskStamp) {
+        const std::optional<interfaces::FileStamp> now = files_->stamp(absolutePath(doc.path));
+        if (now && now->exists && (now->size != doc.diskSize || now->modified != doc.diskModified)) {
+            doc.diskState = model::Document::DiskState::Changed;
+            statusText.set(doc.title + " changed on disk since it was opened: Reload, Keep mine (then save), or Compare");
+            return false;
+        }
+    }
+    const char* eol = doc.eol == model::EolMode::CrLf ? "\r\n" : doc.eol == model::EolMode::Cr ? "\r" : "\n";
+    std::string data = doc.buffer.text(eol);
+    if (doc.encoding == model::Encoding::Utf8Bom)
+        data.insert(0, "\xEF\xBB\xBF");
+    std::string error;
+    if (!files_->write(absolutePath(doc.path), data, &error)) {
+        statusText.set("Cannot save " + doc.path + ": " + error);
+        return false;
+    }
+    doc.savedText = doc.buffer.text();
+    doc.modified = false;
+    recordDiskStamp(doc);
+    statusText.set("Saved " + doc.path);
+    return true;
+}
+
+void NotepadViewModel::refreshExplorer()
+{
+    if (workspaceRoot_.empty() || !files_)
+        return;
+    // Build the explorer tree, skipping version control, build output and other bulk folders.
+    const std::vector<std::string> skipped = {"build", "bin", "out", "ref", "node_modules", "_deps"};
+    int budget = 20000;
+    auto scan = [&](auto&& self, const std::string& relative, ExplorerItem& into, int depth) -> void {
+        for (const interfaces::DirectoryEntry& e : files_->list(relative.empty() ? workspaceRoot_ : workspaceRoot_ + "/" + relative)) {
+            if (--budget < 0)
+                return;
+            if (e.name.empty() || e.name[0] == '.')
+                continue;
+            if (e.isDirectory && depth == 0 && std::find(skipped.begin(), skipped.end(), e.name) != skipped.end())
+                continue;
+            ExplorerItem item{e.name, relative.empty() ? e.name : relative + "/" + e.name, e.isDirectory, {}};
+            if (e.isDirectory && depth < 8)
+                self(self, item.path, item, depth + 1);
+            into.children.push_back(std::move(item));
+        }
+    };
+    ExplorerItem tree{workspaceRoot_.substr(workspaceRoot_.find_last_of('/') + 1), "", true, {}};
+    scan(scan, "", tree, 0);
+
+    explorer_ = std::move(tree);
+}
+
+void NotepadViewModel::remember(std::vector<std::string>& list, const std::string& path, size_t max)
+{
+    std::string p = path;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    list.erase(std::remove(list.begin(), list.end(), p), list.end());
+    list.insert(list.begin(), p);
+    if (list.size() > max)
+        list.resize(max);
+    settings_.markDirty();
+}
+
+void NotepadViewModel::openRecent(const std::string& path)
+{
+    const bool folder = std::find(recentFolders_.begin(), recentFolders_.end(), path) != recentFolders_.end();
+    if (folder ? openFolder(path) : (files_ && files_->read(path).has_value())) {
+        if (!folder)
+            openFile(path);
+        return;
+    }
+    // Gone: forget it.
+    for (std::vector<std::string>* list : {&recentFiles_, &recentFolders_})
+        list->erase(std::remove(list->begin(), list->end(), path), list->end());
+    settings_.markDirty();
+    statusText.set(path + " no longer exists; removed from the recent list");
+}
+
+void NotepadViewModel::clearRecent()
+{
+    recentFiles_.clear();
+    recentFolders_.clear();
+    settings_.markDirty();
+}
+
+bool NotepadViewModel::restoreSession()
+{
+    if (!files_ || !savedSession_.isObject())
+        return false;
+    const std::string workspace = savedSession_.getString("workspace");
+    const model::Json* docs = savedSession_.find("documents");
+    const bool hasDocs = docs && docs->isArray() && !docs->items().empty();
+    if (workspace.empty() && !hasDocs)
+        return false;
+    if (!workspace.empty() && !openFolder(workspace))
+        return false;
+    if (hasDocs) {
+        while (!documents_.empty())
+            closeDocument(0);
+        for (const model::Json& d : docs->items()) {
+            const std::string path = d.getString("path");
+            if (path.empty() || !files_->read(path))
+                continue; // deleted since
+            openFile(path);
+            if (model::Document* doc = activeDocument())
+                doc->caret = doc->anchor = doc->buffer.clamp({int(d.getNumber("line", 0)), 0});
+        }
+        const int active = int(savedSession_.getNumber("active", 0));
+        if (active >= 0 && active < int(documents_.size()))
+            activate(active);
+    }
+    statusText.set("Restored the last session" + (workspace.empty() ? std::string() : ": " + workspace));
+    return !documents_.empty() || !workspace.empty();
+}
+
+void NotepadViewModel::recordDiskStamp(model::Document& doc)
+{
+    const std::optional<interfaces::FileStamp> stamp = files_ && doc.onDisk ? files_->stamp(absolutePath(doc.path)) : std::nullopt;
+    doc.hasDiskStamp = stamp && stamp->exists;
+    doc.diskSize = stamp ? stamp->size : 0;
+    doc.diskModified = stamp ? stamp->modified : 0;
+    doc.diskState = model::Document::DiskState::InSync;
+}
+
+std::optional<std::string> NotepadViewModel::readDiskText(const model::Document& doc) const
+{
+    std::optional<std::string> text = files_ ? files_->read(absolutePath(doc.path)) : std::nullopt;
+    if (text && text->rfind("\xEF\xBB\xBF", 0) == 0)
+        text->erase(0, 3);
+    return text;
+}
+
+void NotepadViewModel::checkDiskChanges()
+{
+    if (!files_)
+        return;
+    for (auto& docPtr : documents_) {
+        model::Document& doc = *docPtr;
+        if (!doc.onDisk || !doc.hasDiskStamp)
+            continue;
+        const std::optional<interfaces::FileStamp> now = files_->stamp(absolutePath(doc.path));
+        if (!now)
+            continue;
+        if (!now->exists) {
+            if (doc.diskState != model::Document::DiskState::Deleted) {
+                doc.diskState = model::Document::DiskState::Deleted;
+                statusText.set(doc.title + " was deleted on disk (saving recreates it)");
+            }
+            continue;
+        }
+        if (now->size == doc.diskSize && now->modified == doc.diskModified) {
+            if (doc.diskState == model::Document::DiskState::Deleted)
+                doc.diskState = model::Document::DiskState::InSync; // it came back
+            continue;
+        }
+        if (!doc.modified) {
+            reloadFromDisk(doc); // nothing of yours to lose
+            statusText.set("Reloaded " + doc.title + ": it changed on disk");
+        } else if (doc.diskState != model::Document::DiskState::Changed) {
+            doc.diskState = model::Document::DiskState::Changed;
+            statusText.set(doc.title + " changed on disk, and you have unsaved changes: Reload, Keep mine or Compare");
+        }
+    }
+}
+
+void NotepadViewModel::reloadFromDisk(model::Document& doc)
+{
+    const std::optional<std::string> text = readDiskText(doc);
+    if (!text)
+        return;
+    const int line = doc.caret.line;
+    doc.buffer.setText(*text);
+    doc.savedText = doc.buffer.text();
+    doc.modified = false;
+    doc.caret = doc.anchor = doc.buffer.clamp({line, 0});
+    history_.forget(doc.id); // the old steps no longer apply to this text
+    ++doc.revision;
+    recordDiskStamp(doc);
+    refreshFind();
+}
+
+void NotepadViewModel::keepMine(model::Document& doc)
+{
+    recordDiskStamp(doc); // accept the file as it is now: the next save replaces it
+    doc.diskState = model::Document::DiskState::InSync;
+    statusText.set("Keeping your version of " + doc.title + " (save to write it)");
+}
+
+void NotepadViewModel::compareWithDisk(model::Document& doc)
+{
+    const std::optional<std::string> disk = readDiskText(doc);
+    std::vector<model::DiffRow> rows = model::diffLines(model::splitLines(disk.value_or(std::string())), model::splitLines(doc.buffer.text()));
+    review_.setDiff(doc.title + ": on disk vs yours", std::move(rows));
+    showPanel.set(true);
+    panelTab.set(PanelTab::Diff);
+}
+
+std::string NotepadViewModel::workspaceRelative(const std::string& path) const
+{
+    if (workspaceRoot_.empty() || !FileDialogViewModel::isAbsolute(path))
+        return path;
+    std::string root = workspaceRoot_, p = path;
+    std::replace(root.begin(), root.end(), '\\', '/');
+    std::replace(p.begin(), p.end(), '\\', '/');
+    auto lower = [](std::string s) {
+#if defined(_WIN32)
+        for (char& c : s)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+#endif
+        return s;
+    };
+    if (lower(p).rfind(lower(root) + "/", 0) == 0)
+        return p.substr(root.size() + 1);
+    return path;
+}
+
+bool NotepadViewModel::saveDocumentAs(model::Document& doc, const std::string& path)
+{
+    if (!files_)
+        return false;
+    const std::string previousPath = doc.path;
+    const bool previousOnDisk = doc.onDisk;
+    doc.path = workspaceRelative(path);
+    doc.onDisk = true;
+    if (!saveDocument(doc)) {
+        doc.path = previousPath;
+        doc.onDisk = previousOnDisk;
+        return false;
+    }
+    doc.title = fileName(doc.path);
+    doc.language = model::languageFromPath(doc.path);
+    remember(recentFiles_, absolutePath(doc.path), kMaxRecentFiles);
+    ++revealSerial_;
+    refreshExplorer();
+    return true;
+}
+
+std::string NotepadViewModel::readWorkspaceFile(const std::string& path) const
+{
+    for (const auto& doc : documents_)
+        if ((doc->path.empty() ? doc->title : doc->path) == path)
+            return doc->buffer.text();
+    if (!workspaceRoot_.empty() && files_)
+        return files_->read(absolutePath(path)).value_or(std::string());
+    return dummy::fileContent(path);
+}
+
+bool NotepadViewModel::writeWorkspaceFile(const std::string& path, const std::string& text)
+{
+    if (workspaceRoot_.empty() || !files_)
+        return false;
+    const std::string full = absolutePath(path);
+    const size_t slash = full.find_last_of('/');
+    if (slash != std::string::npos)
+        files_->createDirectories(full.substr(0, slash));
+    return files_->write(full, text);
+}
+
+bool NotepadViewModel::openFolder(const std::string& path)
+{
+    if (!files_ || !files_->isDirectory(path)) {
+        statusText.set("Cannot open folder " + path);
+        return false;
+    }
+    std::string root = files_->absolute(path);
+    while (root.size() > 1 && root.back() == '/')
+        root.pop_back();
+    workspaceRoot_ = root;
+    refreshExplorer();
+    remember(recentFolders_, root, kMaxRecentFolders);
+    while (!documents_.empty())
+        closeDocument(0);
+    // A real folder: no samples. The agent chat goes to the agent CLI, the review tools run the
+    // configured commands.
+    agent_.goLive(agentCli_, root);
+    review_.goLive(processes_, agentCli_, root, [this]() {
+        const model::Document* doc = activeDocument();
+        return doc && doc->onDisk ? absolutePath(doc->path) : std::string();
+    });
+    for (const ExplorerItem& item : explorer_.children)
+        if (!item.isDirectory && (item.name == "README.md" || item.name == "readme.md")) {
+            openFile(item.path);
+            break;
+        }
+    statusText.set("Opened folder " + root);
+    return true;
 }
 
 void NotepadViewModel::openStartupDocuments(const std::vector<std::string>& arguments)
 {
-    openFile(dummy::kWelcomePath);
-    openFile("src/main.cpp");
+    if (workspaceRoot_.empty()) {
+        openFile(dummy::kWelcomePath);
+        openFile("src/main.cpp");
+    }
     for (const std::string& argument : arguments)
         openFile(argument);
-    statusText.set("Ready - running on sample data, no services connected");
+    if (workspaceRoot_.empty())
+        statusText.set("Ready - running on sample data (open a folder: EasyNotepad <folder>)");
 }
 
 void NotepadViewModel::navigateTo(const std::string& path, int line)
@@ -460,7 +744,35 @@ void NotepadViewModel::insertText(std::string_view text)
     beginEdit(text.size() == 1 && text[0] != '\n' ? EditKind::Typing : EditKind::Other);
     model::TextPos at = doc->buffer.erase(doc->selectionStart(), doc->selectionEnd());
     doc->caret = doc->anchor = doc->buffer.insert(at, text);
+    // Typing a closer ("}", "</", "endif(", "fi ", "else:") moves its line to the opener's indent.
+    if (smartIndent.get() && text.size() == 1 && model::closesIndent(text[0], model::languageSpec(doc->language)))
+        reindentClosingLine(*doc, doc->caret.line);
+    // Closing a continued block comment: " * */" becomes " */".
+    if (smartIndent.get() && text == "/" && model::languageSpec(doc->language).blockCommentStart == "/*") {
+        const std::string& line = doc->buffer.line(doc->caret.line);
+        const size_t ws = model::leadingWhitespace(line).size();
+        if (line.compare(ws, std::string::npos, "* */") == 0 && doc->caret.column == int(line.size())) {
+            doc->buffer.erase({doc->caret.line, int(ws)}, {doc->caret.line, int(ws) + 2});
+            doc->caret.column -= 2;
+            doc->anchor = doc->caret;
+        }
+    }
     endEdit();
+}
+
+bool NotepadViewModel::reindentClosingLine(model::Document& doc, int line)
+{
+    const std::optional<std::string> target = model::closingIndent(doc.buffer, line, model::languageSpec(doc.language), doc.indent);
+    const std::string current = model::leadingWhitespace(doc.buffer.line(line));
+    if (!target || *target == current)
+        return false;
+    doc.buffer.erase({line, 0}, {line, int(current.size())});
+    doc.buffer.insert({line, 0}, *target);
+    const int delta = int(target->size()) - int(current.size());
+    for (model::TextPos* p : {&doc.caret, &doc.anchor})
+        if (p->line == line)
+            p->column = std::max(int(target->size()), p->column + delta);
+    return true;
 }
 
 void NotepadViewModel::newline()
@@ -468,8 +780,67 @@ void NotepadViewModel::newline()
     model::Document* doc = activeDocument();
     if (!doc)
         return;
-    const std::string indent = leadingWhitespace(doc->buffer.line(doc->selectionStart().line));
-    insertText("\n" + indent);
+    if (!smartIndent.get()) {
+        const std::string indent = leadingWhitespace(doc->buffer.line(doc->selectionStart().line));
+        insertText("\n" + indent);
+        return;
+    }
+    beginEdit(EditKind::Other);
+    doc->caret = doc->anchor = doc->buffer.erase(doc->selectionStart(), doc->selectionEnd());
+    const model::LanguageSpec& spec = model::languageSpec(doc->language);
+    reindentClosingLine(*doc, doc->caret.line); // "end" / "fi" typed without a space after it
+    const model::NewlineEdit e = model::smartNewline(doc->buffer, doc->caret, spec, doc->indent);
+    model::TextPos from{doc->caret.line, doc->caret.column - e.eraseBefore};
+    model::TextPos to{doc->caret.line, doc->caret.column + e.eraseAfter};
+    model::TextPos at = doc->buffer.erase(from, to);
+    // Caret after the first part (the new line's indent); the rest (a split-off closer) follows it.
+    doc->caret = doc->buffer.insert(at, e.text.substr(0, size_t(e.caretOffset)));
+    if (size_t(e.caretOffset) < e.text.size())
+        doc->buffer.insert(doc->caret, e.text.substr(size_t(e.caretOffset)));
+    doc->anchor = doc->caret;
+    endEdit();
+}
+
+void NotepadViewModel::insertIndent()
+{
+    model::Document* doc = activeDocument();
+    if (!doc)
+        return;
+    if (doc->indent.tabs) {
+        insertText("\t");
+        return;
+    }
+    // Spaces up to the next stop, measured in visual columns (tabs expand, UTF-8 counts once).
+    const model::TextPos start = doc->selectionStart();
+    const std::string& line = doc->buffer.line(start.line);
+    const int width = std::max(1, doc->indent.width);
+    int column = 0;
+    for (int i = 0; i < start.column && i < int(line.size()); ++i) {
+        if (line[size_t(i)] == '\t')
+            column = (column / width + 1) * width;
+        else if (!model::isUtf8Continuation(line[size_t(i)]))
+            ++column;
+    }
+    insertText(std::string(size_t(width - column % width), ' '));
+}
+
+void NotepadViewModel::setIndentStyle(model::IndentStyle style)
+{
+    model::Document* doc = activeDocument();
+    if (!doc)
+        return;
+    style.width = std::clamp(style.width, 1, 16);
+    doc->indent = style;
+    doc->indentDetected = false; // chosen by the user from now on
+    statusText.set(std::string("Indent: ") + (style.tabs ? "tabs" : "spaces") + ", width " + std::to_string(style.width) +
+                   " (Convert re-writes existing lines)");
+}
+
+void NotepadViewModel::applyDetectedIndent(model::Document& doc)
+{
+    const std::optional<model::IndentStyle> found = model::detectIndent(doc.buffer);
+    doc.indent = found ? *found : indentFor(doc.language);
+    doc.indentDetected = found.has_value();
 }
 
 void NotepadViewModel::backspace()
@@ -484,7 +855,17 @@ void NotepadViewModel::backspace()
     if (doc->caret == model::TextPos{0, 0})
         return;
     beginEdit(EditKind::Deleting);
-    doc->caret = doc->anchor = doc->buffer.erase(doc->buffer.prev(doc->caret), doc->caret);
+    // In leading spaces, one indent level at a time (back to the previous stop).
+    const std::string& line = doc->buffer.line(doc->caret.line);
+    const int column = doc->caret.column;
+    model::TextPos from = doc->buffer.prev(doc->caret);
+    if (smartIndent.get() && !doc->indent.tabs && column > 0 && int(model::leadingWhitespace(line).size()) >= column &&
+        line.find('\t') >= size_t(column)) {
+        const int width = std::max(1, doc->indent.width);
+        const int remove = column % width == 0 ? width : column % width;
+        from = {doc->caret.line, column - std::min(remove, column)};
+    }
+    doc->caret = doc->anchor = doc->buffer.erase(from, doc->caret);
     endEdit();
 }
 
@@ -518,6 +899,7 @@ void NotepadViewModel::goToLine(int line)
 {
     if (!activeDocument())
         return;
+    revealLine(line);
     setCaret({line, 0}, false);
     caretRevealRequested.emit();
 }
@@ -538,24 +920,17 @@ std::string NotepadViewModel::selectionContextLabel() const
 void NotepadViewModel::beginEdit(EditKind kind)
 {
     model::Document* doc = activeDocument();
-    History& h = history_[doc->id];
-    // Consecutive typing (or deleting) at the caret coalesces into one undo step.
-    const bool coalesce = kind != EditKind::Other && kind == h.lastKind && doc->caret == h.lastCaret &&
-                          !doc->hasSelection();
-    if (!coalesce) {
-        h.undo.push_back({doc->buffer.text(), doc->caret, doc->anchor});
-        if (h.undo.size() > kMaxUndo)
-            h.undo.erase(h.undo.begin());
-    }
-    h.redo.clear();
-    h.lastKind = kind;
+    revealLine(doc->caret.line); // never edit text hidden behind a summary
+    history_.begin(*doc, kind);
 }
 
 void NotepadViewModel::endEdit()
 {
     model::Document* doc = activeDocument();
-    history_[doc->id].lastCaret = doc->caret;
-    doc->modified = doc->buffer.text() != doc->savedText;
+    if (!history_.end(*doc))
+        return; // a nested edit: the outer one finishes it
+    ++doc->revision;
+    doc->modified = !doc->buffer.equals(doc->savedText);
     refreshFind();
     caretRevealRequested.emit();
 }
@@ -563,24 +938,27 @@ void NotepadViewModel::endEdit()
 bool NotepadViewModel::canUndo() const
 {
     const model::Document* doc = activeDocument();
-    auto it = doc ? history_.find(doc->id) : history_.end();
-    return it != history_.end() && !it->second.undo.empty();
+    return doc && history_.canUndo(doc->id);
+}
+
+size_t NotepadViewModel::historyBytes() const
+{
+    const model::Document* doc = activeDocument();
+    return doc ? history_.bytes(doc->id) : 0;
 }
 
 bool NotepadViewModel::canRedo() const
 {
     const model::Document* doc = activeDocument();
-    auto it = doc ? history_.find(doc->id) : history_.end();
-    return it != history_.end() && !it->second.redo.empty();
+    return doc && history_.canRedo(doc->id);
 }
 
-void NotepadViewModel::restore(const Snapshot& snapshot)
+void NotepadViewModel::afterHistoryMove(model::Document& doc)
 {
-    model::Document* doc = activeDocument();
-    doc->buffer.setText(snapshot.text);
-    doc->caret = doc->buffer.clamp(snapshot.caret);
-    doc->anchor = doc->buffer.clamp(snapshot.anchor);
-    doc->modified = doc->buffer.text() != doc->savedText;
+    doc.caret = doc.buffer.clamp(doc.caret);
+    doc.anchor = doc.buffer.clamp(doc.anchor);
+    doc.modified = !doc.buffer.equals(doc.savedText);
+    ++doc.revision;
     refreshFind();
     caretRevealRequested.emit();
 }
@@ -588,235 +966,15 @@ void NotepadViewModel::restore(const Snapshot& snapshot)
 void NotepadViewModel::undo()
 {
     model::Document* doc = activeDocument();
-    History& h = history_[doc->id];
-    h.redo.push_back({doc->buffer.text(), doc->caret, doc->anchor});
-    Snapshot snapshot = std::move(h.undo.back());
-    h.undo.pop_back();
-    h.lastKind = EditKind::Other;
-    restore(snapshot);
+    history_.undo(*doc);
+    afterHistoryMove(*doc);
 }
 
 void NotepadViewModel::redo()
 {
     model::Document* doc = activeDocument();
-    History& h = history_[doc->id];
-    h.undo.push_back({doc->buffer.text(), doc->caret, doc->anchor});
-    Snapshot snapshot = std::move(h.redo.back());
-    h.redo.pop_back();
-    h.lastKind = EditKind::Other;
-    restore(snapshot);
-}
-
-// ---- Line operations ----------------------------------------------------------------------------
-
-void NotepadViewModel::selectedLines(int& first, int& last) const
-{
-    const model::Document* doc = activeDocument();
-    first = doc->selectionStart().line;
-    last = doc->selectionEnd().line;
-    // A selection ending at the start of a line does not include that line.
-    if (last > first && doc->selectionEnd().column == 0)
-        --last;
-}
-
-void NotepadViewModel::transformLines(const std::function<void(std::vector<std::string>&)>& transform)
-{
-    model::Document* doc = activeDocument();
-    int first = 0, last = 0;
-    selectedLines(first, last);
-    const bool hadSelection = doc->hasSelection();
-    std::vector<std::string> lines;
-    for (int l = first; l <= last; ++l)
-        lines.push_back(doc->buffer.line(l));
-
-    beginEdit(EditKind::Other);
-    transform(lines);
-    if (lines.empty())
-        lines.emplace_back();
-    if (first == 0 && last == doc->buffer.lineCount() - 1) {
-        std::string joined;
-        for (size_t k = 0; k < lines.size(); ++k)
-            joined += (k ? "\n" : "") + lines[k];
-        doc->buffer.setText(joined);
-    } else {
-        for (int l = last; l >= first; --l)
-            doc->buffer.eraseLine(l);
-        for (size_t k = 0; k < lines.size(); ++k)
-            doc->buffer.insertLine(first + int(k), lines[k]);
-    }
-    const int newLast = first + int(lines.size()) - 1;
-    if (hadSelection)
-        setSelection({first, 0}, {newLast, int(doc->buffer.line(newLast).size())});
-    else
-        setCaret(doc->caret, false);
-    endEdit();
-}
-
-void NotepadViewModel::transformSelection(const std::function<std::string(const std::string&)>& transform)
-{
-    model::Document* doc = activeDocument();
-    if (!doc->hasSelection()) {
-        transformLines([&](std::vector<std::string>& lines) {
-            for (std::string& l : lines)
-                l = transform(l);
-        });
-        return;
-    }
-    const model::TextPos start = doc->selectionStart();
-    const std::string replaced = transform(selectedText());
-    insertText(replaced);
-    setSelection(start, doc->caret);
-}
-
-void NotepadViewModel::duplicateLines()
-{
-    model::Document* doc = activeDocument();
-    int first = 0, last = 0;
-    selectedLines(first, last);
-    beginEdit(EditKind::Other);
-    for (int l = last; l >= first; --l)
-        doc->buffer.insertLine(last + 1, doc->buffer.line(l));
-    const int count = last - first + 1;
-    doc->caret.line += count;
-    doc->anchor.line += count;
-    endEdit();
-}
-
-void NotepadViewModel::deleteLines()
-{
-    model::Document* doc = activeDocument();
-    int first = 0, last = 0;
-    selectedLines(first, last);
-    beginEdit(EditKind::Other);
-    for (int l = last; l >= first; --l)
-        doc->buffer.eraseLine(l);
-    setCaret({first, 0}, false);
-    endEdit();
-}
-
-void NotepadViewModel::moveLines(int direction)
-{
-    model::Document* doc = activeDocument();
-    int first = 0, last = 0;
-    selectedLines(first, last);
-    if ((direction < 0 && first == 0) || (direction > 0 && last + 1 >= doc->buffer.lineCount()))
-        return;
-    beginEdit(EditKind::Other);
-    if (direction < 0) {
-        std::string above = doc->buffer.line(first - 1);
-        doc->buffer.eraseLine(first - 1);
-        doc->buffer.insertLine(last, std::move(above));
-    } else {
-        std::string below = doc->buffer.line(last + 1);
-        doc->buffer.eraseLine(last + 1);
-        doc->buffer.insertLine(first, std::move(below));
-    }
-    doc->caret.line += direction;
-    doc->anchor.line += direction;
-    endEdit();
-}
-
-void NotepadViewModel::toggleComment()
-{
-    model::Document* doc = activeDocument();
-    const char* token = lineCommentToken(doc->language);
-    if (!token) {
-        statusText.set(std::string("No line comment syntax for ") + model::languageName(doc->language));
-        return;
-    }
-    const std::string prefix = std::string(token) + " ";
-    transformLines([&](std::vector<std::string>& lines) {
-        bool allCommented = true;
-        size_t indent = std::string::npos;
-        for (const std::string& l : lines) {
-            const size_t ws = leadingWhitespace(l).size();
-            if (ws == l.size())
-                continue; // blank lines do not count
-            indent = std::min(indent, ws);
-            if (l.compare(ws, std::strlen(token), token) != 0)
-                allCommented = false;
-        }
-        if (indent == std::string::npos)
-            return;
-        for (std::string& l : lines) {
-            const size_t ws = leadingWhitespace(l).size();
-            if (ws == l.size())
-                continue;
-            if (allCommented) {
-                const size_t len = l.compare(ws, prefix.size(), prefix) == 0 ? prefix.size() : std::strlen(token);
-                l.erase(ws, len);
-            } else {
-                l.insert(indent, prefix);
-            }
-        }
-    });
-}
-
-void NotepadViewModel::trimTrailing()
-{
-    model::Document* doc = activeDocument();
-    beginEdit(EditKind::Other);
-    for (int l = 0; l < doc->buffer.lineCount(); ++l) {
-        std::string line = doc->buffer.line(l);
-        while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
-            line.pop_back();
-        doc->buffer.setLine(l, std::move(line));
-    }
-    doc->caret = doc->buffer.clamp(doc->caret);
-    doc->anchor = doc->buffer.clamp(doc->anchor);
-    endEdit();
-}
-
-void NotepadViewModel::toggleBookmark()
-{
-    model::Document* doc = activeDocument();
-    const int line = doc->caret.line;
-    if (!doc->bookmarks.erase(line))
-        doc->bookmarks.insert(line);
-}
-
-void NotepadViewModel::jumpToBookmark(int direction)
-{
-    model::Document* doc = activeDocument();
-    if (doc->bookmarks.empty()) {
-        statusText.set("No bookmarks in " + doc->title);
-        return;
-    }
-    const int line = doc->caret.line;
-    int target = direction > 0 ? *doc->bookmarks.begin() : *doc->bookmarks.rbegin();
-    if (direction > 0) {
-        auto it = doc->bookmarks.upper_bound(line);
-        if (it != doc->bookmarks.end())
-            target = *it;
-    } else {
-        auto it = doc->bookmarks.lower_bound(line);
-        if (it != doc->bookmarks.begin())
-            target = *std::prev(it);
-    }
-    goToLine(target);
-}
-
-void NotepadViewModel::compareWithSaved()
-{
-    const model::Document* doc = activeDocument();
-    std::vector<model::DiffRow> rows = model::diffLines(model::splitLines(doc->savedText), model::splitLines(doc->buffer.text()));
-    const model::DiffStats stats = model::diffStats(rows);
-    review_.setDiff(doc->title + ": saved vs current", std::move(rows));
-    showReviewPanel.set(true);
-    reviewTab.set(ReviewTab::Diff);
-    statusText.set("Compare with saved: +" + std::to_string(stats.added) + " -" + std::to_string(stats.removed));
-}
-
-void NotepadViewModel::askAgent(const std::string& prompt)
-{
-    if (workspace.get() == WorkspaceMode::Code)
-        showAgentPanel.set(true);
-    agent_.submitPrompt(prompt, selectionContextLabel());
-}
-
-void NotepadViewModel::setZoom(float value)
-{
-    zoom.set(std::clamp(std::round(value * 10.0f) / 10.0f, kMinZoom, kMaxZoom));
+    history_.redo(*doc);
+    afterHistoryMove(*doc);
 }
 
 // ---- Find ---------------------------------------------------------------------------------------
@@ -902,9 +1060,416 @@ void NotepadViewModel::replaceAll()
     statusText.set("Replaced " + std::to_string(count) + " occurrence(s)");
 }
 
+// ---- Ribbon customization -----------------------------------------------------------------------
+
+bool NotepadViewModel::isPinned(CommandId id) const
+{
+    return std::find(pinned_.begin(), pinned_.end(), id) != pinned_.end();
+}
+
+void NotepadViewModel::setPinned(CommandId id, bool pinned)
+{
+    const auto it = std::find(pinned_.begin(), pinned_.end(), id);
+    if (pinned && it == pinned_.end())
+        pinned_.push_back(id);
+    else if (!pinned && it != pinned_.end())
+        pinned_.erase(it);
+    settings_.markDirty();
+}
+
+void NotepadViewModel::addCustomAction(std::string name, std::string command)
+{
+    if (name.empty() || command.empty())
+        return;
+    customActions_.push_back({std::move(name), std::move(command)});
+    statusText.set("Added \"" + customActions_.back().name + "\" to My Tools");
+    settings_.markDirty();
+}
+
+void NotepadViewModel::removeCustomAction(int index)
+{
+    if (index >= 0 && index < int(customActions_.size()))
+        customActions_.erase(customActions_.begin() + index);
+    settings_.markDirty();
+}
+
+void NotepadViewModel::runCustomAction(int index)
+{
+    if (index < 0 || index >= int(customActions_.size()))
+        return;
+    if (!terminal_.supported()) {
+        statusText.set("Custom actions need a terminal, which this platform does not have");
+        return;
+    }
+    showPanelTab(PanelTab::Terminal);
+    if (!terminal_.active() || terminal_.active()->exited)
+        terminal_.newTerminal(0);
+    if (!terminal_.active())
+        return;
+    terminal_.sendInput(customActions_[size_t(index)].command + "\r");
+    statusText.set("Running " + customActions_[size_t(index)].name + ": " + customActions_[size_t(index)].command);
+}
+
+// ---- Reading ------------------------------------------------------------------------------------
+
+const char* NotepadViewModel::detailLevelName(int level)
+{
+    static const char* const names[kDetailLevels] = {"Full", "Balanced", "Overview", "Outline"};
+    return names[std::clamp(level, 0, kDetailLevels - 1)];
+}
+
+const char* NotepadViewModel::detailLevelDescription(int level)
+{
+    static const char* const descriptions[kDetailLevels] = {
+        "every line of code",
+        "long functions and blocks collapse into AI summaries",
+        "every function body collapses into its AI summary",
+        "only the top-level structure, each part summarized",
+    };
+    return descriptions[std::clamp(level, 0, kDetailLevels - 1)];
+}
+
+const std::vector<model::OutlineNode>& NotepadViewModel::outline() const
+{
+    static const std::vector<model::OutlineNode> none;
+    const model::Document* doc = activeDocument();
+    if (!doc)
+        return none;
+    if (outline_.documentId != doc->id || outline_.revision != doc->revision || outline_.language != doc->language ||
+        outline_.mode != foldingMode.get()) {
+        if (outline_.mode != foldingMode.get())
+            outline_.summaries.clear();
+        outline_.mode = foldingMode.get();
+        const bool sameDocument = outline_.documentId == doc->id;
+        outline_.documentId = doc->id;
+        outline_.revision = doc->revision;
+        outline_.language = doc->language;
+        outline_.nodes = model::buildOutline(doc->buffer, doc->language, foldingMode.get());
+        if (!sameDocument)
+            outline_.summaries.clear();
+    }
+    return outline_.nodes;
+}
+
+const model::OutlineNode* NotepadViewModel::regionAt(int line) const
+{
+    const model::OutlineNode* found = nullptr;
+    for (const model::OutlineNode& n : outline())
+        if (n.startLine == line)
+            found = &n; // children come after parents: keep the innermost
+    return found;
+}
+
+const std::string& NotepadViewModel::summary(const model::OutlineNode& node) const
+{
+    auto it = outline_.summaries.find(node.startLine);
+    if (it == outline_.summaries.end()) {
+        const model::Document* doc = activeDocument();
+        std::vector<std::string> parts;
+        const auto& nodes = outline();
+        const int self = int(&node - nodes.data());
+        for (const model::OutlineNode& n : nodes)
+            if (n.parent == self)
+                parts.push_back(n.name);
+        it = outline_.summaries.emplace(node.startLine, dummy::summarize(doc->path.empty() ? doc->title : doc->path, node,
+                                                                         doc->buffer, parts)).first;
+    }
+    return it->second;
+}
+
+bool NotepadViewModel::isFolded(const model::OutlineNode& node) const
+{
+    const model::Document* doc = activeDocument();
+    return doc && doc->folded.count(node.startLine) > 0;
+}
+
+void NotepadViewModel::setFolded(int startLine, bool folded)
+{
+    model::Document* doc = activeDocument();
+    if (!doc)
+        return;
+    if (folded)
+        doc->folded.insert(startLine);
+    else
+        doc->folded.erase(startLine);
+    // Keep the caret visible: a caret inside a newly folded region moves to its header.
+    if (const model::OutlineNode* n = regionAt(startLine); folded && n && n->contains(doc->caret.line))
+        setCaret({n->startLine, 0}, false);
+}
+
+void NotepadViewModel::toggleFold(int startLine)
+{
+    if (const model::Document* doc = activeDocument())
+        setFolded(startLine, doc->folded.count(startLine) == 0);
+}
+
+void NotepadViewModel::foldAll()
+{
+    for (const model::OutlineNode& n : outline())
+        setFolded(n.startLine, true);
+}
+
+void NotepadViewModel::unfoldAll()
+{
+    if (model::Document* doc = activeDocument())
+        doc->folded.clear();
+}
+
+void NotepadViewModel::revealLine(int line)
+{
+    model::Document* doc = activeDocument();
+    if (!doc || doc->folded.empty())
+        return;
+    for (const model::OutlineNode& n : outline())
+        if (n.contains(line))
+            doc->folded.erase(n.startLine);
+}
+
+void NotepadViewModel::applyDetailLevel(model::Document& doc)
+{
+    doc.detailLevel = detailLevel.get();
+    doc.folded.clear();
+    if (&doc != activeDocument())
+        return;
+    const int level = detailLevel.get();
+    const bool logical = foldingMode.get() == model::OutlineMode::Logical;
+    for (const model::OutlineNode& n : outline()) {
+        bool fold = false;
+        if (logical && n.kind != model::OutlineKind::Section) {
+            // Logical: Balanced folds long steps, Overview every step (functions read as their step
+            // list), Outline whole functions and types.
+            switch (level) {
+            case 1: fold = n.kind == model::OutlineKind::Step && n.lineCount() > 5; break;
+            case 2: fold = n.kind == model::OutlineKind::Step; break;
+            case 3: fold = n.kind == model::OutlineKind::Function || n.kind == model::OutlineKind::Type; break;
+            default: break;
+            }
+            if (fold)
+                doc.folded.insert(n.startLine);
+            continue;
+        }
+        switch (level) {
+        case 1: // Balanced: long functions, and long nested blocks or sub-sections
+            fold = n.lineCount() > 12 && (n.kind == model::OutlineKind::Function || n.depth > 0);
+            break;
+        case 2: // Overview: every function body, and sub-sections
+            fold = n.kind == model::OutlineKind::Function || (n.kind == model::OutlineKind::Section && n.depth > 0) ||
+                   (n.kind == model::OutlineKind::Block && n.depth > 0 && n.lineCount() > 6);
+            break;
+        case 3: // Outline: top-level structure only
+            fold = n.depth == 0 ? n.kind != model::OutlineKind::Section || n.lineCount() > 3 : false;
+            if (n.depth == 1 && n.kind == model::OutlineKind::Section)
+                fold = true;
+            break;
+        default: break;
+        }
+        if (fold)
+            doc.folded.insert(n.startLine);
+    }
+    // Markdown in Outline mode keeps the document title open and folds its sections.
+    if (level == 3 && doc.language == model::Language::Markdown)
+        for (const model::OutlineNode& n : outline())
+            if (n.depth == 0)
+                doc.folded.erase(n.startLine);
+    if (doc.caret.line > 0)
+        for (const model::OutlineNode& n : outline())
+            if (doc.folded.count(n.startLine) && n.contains(doc.caret.line))
+                doc.caret = doc.anchor = {n.startLine, 0};
+}
+
+// ---- Agent cursor ---------------------------------------------------------------------------------
+
+void NotepadViewModel::pointAt(std::string target, std::string message, bool click, double seconds)
+{
+    pointer_.pointAt(std::move(target), std::move(message), click, seconds);
+}
+
+void NotepadViewModel::hidePointer()
+{
+    pointer_.hidePointer();
+}
+
+void NotepadViewModel::startTour()
+{
+    pointer_.startTour();
+}
+
+void NotepadViewModel::stopTour()
+{
+    pointer_.stopTour();
+}
+
 void NotepadViewModel::tick(double now)
 {
+    settings_.flush(now);
+    if (now >= nextDiskCheck_) {
+        nextDiskCheck_ = now + 2.0;
+        checkDiskChanges();
+    }
+    pointer_.tick(now);
     agent_.tick(now);
+}
+
+// ---- Settings -----------------------------------------------------------------------------------
+
+void NotepadViewModel::setDocumentLanguage(model::Language language)
+{
+    if (model::Document* doc = activeDocument()) {
+        doc->language = language;
+        if (!doc->indentDetected)
+            doc->indent = indentFor(language);
+        statusText.set(std::string("Language: ") + model::languageSpec(language).name);
+    }
+}
+
+void NotepadViewModel::setSettingsPath(const std::string& path)
+{
+    settings_.setPath(path);
+}
+
+// What is remembered between sessions: view options as bound properties, structured data as
+// sections of the settings file.
+void NotepadViewModel::bindSettings()
+{
+    settings_.bind("view.darkTheme", darkTheme);
+    settings_.bind("view.workspace", workspace);
+    settings_.bind("view.showExplorer", showExplorer);
+    settings_.bind("view.showPanel", showPanel);
+    settings_.bind("view.panelTab", panelTab);
+    settings_.bind("view.showAgentPanel", showAgentPanel);
+    settings_.bind("view.showSideBar", showLayersMap);
+    settings_.bind("view.sideBar", sideBar);
+    settings_.bind("view.detailLevel", detailLevel);
+    settings_.bind("view.foldingMode", foldingMode);
+    settings_.bind("view.zoom", zoom);
+    settings_.bind("editor.wordWrap", wordWrap);
+    settings_.bind("editor.showWhitespace", showWhitespace);
+    settings_.bind("editor.showLineNumbers", showLineNumbers);
+    settings_.bind("editor.showIndentGuides", showIndentGuides);
+    settings_.bind("editor.smartIndent", smartIndent);
+    settings_.bind("performance.maxFps", maxFramesPerSecond);
+    settings_.bind("performance.blinkCaret", blinkCaret);
+
+    // {"indent": {"tabs": false, "width": 2}}
+    settings_.section(
+        "indent",
+        [this](const model::Json& j) {
+            if (j.isObject())
+                preferredIndent_ = model::IndentStyle{j.getBool("tabs"), std::clamp(int(j.getNumber("width", 4)), 1, 16)};
+        },
+        [this]() {
+            if (!preferredIndent_)
+                return model::Json();
+            return model::Json::object().set("tabs", preferredIndent_->tabs).set("width", preferredIndent_->width);
+        });
+
+    // {"recent": {"files": [...], "folders": [...]}}
+    settings_.section(
+        "recent",
+        [this](const model::Json& j) {
+            auto read = [&](const char* key, std::vector<std::string>& into) {
+                into.clear();
+                if (const model::Json* list = j.find(key); list && list->isArray())
+                    for (const model::Json& p : list->items())
+                        if (!p.asString().empty())
+                            into.push_back(p.asString());
+            };
+            read("files", recentFiles_);
+            read("folders", recentFolders_);
+        },
+        [this]() {
+            model::Json files = model::Json::array(), folders = model::Json::array();
+            for (const std::string& p : recentFiles_)
+                files.push(p);
+            for (const std::string& p : recentFolders_)
+                folders.push(p);
+            return model::Json::object().set("files", std::move(files)).set("folders", std::move(folders));
+        });
+
+    // {"session": {"workspace": "C:/x", "documents": [{"path": "C:/x/a.cpp", "line": 12}], "active": 0}}
+    settings_.section(
+        "session",
+        [this](const model::Json& j) { savedSession_ = j; },
+        [this]() {
+            model::Json docs = model::Json::array();
+            int active = -1;
+            for (int i = 0; i < int(documents_.size()); ++i) {
+                const model::Document& doc = *documents_[size_t(i)];
+                if (!doc.onDisk)
+                    continue; // untitled and sample documents are not part of the session
+                if (i == activeIndex.get())
+                    active = int(docs.items().size());
+                docs.push(model::Json::object().set("path", absolutePath(doc.path)).set("line", doc.caret.line));
+            }
+            return model::Json::object()
+                .set("workspace", workspaceRoot_)
+                .set("documents", std::move(docs))
+                .set("active", active);
+        });
+
+    // {"ribbon": {"pinned": ["DetailOverview", ...], "customActions": [{"name": ..., "command": ...}]}}
+    settings_.section(
+        "ribbon",
+        [this](const model::Json& j) {
+            if (const model::Json* pinned = j.find("pinned"); pinned && pinned->isArray()) {
+                pinned_.clear();
+                for (const model::Json& key : pinned->items())
+                    if (CommandId id; commandFromKey(key.asString(), id))
+                        pinned_.push_back(id);
+            }
+            if (const model::Json* actions = j.find("customActions"); actions && actions->isArray()) {
+                customActions_.clear();
+                for (const model::Json& a : actions->items())
+                    if (!a.getString("name").empty())
+                        customActions_.push_back({a.getString("name"), a.getString("command")});
+            }
+        },
+        [this]() {
+            model::Json pinned = model::Json::array();
+            for (CommandId id : pinned_)
+                pinned.push(commandKey(id));
+            model::Json actions = model::Json::array();
+            for (const CustomAction& a : customActions_)
+                actions.push(model::Json::object().set("name", a.name).set("command", a.command));
+            return model::Json::object().set("pinned", std::move(pinned)).set("customActions", std::move(actions));
+        });
+}
+
+void NotepadViewModel::setPreferredIndent(std::optional<model::IndentStyle> style)
+{
+    if (style)
+        style->width = std::clamp(style->width, 1, 16);
+    preferredIndent_ = style;
+    // Open documents without a style of their own follow the new default.
+    for (auto& doc : documents_)
+        if (!doc->indentDetected)
+            doc->indent = indentFor(doc->language);
+    settings_.markDirty();
+}
+
+model::IndentStyle NotepadViewModel::indentFor(model::Language language) const
+{
+    return preferredIndent_ ? *preferredIndent_ : model::defaultIndent(model::languageSpec(language));
+}
+
+std::optional<uint32_t> NotepadViewModel::syntaxColor(bool dark, const std::string& languageKey, model::Token token) const
+{
+    return syntaxColors_.color(dark, languageKey, token);
+}
+
+void NotepadViewModel::setSyntaxColor(bool dark, const std::string& languageKey, model::Token token, std::optional<uint32_t> rgb)
+{
+    syntaxColors_.setColor(dark, languageKey, token, rgb);
+}
+
+void NotepadViewModel::resetSyntaxColors(bool dark, const std::string& languageKey)
+{
+    syntaxColors_.reset(dark, languageKey);
+}
+
+bool NotepadViewModel::hasSyntaxColors(bool dark, const std::string& languageKey) const
+{
+    return syntaxColors_.hasColors(dark, languageKey);
 }
 
 } // namespace enp::viewmodel

@@ -1,5 +1,6 @@
 // Ribbon banner: workspace switcher block, tab row with command search, and groups of
 // large icon buttons with captions (in the style of CAD ribbons, kept flat and simple).
+// The "My Tools" tab holds the user's pinned commands and custom shell actions.
 #pragma once
 
 #include "enp/view/Fonts.h"
@@ -24,13 +25,14 @@ private:
         const char* name;
         std::vector<viewmodel::CommandId> buttons;
         std::vector<viewmodel::CommandId> more; // listed in the caption's drop-down
+        bool customActions = false;             // shows the user's custom actions instead
     };
     struct Tab {
         const char* name;
         std::vector<Group> groups;
     };
 
-    const std::vector<Tab>& tabs() const;
+    std::vector<Tab> tabs() const;
     int& selectedTab();
     void renderWorkspaceBlock(float width, float height);
     void renderWorkspacePopup();
@@ -38,6 +40,11 @@ private:
     void renderCommandSearch(float width);
     void renderGroups(const Tab& tab);
     bool ribbonButton(viewmodel::CommandId id);
+    // Large icon-over-label button; returns true when clicked and enabled.
+    bool drawButton(const char* id, const char* icon, const char* label, ImU32 tint, bool enabled, bool checked,
+                    const char* tooltip, const char* detail);
+    void renderCustomActions(float& x, float top);
+    void renderCustomizeDialog();
     void groupCaption(const Group& group, float x0, float x1, float y);
 
     viewmodel::NotepadViewModel& vm_;
@@ -47,6 +54,11 @@ private:
     int selectedTab_[2] = {0, 0}; // per workspace mode
     std::string search_;
     bool searchFocused_ = false;
+    bool customizeRequested_ = false;
+    std::string pinFilter_;
+    std::string newActionName_;
+    std::string newActionCommand_;
+    std::vector<viewmodel::Subscription> subscriptions_;
 };
 
 } // namespace enp::view

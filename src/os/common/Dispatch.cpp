@@ -13,12 +13,25 @@ namespace enp::os::dispatch {
 namespace {
 std::mutex g_mutex;
 std::deque<Task> g_queue;
+std::function<void()> g_wake;
 } // namespace
 
 void postToMain(Task task)
 {
+    std::function<void()> wake;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_queue.push_back(std::move(task));
+        wake = g_wake;
+    }
+    if (wake)
+        wake();
+}
+
+void setWakeCallback(std::function<void()> wake)
+{
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_queue.push_back(std::move(task));
+    g_wake = std::move(wake);
 }
 
 void pump()

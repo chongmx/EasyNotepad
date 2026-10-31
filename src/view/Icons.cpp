@@ -13,7 +13,14 @@ const char* commandIcon(CommandId id)
     case CommandId::OpenFile: return ICON_FA_FOLDER_OPEN;
     case CommandId::Save: return ICON_FA_FLOPPY_DISK;
     case CommandId::SaveAll: return ICON_FA_FILE_ARROW_DOWN;
+    case CommandId::SaveAs: return ICON_FA_FILE_EXPORT;
+    case CommandId::OpenFolder: return ICON_FA_FOLDER_TREE;
     case CommandId::CloseFile: return ICON_FA_XMARK;
+    case CommandId::CloseOthers: return ICON_FA_RECTANGLE_XMARK;
+    case CommandId::CloseAll: return ICON_FA_RECTANGLE_XMARK;
+    case CommandId::CloseSaved: return ICON_FA_CIRCLE_CHECK;
+    case CommandId::NextDocument: return ICON_FA_ARROW_RIGHT;
+    case CommandId::PreviousDocument: return ICON_FA_ARROW_LEFT;
     case CommandId::Cut: return ICON_FA_SCISSORS;
     case CommandId::Copy: return ICON_FA_COPY;
     case CommandId::Paste: return ICON_FA_PASTE;
@@ -42,7 +49,13 @@ const char* commandIcon(CommandId id)
     case CommandId::PreviousBookmark: return ICON_FA_ARROW_UP_LONG;
     case CommandId::ClearBookmarks: return ICON_FA_BROOM;
     case CommandId::ToggleExplorer: return ICON_FA_SITEMAP;
-    case CommandId::ToggleReviewPanel: return ICON_FA_CLIPBOARD_CHECK;
+    case CommandId::TogglePanel: return ICON_FA_TABLE_LIST;
+    case CommandId::ToggleMaximizePanel: return ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER;
+    case CommandId::ToggleTerminal: return ICON_FA_TERMINAL;
+    case CommandId::NewTerminal: return ICON_FA_SQUARE_PLUS;
+    case CommandId::KillTerminal: return ICON_FA_TRASH_CAN;
+    case CommandId::ClearTerminal: return ICON_FA_ERASER;
+    case CommandId::PopOutTerminal: return ICON_FA_UP_RIGHT_FROM_SQUARE;
     case CommandId::ToggleAgentPanel: return ICON_FA_ROBOT;
     case CommandId::ToggleWordWrap: return ICON_FA_TURN_DOWN;
     case CommandId::ToggleWhitespace: return ICON_FA_PARAGRAPH;
@@ -52,6 +65,24 @@ const char* commandIcon(CommandId id)
     case CommandId::ZoomOut: return ICON_FA_MAGNIFYING_GLASS_MINUS;
     case CommandId::ZoomReset: return ICON_FA_TEXT_WIDTH;
     case CommandId::ToggleTheme: return ICON_FA_CIRCLE_HALF_STROKE;
+    case CommandId::SyntaxColors: return ICON_FA_PALETTE;
+    case CommandId::DetailFull: return ICON_FA_ALIGN_JUSTIFY;
+    case CommandId::DetailBalanced: return ICON_FA_ALIGN_LEFT;
+    case CommandId::DetailOverview: return ICON_FA_LIST_UL;
+    case CommandId::DetailOutline: return ICON_FA_LAYER_GROUP;
+    case CommandId::FoldAll: return ICON_FA_COMPRESS;
+    case CommandId::UnfoldAll: return ICON_FA_EXPAND;
+    case CommandId::ToggleFold: return ICON_FA_SQUARE_MINUS;
+    case CommandId::ToggleLayersMap: return ICON_FA_TABLE_COLUMNS;
+    case CommandId::ShowLayers: return ICON_FA_LAYER_GROUP;
+    case CommandId::ShowMinimap: return ICON_FA_BARS_STAGGERED;
+    case CommandId::SummarizeFile: return ICON_FA_WAND_MAGIC_SPARKLES;
+    case CommandId::ShowCodeView: return ICON_FA_CODE;
+    case CommandId::ShowMapView: return ICON_FA_DIAGRAM_PROJECT;
+    case CommandId::FoldingSyntax: return ICON_FA_BARS_STAGGERED;
+    case CommandId::FoldingLogical: return ICON_FA_SHOE_PRINTS;
+    case CommandId::DissectProject: return ICON_FA_BRAIN;
+    case CommandId::RefreshMap: return ICON_FA_ARROWS_ROTATE;
     case CommandId::EolCrLf:
     case CommandId::EolLf:
     case CommandId::EolCr: return ICON_FA_TURN_DOWN;
@@ -60,13 +91,15 @@ const char* commandIcon(CommandId id)
     case CommandId::EncodingUtf16Le:
     case CommandId::EncodingUtf16Be:
     case CommandId::EncodingAnsi: return ICON_FA_LANGUAGE;
-    case CommandId::LanguagePlainText: return ICON_FA_FILE_LINES;
-    case CommandId::LanguageCpp:
-    case CommandId::LanguagePython:
-    case CommandId::LanguageJavaScript:
-    case CommandId::LanguageJson:
-    case CommandId::LanguageCMake: return ICON_FA_FILE_CODE;
-    case CommandId::LanguageMarkdown: return ICON_FA_FILE_PEN;
+    case CommandId::ToggleSmartIndent: return ICON_FA_WAND_MAGIC_SPARKLES;
+    case CommandId::IndentWithSpaces: return ICON_FA_ELLIPSIS;
+    case CommandId::IndentWithTabs: return ICON_FA_ARROW_RIGHT_TO_BRACKET;
+    case CommandId::IndentWidth2:
+    case CommandId::IndentWidth4:
+    case CommandId::IndentWidth8: return ICON_FA_TEXT_WIDTH;
+    case CommandId::DetectIndentation: return ICON_FA_MAGNIFYING_GLASS;
+    case CommandId::ConvertIndentation: return ICON_FA_ARROWS_ROTATE;
+    case CommandId::ChooseLanguage: return ICON_FA_FILE_CODE;
     case CommandId::RunLint: return ICON_FA_SPELL_CHECK;
     case CommandId::RunStaticAnalysis: return ICON_FA_BUG;
     case CommandId::RunSecurityScan: return ICON_FA_SHIELD_HALVED;
@@ -89,6 +122,7 @@ const char* commandIcon(CommandId id)
     case CommandId::AcceptAllChanges: return ICON_FA_CHECK_DOUBLE;
     case CommandId::RejectAllChanges: return ICON_FA_BAN;
     case CommandId::StopAgent: return ICON_FA_STOP;
+    case CommandId::StartTour: return ICON_FA_HAND_POINTER;
     case CommandId::SwitchToAgentMode: return ICON_FA_ROBOT;
     case CommandId::SwitchToCodeMode: return ICON_FA_CODE;
     case CommandId::ToggleWorkspaceMode: return ICON_FA_ARROWS_ROTATE;
@@ -139,7 +173,7 @@ ImU32 commandTint(CommandId id, const Palette& p)
     case CommandId::CompareWithSaved:
     case CommandId::CompareAgentChanges:
     case CommandId::AddReviewComment:
-    case CommandId::ToggleReviewPanel:
+    case CommandId::TogglePanel:
         return p.iconOrange;
     case CommandId::RunStaticAnalysis:
     case CommandId::RunSecurityScan:
@@ -154,6 +188,27 @@ ImU32 commandTint(CommandId id, const Palette& p)
     case CommandId::AcceptAllChanges:
     case CommandId::PlayMacro:
         return p.iconGreen;
+    case CommandId::DetailFull:
+    case CommandId::DetailBalanced:
+    case CommandId::DetailOverview:
+    case CommandId::DetailOutline:
+    case CommandId::FoldAll:
+    case CommandId::UnfoldAll:
+    case CommandId::ToggleFold:
+        return p.iconTeal;
+    case CommandId::ToggleLayersMap:
+    case CommandId::ShowLayers:
+    case CommandId::ShowMinimap:
+    case CommandId::ShowMapView:
+        return p.iconOrange;
+    case CommandId::ShowCodeView:
+    case CommandId::FoldingSyntax:
+    case CommandId::RefreshMap:
+        return p.iconBlue;
+    case CommandId::SummarizeFile:
+    case CommandId::DissectProject:
+    case CommandId::FoldingLogical:
+    case CommandId::StartTour:
     case CommandId::RunAgentReview:
     case CommandId::NewChat:
     case CommandId::AskAgent:
@@ -164,6 +219,9 @@ ImU32 commandTint(CommandId id, const Palette& p)
     case CommandId::ToggleAgentPanel:
     case CommandId::SwitchToAgentMode:
         return p.iconPurple;
+    case CommandId::ToggleTerminal:
+    case CommandId::NewTerminal:
+        return p.iconGreen;
     default:
         return p.iconGray;
     }

@@ -3,10 +3,13 @@
 #pragma once
 
 #include "enp/model/Diff.h"
+#include "enp/interfaces/IAgentCliService.h"
+#include "enp/interfaces/IProcessService.h"
 #include "enp/model/Review.h"
 #include "enp/viewmodel/Observable.h"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -36,6 +39,15 @@ public:
     void setToolVisible(model::ReviewTool tool, bool visible) { toolVisible_[size_t(tool)] = visible; }
 
     void runTool(model::ReviewTool tool);
+
+    // A real workspace: drops the samples; tools run the commands configured in the environment
+    // (EASYNOTEPAD_LINT, ...; {file} and {workspace} are substituted) and Agent Review asks the agent
+    // CLI. `activeFile` gives the absolute path of the file being edited.
+    void goLive(interfaces::IProcessService* processes, interfaces::IAgentCliService* agent, const std::string& workspace,
+                std::function<std::string()> activeFile);
+    bool live() const { return live_; }
+    static const char* settingName(model::ReviewTool tool); // EASYNOTEPAD_LINT, ...
+    bool running(model::ReviewTool tool) const { return running_[size_t(tool)]; }
     void runAll();
     void clearFindings();
     void openFinding(int index);
@@ -63,6 +75,13 @@ private:
     std::vector<model::DiffRow> diff_;
     std::vector<model::ReviewComment> comments_;
     std::vector<model::ChecklistItem> checklist_;
+    bool live_ = false;
+    interfaces::IProcessService* processes_ = nullptr;
+    interfaces::IAgentCliService* agent_ = nullptr;
+    std::string workspace_;
+    std::function<std::string()> activeFile_;
+    std::array<bool, model::kAllReviewTools.size()> running_{};
+    void replaceFindings(model::ReviewTool tool, std::vector<model::ReviewFinding> fresh, const std::string& note);
 };
 
 } // namespace enp::viewmodel

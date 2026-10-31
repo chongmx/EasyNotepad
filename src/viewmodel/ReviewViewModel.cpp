@@ -63,6 +63,53 @@ int ReviewViewModel::count(model::ReviewTool tool) const
 
 void ReviewViewModel::runTool(model::ReviewTool tool)
 {
+    if (live_) {
+        const std::string file = activeFile_ ? activeFile_() : std::string();
+        auto substitute = [&](std::string command) {
+            for (const auto& [key, value] : {std::pair<std::string, std::string>{"{file}", file}, {"{workspace}", workspace_}})
+                for (size_t at = command.find(key); at != std::string::npos; at = command.find(key, at + value.size()))
+                    command.replace(at, key.size(), "\"" + value + "\"");
+            return command;
+        };
+        if (tool == model::ReviewTool::AgentReview) {
+            if (!agent_ || !agent_->available()) {
+                replaceFindings(tool, {}, "Agent Review needs an agent CLI (Claude Code's `claude`, or EASYNOTEPAD_AGENT_CLI)");
+                return;
+            }
+            if (file.empty()) {
+                statusMessage.emit("Agent Review: open a file to review");
+                return;
+            }
+            running_[size_t(tool)] = true;
+            statusMessage.emit("Agent Review: asking the agent about " + file + "...");
+            const std::string prompt = "Review the file " + file + " for bugs, risky code and unclear parts. Answer ONLY with "
+                                       "findings, one per line, in exactly this format:\n<path>:<line>: <error|warning|info>: "
+                                       "<message>\nNo other text. If there is nothing to report, answer with nothing.";
+            agent_->run(prompt, workspace_, [this, tool](bool ok, const std::string& output) {
+                running_[size_t(tool)] = false;
+                replaceFindings(tool, ok ? model::parseToolOutput(output, tool, workspace_) : std::vector<model::ReviewFinding>{},
+                                ok ? std::string() : "Agent Review failed: " + output.substr(0, 200));
+            });
+            return;
+        }
+        const std::optional<std::string> command = processes_ ? processes_->setting(settingName(tool)) : std::nullopt;
+        if (!command) {
+            replaceFindings(tool, {}, std::string(model::reviewToolName(tool)) + " is not configured: set " + settingName(tool) +
+                                          " to a command (e.g. \"clang-tidy {file}\" or \"ruff check {file}\")");
+            return;
+        }
+        running_[size_t(tool)] = true;
+        statusMessage.emit(std::string(model::reviewToolName(tool)) + ": running " + substitute(*command) + "...");
+        processes_->run(substitute(*command), workspace_, [this, tool](const interfaces::ProcessResult& result) {
+            running_[size_t(tool)] = false;
+            if (!result.started) {
+                replaceFindings(tool, {}, std::string(model::reviewToolName(tool)) + " could not run: " + result.error);
+                return;
+            }
+            replaceFindings(tool, model::parseToolOutput(result.output, tool, workspace_), {});
+        });
+        return;
+    }
     findings_.erase(std::remove_if(findings_.begin(), findings_.end(),
                                    [&](const model::ReviewFinding& f) { return f.tool == tool; }),
                     findings_.end());
@@ -148,6 +195,47 @@ void ReviewViewModel::setChecklistDone(int index, bool done)
 {
     if (index >= 0 && index < int(checklist_.size()))
         checklist_[size_t(index)].done = done;
+}
+
+const char* ReviewViewModel::settingName(model::ReviewTool tool)
+{
+    switch (tool) {
+    case model::ReviewTool::Lint: return "EASYNOTEPAD_LINT";
+    case model::ReviewTool::StaticAnalysis: return "EASYNOTEPAD_STATIC_ANALYSIS";
+    case model::ReviewTool::Security: return "EASYNOTEPAD_SECURITY";
+    case model::ReviewTool::Style: return "EASYNOTEPAD_STYLE";
+    case model::ReviewTool::Complexity: return "EASYNOTEPAD_COMPLEXITY";
+    case model::ReviewTool::AgentReview: return "EASYNOTEPAD_AGENT_CLI";
+    }
+    return "";
+}
+
+void ReviewViewModel::goLive(interfaces::IProcessService* processes, interfaces::IAgentCliService* agent, const std::string& workspace,
+                             std::function<std::string()> activeFile)
+{
+    live_ = true;
+    processes_ = processes;
+    agent_ = agent;
+    workspace_ = workspace;
+    activeFile_ = std::move(activeFile);
+    findings_.clear();
+    comments_.clear();
+    checklist_.clear();
+    hasRun_.fill(false);
+    running_.fill(false);
+    selectedFinding.set(-1);
+}
+
+void ReviewViewModel::replaceFindings(model::ReviewTool tool, std::vector<model::ReviewFinding> fresh, const std::string& note)
+{
+    findings_.erase(std::remove_if(findings_.begin(), findings_.end(), [&](const model::ReviewFinding& f) { return f.tool == tool; }),
+                    findings_.end());
+    const size_t count = fresh.size();
+    findings_.insert(findings_.end(), std::make_move_iterator(fresh.begin()), std::make_move_iterator(fresh.end()));
+    hasRun_[size_t(tool)] = note.empty();
+    toolVisible_[size_t(tool)] = true;
+    selectedFinding.set(-1);
+    statusMessage.emit(note.empty() ? std::string(model::reviewToolName(tool)) + ": " + std::to_string(count) + " finding(s)" : note);
 }
 
 } // namespace enp::viewmodel

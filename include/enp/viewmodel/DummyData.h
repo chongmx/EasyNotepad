@@ -3,6 +3,7 @@
 #pragma once
 
 #include "enp/model/Agent.h"
+#include "enp/model/Outline.h"
 #include "enp/model/Review.h"
 #include "enp/viewmodel/ExplorerItem.h"
 
@@ -27,6 +28,17 @@ std::vector<model::ChecklistItem> checklist();
 std::vector<model::ChatMessage> conversation();
 std::vector<model::AgentTask> tasks();
 std::vector<model::FileChange> changes();
+// One-line "AI" summary of an outline region: canned for the sample files, heuristic otherwise.
+// Stands in for the summarizer CLI.
+// `parts`: names of the region's direct sub-regions (used for namespaces and types).
+std::string summarize(const std::string& path, const model::OutlineNode& node, const model::TextBuffer& buffer,
+                      const std::vector<std::string>& parts = {});
+std::string summarizeFile(const std::string& path, const std::vector<model::OutlineNode>& outline);
+// The comment at the top of a file (or a Markdown file's first paragraph), or the canned sample
+// summary; empty when there is none. Cheap: no parsing.
+std::string fileHeaderSummary(const std::string& path, const model::TextBuffer& buffer);
+std::string summarizeFolder(const std::string& name, const std::vector<std::string>& children);
+
 // Canned agent answer for the n-th prompt of the session.
 std::string agentReply(int n, const std::string& prompt);
 

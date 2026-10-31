@@ -47,9 +47,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: EasyNotepad-${{ matrix.name }}
-          path: |
-            build/${{ matrix.preset }}/**/EasyNotepad*
-            build/${{ matrix.preset }}/**/resources/**
+          path: bin/
 
   web:
     runs-on: ubuntu-24.04
@@ -67,11 +65,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: EasyNotepad-web
-          path: |
-            build/web/index.html
-            build/web/index.js
-            build/web/index.wasm
-            build/web/index.data
+          path: bin/web/
 
   android:
     runs-on: ubuntu-24.04

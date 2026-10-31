@@ -1,4 +1,5 @@
-// Review panel: problems from all review tools, the diff under review, comments, checklist.
+// Review tabs of the bottom panel: problems from all review tools, the diff under review,
+// comments and the checklist. The panel's tab strip is drawn by MainView.
 #pragma once
 
 #include "enp/view/Fonts.h"
@@ -13,7 +14,7 @@ class ReviewPanel {
 public:
     ReviewPanel(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale);
 
-    void render(ImVec2 size);
+    void renderTab(viewmodel::PanelTab tab);
 
 private:
     void renderProblems();
@@ -26,7 +27,6 @@ private:
     const Fonts& fonts_;
     const Palette& palette_;
     float s_;
-    viewmodel::ReviewTab shownTab_ = viewmodel::ReviewTab::Problems;
     std::string commentDraft_;
 };
 

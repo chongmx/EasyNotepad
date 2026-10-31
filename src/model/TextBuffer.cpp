@@ -37,6 +37,8 @@ TextBuffer::TextBuffer(std::string_view text)
 
 void TextBuffer::setText(std::string_view text)
 {
+    touched(0);
+    const std::string before = journaling_ ? this->text() : std::string();
     lines_.clear();
     std::string current;
     for (size_t i = 0; i < text.size(); ++i) {
@@ -51,6 +53,8 @@ void TextBuffer::setText(std::string_view text)
         }
     }
     lines_.push_back(std::move(current));
+    if (journaling_)
+        record({0, 0}, before, this->text());
 }
 
 std::string TextBuffer::text(std::string_view eol) const
@@ -78,16 +82,36 @@ std::string TextBuffer::text(TextPos from, TextPos to, std::string_view eol) con
 
 void TextBuffer::setLine(int index, std::string text)
 {
+    touched(index);
+    if (journaling_)
+        record({index, 0}, lines_[size_t(index)], text);
     lines_[size_t(index)] = std::move(text);
 }
 
 void TextBuffer::insertLine(int index, std::string text)
 {
+    touched(index);
+    if (journaling_) {
+        // As text: "line\n" before an existing line, or "\nline" after the last one.
+        if (index < lineCount())
+            record({std::max(0, index), 0}, {}, text + "\n");
+        else
+            record({lineCount() - 1, int(lines_.back().size())}, {}, "\n" + text);
+    }
     lines_.insert(lines_.begin() + std::clamp(index, 0, lineCount()), std::move(text));
 }
 
 void TextBuffer::eraseLine(int index)
 {
+    touched(index);
+    if (journaling_) {
+        if (lineCount() == 1)
+            record({0, 0}, lines_[0], {});
+        else if (index < lineCount() - 1)
+            record({index, 0}, lines_[size_t(index)] + "\n", {});
+        else
+            record({index - 1, int(lines_[size_t(index - 1)].size())}, "\n" + lines_[size_t(index)], {});
+    }
     if (lineCount() == 1) {
         lines_[0].clear();
         return;
@@ -120,6 +144,7 @@ TextPos TextBuffer::end() const
 
 TextPos TextBuffer::insert(TextPos at, std::string_view text)
 {
+    touched(at.line);
     at = clamp(at);
     std::string& first = lines_[size_t(at.line)];
     const std::string tail = first.substr(size_t(at.column));
@@ -143,17 +168,22 @@ TextPos TextBuffer::insert(TextPos at, std::string_view text)
         start = i + 1;
     }
     lines_[size_t(pos.line)] += tail;
+    if (journaling_)
+        record(at, {}, this->text(at, pos));
     return pos;
 }
 
 TextPos TextBuffer::erase(TextPos from, TextPos to)
 {
+    touched(std::min(from.line, to.line));
     from = clamp(from);
     to = clamp(to);
     if (to < from)
         std::swap(from, to);
     if (from == to)
         return from;
+    if (journaling_)
+        record(from, this->text(from, to), {});
     std::string& first = lines_[size_t(from.line)];
     const std::string tail = lines_[size_t(to.line)].substr(size_t(to.column));
     first.erase(size_t(from.column));
@@ -208,6 +238,90 @@ TextPos TextBuffer::wordEnd(TextPos pos) const
     while (pos.column < int(l.size()) && isWordChar(l[size_t(pos.column)]))
         ++pos.column;
     return pos;
+}
+
+void TextBuffer::touched(int line)
+{
+    ++version_;
+    changes_.emplace_back(version_, std::max(0, line));
+    if (changes_.size() > 256)
+        changes_.pop_front();
+}
+
+int TextBuffer::firstLineChangedSince(uint64_t version) const
+{
+    if (version >= version_)
+        return lineCount();
+    if (changes_.empty() || changes_.front().first > version + 1)
+        return 0; // older than the log: everything may have changed
+    int first = lineCount();
+    for (auto it = changes_.rbegin(); it != changes_.rend() && it->first > version; ++it)
+        first = std::min(first, it->second);
+    return first;
+}
+
+void TextBuffer::record(TextPos at, std::string removed, std::string inserted)
+{
+    journal_.push_back({at, std::move(removed), std::move(inserted)});
+}
+
+TextPos TextBuffer::endOf(TextPos at, const std::string& text)
+{
+    const size_t lastBreak = text.rfind('\n');
+    if (lastBreak == std::string::npos)
+        return {at.line, at.column + int(text.size())};
+    return {at.line + int(std::count(text.begin(), text.end(), '\n')), int(text.size() - lastBreak - 1)};
+}
+
+void TextBuffer::beginJournal()
+{
+    journaling_ = true;
+    journal_.clear();
+}
+
+std::vector<TextChange> TextBuffer::endJournal()
+{
+    journaling_ = false;
+    return std::move(journal_);
+}
+
+void TextBuffer::revert(const std::vector<TextChange>& changes)
+{
+    const bool was = journaling_;
+    journaling_ = false;
+    for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+        erase(it->at, endOf(it->at, it->inserted));
+        insert(it->at, it->removed);
+    }
+    journaling_ = was;
+}
+
+void TextBuffer::reapply(const std::vector<TextChange>& changes)
+{
+    const bool was = journaling_;
+    journaling_ = false;
+    for (const TextChange& c : changes) {
+        erase(c.at, endOf(c.at, c.removed));
+        insert(c.at, c.inserted);
+    }
+    journaling_ = was;
+}
+
+bool TextBuffer::equals(std::string_view text) const
+{
+    size_t at = 0;
+    for (size_t l = 0; l < lines_.size(); ++l) {
+        const std::string& line = lines_[l];
+        if (text.compare(at, line.size(), line) != 0 || at + line.size() > text.size())
+            return false;
+        at += line.size();
+        if (l + 1 < lines_.size()) {
+            if (at >= text.size() || text[at] != '\n')
+                return false;
+            ++at;
+        }
+    }
+    return at == text.size();
 }
 
 } // namespace enp::model

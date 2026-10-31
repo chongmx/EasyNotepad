@@ -2,12 +2,18 @@
 // the Agent or Code workspace layout, status bar and dialogs.
 #pragma once
 
+#include "enp/view/AgentCursorView.h"
 #include "enp/view/AgentPanel.h"
+#include "enp/view/DocumentListView.h"
 #include "enp/view/EditorView.h"
+#include "enp/view/FileDialogView.h"
+#include "enp/view/SearchPanel.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
+#include "enp/view/MapView.h"
 #include "enp/view/ReviewPanel.h"
 #include "enp/view/RibbonView.h"
+#include "enp/view/TerminalView.h"
 #include "enp/view/Theme.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
@@ -20,6 +26,7 @@ class MainView {
 public:
     // `frame` is null when the OS draws the title bar (Android, web) or no frame is available.
     MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float uiScale, IWindowFrame* frame = nullptr);
+    ~MainView();
 
     // Builds the whole UI for one frame (between ImGui::NewFrame() and ImGui::Render()).
     void render();
@@ -38,14 +45,24 @@ private:
     void handleCaptionMouse();
     void renderCodeWorkspace();
     void renderAgentWorkspace();
-    void renderReviewArea(float width);
+    // VS Code-style bottom panel: review tabs and the integrated terminal.
+    void renderBottomPanel(float width, float height);
+    void renderPanelActions(float left, float right, float y, float height);
+    void renderTerminalWindow(); // the popped-out terminal
+    void renderLanguagePicker();
+    void renderSaveChangesPrompt();
+    void renderQuitPrompt();
+    void renderAllTabsPopup();
     void renderExplorer();
+    void renderOpenDocuments(); // the explorer's "Open" tab
     void renderExplorerItem(const viewmodel::ExplorerItem& item);
+    bool explorerVisible(const viewmodel::ExplorerItem& item); // under the filter
     void renderPreview(ImVec2 size);
     void renderStatusBar();
     void renderGoToLinePopup();
     void renderCommentPopup();
     void renderPreferencesPopup();
+    void renderSyntaxColorsPopup();
     void renderAboutPopup();
 
     bool beginPanel(const char* id, const char* title, ImVec2 size, const char* detail = nullptr);
@@ -62,17 +79,39 @@ private:
     Palette palette_;
     RibbonView ribbon_;
     EditorView editor_;
+    MapView map_;
+    FileDialogView fileDialogView_;
+    SearchPanel searchPanel_;
+    DocumentListView documentList_;
     AgentPanel agentPanel_;
     ReviewPanel reviewPanel_;
+    TerminalView terminalView_;
+    AgentCursorView agentCursor_;
 
     // Layout (unscaled pixels are multiplied by s_ at use).
     float explorerWidth_;
     float agentSideWidth_;
-    float reviewHeight_;
+    float panelHeight_;
     float planWidth_;
     float conversationWidth_;
     int previewTab_ = 0;        // Agent workspace: 0 = proposed change, 1 = editor
     int previewTabRequest_ = -1;
+
+    // Document tabs: a strip that scrolls when the tabs do not fit.
+    float tabScroll_ = 0.0f;
+    float tabScrollShown_ = 0.0f;
+    int tabRevealSerial_ = -1;
+    std::string allTabsFilter_;
+    bool openAllTabs_ = false; // requested by an agent
+
+    // Explorer: one tree; the open documents are marked in it.
+    std::string explorerFilter_;
+    std::string explorerFilterKey_; // explorerVisible_ was computed for this filter
+    std::vector<std::string> explorerVisible_; // sorted paths matching the filter (and their folders)
+    int explorerRevealSerial_ = -1;
+    int explorerTab_ = 0;         // 0 = Files, 1 = Open
+    int explorerTabRequest_ = -1; // switch on the next frame (agents, "Reveal in Files")
+    bool explorerCollapse_ = false;
 
     std::string rendererInfo_;
     std::string commentDraft_;
@@ -80,6 +119,10 @@ private:
     bool openGoToLine_ = false;
     bool openComment_ = false;
     bool openPreferences_ = false;
+    bool openSyntaxColors_ = false;
+    bool openLanguagePicker_ = false;
+    std::string languageFilter_;
+    int syntaxColorsLanguage_ = -1; // index into model::languages(); -1 = all languages
     bool openAbout_ = false;
     bool quitRequested_ = false;
     std::vector<bool> panelHasHeader_; // beginPanel() nesting

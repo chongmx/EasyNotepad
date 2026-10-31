@@ -1,6 +1,7 @@
 #include "enp/view/RibbonView.h"
 
 #include "enp/view/Icons.h"
+#include "enp/view/UiAutomation.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -59,6 +60,24 @@ std::string lower(std::string s)
 RibbonView::RibbonView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
     : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale)
 {
+    // The agent cursor points at commands that may sit on another tab: bring that tab forward.
+    subscriptions_.push_back(vm_.ribbonRevealRequested.subscribe([this](const CommandId& id) {
+        const std::vector<Tab> list = tabs();
+        int& selected = selectedTab();
+        auto has = [&](const Tab& tab) {
+            for (const Group& g : tab.groups)
+                if (std::find(g.buttons.begin(), g.buttons.end(), id) != g.buttons.end())
+                    return true;
+            return false;
+        };
+        if (has(list[size_t(selected)]))
+            return;
+        for (int i = 0; i < int(list.size()); ++i)
+            if (has(list[size_t(i)])) {
+                selected = i;
+                return;
+            }
+    }));
 }
 
 float RibbonView::height() const
@@ -66,7 +85,7 @@ float RibbonView::height() const
     return (kTabRowHeight + kButtonHeight + kCaptionHeight + 10.0f) * s_;
 }
 
-const std::vector<RibbonView::Tab>& RibbonView::tabs() const
+std::vector<RibbonView::Tab> RibbonView::tabs() const
 {
     using C = CommandId;
     static const Group review[] = {
@@ -77,21 +96,32 @@ const std::vector<RibbonView::Tab>& RibbonView::tabs() const
         {"Discuss", {C::AddReviewComment}, {}},
         {"Findings", {C::PreviousFinding, C::NextFinding}, {C::ClearFindings}},
     };
+    // Reading comes first after the workspace's home tab: this editor is built around it.
+    static const Group read[] = {
+        {"View", {C::ShowCodeView, C::ShowMapView}, {C::RefreshMap}},
+        {"Detail", {C::DetailFull, C::DetailBalanced, C::DetailOverview, C::DetailOutline}, {}},
+        {"Folding", {C::FoldingSyntax, C::FoldingLogical, C::ToggleFold}, {C::FoldAll, C::UnfoldAll, C::SummarizeFile}},
+        {"Side Bar", {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}, {}},
+        {"Navigate", {C::GoToLine, C::Find}, {C::ToggleBookmark}},
+        {"Understand", {C::DissectProject, C::ExplainSelection, C::AskAgent}, {C::GenerateTests}},
+    };
     static const Group view[] = {
-        {"Panels", {C::ToggleExplorer, C::ToggleReviewPanel, C::ToggleAgentPanel}, {}},
-        {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap}, {}},
+        {"Panels", {C::ToggleExplorer, C::TogglePanel, C::ToggleTerminal, C::ToggleAgentPanel}, {C::ToggleMaximizePanel}},
+        {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap},
+         {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}},
         {"Zoom", {C::ZoomIn, C::ZoomOut, C::ZoomReset}, {}},
-        {"Theme", {C::ToggleTheme}, {}},
+        {"Theme", {C::ToggleTheme, C::SyntaxColors}, {}},
     };
     static const std::vector<Tab> codeTabs = {
         {"Home",
          {
-             {"File", {C::NewFile, C::OpenFile, C::Save, C::CloseFile}, {C::SaveAll}},
+             {"File", {C::NewFile, C::OpenFile, C::Save, C::CloseFile}, {C::SaveAs, C::SaveAll, C::OpenFolder}},
              {"Clipboard", {C::Paste, C::Cut, C::Copy}, {C::SelectAll}},
              {"History", {C::Undo, C::Redo}, {}},
              {"Find", {C::Find, C::Replace, C::GoToLine}, {C::FindNext, C::FindPrevious, C::FindInFiles}},
              {"Assist", {C::AskAgent, C::ExplainSelection}, {C::RefactorSelection, C::GenerateTests}},
          }},
+        {"Read", {std::begin(read), std::end(read)}},
         {"Edit",
          {
              {"Lines", {C::DuplicateLine, C::DeleteLine, C::MoveLineUp, C::MoveLineDown}, {C::SortLines}},
@@ -105,33 +135,40 @@ const std::vector<RibbonView::Tab>& RibbonView::tabs() const
          {
              {"Line Endings", {C::EolCrLf, C::EolLf, C::EolCr}, {}},
              {"Encoding", {C::EncodingUtf8, C::EncodingUtf8Bom, C::EncodingAnsi}, {C::EncodingUtf16Le, C::EncodingUtf16Be}},
-             {"Language", {C::LanguagePlainText, C::LanguageCpp, C::LanguagePython, C::LanguageMarkdown},
-              {C::LanguageJavaScript, C::LanguageJson, C::LanguageCMake}},
+             {"Indentation", {C::ToggleSmartIndent, C::IndentWithSpaces, C::IndentWithTabs},
+              {C::IndentWidth2, C::IndentWidth4, C::IndentWidth8, C::DetectIndentation, C::ConvertIndentation}},
+             {"Language", {C::ChooseLanguage}, {}},
          }},
         {"Tools",
          {
+             {"Terminal", {C::NewTerminal, C::ToggleTerminal, C::PopOutTerminal}, {C::ClearTerminal, C::KillTerminal}},
              {"Macro", {C::StartRecording, C::StopRecording, C::PlayMacro}, {}},
              {"Utilities", {C::HashSha256}, {}},
-             {"Application", {C::Preferences, C::About}, {C::Exit}},
+             {"Application", {C::StartTour, C::Preferences, C::About}, {C::Exit}},
          }},
     };
     static const std::vector<Tab> agentTabs = {
         {"Agent",
          {
-             {"Session", {C::NewChat, C::AskAgent, C::StopAgent}, {}},
-             {"Ask", {C::ExplainSelection, C::RefactorSelection, C::GenerateTests, C::FixFindings}, {}},
+             {"Session", {C::NewChat, C::AskAgent, C::StopAgent, C::StartTour}, {}},
+             {"Ask", {C::DissectProject, C::ExplainSelection, C::RefactorSelection, C::GenerateTests, C::FixFindings}, {}},
              {"Changes", {C::CompareAgentChanges, C::AcceptAllChanges, C::RejectAllChanges}, {}},
+             {"Terminal", {C::NewTerminal, C::ToggleTerminal, C::PopOutTerminal}, {C::ClearTerminal, C::KillTerminal}},
          }},
+        {"Read", {std::begin(read), std::end(read)}},
         {"Review", {std::begin(review), std::end(review)}},
         {"Files",
          {
-             {"File", {C::NewFile, C::OpenFile, C::Save}, {C::SaveAll, C::CloseFile}},
+             {"File", {C::NewFile, C::OpenFile, C::Save}, {C::SaveAs, C::SaveAll, C::OpenFolder, C::CloseFile}},
              {"History", {C::Undo, C::Redo}, {}},
              {"Find", {C::Find, C::GoToLine}, {C::Replace, C::FindInFiles}},
          }},
         {"View", {std::begin(view), std::end(view)}},
     };
-    return vm_.workspace.get() == WorkspaceMode::Agent ? agentTabs : codeTabs;
+    std::vector<Tab> result = vm_.workspace.get() == WorkspaceMode::Agent ? agentTabs : codeTabs;
+    result.push_back({"My Tools",
+                      {{"Pinned", vm_.pinnedCommands(), {}}, {"Custom Actions", {}, {}, true}}});
+    return result;
 }
 
 int& RibbonView::selectedTab()
@@ -174,6 +211,11 @@ void RibbonView::render()
 
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(width, h));
+    if (customizeRequested_) {
+        ImGui::OpenPopup("Customize Ribbon");
+        customizeRequested_ = false;
+    }
+    renderCustomizeDialog();
     ImGui::PopID();
 }
 
@@ -183,6 +225,8 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool agent = vm_.workspace.get() == WorkspaceMode::Agent;
     ImGui::InvisibleButton("##workspace", ImVec2(width, height));
+    registerLastItem("workspace", "button", agent ? "Agent workspace" : "Code workspace",
+                     [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); });
     const bool hovered = ImGui::IsItemHovered();
     if (ImGui::IsItemClicked())
         ImGui::OpenPopup("##workspacePopup");
@@ -257,6 +301,8 @@ void RibbonView::renderTabRow(float width)
         ImGui::PushID(i);
         if (ImGui::InvisibleButton("##tab", ImVec2(w, pillH)))
             selected = i;
+        registerLastItem(std::string("ribbon-tab:") + list[size_t(i)].name, "tab", list[size_t(i)].name,
+                         [this, i]() { selectedTab() = i; });
         ImGui::PopID();
         const bool active = i == selected;
         if (active)
@@ -266,6 +312,22 @@ void RibbonView::renderTabRow(float width)
         dl->AddText(ImVec2(x + 12.0f * s_, start.y + (pillH - size.y) * 0.5f), active ? palette_.text : palette_.textDim,
                     list[size_t(i)].name);
         x += w + 2.0f * s_;
+    }
+
+    // Customize: right after the tabs, like an extra pill.
+    {
+        const char* label = ICON_FA_SLIDERS;
+        const float w = ImGui::CalcTextSize(label).x + 18.0f * s_;
+        ImGui::SetCursorScreenPos(ImVec2(x + 4.0f * s_, start.y));
+        if (ImGui::InvisibleButton("##customize", ImVec2(w, pillH)))
+            customizeRequested_ = true;
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered)
+            dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 5.0f * s_);
+        dl->AddText(ImVec2(x + 4.0f * s_ + 9.0f * s_, start.y + (pillH - ImGui::GetTextLineHeight()) * 0.5f),
+                    hovered ? palette_.text : palette_.textFaint, label);
+        ImGui::SetItemTooltip("Customize the ribbon: pin commands and add your own actions to My Tools");
+        x += w + 8.0f * s_;
     }
 
     const float searchW = std::min(kSearchWidth * s_, std::max(0.0f, start.x + width - x - 8.0f * s_));
@@ -341,6 +403,8 @@ void RibbonView::renderGroups(const Tab& tab)
         const Group& group = tab.groups[g];
         const float x0 = x;
         ImGui::PushID(int(g));
+        if (group.customActions)
+            renderCustomActions(x, top);
         for (CommandId id : group.buttons) {
             ImGui::SetCursorScreenPos(ImVec2(x, top));
             if (ribbonButton(id))
@@ -366,16 +430,140 @@ void RibbonView::renderGroups(const Tab& tab)
 bool RibbonView::ribbonButton(CommandId id)
 {
     const viewmodel::CommandInfo& info = commandInfo(id);
-    const bool enabled = vm_.command(id).canExecute();
-    const bool checked = vm_.isChecked(id);
-    const ImVec2 labelSize = textSize(info.label, kLabelSize);
+    ImGui::PushID(int(id));
+    const std::string detail = info.shortcut[0] ? std::string(info.tooltip) + "\n" + info.shortcut : std::string(info.tooltip);
+    const bool clicked = drawButton("##ribbonButton", fonts_.hasIcons ? commandIcon(id) : "?", info.label,
+                                    commandTint(id, palette_), vm_.command(id).canExecute(), vm_.isChecked(id), info.label,
+                                    detail.c_str());
+    registerLastItem(std::string("command:") + commandKey(id), "button", info.label, [this, id]() { vm_.execute(id); },
+                     vm_.command(id).canExecute());
+    ImGui::PopID();
+    return clicked;
+}
+
+void RibbonView::renderCustomActions(float& x, float top)
+{
+    const auto& actions = vm_.customActions();
+    for (int i = 0; i < int(actions.size()); ++i) {
+        ImGui::SetCursorScreenPos(ImVec2(x, top));
+        ImGui::PushID(i);
+        const std::string detail = "Runs in the terminal:\n" + actions[size_t(i)].command;
+        if (drawButton("##customAction", ICON_FA_BOLT, actions[size_t(i)].name.c_str(), palette_.iconGreen, true, false,
+                       actions[size_t(i)].name.c_str(), detail.c_str()))
+            vm_.runCustomAction(i);
+        registerLastItem("action:" + actions[size_t(i)].name, "button", actions[size_t(i)].name,
+                         [this, i]() { vm_.runCustomAction(i); });
+        ImGui::PopID();
+        x = ImGui::GetItemRectMax().x + 2.0f * s_;
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x, top));
+    if (drawButton("##addAction", ICON_FA_PLUS, "Add", palette_.iconGray, true, false, "Add an action",
+                   "Create a button that runs a command in the terminal"))
+        customizeRequested_ = true;
+    x = ImGui::GetItemRectMax().x + 2.0f * s_;
+}
+
+void RibbonView::renderCustomizeDialog()
+{
+    ImGui::SetNextWindowSize(ImVec2(760.0f * s_, 500.0f * s_), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    bool open = true;
+    if (!ImGui::BeginPopupModal("Customize Ribbon", &open, ImGuiWindowFlags_NoSavedSettings))
+        return;
+    const float columnW = ImGui::GetContentRegionAvail().x * 0.5f - 6.0f * s_;
+    const float listH = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
+
+    // Left: pin any command to My Tools.
+    ImGui::BeginChild("##pinned", ImVec2(columnW, listH));
+    ImGui::TextDisabled(ICON_FA_THUMBTACK "  PINNED COMMANDS");
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##filter", ICON_FA_MAGNIFYING_GLASS "  Filter commands", &pinFilter_);
+    ImGui::BeginChild("##commandList", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+    const std::string needle = lower(pinFilter_);
+    for (int i = 0; i < int(CommandId::Count); ++i) {
+        const CommandId id = CommandId(i);
+        const viewmodel::CommandInfo& info = commandInfo(id);
+        if (!needle.empty() && lower(info.label).find(needle) == std::string::npos &&
+            lower(info.tooltip).find(needle) == std::string::npos)
+            continue;
+        bool pinned = vm_.isPinned(id);
+        ImGui::PushID(i);
+        if (ImGui::Checkbox("##pin", &pinned))
+            vm_.setPinned(id, pinned);
+        ImGui::SameLine();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(commandTint(id, palette_)), "%s", commandIcon(id));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(info.label);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", info.tooltip);
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
+
+    // Right: custom actions.
+    ImGui::SameLine(0.0f, 12.0f * s_);
+    ImGui::BeginChild("##actions", ImVec2(0.0f, listH));
+    ImGui::TextDisabled(ICON_FA_BOLT "  CUSTOM ACTIONS");
+    ImGui::TextWrapped("Each action is a ribbon button that runs a shell command in the integrated terminal.");
+    ImGui::Spacing();
+    const auto& actions = vm_.customActions();
+    int remove = -1;
+    if (ImGui::BeginTable("##actionTable", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 110.0f * s_);
+        ImGui::TableSetupColumn("Command", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
+        for (int i = 0; i < int(actions.size()); ++i) {
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(actions[size_t(i)].name.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", actions[size_t(i)].command.c_str());
+            ImGui::TableSetColumnIndex(2);
+            if (ImGui::SmallButton(ICON_FA_TRASH_CAN "##remove"))
+                remove = i;
+            ImGui::SetItemTooltip("Remove");
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (remove >= 0)
+        vm_.removeCustomAction(remove);
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##actionName", "Name, e.g. Build", &newActionName_);
+    ImGui::SetNextItemWidth(-1.0f);
+    const bool enter = ImGui::InputTextWithHint("##actionCommand", "Command, e.g. cmake --build build", &newActionCommand_,
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::BeginDisabled(newActionName_.empty() || newActionCommand_.empty());
+    if (ImGui::Button(ICON_FA_PLUS "  Add action") || (enter && !newActionName_.empty())) {
+        vm_.addCustomAction(newActionName_, newActionCommand_);
+        newActionName_.clear();
+        newActionCommand_.clear();
+    }
+    ImGui::EndDisabled();
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Changes apply immediately and are remembered.");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 90.0f * s_);
+    if (ImGui::Button("Done", ImVec2(90.0f * s_, 0.0f)) || !open)
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+bool RibbonView::drawButton(const char* id, const char* icon, const char* label, ImU32 tint, bool enabled, bool checked,
+                            const char* tooltip, const char* detail)
+{
+    const ImVec2 labelSize = textSize(label, kLabelSize);
     const float w = std::max(kButtonMinWidth * s_, labelSize.x + 14.0f * s_);
     const float h = kButtonHeight * s_;
 
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::PushID(int(id));
-    const bool clicked = ImGui::InvisibleButton("##ribbonButton", ImVec2(w, h));
-    ImGui::PopID();
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
     const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     const bool held = ImGui::IsItemActive();
 
@@ -386,21 +574,15 @@ bool RibbonView::ribbonButton(CommandId id)
     if (hovered && enabled)
         dl->AddRectFilled(p, q, held ? fade(palette_.hover, 2.0f) : palette_.hover, 6.0f * s_);
 
-    const char* icon = fonts_.hasIcons ? commandIcon(id) : "?";
     const ImVec2 iconSize = textSize(icon, Fonts::kRibbonIconSize);
-    const ImU32 tint = commandTint(id, palette_);
     drawText(dl, ImVec2(p.x + (w - iconSize.x) * 0.5f, p.y + 5.0f * s_), enabled ? tint : fade(tint, 0.35f), icon,
              Fonts::kRibbonIconSize);
     drawText(dl, ImVec2(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_),
-             enabled ? palette_.text : palette_.textFaint, info.label, kLabelSize);
+             enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
 
     if (hovered && ImGui::BeginTooltip()) {
-        ImGui::TextUnformatted(info.label);
-        if (info.shortcut[0]) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%s)", info.shortcut);
-        }
-        ImGui::TextDisabled("%s", info.tooltip);
+        ImGui::TextUnformatted(tooltip);
+        ImGui::TextDisabled("%s", detail);
         ImGui::EndTooltip();
     }
     return clicked && enabled;
