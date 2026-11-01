@@ -147,11 +147,23 @@ EditorView::EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, cons
     subscriptions_.push_back(vm_.activeIndex.subscribe([this](const int&) {
         focusRequested_ = true;
         preferredVcol_ = -1.0f;
+        pruneClosed(); // closing a document changes the active index
     }));
     subscriptions_.push_back(vm_.findVisible.subscribe([this](const bool& visible) {
         if (!visible)
             focusRequested_ = true;
     }));
+}
+
+// The rendered Markdown (parsed blocks, measured layout, a copy of the text) and the scroll are
+// kept per document. Without this, every closed document's state stayed for as long as the app
+// ran: each opened folder shows its README, so opening and closing folders leaked.
+void EditorView::pruneClosed()
+{
+    for (auto it = markdown_.begin(); it != markdown_.end();)
+        it = vm_.documentIndexById(it->first) < 0 ? markdown_.erase(it) : std::next(it);
+    for (auto it = scroll_.begin(); it != scroll_.end();)
+        it = vm_.documentIndexById(it->first) < 0 ? scroll_.erase(it) : std::next(it);
 }
 
 // ---- Layout -------------------------------------------------------------------------------------
@@ -302,6 +314,8 @@ void EditorView::render(ImVec2 size)
     }
     if (markdownDoc)
         markdown_[doc->id].shown = false;
+    if (markdown_.size() > vm_.documents().size() || scroll_.size() > vm_.documents().size())
+        pruneClosed(); // documents closed without an active-index change
 
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * vm_.zoom.get());
     Metrics m{};
@@ -329,8 +343,11 @@ void EditorView::render(ImVec2 size)
 
     const bool wrap = vm_.wordWrap.get();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    const std::string childId = "##editor" + std::to_string(doc->id);
-    panel::beginChild(childId.c_str(), size, palette_.editorBg, ImGuiChildFlags_None,
+    if (doc->id != shownTextDoc_) { // another document in the shared window: its own scroll
+        ImGui::SetNextWindowScroll(scroll_[doc->id].text);
+        shownTextDoc_ = doc->id;
+    }
+    panel::beginChild("##editorText", size, palette_.editorBg, ImGuiChildFlags_None,
                       (wrap ? ImGuiWindowFlags_None : ImGuiWindowFlags_HorizontalScrollbar) | ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
     if (focusRequested_ && !vm_.findVisible.get()) {
@@ -399,6 +416,7 @@ void EditorView::render(ImVec2 size)
     const float contentW = wrap ? 1.0f : m.gutterW + 6.0f * s_ + float(maxColumns_ + 4) * m.charW;
     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
     ImGui::Dummy(ImVec2(contentW, float(rows_.size()) * m.lineH + viewH * 0.5f));
+    scroll_[doc->id].text = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     ImGui::PopFont();
     renderChangePeek(*vm_.activeDocument());
@@ -454,8 +472,11 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     const ImVec2 sideSize(sideW, size.y);
     size.x -= sideW;
 
-    const std::string childId = "##markdown" + std::to_string(doc.id);
-    panel::beginChild(childId.c_str(), size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    if (doc.id != shownMarkdownDoc_) { // another document in the shared window: its own scroll
+        ImGui::SetNextWindowScroll(scroll_[doc.id].markdown);
+        shownMarkdownDoc_ = doc.id;
+    }
+    panel::beginChild("##markdownText", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     if (focusRequested_ && !vm_.findVisible.get()) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
@@ -486,6 +507,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
         vm_.statusText.set("This Markdown file is shown rendered: press Ctrl+Shift+V (or double-click) to edit it");
     markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
                                winPos.y + 6.0f * s_));
+    scroll_[doc.id].markdown = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     if (sideBar) {
         ImGui::SameLine(0.0f, 0.0f);

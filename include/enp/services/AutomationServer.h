@@ -47,8 +47,12 @@ private:
     std::unique_ptr<os::net::Socket> listener_;
     std::thread acceptThread_;
     std::mutex connectionsMutex_;
-    std::vector<std::shared_ptr<os::net::Socket>> connections_;
-    std::vector<std::thread> connectionThreads_;
+    struct Connection {
+        std::shared_ptr<os::net::Socket> socket;
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> finished; // serve() returned: the thread can be joined
+    };
+    std::vector<Connection> connections_;
     std::atomic<bool> stopping_{false};
     int port_ = 0;
     std::string token_;

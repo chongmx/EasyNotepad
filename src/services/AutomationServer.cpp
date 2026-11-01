@@ -89,13 +89,12 @@ void AutomationServer::stop()
         acceptThread_.join();
     {
         std::lock_guard<std::mutex> lock(connectionsMutex_);
-        for (auto& c : connections_)
-            c->shutdown();
+        for (Connection& c : connections_)
+            c.socket->shutdown();
     }
-    for (std::thread& t : connectionThreads_)
-        if (t.joinable())
-            t.join();
-    connectionThreads_.clear();
+    for (Connection& c : connections_)
+        if (c.thread.joinable())
+            c.thread.join();
     connections_.clear();
     listener_.reset();
     // Only remove the endpoint file if it is still ours (another instance may have taken over).
@@ -113,8 +112,21 @@ void AutomationServer::acceptLoop()
         if (!connection)
             continue;
         std::lock_guard<std::mutex> lock(connectionsMutex_);
-        connections_.push_back(connection);
-        connectionThreads_.emplace_back([this, connection]() { serve(connection); });
+        // Connections that ended are reaped here (the MCP bridge connects once per agent prompt);
+        // an unjoined thread keeps its stack mapped, so they used to pile up until the server stopped.
+        for (auto it = connections_.begin(); it != connections_.end();) {
+            if (it->finished->load()) {
+                it->thread.join();
+                it = connections_.erase(it);
+            } else
+                ++it;
+        }
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        connections_.push_back({connection, {}, finished});
+        connections_.back().thread = std::thread([this, connection, finished]() {
+            serve(connection);
+            *finished = true;
+        });
     }
 }
 

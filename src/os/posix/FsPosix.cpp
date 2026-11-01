@@ -110,6 +110,13 @@ FileInfo stat(const std::string& path)
 
 std::vector<DirEntry> listDirectory(const std::string& p, std::string* error)
 {
+    return listDirectory(p, 0, nullptr, error);
+}
+
+std::vector<DirEntry> listDirectory(const std::string& p, size_t limit, bool* more, std::string* error)
+{
+    if (more)
+        *more = false;
     std::vector<DirEntry> entries;
     DIR* dir = ::opendir(p.c_str());
     if (!dir) {
@@ -121,10 +128,27 @@ std::vector<DirEntry> listDirectory(const std::string& p, std::string* error)
         std::string name = d->d_name;
         if (name == "." || name == ".." || name[0] == '.')
             continue;
-        FileInfo info = stat(path::join(p, name));
-        if (!info.exists)
-            continue;
-        entries.push_back({name, info.isDirectory, info.size});
+        if (limit > 0 && entries.size() >= limit) {
+            if (more)
+                *more = true;
+            break;
+        }
+        // The directory itself usually says what an entry is: a stat() per entry made listing a
+        // large folder slow. Links and unknown types are still resolved (a dangling link is skipped).
+        DirEntry e{name, false, 0};
+#if defined(DT_DIR) && defined(DT_REG)
+        if (d->d_type == DT_DIR)
+            e.isDirectory = true;
+        else if (d->d_type != DT_REG)
+#endif
+        {
+            FileInfo info = stat(path::join(p, name));
+            if (!info.exists)
+                continue;
+            e.isDirectory = info.isDirectory;
+            e.size = info.size;
+        }
+        entries.push_back(std::move(e));
     }
     ::closedir(dir);
     std::sort(entries.begin(), entries.end(), [](const DirEntry& a, const DirEntry& b) {

@@ -348,6 +348,8 @@ Result run(const std::string& commandLine, const std::string& input, const std::
     const pid_t pid = fork();
     if (pid < 0) {
         result.error = "fork failed";
+        for (int fd : {in[0], in[1], out[0], out[1]})
+            close(fd);
         return result;
     }
     if (pid == 0) {
@@ -469,6 +471,8 @@ Result run(const Command& command)
     const pid_t pid = fork();
     if (pid < 0) {
         result.error = "fork failed";
+        for (int fd : {in[0], in[1], out[0], out[1], err[0], err[1]})
+            close(fd);
         return result;
     }
     if (pid == 0) {

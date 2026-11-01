@@ -223,6 +223,17 @@ public:
     // Opens `path` and moves the caret to the 0-based `line`.
     void navigateTo(const std::string& path, int line);
     const ExplorerItem& explorer() const { return explorer_; }
+    // The explorer tree is read breadth-first within limits (entries per folder, items in all,
+    // depth), so a huge repository opens at once and every top-level folder shows. Folders beyond
+    // the limits are read when they are expanded (expandExplorer). Searches, the map and the
+    // layers see the part of the tree read so far.
+    struct ExplorerLimits {
+        int perFolder = 1000;
+        int total = 20000;
+        int depth = 8;
+    };
+    void setExplorerLimits(ExplorerLimits limits) { explorerLimits_ = limits; }
+    void expandExplorer(const std::string& path); // reads the entries of a folder not scanned yet
     // Opens a real folder as the workspace (needs the file service); closes the sample documents.
     bool openFolder(const std::string& path);
     // Absolute root of the opened folder; empty while showing the sample workspace.
@@ -414,7 +425,9 @@ private:
     void set(CommandId id, std::function<void()> execute, std::function<bool()> canExecute = {});
     void notImplemented(CommandId id);
     model::Document& addDocument(std::string title, std::string path, const std::string& text);
-    void refreshExplorer(); // re-reads the workspace folder tree
+    void refreshExplorer(); // re-reads the workspace folder tree (within explorerLimits_)
+    void scanExplorerFolder(ExplorerItem& folder); // reads one folder's entries
+    ExplorerLimits explorerLimits_;
     bool saveDocument(model::Document& doc);
 
     void beginEdit(EditKind kind);

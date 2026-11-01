@@ -1836,8 +1836,12 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
                                 withAlpha(palette_.severityWarning, 200));
         }
         if (open) {
+            if (!item.scanned)
+                vm_.expandExplorer(item.path); // deep folders are read when first shown
             for (const viewmodel::ExplorerItem& child : item.children)
                 renderExplorerItem(child);
+            if (item.truncated)
+                ImGui::TextDisabled("%s", "...  more entries than the explorer shows");
             ImGui::TreePop();
         }
         return;

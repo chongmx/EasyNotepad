@@ -181,6 +181,13 @@ FileInfo stat(const std::string& path)
 
 std::vector<DirEntry> listDirectory(const std::string& path, std::string* error)
 {
+    return listDirectory(path, 0, nullptr, error);
+}
+
+std::vector<DirEntry> listDirectory(const std::string& path, size_t limit, bool* more, std::string* error)
+{
+    if (more)
+        *more = false;
     std::vector<DirEntry> entries;
     std::wstring pattern = nativePath(path);
     if (!pattern.empty() && pattern.back() != L'\\')
@@ -200,6 +207,11 @@ std::vector<DirEntry> listDirectory(const std::string& path, std::string* error)
             continue;
         if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
             continue;
+        if (limit > 0 && entries.size() >= limit) {
+            if (more)
+                *more = true;
+            break;
+        }
         DirEntry e;
         e.name = narrow(name);
         e.isDirectory = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;

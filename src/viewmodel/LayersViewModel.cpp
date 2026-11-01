@@ -370,6 +370,15 @@ void LayersViewModel::zoomIn(int index)
         setFocus(index, +1);
 }
 
+void LayersViewModel::workspaceChanged()
+{
+    facts_.clear();
+    loadedFiles_.clear();
+    focusId_[int(LayerScope::Project)].clear();
+    key_.clear();
+    nodes_.clear();
+}
+
 void LayersViewModel::zoomOut()
 {
     const int f = focus();

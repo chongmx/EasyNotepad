@@ -3214,6 +3214,96 @@ TEST(agent_chooses_local_or_claude_and_falls_back)
     CHECK(engine.chats.size() == chats && !agent.busy.get());
 }
 
+
+TEST(opening_another_folder_forgets_the_previous_one)
+{
+    // The layers' file facts are keyed by workspace-relative path and Find in Files keeps its hits:
+    // both must go with the folder, or they describe the wrong files and grow with every folder.
+    services::FileService files;
+    const std::string a = scratchDirectory() + "/enp-test-folder-a";
+    const std::string b = scratchDirectory() + "/enp-test-folder-b";
+    os::fs::createDirectories(a + "/src");
+    os::fs::createDirectories(b + "/src");
+    files.write(a + "/src/x.cpp", "int a;\nint b;\nint c;", nullptr);
+    files.write(b + "/src/x.cpp", "int a;\nint b;\nint c;\nint d;\nint e;\nint f;", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    // Project scope, zoomed into src: the line count of src/x.cpp as the layers describe it.
+    auto linesOfX = [&]() {
+        viewmodel::LayersViewModel& layers = vm.layers();
+        layers.scope.set(viewmodel::LayerScope::Project);
+        const std::vector<viewmodel::LayerNode>& nodes = layers.nodes();
+        for (int i = 0; i < int(nodes.size()); ++i)
+            if (nodes[size_t(i)].id == "dir:src")
+                layers.zoomIn(i);
+        for (const viewmodel::LayerNode& n : layers.nodes())
+            if (n.id == "file:src/x.cpp")
+                return n.size;
+        return -1;
+    };
+    CHECK(vm.openFolder(a));
+    CHECK_EQ(linesOfX(), 3);
+    vm.findInFiles().query = "int";
+    vm.findInFiles().searchNow();
+    CHECK_EQ(vm.findInFiles().hitCount(), 3);
+
+    CHECK(vm.openFolder(b));
+    CHECK(vm.findInFiles().results().empty());
+    CHECK_EQ(vm.findInFiles().hitCount(), 0);
+    CHECK_EQ(linesOfX(), 6); // not the first folder's 3
+
+    vm.findInFiles().searchNow();
+    CHECK_EQ(vm.findInFiles().hitCount(), 6);
+    vm.closeFolder();
+    CHECK(vm.findInFiles().results().empty());
+    CHECK(vm.layers().nodes().size() <= 1); // the project node at most: nothing of the closed folder
+}
+
+TEST(explorer_scans_breadth_first_within_limits_and_reads_deep_folders_on_demand)
+{
+    // A repository whose first folder alone exceeds the budget used to show as that folder and
+    // nothing else; a folder of a million files was read whole.
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-explorer";
+    for (const char* dir : {"/a", "/b", "/c/d/e"})
+        os::fs::createDirectories(root + dir);
+    for (int i = 0; i < 8; ++i)
+        files.write(root + "/a/f" + std::to_string(i) + ".txt", "x", nullptr);
+    files.write(root + "/b/one.txt", "x", nullptr);
+    files.write(root + "/b/two.txt", "x", nullptr);
+    files.write(root + "/c/d/e/deep.txt", "x", nullptr);
+
+    bool more = false;
+    CHECK_EQ(files.list(root + "/a", 3, &more).size(), size_t(3));
+    CHECK(more);
+    CHECK_EQ(files.list(root + "/b", 5, &more).size(), size_t(2));
+    CHECK(!more);
+
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    vm.setExplorerLimits({5, 12, 2});
+    CHECK(vm.openFolder(root));
+    auto find = [&](const std::string& path) -> const viewmodel::ExplorerItem* {
+        auto walk = [&](auto&& self, const viewmodel::ExplorerItem& item) -> const viewmodel::ExplorerItem* {
+            if (item.path == path)
+                return &item;
+            for (const viewmodel::ExplorerItem& child : item.children)
+                if (const viewmodel::ExplorerItem* found = self(self, child))
+                    return found;
+            return nullptr;
+        };
+        return walk(walk, vm.explorer());
+    };
+    CHECK_EQ(vm.explorer().children.size(), size_t(3)); // a, b and c: all of the top level
+    const viewmodel::ExplorerItem* a = find("a");
+    CHECK(a && a->children.size() == 5 && a->truncated);
+    const viewmodel::ExplorerItem* b = find("b");
+    CHECK(b && b->children.size() == 2 && !b->truncated);
+    const viewmodel::ExplorerItem* e = find("c/d/e");
+    CHECK(e && !e->scanned && e->children.empty()); // beyond the depth: not read yet
+    vm.expandExplorer("c/d/e");
+    e = find("c/d/e");
+    CHECK(e && e->scanned && e->children.size() == 1 && e->children[0].name == "deep.txt");
+}
+
 int main(int argc, char** argv)
 {
     os::InitParams params;

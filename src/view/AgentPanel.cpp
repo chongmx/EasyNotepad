@@ -221,6 +221,10 @@ void AgentPanel::renderMessages(float height)
         ImGui::TextDisabled("The agent plans, edits and runs the review tools;");
         ImGui::TextDisabled("you review the changes before they land.");
     }
+    // A new session (another folder was opened) starts with fewer messages: the rendered Markdown
+    // of the old ones goes too.
+    if (markdown_.size() > agent.messages().size())
+        markdown_.resize(agent.messages().size());
     for (const model::ChatMessage& message : agent.messages())
         bubble(message, size_t(&message - agent.messages().data()), width);
     // The last answer came from the local model: Claude Code can have a go too.

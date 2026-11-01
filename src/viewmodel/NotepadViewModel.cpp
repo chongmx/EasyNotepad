@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 
 namespace enp::viewmodel {
 
@@ -280,6 +281,8 @@ void NotepadViewModel::closeFolder()
     workspaceRoot_.clear();
     explorer_ = ExplorerItem{"", "", true, {}}; // empty: "No folder open", not the samples
     findInFiles_.folder.clear();
+    findInFiles_.clear(); // the hits (and their lines) were the closed folder's
+    layers_.workspaceChanged();
     git_.workspaceChanged();
     statusText.set(closed.empty() ? "No folder open" : "Closed the folder " + closed);
 }
@@ -489,27 +492,65 @@ void NotepadViewModel::refreshExplorer()
 {
     if (workspaceRoot_.empty() || !files_)
         return;
-    // Build the explorer tree, skipping version control, build output and other bulk folders.
-    const std::vector<std::string> skipped = {"build", "bin", "out", "ref", "node_modules", "_deps"};
-    int budget = 20000;
-    auto scan = [&](auto&& self, const std::string& relative, ExplorerItem& into, int depth) -> void {
-        for (const interfaces::DirectoryEntry& e : files_->list(relative.empty() ? workspaceRoot_ : workspaceRoot_ + "/" + relative)) {
-            if (--budget < 0)
-                return;
-            if (e.name.empty() || e.name[0] == '.')
-                continue;
-            if (e.isDirectory && depth == 0 && std::find(skipped.begin(), skipped.end(), e.name) != skipped.end())
-                continue;
-            ExplorerItem item{e.name, relative.empty() ? e.name : relative + "/" + e.name, e.isDirectory, {}};
-            if (e.isDirectory && depth < 8)
-                self(self, item.path, item, depth + 1);
-            into.children.push_back(std::move(item));
-        }
-    };
+    // Breadth-first, so that a big folder early in the order cannot crowd out the others (a
+    // depth-first scan with a budget used to show a repository as a part of its first folder and
+    // nothing else): every top-level entry shows, and the budget runs out in the depths, where
+    // folders are read when expanded instead.
     ExplorerItem tree{workspaceRoot_.substr(workspaceRoot_.find_last_of('/') + 1), "", true, {}};
-    scan(scan, "", tree, 0);
-
+    tree.scanned = false;
+    std::deque<ExplorerItem*> pending{&tree};
+    int budget = explorerLimits_.total;
+    while (!pending.empty() && budget > 0) {
+        ExplorerItem& folder = *pending.front();
+        pending.pop_front();
+        scanExplorerFolder(folder);
+        budget -= int(folder.children.size());
+        const int depth = folder.path.empty() ? 0 : int(std::count(folder.path.begin(), folder.path.end(), '/')) + 1;
+        if (depth + 1 > explorerLimits_.depth)
+            continue;
+        for (ExplorerItem& child : folder.children) // this vector is final now: the pointers stay valid
+            if (child.isDirectory)
+                pending.push_back(&child);
+    }
     explorer_ = std::move(tree);
+}
+
+// Reads one folder's entries, up to the per-folder limit. Version control, build output and other
+// bulk folders at the top level are left out, as are hidden entries.
+void NotepadViewModel::scanExplorerFolder(ExplorerItem& folder)
+{
+    static const std::vector<std::string> skipped = {"build", "bin", "out", "ref", "node_modules", "_deps"};
+    bool more = false;
+    const std::string absolute = folder.path.empty() ? workspaceRoot_ : workspaceRoot_ + "/" + folder.path;
+    folder.children.clear();
+    for (const interfaces::DirectoryEntry& e : files_->list(absolute, size_t(std::max(1, explorerLimits_.perFolder)), &more)) {
+        if (e.name.empty() || e.name[0] == '.')
+            continue;
+        if (e.isDirectory && folder.path.empty() && std::find(skipped.begin(), skipped.end(), e.name) != skipped.end())
+            continue;
+        ExplorerItem item{e.name, folder.path.empty() ? e.name : folder.path + "/" + e.name, e.isDirectory, {}};
+        item.scanned = !e.isDirectory; // folders: read later (breadth-first, or when expanded)
+        folder.children.push_back(std::move(item));
+    }
+    folder.truncated = more;
+    folder.scanned = true;
+}
+
+void NotepadViewModel::expandExplorer(const std::string& path)
+{
+    if (workspaceRoot_.empty() || !files_)
+        return;
+    auto find = [](auto&& self, ExplorerItem& item, const std::string& p) -> ExplorerItem* {
+        if (item.path == p)
+            return &item;
+        for (ExplorerItem& child : item.children)
+            if (child.isDirectory && (child.path == p || p.compare(0, child.path.size() + 1, child.path + "/") == 0))
+                return self(self, child, p);
+        return nullptr;
+    };
+    ExplorerItem* folder = find(find, explorer_, path);
+    if (folder && folder->isDirectory && !folder->scanned)
+        scanExplorerFolder(*folder);
 }
 
 void NotepadViewModel::remember(std::vector<std::string>& list, const std::string& path, size_t max)
@@ -766,6 +807,9 @@ bool NotepadViewModel::openFolder(const std::string& path)
         root.pop_back();
     workspaceRoot_ = root;
     refreshExplorer();
+    findInFiles_.folder.clear();
+    findInFiles_.clear();
+    layers_.workspaceChanged();
     remember(recentFolders_, root, kMaxRecentFolders);
     while (!documents_.empty())
         closeDocument(0);

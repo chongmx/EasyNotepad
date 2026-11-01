@@ -29,6 +29,17 @@ public:
     virtual bool write(const std::string& path, std::string_view data, std::string* error = nullptr) = 0;
     // Directories first, then files, each sorted by name.
     virtual std::vector<DirectoryEntry> list(const std::string& path) = 0;
+    // At most `limit` entries (0: all; which ones is up to the file system, sorted all the same),
+    // without reading a huge folder whole where the platform allows; `*more`: the folder holds more.
+    virtual std::vector<DirectoryEntry> list(const std::string& path, size_t limit, bool* more)
+    {
+        std::vector<DirectoryEntry> all = list(path);
+        if (more)
+            *more = limit > 0 && all.size() > limit;
+        if (limit > 0 && all.size() > limit)
+            all.resize(limit);
+        return all;
+    }
     virtual bool isDirectory(const std::string& path) = 0;
     virtual std::string absolute(const std::string& path) = 0;
     virtual bool createDirectories(const std::string& path) = 0;

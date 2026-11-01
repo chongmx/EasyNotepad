@@ -26,8 +26,12 @@ struct DirEntry {
 std::optional<std::string> readFile(const std::string& path, std::string* error = nullptr);
 bool writeFile(const std::string& path, std::string_view data, std::string* error = nullptr);
 FileInfo stat(const std::string& path);
-// Directories first, then files; both sorted case-insensitively. Excludes "." and "..".
+// Directories first, then files; both sorted case-insensitively. Excludes "." and ".." (and hidden
+// entries). `size` is 0 where the directory listing does not give it.
 std::vector<DirEntry> listDirectory(const std::string& path, std::string* error = nullptr);
+// Stops after `limit` entries (0: all), so a folder of a million files is not read whole; `*more`
+// reports whether the folder holds more. Which entries come first is up to the file system.
+std::vector<DirEntry> listDirectory(const std::string& path, size_t limit, bool* more, std::string* error = nullptr);
 bool createDirectories(const std::string& path);
 // Renames or moves a file or folder; fails if `to` exists.
 bool renamePath(const std::string& from, const std::string& to, std::string* error = nullptr);

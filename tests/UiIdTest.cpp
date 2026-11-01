@@ -11,6 +11,7 @@
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/viewmodel/DummyData.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include "FakeTerminalService.h"
@@ -84,6 +85,7 @@ public:
     }
 
     viewmodel::NotepadViewModel& vm() { return vm_; }
+    view::MainView& view() { return *view_; }
     const std::vector<Failure>& failures() const { return failures_; }
     int frames() const { return frames_; }
 
@@ -268,8 +270,8 @@ int main(int argc, char** argv)
 
         // Touch: a finger drags content; a tap still clicks; a mouse drag selects as before.
         {
-            // The scroll of the window whose own name (after the last '/') starts with `part`; "##editor#"
-            // means "##editor" followed by a digit (the editor itself, not "##editorPanel").
+            // The scroll of the window whose own name (after the last '/') starts with `part`; a trailing
+            // '#' means "followed by a digit" (a numbered window, not one with a longer name).
             auto scrollOf = [](const char* part, int axis) {
                 std::string prefix = part;
                 const bool digit = !prefix.empty() && prefix.back() == '#';
@@ -306,15 +308,15 @@ int main(int argc, char** argv)
             h.setTouch(true);
             h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
             h.settle();
-            const float before = scrollOf("##editor#", 1);
+            const float before = scrollOf("##editorText", 1);
             drag(ImVec2(200.0f, 600.0f), ImVec2(200.0f, 300.0f));
-            const float after = scrollOf("##editor#", 1);
+            const float after = scrollOf("##editorText", 1);
             check(before >= 0.0f && after - before > 250.0f && after - before < 350.0f,
                   "a finger dragging 300 px up should scroll the editor about 300 px (" + std::to_string(after - before) + ")");
             // Momentum: it glides on for a moment after the finger lifts.
             for (int i = 0; i < 30; ++i)
                 h.frame(ImVec2(200.0f, 300.0f));
-            check(scrollOf("##editor#", 1) >= after, "the glide should not move backwards");
+            check(scrollOf("##editorText", 1) >= after, "the glide should not move backwards");
 
             // A tap on a navigation button still switches the screen.
             h.click(ImVec2(390.0f * 0.5f / 4.0f, 844.0f - 29.0f)); // Files
@@ -352,11 +354,31 @@ int main(int argc, char** argv)
             h.click(ImVec2(19.0f, 18.0f)); // hide the ribbon
             h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
             h.settle();
-            const float mouseBefore = scrollOf("##editor#", 1);
+            const float mouseBefore = scrollOf("##editorText", 1);
             drag(ImVec2(200.0f, 400.0f), ImVec2(200.0f, 300.0f));
-            check(std::fabs(scrollOf("##editor#", 1) - mouseBefore) < 1.0f, "a mouse drag should not scroll");
+            check(std::fabs(scrollOf("##editorText", 1) - mouseBefore) < 1.0f, "a mouse drag should not scroll");
             check(h.vm().activeDocument() && h.vm().activeDocument()->hasSelection(), "a mouse drag should select");
             ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.settle();
+        }
+
+        // Rendered Markdown is kept per document and must go when the document closes: every
+        // opened folder shows its README, so this grew for as long as the app ran.
+        {
+            h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+            h.vm().execute(viewmodel::CommandId::ShowCodeView);
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            for (int round = 0; round < 5; ++round) {
+                h.vm().openFile(viewmodel::dummy::kWelcomePath); // Markdown: shown rendered
+                h.settle();
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+            }
+            const size_t held = h.view().editor().renderedMarkdownCount();
+            if (held != 0)
+                std::printf("  FAILED rendered Markdown of %zu closed document(s) still held\n", held), layoutsWrong = true;
+            h.vm().openStartupDocuments({}); // the sample documents again for the states below
             h.settle();
         }
 

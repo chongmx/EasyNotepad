@@ -199,6 +199,9 @@ void GitViewModel::workspaceChanged()
     diff_ = {};
     lineCache_.clear();
     blames_.clear();
+    blameShown_.clear();
+    remotes_.clear();
+    lastOutput_.clear();
     if (owner_.workspaceRoot().empty() || !processes_)
         return;
     run({"--version"}, [this](const interfaces::ProcessResult& r) {

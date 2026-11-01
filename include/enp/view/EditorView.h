@@ -28,6 +28,9 @@ public:
     void focus() { focusRequested_ = true; }
     // A phone layout: no side bar (layers, minimap); the text gets the whole width.
     void setCompact(bool compact) { compact_ = compact; }
+    // Rendered-Markdown states held (one per open Markdown document; tests check that closed
+    // documents release theirs).
+    size_t renderedMarkdownCount() const { return markdown_.size(); }
 
 private:
     // One visual row: a whole line, a wrapped piece of it, or the summary of a folded region.
@@ -109,7 +112,18 @@ private:
         std::string text;
         bool shown = false; // shown last frame (entering it scrolls to the caret's line)
     };
-    std::map<int, RenderedMarkdown> markdown_; // by document id
+    std::map<int, RenderedMarkdown> markdown_; // by document id (open documents only)
+    // The text and the rendered Markdown are drawn in one child window each, shared by all
+    // documents (Dear ImGui never frees a window: one per document would accumulate for as long
+    // as the app runs). A document's scroll is kept here and restored when it is shown again.
+    struct DocumentScroll {
+        ImVec2 text{0.0f, 0.0f};
+        ImVec2 markdown{0.0f, 0.0f};
+    };
+    std::map<int, DocumentScroll> scroll_; // by document id (open documents only)
+    int shownTextDoc_ = -1;     // document the text window showed last
+    int shownMarkdownDoc_ = -1; // document the Markdown window showed last
+    void pruneClosed();         // drops the states of closed documents
     float blameColumns_ = 30.0f;  // drag its right edge: 9 (hash only) to 60
     int pendingScrollLine_ = -1;  // minimap: centre this line on the next frame
     int firstVisibleLine_ = 0;    // for the minimap's viewport frame

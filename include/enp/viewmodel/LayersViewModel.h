@@ -56,6 +56,9 @@ public:
     void zoomIn(int index);  // focus a layer that has children
     void zoomOut();          // focus the parent
     void zoomTo(int index);  // any layer on the breadcrumb (or elsewhere)
+    // A folder was opened or closed: nothing read from the previous one applies (facts are keyed
+    // by workspace-relative path, so they would otherwise describe the wrong files, and grow).
+    void workspaceChanged();
     // Shows the layer in the editor: opens its file, expands and reveals a region.
     void open(int index);
 

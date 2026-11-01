@@ -18,8 +18,13 @@ bool FileService::write(const std::string& path, std::string_view data, std::str
 
 std::vector<interfaces::DirectoryEntry> FileService::list(const std::string& path)
 {
+    return list(path, 0, nullptr);
+}
+
+std::vector<interfaces::DirectoryEntry> FileService::list(const std::string& path, size_t limit, bool* more)
+{
     std::vector<interfaces::DirectoryEntry> out;
-    for (const os::fs::DirEntry& e : os::fs::listDirectory(path))
+    for (const os::fs::DirEntry& e : os::fs::listDirectory(path, limit, more))
         out.push_back({e.name, e.isDirectory});
     return out;
 }

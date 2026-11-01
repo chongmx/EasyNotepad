@@ -50,6 +50,7 @@ public:
     enum class Layout { Desktop, Portrait, Landscape };
     static Layout chooseLayout(float widthDp, float heightDp);
     Layout layout() const { return layout_; }
+    const EditorView& editor() const { return editor_; }
 
 private:
     void handleShortcuts();
