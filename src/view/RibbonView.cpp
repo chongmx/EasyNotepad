@@ -25,6 +25,13 @@ constexpr float kWorkspaceWidth = 96.0f;
 constexpr float kLabelSize = 12.0f;
 constexpr float kCaptionSize = 11.5f;
 constexpr float kSearchWidth = 220.0f;
+// Slim: icon-only buttons in one row, no captions.
+constexpr float kSlimButtonHeight = 28.0f;
+constexpr float kSlimButtonWidth = 30.0f;
+constexpr float kSlimIconSize = 16.0f;
+constexpr float kSlimWorkspaceWidth = 70.0f;
+constexpr float kToggleWidth = 18.0f;
+constexpr float kToggleHeight = 14.0f;
 
 ImU32 fade(ImU32 color, float alpha)
 {
@@ -82,7 +89,7 @@ RibbonView::RibbonView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, cons
 
 float RibbonView::height() const
 {
-    return (kTabRowHeight + kButtonHeight + kCaptionHeight + 10.0f) * s_;
+    return slim() ? (kTabRowHeight + kSlimButtonHeight + 10.0f) * s_ : (kTabRowHeight + kButtonHeight + kCaptionHeight + 10.0f) * s_;
 }
 
 std::vector<RibbonView::Tab> RibbonView::tabs() const
@@ -115,7 +122,7 @@ std::vector<RibbonView::Tab> RibbonView::tabs() const
         {"Understand", {C::DissectProject, C::ExplainSelection, C::AskAgent}, {C::GenerateTests}},
     };
     static const Group view[] = {
-        {"Panels", {C::ToggleExplorer, C::TogglePanel, C::ToggleTerminal, C::ToggleAgentPanel}, {C::ToggleMaximizePanel}},
+        {"Panels", {C::ToggleExplorer, C::TogglePanel, C::ToggleTerminal, C::ToggleAgentPanel}, {C::ToggleMaximizePanel, C::ToggleSlimRibbon}},
         {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap, C::ToggleMarkdownView},
          {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}},
         {"Zoom", {C::ZoomIn, C::ZoomOut, C::ZoomReset}, {}},
@@ -201,7 +208,7 @@ void RibbonView::render()
     dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + h), palette_.ribbonBg);
     dl->AddLine(ImVec2(origin.x, origin.y + h - 1.0f), ImVec2(origin.x + width, origin.y + h - 1.0f), palette_.border);
 
-    const float blockWidth = kWorkspaceWidth * s_;
+    const float blockWidth = (slim() ? kSlimWorkspaceWidth : kWorkspaceWidth) * s_;
     ImGui::SetCursorScreenPos(origin);
     renderWorkspaceBlock(blockWidth, h - 1.0f);
     dl->AddLine(ImVec2(origin.x + blockWidth, origin.y + 8.0f * s_), ImVec2(origin.x + blockWidth, origin.y + h - 8.0f * s_),
@@ -211,14 +218,18 @@ void RibbonView::render()
     ImGui::SetCursorScreenPos(ImVec2(left, origin.y + 3.0f * s_));
     renderTabRow(origin.x + width - left - 8.0f * s_);
 
+    // The groups scroll sideways when they do not fit; the size toggle keeps a corner of its own.
+    const float toggleRoom = (kToggleWidth + 10.0f) * s_;
     ImGui::SetCursorScreenPos(ImVec2(left, origin.y + (kTabRowHeight + 4.0f) * s_));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 4.0f * s_);
-    ImGui::BeginChild("##ribbonGroups", ImVec2(origin.x + width - left, (kButtonHeight + kCaptionHeight + 4.0f) * s_),
-                      ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
+    const float groupsH = (slim() ? kSlimButtonHeight : kButtonHeight + kCaptionHeight) + 4.0f;
+    ImGui::BeginChild("##ribbonGroups", ImVec2(origin.x + width - left - toggleRoom, groupsH * s_), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
     renderGroups(tabs()[size_t(selectedTab())]);
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
+    renderSizeToggle(ImVec2(origin.x + width - (kToggleWidth + 6.0f) * s_, origin.y + h - (kToggleHeight + 6.0f) * s_));
 
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(width, h));
@@ -251,6 +262,18 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     const ImU32 modeColor = agent ? palette_.modeAgent : palette_.modeCode;
     const char* icon = commandIcon(agent ? CommandId::SwitchToAgentMode : CommandId::SwitchToCodeMode);
     const char* name = agent ? "Agent" : "Code";
+    if (slim()) { // the icon over "Code ▾"
+        const std::string caption = std::string(name) + " " ICON_FA_CARET_DOWN;
+        const ImVec2 iconSize = textSize(icon, 20.0f);
+        const ImVec2 captionSize = textSize(caption.c_str(), kLabelSize);
+        float y = p.y + (height - iconSize.y - captionSize.y - 3.0f * s_) * 0.5f;
+        drawText(dl, ImVec2(p.x + (width - iconSize.x) * 0.5f, y), modeColor, icon, 20.0f);
+        y += iconSize.y + 3.0f * s_;
+        drawText(dl, ImVec2(p.x + (width - captionSize.x) * 0.5f, y), palette_.text, caption.c_str(), kLabelSize);
+        ImGui::SetNextWindowPos(ImVec2(p.x + pad, p.y + height));
+        renderWorkspacePopup();
+        return;
+    }
     const ImVec2 iconSize = textSize(icon, 26.0f);
     const ImVec2 nameSize = textSize(name, 15.0f);
     const char* sub = "Workspace " ICON_FA_CARET_DOWN;
@@ -422,20 +445,43 @@ void RibbonView::renderGroups(const Tab& tab)
                 vm_.execute(id);
             x = ImGui::GetItemRectMax().x + 2.0f * s_;
         }
-        const std::string caption = group.more.empty() ? std::string(group.name) : std::string(group.name) + " " ICON_FA_CARET_DOWN;
-        const float captionW = textSize(caption.c_str(), kCaptionSize).x + 8.0f * s_;
-        const float x1 = std::max(x - 2.0f * s_, x0 + captionW);
-        groupCaption(group, x0, x1, top + kButtonHeight * s_ + 1.0f * s_);
+        float x1 = x - 2.0f * s_;
+        if (slim()) {
+            if (!group.more.empty()) {
+                ImGui::SetCursorScreenPos(ImVec2(x - 1.0f * s_, top));
+                if (ImGui::InvisibleButton("##moreCaret", ImVec2(13.0f * s_, kSlimButtonHeight * s_)))
+                    ImGui::OpenPopup("##more");
+                const bool hovered = ImGui::IsItemHovered();
+                if (hovered)
+                    dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 4.0f * s_);
+                const ImVec2 caretSize = textSize(ICON_FA_CARET_DOWN, kCaptionSize);
+                drawText(dl, ImVec2(ImGui::GetItemRectMin().x + (13.0f * s_ - caretSize.x) * 0.5f, top + (kSlimButtonHeight * s_ - caretSize.y) * 0.5f),
+                         hovered ? palette_.text : palette_.textFaint, ICON_FA_CARET_DOWN, kCaptionSize);
+                ImGui::SetItemTooltip("More: %s", group.name);
+                ImGui::SetNextWindowPos(ImVec2(x0, top + kSlimButtonHeight * s_ + 2.0f * s_));
+                if (ImGui::BeginPopup("##more")) {
+                    morePopup(group);
+                    ImGui::EndPopup();
+                }
+                x1 = ImGui::GetItemRectMax().x;
+            }
+        } else {
+            const std::string caption = group.more.empty() ? std::string(group.name) : std::string(group.name) + " " ICON_FA_CARET_DOWN;
+            const float captionW = textSize(caption.c_str(), kCaptionSize).x + 8.0f * s_;
+            x1 = std::max(x1, x0 + captionW);
+            groupCaption(group, x0, x1, top + kButtonHeight * s_ + 1.0f * s_);
+        }
         ImGui::PopID();
 
-        const float sepX = x1 + 8.0f * s_;
+        const float rowH = (slim() ? kSlimButtonHeight : kButtonHeight + kCaptionHeight) * s_;
+        const float sepX = x1 + (slim() ? 6.0f : 8.0f) * s_;
         if (g + 1 < tab.groups.size())
-            dl->AddLine(ImVec2(sepX, top + 6.0f * s_), ImVec2(sepX, top + (kButtonHeight + kCaptionHeight - 2.0f) * s_),
+            dl->AddLine(ImVec2(sepX, top + (slim() ? 5.0f : 6.0f) * s_), ImVec2(sepX, top + rowH - (slim() ? 5.0f : 2.0f) * s_),
                         palette_.border);
-        x = sepX + 8.0f * s_;
+        x = sepX + (slim() ? 6.0f : 8.0f) * s_;
     }
     ImGui::SetCursorScreenPos(ImVec2(start.x, top));
-    ImGui::Dummy(ImVec2(x - start.x, (kButtonHeight + kCaptionHeight) * s_)); // scrollable extent
+    ImGui::Dummy(ImVec2(x - start.x, (slim() ? kSlimButtonHeight : kButtonHeight + kCaptionHeight) * s_)); // scrollable extent
 }
 
 bool RibbonView::ribbonButton(CommandId id)
@@ -571,9 +617,10 @@ void RibbonView::renderCustomizeDialog()
 bool RibbonView::drawButton(const char* id, const char* icon, const char* label, ImU32 tint, bool enabled, bool checked,
                             const char* tooltip, const char* detail)
 {
-    const ImVec2 labelSize = textSize(label, kLabelSize);
-    const float w = std::max(kButtonMinWidth * s_, labelSize.x + 14.0f * s_);
-    const float h = kButtonHeight * s_;
+    const bool small = slim();
+    const ImVec2 labelSize = small ? ImVec2(0.0f, 0.0f) : textSize(label, kLabelSize);
+    const float w = small ? kSlimButtonWidth * s_ : std::max(kButtonMinWidth * s_, labelSize.x + 14.0f * s_);
+    const float h = (small ? kSlimButtonHeight : kButtonHeight) * s_;
 
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
@@ -587,11 +634,17 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
     if (hovered && enabled)
         dl->AddRectFilled(p, q, held ? fade(palette_.hover, 2.0f) : palette_.hover, 6.0f * s_);
 
-    const ImVec2 iconSize = textSize(icon, Fonts::kRibbonIconSize);
-    drawText(dl, ImVec2(p.x + (w - iconSize.x) * 0.5f, p.y + 5.0f * s_), enabled ? tint : fade(tint, 0.35f), icon,
-             Fonts::kRibbonIconSize);
-    drawText(dl, ImVec2(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_),
-             enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
+    if (small) {
+        const ImVec2 iconSize = textSize(icon, kSlimIconSize);
+        drawText(dl, ImVec2(p.x + (w - iconSize.x) * 0.5f, p.y + (h - iconSize.y) * 0.5f), enabled ? tint : fade(tint, 0.35f), icon,
+                 kSlimIconSize);
+    } else {
+        const ImVec2 iconSize = textSize(icon, Fonts::kRibbonIconSize);
+        drawText(dl, ImVec2(p.x + (w - iconSize.x) * 0.5f, p.y + 5.0f * s_), enabled ? tint : fade(tint, 0.35f), icon,
+                 Fonts::kRibbonIconSize);
+        drawText(dl, ImVec2(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_),
+                 enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
+    }
 
     if (hovered && ImGui::BeginTooltip()) {
         ImGui::TextUnformatted(tooltip);
@@ -599,6 +652,37 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
         ImGui::EndTooltip();
     }
     return clicked && enabled;
+}
+
+void RibbonView::morePopup(const Group& group)
+{
+    for (CommandId id : group.more) {
+        const viewmodel::CommandInfo& info = commandInfo(id);
+        const std::string label = std::string(commandIcon(id)) + "  " + info.label;
+        if (ImGui::MenuItem(label.c_str(), info.shortcut, vm_.isChecked(id), vm_.command(id).canExecute()))
+            vm_.execute(id);
+    }
+}
+
+void RibbonView::renderSizeToggle(ImVec2 topLeft)
+{
+    // Quiet until hovered: a faint chevron in the corner, a soft pill under the pointer.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 size(kToggleWidth * s_, kToggleHeight * s_);
+    ImGui::SetCursorScreenPos(topLeft);
+    if (ImGui::InvisibleButton("##ribbonSize", size))
+        vm_.execute(CommandId::ToggleSlimRibbon);
+    registerLastItem("ribbon-size", "button", slim() ? "Full ribbon" : "Slim ribbon",
+                     [this]() { vm_.execute(CommandId::ToggleSlimRibbon); });
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered)
+        dl->AddRectFilled(topLeft, ImVec2(topLeft.x + size.x, topLeft.y + size.y), palette_.hover, 4.0f * s_);
+    const char* icon = slim() ? ICON_FA_CHEVRON_DOWN : ICON_FA_CHEVRON_UP;
+    const float iconPx = 9.0f;
+    const ImVec2 iconSize = textSize(icon, iconPx);
+    drawText(dl, ImVec2(topLeft.x + (size.x - iconSize.x) * 0.5f, topLeft.y + (size.y - iconSize.y) * 0.5f),
+             hovered ? palette_.text : palette_.textFaint, icon, iconPx);
+    ImGui::SetItemTooltip(slim() ? "Full ribbon (Ctrl+F1)" : "Slim ribbon: icons only, more room for your work (Ctrl+F1)");
 }
 
 void RibbonView::groupCaption(const Group& group, float x0, float x1, float y)
@@ -620,12 +704,7 @@ void RibbonView::groupCaption(const Group& group, float x0, float x1, float y)
             dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 3.0f * s_);
         ImGui::SetNextWindowPos(ImVec2(x0, ImGui::GetItemRectMax().y + 2.0f * s_));
         if (ImGui::BeginPopup("##more")) {
-            for (CommandId id : group.more) {
-                const viewmodel::CommandInfo& info = commandInfo(id);
-                const std::string label = std::string(commandIcon(id)) + "  " + info.label;
-                if (ImGui::MenuItem(label.c_str(), info.shortcut, vm_.isChecked(id), vm_.command(id).canExecute()))
-                    vm_.execute(id);
-            }
+            morePopup(group);
             ImGui::EndPopup();
         }
         ImGui::PopID();

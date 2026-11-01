@@ -88,6 +88,7 @@ public:
 
     Property<bool> darkTheme{true};
     Property<bool> showExplorer{true};
+    Property<bool> slimRibbon{false}; // icons only, one row: more room for the work
     Property<bool> showPanel{true};
     Property<bool> panelMaximized{false};
     Property<bool> showAgentPanel{true};

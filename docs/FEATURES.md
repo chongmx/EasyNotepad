@@ -164,6 +164,40 @@ lists and task lists, quotes, tables, links and coloured code blocks.
 - Links open in the browser, or open the file they point to in the workspace.
 - New untitled Markdown documents start as text.
 
+## Phones, tablets and small windows
+
+The layout follows the shape of the window. It is the same view on every platform, so Android, a
+narrow desktop window and the web behave alike.
+
+- **Room to spare** (a desktop, or a tablet): the full layout, with the explorer, editor, agent
+  column, bottom panel and status bar.
+- **Upright phone** (narrower than 600 dp): one screen at a time. A bottom bar switches between
+  **Files**, **Code**, **Agent** and **Tools** (problems, diff, terminal, search, history). A dot
+  on Agent means the agent is working, and a dot on Tools means there are findings.
+- **Phone turned sideways** (less than 500 dp tall): the same screens, with a rail on the left
+  instead, so the editor keeps its full height.
+- **Top bar:** the menu button shows or hides the ribbon (every command). The document's name opens
+  the list of open documents. Save, undo and redo sit on the right, and *More* has the file
+  commands, theme, preferences and help.
+- **Switching screens:** the app does it for you. Opening a file shows the editor, *Ask* shows the
+  agent, and terminal, search or review commands show Tools.
+- **Rotation** switches between the two phone layouts as it happens.
+- **Android:** the app keeps clear of the status and navigation bars and the on-screen keyboard,
+  which shrinks the screen instead of covering it.
+- The bottom panel's tabs become a drop-down when they do not fit.
+- **Trying it on a desktop:** `--window-size=390x844` opens a phone-sized window (in dp).
+  `--safe-area=left,top,right,bottom` pretends the system covers those edges (in dp).
+
+## Slim ribbon
+
+The small chevron in the ribbon's lower-right corner (or **Ctrl+F1**, or View ▸ Panels ▾ ▸ *Slim
+Ribbon*) makes the ribbon slim, giving about 40 dp back to the work area:
+
+- The same buttons, as icons only in one row. Their names are in the tooltips.
+- The extra commands of each group sit behind a small caret.
+
+The chevron turns over to bring the full ribbon back. The choice is remembered.
+
 ## Large files stay fast
 
 Syntax colouring no longer re-reads the file from the top on every frame. Each document remembers

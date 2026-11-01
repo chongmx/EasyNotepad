@@ -34,6 +34,8 @@ public:
 
     // Builds the UI (between ImGui::NewFrame() and ImGui::Render()).
     void frame();
+    // Window edges covered by the system (bars, notch, on-screen keyboard), in pixels.
+    void setSafeArea(float left, float top, float right, float bottom);
 
     ImVec4 clearColor() const;
     bool quitRequested() const;

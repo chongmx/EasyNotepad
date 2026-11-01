@@ -1660,6 +1660,7 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.darkTheme", darkTheme);
     settings_.bind("view.workspace", workspace);
     settings_.bind("view.showExplorer", showExplorer);
+    settings_.bind("view.slimRibbon", slimRibbon);
     settings_.bind("view.showPanel", showPanel);
     settings_.bind("view.panelTab", panelTab);
     settings_.bind("view.showAgentPanel", showAgentPanel);

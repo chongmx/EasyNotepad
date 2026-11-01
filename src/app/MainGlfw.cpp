@@ -26,6 +26,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -203,6 +204,15 @@ int main(int argc, char** argv)
         height = std::min(height, int(areaH * 0.88f));
     }
 #endif
+    // --window-size=390x844 (in dp): a phone-sized window, to try the phone layouts.
+    for (int i = 1; i < argc; ++i)
+        if (std::strncmp(argv[i], "--window-size=", 14) == 0) {
+            int w = 0, h = 0;
+            if (std::sscanf(argv[i] + 14, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                width = int(float(w) * scale);
+                height = int(float(h) * scale);
+            }
+        }
     GLFWwindow* window = glfwCreateWindow(width, height, "EasyNotepad", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
@@ -246,6 +256,14 @@ int main(int argc, char** argv)
     const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     state->app->attachUi(scale, std::string(renderer ? renderer : "?") + " / " + (version ? version : "?"), frame);
     state->app->openInitialDocuments();
+    // --safe-area=left,top,right,bottom (in dp): pretend the system covers those edges, as a phone's
+    // bars, notch and keyboard do.
+    for (int i = 1; i < argc; ++i)
+        if (std::strncmp(argv[i], "--safe-area=", 12) == 0) {
+            float l = 0, t = 0, r = 0, b = 0;
+            if (std::sscanf(argv[i] + 12, "%f,%f,%f,%f", &l, &t, &r, &b) == 4)
+                state->app->setSafeArea(l * scale, t * scale, r * scale, b * scale);
+        }
 #if !defined(__EMSCRIPTEN__) // the browser GLFW ports do not all implement file drop
     glfwSetDropCallback(window, onDrop);
 #endif

@@ -197,6 +197,7 @@ int main(int argc, char** argv)
     int result = 0;
     {
         Harness h;
+        bool layoutsWrong = false;
         h.frame(ImVec2(-100.0f, -100.0f)); // first frame lays everything out
         const float ribbonTop = 36.0f, ribbonBottom = 145.0f, tabRowY = ribbonTop + 15.0f;
 
@@ -221,6 +222,41 @@ int main(int argc, char** argv)
                 h.frame(ImVec2(-100.0f, -100.0f));
                 h.sweep(0.0f, kHeight - 260.0f, kWidth, kHeight);
             }
+        }
+
+        // Phone layouts: upright (bottom bar) and turned sideways (rail on the left), every screen.
+        {
+            using L = view::MainView::Layout;
+            const struct {
+                float w, h;
+                L expected;
+            } shapes[] = {{390, 844, L::Portrait}, {844, 390, L::Landscape}, {412, 915, L::Portrait}, {915, 412, L::Landscape},
+                          {800, 1280, L::Desktop}, {1280, 800, L::Desktop}, {1440, 900, L::Desktop}, {560, 520, L::Landscape}};
+            for (const auto& s : shapes)
+                if (view::MainView::chooseLayout(s.w, s.h) != s.expected)
+                    std::printf("  FAILED layout for %.0fx%.0f dp\n", s.w, s.h), layoutsWrong = true;
+            h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+            struct Phone {
+                const char* name;
+                ImVec2 size;
+                bool rail;
+            };
+            for (const Phone& phone : {Phone{"phone upright", ImVec2(390.0f, 844.0f), false},
+                                       Phone{"phone sideways", ImVec2(844.0f, 390.0f), true}}) {
+                ImGui::GetIO().DisplaySize = phone.size;
+                h.settle();
+                for (int screen = 0; screen < 4; ++screen) {
+                    // The navigation buttons: a bottom bar 58 high, or a rail 64 wide with 64-high cells.
+                    const ImVec2 button = phone.rail ? ImVec2(32.0f, 36.0f + 32.0f + 64.0f * float(screen))
+                                                     : ImVec2(phone.size.x * (float(screen) + 0.5f) / 4.0f, phone.size.y - 29.0f);
+                    h.click(button);
+                    h.setContext(std::string(phone.name) + ", screen " + std::to_string(screen));
+                    h.settle();
+                    h.sweep(0.0f, 0.0f, phone.size.x, phone.size.y, kCoarseStep);
+                }
+            }
+            ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.settle();
         }
 
         // Layout states that add, remove or move items; each is swept in both workspaces.
@@ -365,6 +401,7 @@ int main(int argc, char** argv)
                  while (!vm.documents().empty())
                      vm.closeDocument(0);
              }},
+            {"slim ribbon", [](auto& vm) { vm.slimRibbon.set(true); }},
             {"syntax colours dialog (modal, last)", [](auto& vm) {
                  vm.openFile("CMakeLists.txt");
                  vm.execute(viewmodel::CommandId::SyntaxColors);
@@ -384,7 +421,7 @@ int main(int argc, char** argv)
         for (const Failure& f : h.failures())
             std::printf("  FAILED %s at (%.0f, %.0f) in %s\n", f.what.c_str(), f.mouse.x, f.mouse.y, f.where.c_str());
         std::printf("%d frames, %d failure(s)\n", h.frames(), int(h.failures().size()));
-        result = h.failures().empty() ? 0 : 1;
+        result = h.failures().empty() && !layoutsWrong ? 0 : 1;
     }
     os::shutdown();
     return result;

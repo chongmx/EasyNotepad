@@ -174,6 +174,7 @@ void NotepadViewModel::initCommands()
         else if (panelTab.get() == PanelTab::Terminal)
             showPanelTab(PanelTab::Terminal);
     });
+    set(C::ToggleSlimRibbon, [this]() { slimRibbon.set(!slimRibbon.get()); });
     set(C::ToggleMaximizePanel, [this]() {
         showPanel.set(true);
         panelMaximized.set(!panelMaximized.get());
@@ -455,6 +456,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::TogglePanel: return showPanel.get();
     case C::ToggleTerminal: return showPanel.get() && panelTab.get() == PanelTab::Terminal;
     case C::ToggleMaximizePanel: return panelMaximized.get();
+    case C::ToggleSlimRibbon: return slimRibbon.get();
     case C::ToggleAgentPanel: return showAgentPanel.get();
     case C::ToggleWordWrap: return wordWrap.get();
     case C::ToggleMarkdownView: return activeDocument() && activeDocument()->rendered;

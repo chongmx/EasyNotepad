@@ -19,7 +19,7 @@ enum class CommandId {
     Find, FindNext, FindPrevious, Replace, FindInFiles, GoToLine,
     ToggleBookmark, NextBookmark, PreviousBookmark, ClearBookmarks,
     // View
-    ToggleExplorer, TogglePanel, ToggleAgentPanel, ToggleMaximizePanel,
+    ToggleExplorer, TogglePanel, ToggleAgentPanel, ToggleMaximizePanel, ToggleSlimRibbon,
     ToggleWordWrap, ToggleWhitespace, ToggleLineNumbers, ToggleIndentGuides, ToggleMarkdownView,
     ZoomIn, ZoomOut, ZoomReset, ToggleTheme, SyntaxColors,
     // Reading

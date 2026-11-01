@@ -37,10 +37,25 @@ public:
     bool quitRequested() const { return quitRequested_; }
     // Extra text shown in the About box (e.g. the GL renderer string).
     void setRendererInfo(std::string info) { rendererInfo_ = std::move(info); }
+    // Edges of the window covered by the system (status and navigation bars, a notch, the
+    // on-screen keyboard), in pixels: the UI keeps inside them.
+    void setSafeArea(float left, float top, float right, float bottom) { safeArea_ = ImVec4(left, top, right, bottom); }
+
+    // The arrangement, chosen every frame from the window's size in dp: the desktop layout when
+    // there is room; on a phone one screen at a time, with a bottom bar when upright and a rail
+    // on the left when turned sideways (so the editor keeps its height).
+    enum class Layout { Desktop, Portrait, Landscape };
+    static Layout chooseLayout(float widthDp, float heightDp);
+    Layout layout() const { return layout_; }
 
 private:
     void handleShortcuts();
     void renderTopBar();
+    // Phone layouts: one screen at a time.
+    enum class Screen { Files, Editor, Agent, Tools };
+    void renderCompactTopBar();
+    void renderCompactScreen(ImVec2 size);
+    void renderNavigation(bool rail, ImVec2 size);
     // Returns the right edge of the last tab (including the "+" button).
     float renderDocumentTabs(float x0, float x1, float y, float height);
     float renderWindowButtons(float right, float y, float height); // returns the left edge
@@ -134,6 +149,11 @@ private:
     bool openExplorerPrompt_ = false;
 
     std::string rendererInfo_;
+    ImVec4 safeArea_{0.0f, 0.0f, 0.0f, 0.0f};
+    Layout layout_ = Layout::Desktop;
+    Screen screen_ = Screen::Editor;
+    bool compactRibbon_ = false;  // the ribbon shown in a phone layout (the menu button)
+    int lastActiveDocument_ = -1; // a different document became active: show the editor
     std::string commentDraft_;
     int goToLine_ = 1;
     bool openGoToLine_ = false;

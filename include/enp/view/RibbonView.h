@@ -46,6 +46,10 @@ private:
     void renderCustomActions(float& x, float top);
     void renderCustomizeDialog();
     void groupCaption(const Group& group, float x0, float x1, float y);
+    void morePopup(const Group& group); // the group's extra commands (inside its "##more" popup)
+    // The small chevron at the ribbon's lower right that makes it slim, or full again.
+    void renderSizeToggle(ImVec2 topLeft);
+    bool slim() const { return vm_.slimRibbon.get(); }
 
     viewmodel::NotepadViewModel& vm_;
     const Fonts& fonts_;

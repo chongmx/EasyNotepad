@@ -12,6 +12,7 @@
 #include <android/configuration.h>
 #include <android_native_app_glue.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 
@@ -122,10 +123,28 @@ void shutdownUi()
     g.uiReady = false;
 }
 
+// The part of the window not covered by the status and navigation bars or the on-screen keyboard:
+// NativeActivity reports it as contentRect (with adjustResize it shrinks when the keyboard opens).
+// Rotation needs nothing else: the window is resized, ImGui reads its new size every frame, and
+// the view picks the layout for that shape.
+void updateSafeArea()
+{
+    const int width = ANativeWindow_getWidth(g.app->window);
+    const int height = ANativeWindow_getHeight(g.app->window);
+    const ARect& r = g.app->contentRect;
+    if (r.right <= r.left || r.bottom <= r.top || width <= 0 || height <= 0) {
+        g.application->setSafeArea(0, 0, 0, 0); // not reported yet
+        return;
+    }
+    g.application->setSafeArea(float(std::max(0, r.left)), float(std::max(0, r.top)), float(std::max(0, width - r.right)),
+                               float(std::max(0, height - r.bottom)));
+}
+
 void frame()
 {
     if (!g.uiReady)
         return;
+    updateSafeArea();
     ImGuiIO& io = ImGui::GetIO();
     pollUnicodeChars();
     if (io.WantTextInput != g.keyboardShown) {

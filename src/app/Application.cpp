@@ -139,6 +139,12 @@ ImVec4 Application::clearColor() const
     return view_ ? view_->clearColor() : ImVec4(0, 0, 0, 1);
 }
 
+void Application::setSafeArea(float left, float top, float right, float bottom)
+{
+    if (view_)
+        view_->setSafeArea(left, top, right, bottom);
+}
+
 bool Application::animating() const
 {
     const viewmodel::NotepadViewModel& vm = *viewModel_;

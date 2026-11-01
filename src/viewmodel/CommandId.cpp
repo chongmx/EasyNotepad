@@ -53,6 +53,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::ToggleExplorer: return {"Explorer", "Show or hide the workspace explorer", "Ctrl+Shift+E"};
     case CommandId::TogglePanel: return {"Panel", "Show or hide the bottom panel (review and terminal)", "Ctrl+J"};
     case CommandId::ToggleMaximizePanel: return {"Maximize", "Maximize or restore the bottom panel", ""};
+    case CommandId::ToggleSlimRibbon: return {"Slim Ribbon", "A slimmer ribbon: icons only, more room for your work", "Ctrl+F1"};
     case CommandId::ToggleAgentPanel: return {"Agent Panel", "Show or hide the agent side panel", "Ctrl+Shift+I"};
     case CommandId::ToggleWordWrap: return {"Word Wrap", "Wrap long lines", "Alt+Z"};
     case CommandId::ToggleMarkdownView: return {"Rendered", "Show this Markdown file formatted, or as text to edit", "Ctrl+Shift+V"};
@@ -215,6 +216,7 @@ const char* commandKey(CommandId id)
     case CommandId::TogglePanel: return "TogglePanel";
     case CommandId::ToggleAgentPanel: return "ToggleAgentPanel";
     case CommandId::ToggleMaximizePanel: return "ToggleMaximizePanel";
+    case CommandId::ToggleSlimRibbon: return "ToggleSlimRibbon";
     case CommandId::ToggleWordWrap: return "ToggleWordWrap";
     case CommandId::ToggleMarkdownView: return "ToggleMarkdownView";
     case CommandId::ToggleWhitespace: return "ToggleWhitespace";

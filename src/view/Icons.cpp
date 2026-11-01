@@ -51,6 +51,7 @@ const char* commandIcon(CommandId id)
     case CommandId::ToggleExplorer: return ICON_FA_SITEMAP;
     case CommandId::TogglePanel: return ICON_FA_TABLE_LIST;
     case CommandId::ToggleMaximizePanel: return ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER;
+    case CommandId::ToggleSlimRibbon: return ICON_FA_CHEVRON_UP;
     case CommandId::ToggleTerminal: return ICON_FA_TERMINAL;
     case CommandId::NewTerminal: return ICON_FA_SQUARE_PLUS;
     case CommandId::KillTerminal: return ICON_FA_TRASH_CAN;

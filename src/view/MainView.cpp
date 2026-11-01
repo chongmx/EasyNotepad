@@ -86,7 +86,24 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
             break;
         }
     }));
-    subscriptions_.push_back(vm_.focusPromptRequested.subscribe([this]() { agentPanel_.focusPrompt(); }));
+    subscriptions_.push_back(vm_.focusPromptRequested.subscribe([this]() {
+        agentPanel_.focusPrompt();
+        screen_ = Screen::Agent;
+    }));
+    // A phone shows one screen at a time: commands that show a part of the UI switch to it.
+    subscriptions_.push_back(vm_.showPanel.subscribe([this](const bool& shown) {
+        if (shown)
+            screen_ = Screen::Tools;
+    }));
+    subscriptions_.push_back(vm_.panelTab.subscribe([this](const viewmodel::PanelTab&) { screen_ = Screen::Tools; }));
+    subscriptions_.push_back(vm_.showExplorer.subscribe([this](const bool& shown) {
+        if (shown)
+            screen_ = Screen::Files;
+    }));
+    subscriptions_.push_back(vm_.showAgentPanel.subscribe([this](const bool& shown) {
+        if (shown)
+            screen_ = Screen::Agent;
+    }));
     subscriptions_.push_back(vm_.goToLineRequested.subscribe([this]() {
         const model::Document* doc = vm_.activeDocument();
         goToLine_ = doc ? doc->caret.line + 1 : 1;
@@ -152,8 +169,13 @@ void MainView::render()
     UiAutomation::instance().beginFrame();
     terminalView_.setBlinkCursor(vm_.blinkCaret.get());
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(viewport->WorkSize);
+    // Inside the safe area (system bars, notch, on-screen keyboard).
+    const ImVec2 pos(viewport->WorkPos.x + safeArea_.x, viewport->WorkPos.y + safeArea_.y);
+    const ImVec2 size(std::max(1.0f, viewport->WorkSize.x - safeArea_.x - safeArea_.z),
+                      std::max(1.0f, viewport->WorkSize.y - safeArea_.y - safeArea_.w));
+    layout_ = chooseLayout(size.x / s_, size.y / s_);
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -165,6 +187,13 @@ void MainView::render()
     ImGui::PopStyleVar(3);
 
     handleShortcuts();
+    if (layout_ != Layout::Desktop) {
+        renderCompactTopBar();
+        if (compactRibbon_)
+            ribbon_.render();
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        renderCompactScreen(avail);
+    } else {
     renderTopBar();
     ribbon_.render();
 
@@ -182,6 +211,7 @@ void MainView::render()
         renderCodeWorkspace();
     ImGui::EndChild();
     renderStatusBar();
+    }
 
     renderGoToLinePopup();
     renderCommentPopup();
@@ -256,6 +286,7 @@ void MainView::handleShortcuts()
         {ImGuiMod_Shift | ImGuiKey_F2, C::PreviousBookmark, Global},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_E, C::ToggleExplorer, Global},
         {ImGuiMod_Ctrl | ImGuiKey_J, C::TogglePanel, Always},
+        {ImGuiMod_Ctrl | ImGuiKey_F1, C::ToggleSlimRibbon, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_B, C::ToggleLayersMap, Global},
         {ImGuiMod_Ctrl | ImGuiKey_GraveAccent, C::ToggleTerminal, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_GraveAccent, C::NewTerminal, Always},
@@ -666,6 +697,241 @@ float MainView::renderDocumentTabs(float x0, float x1, float y, float height)
     if (closeIndex >= 0)
         vm_.requestCloseDocument(closeIndex);
     return end;
+}
+
+// ---- Phone layouts ------------------------------------------------------------------------------
+
+MainView::Layout MainView::chooseLayout(float widthDp, float heightDp)
+{
+    if (widthDp < 600.0f) // a phone, or a narrow window
+        return widthDp >= heightDp ? Layout::Landscape : Layout::Portrait;
+    if (heightDp < 500.0f) // a phone turned sideways
+        return Layout::Landscape;
+    return Layout::Desktop;
+}
+
+void MainView::renderCompactTopBar()
+{
+    ImGui::PushID("compactBar");
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float h = kTopBarHeight * s_;
+    const float button = h - 6.0f * s_;
+    dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + h), palette_.titleBarBg);
+    const float y = origin.y + (h - button) * 0.5f;
+    dragRegions_.clear();
+
+    // Left: the ribbon (all commands), behind a menu button.
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + 4.0f * s_, y));
+    if (flatIconButton(compactRibbon_ ? ICON_FA_XMARK "##ribbon" : ICON_FA_BARS "##ribbon",
+                       compactRibbon_ ? "Hide the commands" : "All commands", button))
+        compactRibbon_ = !compactRibbon_;
+    registerLastItem("compact:ribbon", "button", "All commands", [this]() { compactRibbon_ = !compactRibbon_; });
+
+    // Right: save, undo, more (and the window buttons when the app draws its own title bar).
+    const float buttonsX = frame_ ? renderWindowButtons(origin.x + width, origin.y, h) : origin.x + width;
+    // Undo and redo only when the document's name keeps some room (they are in the ribbon too).
+    const float titleStart = origin.x + 10.0f * s_ + button;
+    const bool undoRedo = buttonsX - titleStart - 4.0f * (button + 2.0f * s_) >= 140.0f * s_;
+    const int count = undoRedo ? 4 : 2;
+    const float rightX = buttonsX - 4.0f * s_ - float(count) * (button + 2.0f * s_);
+    ImGui::SetCursorScreenPos(ImVec2(rightX, y));
+    for (CommandId id : {CommandId::Save, CommandId::Undo, CommandId::Redo}) {
+        if (!undoRedo && id != CommandId::Save)
+            continue;
+        ImGui::PushID(int(id));
+        if (flatIconButton(commandIcon(id), commandInfo(id).tooltip, button, vm_.command(id).canExecute()))
+            vm_.execute(id);
+        ImGui::PopID();
+        ImGui::SameLine(0.0f, 2.0f * s_);
+    }
+    if (flatIconButton(ICON_FA_ELLIPSIS_VERTICAL "##more", "More", button))
+        ImGui::OpenPopup("##compactMenu");
+    registerLastItem("compact:more", "button", "More", nullptr);
+    if (ImGui::BeginPopup("##compactMenu")) {
+        const CommandId items[] = {CommandId::NewFile, CommandId::OpenFile, CommandId::OpenFolder, CommandId::SaveAs,
+                                   CommandId::SaveAll, CommandId::CloseFile, CommandId::CloseFolder};
+        for (CommandId id : items) {
+            const std::string label = std::string(commandIcon(id)) + "  " + commandInfo(id).tooltip;
+            if (ImGui::MenuItem(label.c_str(), nullptr, false, vm_.command(id).canExecute()))
+                vm_.execute(id);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(vm_.darkTheme.get() ? ICON_FA_SUN "  Light theme" : ICON_FA_MOON "  Dark theme"))
+            vm_.execute(CommandId::ToggleTheme);
+        for (CommandId id : {CommandId::Preferences, CommandId::StartTour, CommandId::GitGuide, CommandId::About}) {
+            const std::string label = std::string(commandIcon(id)) + "  " + commandInfo(id).tooltip;
+            if (ImGui::MenuItem(label.c_str()))
+                vm_.execute(id);
+        }
+        if (os::isDesktop()) {
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET "  Exit"))
+                vm_.execute(CommandId::Exit);
+        }
+        ImGui::EndPopup();
+    }
+
+    // Middle: the active document; tap for the list of open documents.
+    const float titleX0 = origin.x + 4.0f * s_ + button + 6.0f * s_;
+    const float titleX1 = rightX - 6.0f * s_;
+    if (titleX1 - titleX0 > 40.0f * s_) {
+        const model::Document* doc = vm_.activeDocument();
+        std::string title = doc ? doc->title : std::string("No document");
+        if (doc && doc->modified)
+            title += " " ICON_FA_CIRCLE;
+        title += "  " ICON_FA_CARET_DOWN;
+        ImGui::SetCursorScreenPos(ImVec2(titleX0, y));
+        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col(palette_.hover));
+        if (ImGui::Button((title + "##documents").c_str(), ImVec2(titleX1 - titleX0, button)))
+            ImGui::OpenPopup("##allTabs");
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
+        registerLastItem("compact:documents", "button", "Open documents", [this]() { openAllTabs_ = true; });
+        if (frame_) // the empty part of the bar moves the window
+            dragRegions_.push_back({ImVec2(titleX1, origin.y), ImVec2(rightX, origin.y + h)});
+    }
+    if (openAllTabs_) {
+        ImGui::OpenPopup("##allTabs");
+        openAllTabs_ = false;
+    }
+    renderAllTabsPopup(); // (in this ID scope, where it is opened)
+    if (frame_) {
+        const ImVec2 o = ImGui::GetMainViewport()->Pos;
+        std::vector<ScreenRect> local = dragRegions_;
+        for (ScreenRect& r : local) {
+            r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
+            r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
+        }
+        frame_->setDragRegions(local);
+    }
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy(ImVec2(width, h));
+    ImGui::PopID();
+}
+
+void MainView::renderCompactScreen(ImVec2 size)
+{
+    // A document opened (from the files, a search result, the agent): show it.
+    const model::Document* active = vm_.activeDocument();
+    const int activeId = active ? active->id : -1;
+    if (activeId != lastActiveDocument_ && activeId >= 0 && lastActiveDocument_ != -2)
+        screen_ = Screen::Editor;
+    lastActiveDocument_ = activeId;
+
+    const bool rail = layout_ == Layout::Landscape;
+    const float navW = rail ? 64.0f * s_ : size.x;
+    const float navH = rail ? size.y : 58.0f * s_;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 body(rail ? size.x - navW : size.x, rail ? size.y : size.y - navH);
+
+    if (rail) {
+        renderNavigation(true, ImVec2(navW, navH));
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + navW, origin.y));
+    }
+    const float gap = 4.0f * s_;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(gap, gap));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col(palette_.titleBarBg));
+    ImGui::BeginChild("##compactBody", body, ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    const ImVec2 inner = ImGui::GetContentRegionAvail();
+    switch (screen_) {
+    case Screen::Files:
+        beginPanel("##explorer", ICON_FA_SITEMAP "  Files", inner, vm_.explorer().name.c_str());
+        renderExplorer();
+        endPanel();
+        break;
+    case Screen::Editor:
+        beginPanel("##editorPanel", nullptr, inner);
+        if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
+            map_.render(ImGui::GetContentRegionAvail());
+        else
+            editor_.render(ImGui::GetContentRegionAvail());
+        endPanel();
+        break;
+    case Screen::Agent: {
+        const char* busy = vm_.agent().busy.get() ? "working..." : nullptr;
+        beginPanel("##agentSide", ICON_FA_ROBOT "  Agent", inner, busy);
+        agentPanel_.renderConversation(true);
+        endPanel();
+        break;
+    }
+    case Screen::Tools:
+        renderBottomPanel(inner.x, inner.y);
+        break;
+    }
+    ImGui::EndChild();
+    if (!rail) {
+        ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + body.y));
+        renderNavigation(false, ImVec2(navW, navH));
+    }
+}
+
+void MainView::renderNavigation(bool rail, ImVec2 size)
+{
+    ImGui::PushID("navigation");
+    struct Item {
+        Screen screen;
+        const char* icon;
+        const char* label;
+        const char* id;
+    };
+    const Item items[] = {
+        {Screen::Files, ICON_FA_FOLDER_TREE, "Files", "nav:Files"},
+        {Screen::Editor, ICON_FA_CODE, "Code", "nav:Code"},
+        {Screen::Agent, ICON_FA_ROBOT, "Agent", "nav:Agent"},
+        {Screen::Tools, ICON_FA_TERMINAL, "Tools", "nav:Tools"},
+    };
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), palette_.panelHeaderBg);
+    if (rail)
+        dl->AddLine(ImVec2(origin.x + size.x - 1.0f, origin.y), ImVec2(origin.x + size.x - 1.0f, origin.y + size.y), palette_.border);
+    else
+        dl->AddLine(origin, ImVec2(origin.x + size.x, origin.y), palette_.border);
+    const int n = int(std::size(items));
+    // Upright: the bar's full width, shared. Sideways: square cells from the top.
+    const ImVec2 cell = rail ? ImVec2(size.x, std::min(size.y / float(n), 64.0f * s_)) : ImVec2(size.x / float(n), size.y);
+    for (int i = 0; i < n; ++i) {
+        const Item& item = items[i];
+        const ImVec2 min = rail ? ImVec2(origin.x, origin.y + cell.y * float(i)) : ImVec2(origin.x + cell.x * float(i), origin.y);
+        ImGui::SetCursorScreenPos(min);
+        ImGui::PushID(i);
+        const bool clicked = ImGui::InvisibleButton("##nav", cell);
+        ImGui::PopID();
+        const bool active = screen_ == item.screen;
+        const bool hovered = ImGui::IsItemHovered();
+        if (clicked)
+            screen_ = item.screen;
+        registerLastItem(item.id, "tab", item.label, [this, s = item.screen]() { screen_ = s; });
+        const ImU32 color = active ? palette_.accent : hovered ? palette_.text : palette_.textDim;
+        // Active: a pill behind the icon (Material style).
+        const float iconSize = Fonts::kUiSize * 1.35f * s_;
+        const float labelSize = Fonts::kUiSize * 0.78f * s_;
+        const float contentH = iconSize + 4.0f * s_ + labelSize;
+        const float top = min.y + (cell.y - contentH) * 0.5f;
+        const ImVec2 iconDim = fonts_.ui->CalcTextSizeA(iconSize, FLT_MAX, 0.0f, item.icon);
+        const float cx = min.x + cell.x * 0.5f;
+        if (active)
+            dl->AddRectFilled(ImVec2(cx - 26.0f * s_, top - 3.0f * s_), ImVec2(cx + 26.0f * s_, top + iconSize + 3.0f * s_),
+                              palette_.accentSoft, (iconSize + 6.0f * s_) * 0.5f);
+        dl->AddText(fonts_.ui, iconSize, ImVec2(cx - iconDim.x * 0.5f, top), color, item.icon);
+        const ImVec2 labelDim = fonts_.ui->CalcTextSizeA(labelSize, FLT_MAX, 0.0f, item.label);
+        dl->AddText(fonts_.ui, labelSize, ImVec2(cx - labelDim.x * 0.5f, top + iconSize + 4.0f * s_), color, item.label);
+        // Something waiting: problems in Tools, the agent working.
+        const bool badge = (item.screen == Screen::Agent && vm_.agent().busy.get()) ||
+                           (item.screen == Screen::Tools && !vm_.review().findings().empty());
+        if (badge)
+            dl->AddCircleFilled(ImVec2(cx + iconDim.x * 0.5f + 3.0f * s_, top + 2.0f * s_), 3.5f * s_, palette_.iconOrange);
+    }
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy(size);
+    ImGui::PopID();
 }
 
 void MainView::renderTerminalWindow()
@@ -1261,7 +1527,48 @@ void MainView::renderBottomPanel(float width, float height)
     ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f);
     float x = p.x + 8.0f * s_;
     const float textY = p.y + (headerH - ImGui::GetTextLineHeight()) * 0.5f;
-    for (const TabInfo& t : tabs) {
+    auto tabName = [](const char* label) { // "TERMINAL" -> "Terminal"
+        std::string name = label;
+        for (size_t k = 1; k < name.size(); ++k)
+            name[k] = char(std::tolower(static_cast<unsigned char>(name[k])));
+        return name;
+    };
+    float allTabsW = 0.0f;
+    for (const TabInfo& t : tabs)
+        allTabsW += ImGui::CalcTextSize(t.label).x + (t.badge.empty() ? 0.0f : ImGui::CalcTextSize(t.badge.c_str()).x + 12.0f * s_) +
+                    20.0f * s_;
+    // Too narrow for the row (a phone): the current tab, opening a list of them all.
+    const bool tabList = allTabsW > w - 110.0f * s_;
+    if (tabList) {
+        const TabInfo* shown = &tabs[0];
+        for (const TabInfo& t : tabs)
+            if (t.tab == current)
+                shown = &t;
+        std::string caption = std::string(shown->label) + (shown->badge.empty() ? "" : "  " + shown->badge) + "  " ICON_FA_CARET_DOWN;
+        const float tabW = ImGui::CalcTextSize(caption.c_str()).x + 20.0f * s_;
+        ImGui::SetCursorScreenPos(ImVec2(x, p.y));
+        if (ImGui::InvisibleButton("##panelTabList", ImVec2(tabW, headerH)))
+            ImGui::OpenPopup("##panelTabs");
+        for (const TabInfo& t : tabs) { // agents still reach every tab by its id
+            const PanelTab tab = t.tab;
+            registerLastItem("panel-tab:" + tabName(t.label), "tab", tabName(t.label), [this, tab]() { vm_.showPanelTab(tab); });
+        }
+        dl->AddText(ImVec2(x + 10.0f * s_, textY), palette_.text, caption.c_str());
+        dl->AddRectFilled(ImVec2(x + 8.0f * s_, p.y + headerH - 2.0f * s_), ImVec2(x + tabW - 8.0f * s_, p.y + headerH),
+                          palette_.accent);
+        ImGui::SetNextWindowPos(ImVec2(x, p.y + headerH));
+        if (ImGui::BeginPopup("##panelTabs")) {
+            for (const TabInfo& t : tabs) {
+                const std::string item = tabName(t.label) + (t.badge.empty() ? "" : "  (" + t.badge + ")");
+                if (ImGui::Selectable(item.c_str(), t.tab == current))
+                    vm_.showPanelTab(t.tab);
+            }
+            ImGui::EndPopup();
+        }
+        x += tabW;
+    }
+    for (size_t i = 0; i < (tabList ? 0 : std::size(tabs)); ++i) {
+        const TabInfo& t = tabs[i];
         const float labelW = ImGui::CalcTextSize(t.label).x;
         const float badgeW = t.badge.empty() ? 0.0f : ImGui::CalcTextSize(t.badge.c_str()).x + 12.0f * s_;
         const float tabW = labelW + badgeW + 20.0f * s_;
@@ -1270,11 +1577,8 @@ void MainView::renderBottomPanel(float width, float height)
         if (ImGui::InvisibleButton("##panelTab", ImVec2(tabW, headerH)))
             vm_.showPanelTab(t.tab);
         {
-            std::string name = t.label;
-            for (size_t k = 1; k < name.size(); ++k)
-                name[k] = char(std::tolower(static_cast<unsigned char>(name[k])));
             const PanelTab tab = t.tab;
-            registerLastItem("panel-tab:" + name, "tab", name, [this, tab]() { vm_.showPanelTab(tab); });
+            registerLastItem("panel-tab:" + tabName(t.label), "tab", tabName(t.label), [this, tab]() { vm_.showPanelTab(tab); });
         }
         ImGui::PopID();
         const bool active = t.tab == current;
@@ -1333,14 +1637,16 @@ void MainView::renderPanelActions(float left, float right, float y, float height
         ImGui::SetCursorScreenPos(ImVec2(x, buttonY));
         return flatButton(label, tooltip, enabled);
     };
-    if (action(ICON_FA_XMARK "##closePanel", "Close panel (Ctrl+J)")) {
-        vm_.showPanel.set(false);
-        vm_.panelMaximized.set(false);
+    if (layout_ == Layout::Desktop) { // a phone shows the panel as a whole screen of its own
+        if (action(ICON_FA_XMARK "##closePanel", "Close panel (Ctrl+J)")) {
+            vm_.showPanel.set(false);
+            vm_.panelMaximized.set(false);
+        }
+        const bool maximized = vm_.panelMaximized.get();
+        if (action(maximized ? ICON_FA_CHEVRON_DOWN "##restorePanel" : ICON_FA_CHEVRON_UP "##maximizePanel",
+                   maximized ? "Restore panel size" : "Maximize panel"))
+            vm_.execute(CommandId::ToggleMaximizePanel);
     }
-    const bool maximized = vm_.panelMaximized.get();
-    if (action(maximized ? ICON_FA_CHEVRON_DOWN "##restorePanel" : ICON_FA_CHEVRON_UP "##maximizePanel",
-               maximized ? "Restore panel size" : "Maximize panel"))
-        vm_.execute(CommandId::ToggleMaximizePanel);
     if (vm_.panelTab.get() != viewmodel::PanelTab::Terminal)
         return;
 
