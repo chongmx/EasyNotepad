@@ -22,11 +22,23 @@ struct State {
 
 State s;
 
+// Whether the user may scroll `w` along `axis`: the same windows a mouse wheel or a scrollbar
+// scrolls. A window with scrolling turned off (the app's frame, a body sized to fit) may still
+// have content past its edge, such as a tab row too wide for a phone; dragging must not shift it.
+bool userScrollable(const ImGuiWindow* w, int axis)
+{
+    if (w->Flags & (ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar))
+        return false;
+    if (axis == 0 && !(w->Flags & (ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar)))
+        return false;
+    return (axis == 0 ? w->ScrollMax.x : w->ScrollMax.y) > 0.5f;
+}
+
 // The innermost window under `window` (itself or a parent) that can scroll along `axis`.
 ImGuiWindow* scrollableAlong(ImGuiWindow* window, int axis)
 {
     for (ImGuiWindow* w = window; w; w = (w->Flags & ImGuiWindowFlags_ChildWindow) ? w->ParentWindow : nullptr)
-        if ((axis == 0 ? w->ScrollMax.x : w->ScrollMax.y) > 0.5f)
+        if (userScrollable(w, axis))
             return w;
     return nullptr;
 }

@@ -322,12 +322,25 @@ void RibbonView::renderWorkspacePopup()
 
 void RibbonView::renderTabRow(float width)
 {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
     const std::vector<Tab>& list = tabs();
     int& selected = selectedTab();
+    const float pillH = (kTabRowHeight - 6.0f) * s_;
+    const float customizeW = ImGui::CalcTextSize(ICON_FA_SLIDERS).x + 18.0f * s_;
+    float needed = customizeW + 12.0f * s_;
+    for (const Tab& tab : list)
+        needed += ImGui::CalcTextSize(tab.name).x + 26.0f * s_;
+    // Too narrow for every tab (a phone): the row scrolls sideways on its own, by finger or its thin
+    // scrollbar, and the command search makes room for it.
+    const bool scrolling = needed > width;
+    if (scrolling) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 3.0f * s_);
+        ImGui::BeginChild("##ribbonTabs", ImVec2(width, (kTabRowHeight - 2.0f) * s_), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 start = ImGui::GetCursorScreenPos();
     float x = start.x;
-    const float pillH = (kTabRowHeight - 6.0f) * s_;
     for (int i = 0; i < int(list.size()); ++i) {
         const ImVec2 size = ImGui::CalcTextSize(list[size_t(i)].name);
         const float w = size.x + 24.0f * s_;
@@ -335,6 +348,10 @@ void RibbonView::renderTabRow(float width)
         ImGui::PushID(i);
         if (ImGui::InvisibleButton("##tab", ImVec2(w, pillH)))
             selected = i;
+        if (scrolling && i == selected && i != shownTab_) { // a newly chosen tab is brought into view
+            ImGui::SetScrollHereX(0.5f);
+            shownTab_ = i;
+        }
         registerLastItem(std::string("ribbon-tab:") + list[size_t(i)].name, "tab", list[size_t(i)].name,
                          [this, i]() { selectedTab() = i; });
         ImGui::PopID();
@@ -362,6 +379,13 @@ void RibbonView::renderTabRow(float width)
                     hovered ? palette_.text : palette_.textFaint, label);
         ImGui::SetItemTooltip("Customize the ribbon: pin commands and add your own actions to My Tools");
         x += w + 8.0f * s_;
+    }
+    if (scrolling) {
+        ImGui::SetCursorScreenPos(start);
+        ImGui::Dummy(ImVec2(x - start.x, pillH)); // the scrollable extent
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        return;
     }
 
     const float searchW = std::min(kSearchWidth * s_, std::max(0.0f, start.x + width - x - 8.0f * s_));

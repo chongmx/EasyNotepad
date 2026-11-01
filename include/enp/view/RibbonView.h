@@ -59,6 +59,7 @@ private:
     std::string search_;
     bool searchFocused_ = false;
     bool customizeRequested_ = false;
+    int shownTab_ = -1; // the tab last scrolled into view in a too-narrow tab row
     std::string pinFilter_;
     std::string newActionName_;
     std::string newActionCommand_;

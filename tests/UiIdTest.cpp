@@ -331,6 +331,22 @@ int main(int argc, char** argv)
             check(ribbonBefore >= 0.0f && scrollOf("##ribbonGroups", 0) > ribbonBefore + 50.0f, "a finger should scroll the ribbon");
             check(h.vm().documents().size() == documents, "scrolling from the New button should not create a document");
 
+            // A sideways drag across the tab row (wider than a phone) scrolls the row, never the whole app.
+            // (The chosen tab is scrolled into view, so the row may start at its end: drag back then.)
+            const float tabsBefore = scrollOf("##ribbonTabs", 0);
+            // (The row starts right of the workspace block, at about x = 104.)
+            if (tabsBefore > 0.0f)
+                drag(ImVec2(120.0f, 51.0f), ImVec2(370.0f, 51.0f));
+            else
+                drag(ImVec2(370.0f, 51.0f), ImVec2(120.0f, 51.0f));
+            h.settle();
+            check(tabsBefore >= 0.0f && std::fabs(scrollOf("##ribbonTabs", 0) - tabsBefore) > 50.0f,
+                  "a finger should scroll the ribbon's tab row (" + std::to_string(tabsBefore) + " -> " +
+                      std::to_string(scrollOf("##ribbonTabs", 0)) + ")");
+            for (ImGuiWindow* w : GImGui->Windows)
+                if (w->WasActive && !(w->Flags & ImGuiWindowFlags_ChildWindow) && std::strcmp(w->Name, "##main") == 0)
+                    check(w->Scroll.x == 0.0f && w->Scroll.y == 0.0f, "the app itself must never be dragged sideways");
+
             // A mouse drag over the text selects, as it always did, and does not scroll.
             h.setTouch(false);
             h.click(ImVec2(19.0f, 18.0f)); // hide the ribbon
