@@ -55,7 +55,7 @@ jobs:
           path: bin/
 
   web:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -106,4 +106,4 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: EasyNotepad-android
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: bin/android/*.apk

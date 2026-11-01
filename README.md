@@ -117,7 +117,7 @@ git clone --recursive <repo-url>
 scripts/build.sh --test --run     # build, run the tests, launch
 ```
 
-Binaries go to `bin/<os>/<arch>/`. CMake presets cover Windows (MSVC x64/ARM64/x86, MinGW x64/x86),
+Binaries go to `bin/<os>/<arch>/`, and Android APKs to `bin/android/`. CMake presets cover Windows (MSVC x64/ARM64/x86, MinGW x64/x86),
 Linux (native and aarch64 cross), macOS (universal) and the web; `android/` is a Gradle project.
 
 The Windows build runs on Windows 7 and later, 64- or 32-bit. The built-in terminal needs Windows 10

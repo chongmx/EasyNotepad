@@ -27,9 +27,24 @@ android {
         }
     }
 
+    // The release key comes from Gradle properties, never from the repository:
+    //   -PreleaseStoreFile=<keystore> -PreleaseStorePassword=... -PreleaseKeyAlias=... -PreleaseKeyPassword=...
+    // Without them a release build is signed with the debug key: installable for testing, not for Play.
+    signingConfigs {
+        release {
+            if (project.hasProperty('releaseStoreFile')) {
+                storeFile file(project.property('releaseStoreFile'))
+                storePassword project.property('releaseStorePassword')
+                keyAlias project.property('releaseKeyAlias')
+                keyPassword project.property('releaseKeyPassword')
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig project.hasProperty('releaseStoreFile') ? signingConfigs.release : signingConfigs.debug
         }
     }
 
@@ -49,6 +64,20 @@ android {
         cmake {
             path file('../../CMakeLists.txt')
             version '3.22.1+'
+        }
+    }
+}
+
+// Like the other platforms' binaries (bin/<os>/<arch>/), each APK is also copied to bin/android/
+// at the repository root: EasyNotepad-debug.apk, EasyNotepad-release.apk. One APK holds every ABI.
+android.applicationVariants.all { variant ->
+    variant.assembleProvider.configure { task ->
+        task.doLast {
+            project.copy {
+                from variant.outputs.collect { it.outputFile }
+                into rootProject.file('../bin/android')
+                rename { "EasyNotepad-${variant.name}.apk" }
+            }
         }
     }
 }
