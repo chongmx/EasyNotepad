@@ -102,12 +102,45 @@ column, text) and shows them in the Search tab.
 The sample conversation, plan, proposed changes, findings, comments and checklist belong to the
 sample workspace only. Opening a folder clears them all and switches to live mode:
 
-- **Agent chat.** Your question goes to the agent CLI (`claude -p` by default, or the command in
-  `EASYNOTEPAD_AGENT_CLI`, which gets the prompt on stdin and answers on stdout), run in the
-  workspace folder. The recent conversation and the file and line you are on travel with it, so
-  follow-up questions work. **Stop** discards an answer that is still coming. With no agent CLI
-  installed, the panel says so and how to connect one (or to drive the editor through the MCP
-  connector).
+- **Agent chat with Claude Code.** By default your question goes to Claude Code, run in the
+  workspace folder under your own `claude` login. The app finds `claude` on PATH, in its
+  installer's folders (`~/.local/bin`, `~/.claude/local`), or inside the Claude Code extension for
+  VS Code. The chat is one conversation: each prompt continues it, and **New chat** starts another.
+  The answer streams into the panel as it is written. Each step the agent takes shows as a line
+  ("Read src/main.cpp", "Edit hello.py", "click panel-tab:Terminal"), and the line under the chat
+  says what it is doing now. The file and line you are on travel with the prompt.
+  - **It edits files directly** in the default *Edits files* mode, and the editor reloads them.
+    *Plan only* lets it read and propose without changing anything. The model menu picks Opus,
+    Sonnet or Haiku, or leaves Claude Code's own setting (*Default model*). Shell commands are not
+    allowed.
+  - **It can operate the app** when you ask it to ("show me where…", "open the terminal"). It
+    gets the app's MCP connector, so it moves its glowing pointer, points at controls and clicks
+    them, without touching your mouse.
+  - **Answers are formatted.** Headings, bold and italics, lists and task lists, quotes, tables,
+    links and code are shown as they are meant to look. Code blocks are coloured for their
+    language and have a copy button. Right-click a message to copy it as written.
+  - The status bar shows the turns and cost of each answer.
+  - The model, the mode, the agent command and app control are remembered between sessions.
+  The agent runs in the background and the editor stays responsive
+  while it works. **Stop** ends the agent program and anything it started
+  within a fraction of a second, whether it is answering the chat, dissecting the project or
+  writing a commit message. Closing the app ends it too.
+- **Agent setup** (the gear in the Agent panel). It opens by itself when Claude Code is missing
+  or a run fails because it is not logged in.
+  - **Status:** whether Claude Code was found, and where.
+  - **Install:** the official one-line installer for your system, with *Install in terminal*
+    (it runs in the built-in terminal) and *Copy*. Other ways are listed too (winget, Homebrew,
+    npm).
+  - **Log in:** *Log in in terminal* starts `claude` so you can sign in with your Claude account
+    (Pro, Max, Team, Enterprise or Console).
+  - **Check again** looks for it once more after installing, and *Setup guide* opens Anthropic's
+    setup page.
+  - **Agent command:** leave it empty for Claude Code, or give another command that gets the
+    prompt on stdin and answers on stdout. That command answers in one piece, without streaming
+    or app control, and the recent conversation is sent along with each prompt. The
+    `EASYNOTEPAD_AGENT_CLI` environment variable still works when the field is empty.
+  - **App control:** a switch for whether the agent may point and click in the window.
+  - The app stores no keys: Claude Code keeps its own login.
 - **Review tools.** Each tool runs the command you configure in the environment:
   `EASYNOTEPAD_LINT`, `EASYNOTEPAD_STATIC_ANALYSIS`, `EASYNOTEPAD_SECURITY`, `EASYNOTEPAD_STYLE`,
   `EASYNOTEPAD_COMPLEXITY`. In the command, `{file}` is the file you are editing and `{workspace}`
@@ -118,6 +151,18 @@ sample workspace only. Opening a folder clears them all and switches to live mod
   instead of inventing findings.
 - **Agent Review** asks the agent CLI to review the current file and answer in that same format.
 - Fold and layer summaries say they come from the code's own comments and structure.
+
+## Markdown files shown formatted
+
+A Markdown file you open is shown formatted, as a readable column. It has headings, emphasis,
+lists and task lists, quotes, tables, links and coloured code blocks.
+
+- **Edit** (top right of the file), **Ctrl+Shift+V** or *Rendered* in the View tab switches to
+  the text to edit, and back.
+- **Double-click** a paragraph to edit the text right there.
+- Switching back to the formatted view keeps your place.
+- Links open in the browser, or open the file they point to in the workspace.
+- New untitled Markdown documents start as text.
 
 ## Large files stay fast
 

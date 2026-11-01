@@ -199,6 +199,7 @@ add_library(enp_model STATIC
     src/model/Review.cpp
     src/model/TerminalScreen.cpp
     src/model/Outline.cpp
+    src/model/Markdown.cpp
     src/model/Language.cpp
     src/model/Highlighter.cpp
     src/model/Indent.cpp
@@ -258,6 +259,7 @@ add_library(enp_view STATIC
     src/view/EditorView.cpp
     src/view/DiffView.cpp
     src/view/AgentPanel.cpp
+    src/view/MarkdownView.cpp
     src/view/ReviewPanel.cpp
     src/view/TerminalView.cpp
     src/view/UiAutomation.cpp

@@ -200,6 +200,12 @@ void NotepadViewModel::initCommands()
     }, [this]() { return terminal_.supported(); });
     set(C::ToggleAgentPanel, [this]() { showAgentPanel.set(!showAgentPanel.get()); });
     set(C::ToggleWordWrap, [this]() { wordWrap.set(!wordWrap.get()); });
+    set(C::ToggleMarkdownView, [this]() {
+        model::Document* doc = activeDocument();
+        doc->rendered = !doc->rendered;
+        if (!doc->rendered)
+            revealLine(doc->caret.line);
+    }, [this]() { return activeDocument() && activeDocument()->language == model::Language::Markdown; });
     set(C::ToggleWhitespace, [this]() { showWhitespace.set(!showWhitespace.get()); });
     set(C::ToggleLineNumbers, [this]() { showLineNumbers.set(!showLineNumbers.get()); });
     set(C::ToggleIndentGuides, [this]() { showIndentGuides.set(!showIndentGuides.get()); });
@@ -342,7 +348,12 @@ void NotepadViewModel::initCommands()
     }, notBusy);
     set(C::AcceptAllChanges, [this]() { agent_.acceptAll(); }, [this]() { return agent_.pendingChangeCount() > 0; });
     set(C::RejectAllChanges, [this]() { agent_.rejectAll(); }, [this]() { return agent_.pendingChangeCount() > 0; });
-    set(C::StopAgent, [this]() { agent_.stop(); }, [this]() { return agent_.busy.get(); });
+    // Stops every agent run: the chat, a project dissection, a commit message being written.
+    set(C::StopAgent, [this]() {
+        agent_.stop();
+        if (agentCli_)
+            agentCli_->cancel();
+    }, [this]() { return agent_.busy.get() || logicalMap_.analyzing.get() || git_.writingMessage(); });
     set(C::StartTour, [this]() {
         if (tourRunning())
             stopTour();
@@ -446,6 +457,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::ToggleMaximizePanel: return panelMaximized.get();
     case C::ToggleAgentPanel: return showAgentPanel.get();
     case C::ToggleWordWrap: return wordWrap.get();
+    case C::ToggleMarkdownView: return activeDocument() && activeDocument()->rendered;
     case C::ToggleWhitespace: return showWhitespace.get();
     case C::ToggleLineNumbers: return showLineNumbers.get();
     case C::ToggleIndentGuides: return showIndentGuides.get();

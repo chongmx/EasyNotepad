@@ -17,6 +17,7 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 #include "enp/model/Json.h"
 #include "enp/model/LogicalMap.h"
+#include "enp/model/Markdown.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/os/Dispatch.h"
 #include "enp/os/Os.h"
@@ -1630,6 +1631,157 @@ struct FakeAgentCli : interfaces::IAgentCliService {
     }
 };
 
+TEST(markdown_inline_styles_and_links)
+{
+    namespace md = model::markdown;
+    const md::Spans s = md::parseInline("Use **bold**, *it*, `a*b`, ~~old~~ and [docs](https://x.io \"t\") or my_var_name");
+    CHECK_EQ(md::plainText(s), std::string("Use bold, it, a*b, old and docs or my_var_name"));
+    auto styleOf = [&s](const std::string& text) {
+        for (const md::Span& span : s)
+            if (span.text == text)
+                return span.style;
+        return 999u;
+    };
+    CHECK_EQ(styleOf("bold"), unsigned(md::Bold));
+    CHECK_EQ(styleOf("it"), unsigned(md::Italic));
+    CHECK_EQ(styleOf("a*b"), unsigned(md::Code));
+    CHECK_EQ(styleOf("old"), unsigned(md::Strike));
+    CHECK_EQ(styleOf("docs"), unsigned(md::Link));
+    for (const md::Span& span : s)
+        if (span.text == "docs")
+            CHECK_EQ(span.url, std::string("https://x.io"));
+    // Unclosed markers stay text; bare URLs are links without trailing punctuation.
+    CHECK_EQ(md::plainText(md::parseInline("2 * 3 = 6 and **open")), std::string("2 * 3 = 6 and **open"));
+    const md::Spans url = md::parseInline("See https://example.com/a.");
+    CHECK(url.size() == 3 && url[1].style == md::Link && url[1].url == "https://example.com/a" && url[2].text == ".");
+}
+
+TEST(markdown_blocks)
+{
+    namespace md = model::markdown;
+    const std::string text = "# Title\n"
+                             "Some *text*\ncontinued.\n"
+                             "\n"
+                             "- one\n"
+                             "  - nested\n"
+                             "- [x] done\n"
+                             "3. third\n"
+                             "\n"
+                             "> quoted\n"
+                             "\n"
+                             "```cpp\nint main() {}\n```\n"
+                             "---\n"
+                             "| A | B |\n|:--|--:|\n| 1 | `x|y` |\n"
+                             "Sub\n===\n"
+                             "```\nstill streaming";
+    const std::vector<md::Block> b = md::parse(text);
+    CHECK_EQ(int(b.size()), 12);
+    if (b.size() != 12)
+        return;
+    CHECK(b[0].kind == md::BlockKind::Heading && b[0].level == 1 && md::plainText(b[0].spans) == "Title");
+    CHECK(b[1].kind == md::BlockKind::Paragraph && md::plainText(b[1].spans) == "Some text continued." && b[1].line == 1);
+    CHECK(b[2].kind == md::BlockKind::Bullet && b[2].level == 0);
+    CHECK(b[3].kind == md::BlockKind::Bullet && b[3].level == 1 && md::plainText(b[3].spans) == "nested");
+    CHECK(b[4].kind == md::BlockKind::Task && b[4].checked && md::plainText(b[4].spans) == "done");
+    CHECK(b[5].kind == md::BlockKind::Numbered && b[5].marker == "3.");
+    CHECK(b[6].kind == md::BlockKind::Paragraph && b[6].quote == 1 && md::plainText(b[6].spans) == "quoted");
+    CHECK(b[7].kind == md::BlockKind::Code && b[7].language == "cpp" && b[7].code == "int main() {}");
+    CHECK(b[8].kind == md::BlockKind::Rule);
+    CHECK(b[9].kind == md::BlockKind::Table && b[9].rows.size() == 2 && b[9].align == std::vector<int>({-1, 1}));
+    CHECK(b[9].rows.size() == 2 && md::plainText(b[9].rows[1][1]) == "x|y");
+    CHECK(b[10].kind == md::BlockKind::Heading && b[10].level == 1 && md::plainText(b[10].spans) == "Sub");
+    CHECK(b[11].kind == md::BlockKind::Code && b[11].code == "still streaming"); // unclosed fence
+}
+
+TEST(markdown_files_open_rendered_and_toggle_to_text)
+{
+    viewmodel::NotepadViewModel vm;
+    vm.openFile("docs/README.md");
+    model::Document* doc = vm.activeDocument();
+    CHECK(doc && doc->language == model::Language::Markdown);
+    if (!doc)
+        return;
+    CHECK(doc->rendered);
+    CHECK(vm.command(CommandId::ToggleMarkdownView).canExecute() && vm.isChecked(CommandId::ToggleMarkdownView));
+    vm.execute(CommandId::ToggleMarkdownView);
+    CHECK(!doc->rendered && !vm.isChecked(CommandId::ToggleMarkdownView));
+    vm.execute(CommandId::NewFile);
+    CHECK(!vm.command(CommandId::ToggleMarkdownView).canExecute()); // plain text
+}
+
+// Claude Code that streams: the test plays its output lines.
+struct FakeStreamingAgent : FakeAgentCli {
+    interfaces::AgentStreamRequest request;
+    std::function<void(const std::string&)> onLine;
+    std::function<void(bool, const std::string&)> finished;
+    bool cancelled = false;
+    bool canStream() const override { return true; }
+    void cancel() override { cancelled = true; }
+    void stream(const interfaces::AgentStreamRequest& r, std::function<void(const std::string&)> line,
+                std::function<void(bool, const std::string&)> done) override
+    {
+        request = r;
+        onLine = std::move(line);
+        finished = std::move(done);
+    }
+};
+
+TEST(agent_streams_a_claude_code_conversation)
+{
+    FakeStreamingAgent cli;
+    viewmodel::AgentViewModel agent;
+    agent.goLive(&cli, "/work");
+    agent.submitPrompt("Show me the terminal button", "src/a.cpp:3");
+    CHECK(agent.busy.get());
+    CHECK(cli.request.sessionId.empty());
+    CHECK(cli.request.appControl);
+    CHECK(cli.request.prompt.find("src/a.cpp:3") != std::string::npos);
+    CHECK(cli.request.prompt.find("Show me the terminal button") != std::string::npos);
+
+    cli.onLine(R"({"type":"system","subtype":"init","session_id":"s-1","mcp_servers":[{"name":"easynotepad","status":"connected"}]})");
+    cli.onLine(R"({"type":"stream_event","event":{"type":"message_start"},"session_id":"s-1"})");
+    cli.onLine(R"({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Here "}}})");
+    cli.onLine(R"({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"it is."}}})");
+    CHECK(agent.messages().back().role == model::ChatRole::Agent);
+    CHECK_EQ(agent.messages().back().text, std::string("Here it is."));
+    // The whole message repeats what was streamed: not shown twice.
+    cli.onLine(R"({"type":"assistant","message":{"content":[{"type":"text","text":"Here it is."}]}})");
+    cli.onLine(R"({"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__easynotepad__point","input":{"id":"command:ToggleTerminal","message":"This one"}}]}})");
+    CHECK_EQ(agent.messages().back().text, std::string("point command:ToggleTerminal"));
+    CHECK_EQ(agent.activity(), std::string("point command:ToggleTerminal"));
+    cli.onLine(R"({"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"no such element"}]}]}})");
+    CHECK(agent.messages().back().text.find("no such element") != std::string::npos);
+    cli.onLine(R"({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"\\work\\src\\a.cpp"}}]}})");
+    CHECK_EQ(agent.messages().back().text, std::string("Edit src/a.cpp"));
+    cli.onLine("not json at all");
+    cli.onLine(R"({"type":"stream_event","event":{"type":"message_start"}})");
+    cli.onLine(R"({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Done."}}})");
+    cli.onLine(R"({"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"s-1","num_turns":2,"total_cost_usd":0.01})");
+    cli.finished(true, "");
+    CHECK(!agent.busy.get());
+    CHECK_EQ(agent.messages().back().text, std::string("Done."));
+    int agentMessages = 0;
+    for (const model::ChatMessage& m : agent.messages())
+        agentMessages += m.role == model::ChatRole::Agent;
+    CHECK_EQ(agentMessages, 2);
+    CHECK_EQ(agent.sessionId(), std::string("s-1"));
+
+    // The next prompt continues the conversation; Stop ends the program; New Chat starts over.
+    agent.submitPrompt("And now?");
+    CHECK_EQ(cli.request.sessionId, std::string("s-1"));
+    agent.stop();
+    CHECK(cli.cancelled && !agent.busy.get());
+    cli.finished(false, "stopped"); // arrives after Stop: ignored
+    CHECK_EQ(agent.messages().back().text, std::string("Stopped by user."));
+    agent.newChat();
+    agent.submitPrompt("Fresh start");
+    CHECK(cli.request.sessionId.empty());
+    // A run that ends without a result says why.
+    cli.finished(false, "the agent exited with code 1: not logged in");
+    CHECK(!agent.busy.get());
+    CHECK(agent.messages().back().text.find("not logged in") != std::string::npos);
+}
+
 struct FakeProcesses : interfaces::IProcessService {
     std::map<std::string, std::string> settings;
     std::string lastCommand, lastDirectory, output;
@@ -2086,6 +2238,9 @@ TEST(automation_endpoint_end_to_end)
     setenv("EASYNOTEPAD_ENDPOINT", (os::fs::appDataDirectory() + "/test-endpoint.json").c_str(), 1);
 #endif
     services::AutomationServer server([](const std::string& method, const model::Json& params) {
+        if (method == "deferred") // a program run by the connection's thread, not this one
+            return model::Json::object().set(
+                "__process", model::Json::object().set("arguments", model::Json::array().push("git").push("--version")).set("key", "text"));
         return model::Json::object().set("method", method).set("echo", params);
     });
     std::string error;
@@ -2112,6 +2267,17 @@ TEST(automation_endpoint_end_to_end)
     } else {
         std::printf("  call error: %s\n", callError.c_str());
     }
+    done = false;
+    std::thread deferredClient([&]() {
+        reply = app::forwardToRunningApp("deferred", model::Json::object(), &callError);
+        done = true;
+    });
+    for (int i = 0; i < 1000 && !done; ++i) {
+        os::dispatch::pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    deferredClient.join();
+    CHECK(reply && reply->getString("text").find("git version") != std::string::npos);
     server.stop();
     os::fs::writeFile(services::AutomationServer::endpointPath(), ""); // leave nothing behind
     std::string stoppedError;
@@ -2528,6 +2694,30 @@ bool pumpUntil(viewmodel::NotepadViewModel& vm, const std::function<bool()>& don
 }
 
 } // namespace
+
+// Stop ends the program and what it started at once (a child left running would hold the output
+// pipe open, and the run would wait for it).
+TEST(process_cancel_stops_the_program_and_its_children)
+{
+#if defined(_WIN32)
+    const std::string command = "ping -n 30 127.0.0.1 > nul";
+#else
+    const std::string command = "sleep 30; true";
+#endif
+    os::process::CancelFlag cancel = std::make_shared<std::atomic<bool>>(false);
+    std::thread stopper([cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        *cancel = true;
+    });
+    const auto start = std::chrono::steady_clock::now();
+    const os::process::Result result = os::process::run(command, "", "", 60, cancel);
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+    stopper.join();
+    CHECK(result.started);
+    CHECK(result.cancelled);
+    CHECK(!result.timedOut);
+    CHECK(seconds < 5);
+}
 
 TEST(git_end_to_end_in_a_real_repository)
 {

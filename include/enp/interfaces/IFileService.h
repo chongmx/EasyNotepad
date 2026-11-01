@@ -47,6 +47,7 @@ public:
         return false;
     }
     virtual bool reveal(const std::string& path) { (void)path; return false; } // in the system's file manager
+    virtual bool openExternal(const std::string& url) { (void)url; return false; } // in the browser
     // nullopt where the platform cannot tell.
     virtual std::optional<FileStamp> stamp(const std::string& path) { (void)path; return std::nullopt; }
 };

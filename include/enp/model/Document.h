@@ -31,6 +31,7 @@ struct Document {
     Encoding encoding = Encoding::Utf8;
     bool modified = false;
     bool onDisk = false; // loaded from (and saved to) a real file under the workspace
+    bool rendered = false; // Markdown shown formatted (read-only); off: the text, to edit
     IndentStyle indent;          // spaces or tabs, and the width (also the tab stop)
     bool indentDetected = false; // `indent` came from the file's content
     mutable HighlightCache highlightCache; // lexer state per line, for drawing

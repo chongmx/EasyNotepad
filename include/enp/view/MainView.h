@@ -80,6 +80,8 @@ private:
     void verticalSplitter(const char* id, float& value, float direction, float height, float minValue, float maxValue);
     void horizontalSplitter(const char* id, float& value, float width, float minValue, float maxValue);
     bool flatButton(const char* label, const char* tooltip, bool enabled = true, bool active = false);
+    // A square icon-only flat button `size` wide, the icon centred.
+    bool flatIconButton(const char* label, const char* tooltip, float size, bool enabled = true);
 
     viewmodel::NotepadViewModel& vm_;
     const Fonts& fonts_;

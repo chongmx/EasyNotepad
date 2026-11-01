@@ -116,7 +116,7 @@ std::vector<RibbonView::Tab> RibbonView::tabs() const
     };
     static const Group view[] = {
         {"Panels", {C::ToggleExplorer, C::TogglePanel, C::ToggleTerminal, C::ToggleAgentPanel}, {C::ToggleMaximizePanel}},
-        {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap},
+        {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap, C::ToggleMarkdownView},
          {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}},
         {"Zoom", {C::ZoomIn, C::ZoomOut, C::ZoomReset}, {}},
         {"Theme", {C::ToggleTheme, C::SyntaxColors}, {}},

@@ -23,6 +23,14 @@ public:
     Property<int> selectedChange{0}; // index into changes(), -1 when none
     Property<int> modelIndex{0};
     Property<int> autonomyIndex{0};
+    // Set-up (saved): the agent command (empty: Claude Code) and whether it may operate the window.
+    Property<std::string> command{std::string()};
+    Property<bool> appControl{true};
+    // The set-up card is open (also opens by itself when the agent needs installing or a login).
+    Property<bool> showSetup{false};
+    // The last run failed in a way that looks like Claude Code is not logged in.
+    bool needsLogin() const { return needsLogin_; }
+    static bool looksLikeLoginProblem(const std::string& text);
 
     // A change was accepted: the path and its new contents.
     Event<std::string, std::string> changeAccepted;
@@ -37,6 +45,10 @@ public:
     const std::vector<model::AgentTask>& tasks() const { return tasks_; }
     const std::vector<model::FileChange>& changes() const { return changes_; }
     const model::FileChange* currentChange() const;
+    // What the agent is doing right now ("Thinking", "Read src/main.cpp", ...), while busy.
+    const std::string& activity() const { return activity_; }
+    // The Claude Code conversation the next prompt continues (empty: a new one).
+    const std::string& sessionId() const { return sessionId_; }
     int pendingChangeCount() const;
 
     // `context` names what the prompt refers to, e.g. "src/main.cpp:12-20".
@@ -64,6 +76,17 @@ private:
     std::string workingDirectory_;
     int generation_ = 0; // a stopped or replaced request's answer is dropped
     void askCli(const std::string& prompt, const std::string& context);
+
+    // Streaming (Claude Code): one conversation, continued with each prompt.
+    std::string sessionId_;
+    std::string activity_;
+    int streamingMessage_ = -1; // the agent message text is being appended to, -1 when none
+    bool streamedText_ = false; // the current message's text came as it was written
+    bool resultSeen_ = false;
+    bool needsLogin_ = false;
+    void noteFailure(const std::string& text);
+    void askStream(const std::string& prompt, const std::string& context);
+    void streamLine(const std::string& line, const std::string& prompt);
 };
 
 } // namespace enp::viewmodel

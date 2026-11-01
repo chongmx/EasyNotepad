@@ -1,6 +1,7 @@
 #include "enp/services/AutomationServer.h"
 
 #include "enp/os/Os.h"
+#include "enp/os/Process.h"
 #include "enp/os/Socket.h"
 
 #include <chrono>
@@ -117,6 +118,32 @@ void AutomationServer::acceptLoop()
     }
 }
 
+namespace {
+
+// A handler that needs a program's output answers {"__process": {arguments, directory, key}}: the
+// program runs here, on the connection's thread, so a slow one never stalls the UI. Its stdout
+// becomes {key: output}.
+model::Json runDeferred(const model::Json& spec)
+{
+    os::process::Command command;
+    if (const model::Json* arguments = spec.find("arguments"); arguments && arguments->isArray())
+        for (const model::Json& argument : arguments->items())
+            command.arguments.push_back(argument.isString() ? argument.asString() : std::string());
+    command.workingDirectory = spec.getString("directory");
+    command.timeoutSeconds = 30;
+    const os::process::Result r = os::process::run(command);
+    if (!r.started || r.timedOut || r.exitCode != 0)
+        return model::Json::object().set("error", r.timedOut          ? std::string("timed out")
+                                                  : !r.errorOutput.empty() ? r.errorOutput
+                                                  : !r.error.empty()       ? r.error
+                                                                           : std::string("failed"));
+    const size_t limit = size_t(spec.getNumber("limit", 200000));
+    return model::Json::object().set(spec.getString("key", "output"),
+                                     r.output.size() > limit ? r.output.substr(0, limit) + "\n[cut]" : r.output);
+}
+
+} // namespace
+
 void AutomationServer::serve(std::shared_ptr<os::net::Socket> connection)
 {
     std::string line;
@@ -146,6 +173,8 @@ void AutomationServer::serve(std::shared_ptr<os::net::Socket> connection)
                 reply = errorReply(id, "the application did not respond in time");
             } else {
                 model::Json result = future.get();
+                if (const model::Json* deferred = result.find("__process"); deferred && deferred->isObject())
+                    result = runDeferred(*deferred);
                 if (const model::Json* err = result.find("error"); err && err->isString())
                     reply = errorReply(id, err->asString());
                 else

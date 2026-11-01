@@ -7,6 +7,7 @@
 #include "enp/view/UiAutomation.h"
 
 #include "IconsFontAwesome6.h"
+#include "imgui_internal.h"
 #include "misc/cpp/imgui_stdlib.h"
 
 #include <algorithm>
@@ -292,6 +293,13 @@ void EditorView::render(ImVec2 size)
         renderFindBar();
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
+    const bool markdownDoc = doc->language == model::Language::Markdown;
+    if (markdownDoc && doc->rendered) {
+        renderMarkdown(*doc, size);
+        return;
+    }
+    if (markdownDoc)
+        markdown_[doc->id].shown = false;
 
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * vm_.zoom.get());
     Metrics m{};
@@ -340,7 +348,9 @@ void EditorView::render(ImVec2 size)
     const int wrapColumns = wrap ? std::max(8, int((viewW - m.gutterW - 12.0f * s_) / m.charW)) : 0;
 
     buildRows(*doc, wrapColumns);
-    const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax);
+    const ImVec2 switchAt(m.viewMax.x - 8.0f * s_, winPos.y + 6.0f * s_);
+    const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
+                         !(markdownDoc && markdownSwitchRect(switchAt, s_).Contains(ImGui::GetMousePos()));
     handleMouse(*doc, m, hovered);
     if (focused_)
         handleKeyboard(*doc, m);
@@ -377,6 +387,11 @@ void EditorView::render(ImVec2 size)
         jumpToConflict(*doc, ImGui::GetIO().KeyShift ? -1 : 1);
     if (hovered && !dragging_)
         drawHoverTooltip(*doc, m);
+    if (markdownDoc) {
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        markdownSwitch(*doc, switchAt);
+        ImGui::PopFont();
+    }
 
     // Scrollable extent: every row plus half a page of slack below the last line.
     const float contentW = wrap ? 1.0f : m.gutterW + 6.0f * s_ + float(maxColumns_ + 4) * m.charW;
@@ -388,6 +403,91 @@ void EditorView::render(ImVec2 size)
     if (sideBar) {
         ImGui::SameLine(0.0f, 0.0f);
         renderSideBar(*vm_.activeDocument(), sideSize);
+    }
+}
+
+ImRect EditorView::markdownSwitchRect(ImVec2 topRight, float scale)
+{
+    const float w = 92.0f * scale, h = 24.0f * scale;
+    return ImRect(ImVec2(topRight.x - w, topRight.y), ImVec2(topRight.x, topRight.y + h));
+}
+
+void EditorView::markdownSwitch(model::Document& doc, ImVec2 topRight)
+{
+    const ImRect r = markdownSwitchRect(topRight, s_);
+    ImGui::SetCursorScreenPos(r.Min);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f * s_);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(palette_.panelHeaderBg));
+    const char* label = doc.rendered ? ICON_FA_PEN "  Edit##mdSwitch" : ICON_FA_BOOK_OPEN "  Rendered##mdSwitch";
+    if (ImGui::Button(label, r.GetSize()))
+        vm_.execute(viewmodel::CommandId::ToggleMarkdownView);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+    registerLastItem("markdown-view", "button", doc.rendered ? "Edit the Markdown text" : "Show the Markdown rendered",
+                     [this]() { vm_.execute(viewmodel::CommandId::ToggleMarkdownView); });
+    ImGui::SetItemTooltip(doc.rendered ? "Edit the text (Ctrl+Shift+V; or double-click where you want to edit)"
+                                       : "Show it formatted (Ctrl+Shift+V)");
+}
+
+void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
+{
+    RenderedMarkdown& md = markdown_[doc.id];
+    if (md.revision != doc.revision || md.text.empty()) {
+        md.text = doc.buffer.text();
+        md.revision = doc.revision;
+    }
+    if (!md.view.onLink)
+        md.view.onLink = [this](const std::string& url) {
+            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0)
+                vm_.openLink(url);
+            else if (!url.empty() && url[0] != '#') // a file next to this one
+                vm_.openFile(url.substr(0, url.find('#')));
+        };
+
+    const bool sideBar = vm_.showLayersMap.get();
+    if (sideBarWidth_ <= 0.0f)
+        sideBarWidth_ = 280.0f * s_;
+    sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
+    const float sideW = sideBar ? sideBarWidth_ : 0.0f;
+    const ImVec2 sideSize(sideW, size.y);
+    size.x -= sideW;
+
+    const std::string childId = "##markdown" + std::to_string(doc.id);
+    panel::beginChild(childId.c_str(), size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    if (focusRequested_ && !vm_.findVisible.get()) {
+        ImGui::SetWindowFocus();
+        focusRequested_ = false;
+    }
+    focused_ = ImGui::IsWindowFocused();
+    const ImVec2 winPos = ImGui::GetWindowPos();
+    const float viewW = ImGui::GetContentRegionAvail().x;
+    const float zoom = vm_.zoom.get();
+    // A readable column: centred, at most ~90 characters wide.
+    const float pad = 24.0f * s_;
+    const float column = std::min(viewW - pad * 2.0f, 820.0f * s_ * zoom);
+    ImGui::SetCursorPos(ImVec2(std::max(pad, (viewW - column) * 0.5f), pad));
+    md.view.render(md.text, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
+    ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f)); // room to scroll the end up
+
+    if (!md.shown) { // just switched here: show where the caret was
+        ImGui::SetScrollY(std::max(0.0f, md.view.offsetOfLine(doc.caret.line) - 8.0f * s_));
+        md.shown = true;
+    }
+    // Double-click: edit the text there.
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && md.view.hoveredLine() >= 0) {
+        const int line = md.view.hoveredLine();
+        vm_.execute(viewmodel::CommandId::ToggleMarkdownView);
+        vm_.goToLine(line);
+    }
+    // Typing here does nothing: say how to edit.
+    if (focused_ && ImGui::GetIO().InputQueueCharacters.Size > 0)
+        vm_.statusText.set("This Markdown file is shown rendered: press Ctrl+Shift+V (or double-click) to edit it");
+    markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
+                               winPos.y + 6.0f * s_));
+    ImGui::EndChild();
+    if (sideBar) {
+        ImGui::SameLine(0.0f, 0.0f);
+        renderSideBar(doc, sideSize);
     }
 }
 

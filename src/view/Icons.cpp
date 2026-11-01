@@ -58,6 +58,7 @@ const char* commandIcon(CommandId id)
     case CommandId::PopOutTerminal: return ICON_FA_UP_RIGHT_FROM_SQUARE;
     case CommandId::ToggleAgentPanel: return ICON_FA_ROBOT;
     case CommandId::ToggleWordWrap: return ICON_FA_TURN_DOWN;
+    case CommandId::ToggleMarkdownView: return ICON_FA_BOOK_OPEN;
     case CommandId::ToggleWhitespace: return ICON_FA_PARAGRAPH;
     case CommandId::ToggleLineNumbers: return ICON_FA_LIST_OL;
     case CommandId::ToggleIndentGuides: return ICON_FA_GRIP_LINES_VERTICAL;

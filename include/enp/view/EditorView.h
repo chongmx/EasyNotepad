@@ -6,9 +6,14 @@
 #include "enp/model/Git.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/LayersView.h"
+#include "enp/view/MarkdownView.h"
+
+#include "imgui_internal.h" // ImRect
 #include "enp/view/Theme.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
+#include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -52,6 +57,11 @@ private:
     int rowAt(ImVec2 mouse, const Metrics& m) const;
     void drawSummaryRow(const model::Document& doc, const Row& row, const Metrics& m, float y);
     void renderEmptyState(ImVec2 size);
+    // A Markdown document shown formatted (read-only); double-click or the Edit button for the text.
+    void renderMarkdown(model::Document& doc, ImVec2 size);
+    // The Rendered / Edit switch at the top right of a Markdown document; returns its rectangle.
+    void markdownSwitch(model::Document& doc, ImVec2 topRight);
+    static ImRect markdownSwitchRect(ImVec2 topRight, float scale);
     void buildRows(const model::Document& doc, int wrapColumns);
     int rowOf(model::TextPos pos) const;
     model::TextPos hitTest(const model::Document& doc, ImVec2 mouse, const Metrics& m) const;
@@ -91,6 +101,13 @@ public:
     float& blameColumns() { return blameColumns_; } // the blame column's width in characters, remembered too
 private:
     float sideBarWidth_ = 0.0f;   // 0: default on first use
+    struct RenderedMarkdown {
+        MarkdownView view;
+        uint64_t revision = UINT64_MAX;
+        std::string text;
+        bool shown = false; // shown last frame (entering it scrolls to the caret's line)
+    };
+    std::map<int, RenderedMarkdown> markdown_; // by document id
     float blameColumns_ = 30.0f;  // drag its right edge: 9 (hash only) to 60
     int pendingScrollLine_ = -1;  // minimap: centre this line on the next frame
     int firstVisibleLine_ = 0;    // for the minimap's viewport frame

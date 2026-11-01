@@ -42,7 +42,49 @@ std::wstring widen(const std::string& s)
 
 } // namespace
 
-Result run(const std::string& commandLine, const std::string& input, const std::string& workingDirectory, int timeoutSeconds)
+namespace {
+
+// The program and whatever it starts (cmd.exe -> claude -> node ...) live in one job: ending the job
+// ends all of them, and closing it when we are done (or when this app dies) ends any left over.
+HANDLE startInJob(PROCESS_INFORMATION& info)
+{
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+        if (!AssignProcessToJobObject(job, info.hProcess)) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+    ResumeThread(info.hThread);
+    return job;
+}
+
+// Waits for the process, a tenth of a second at a time, so a cancel or the timeout acts at once.
+void waitForExit(HANDLE process, HANDLE job, int timeoutSeconds, const CancelFlag& cancel, Result& result)
+{
+    const ULONGLONG deadline = GetTickCount64() + ULONGLONG(timeoutSeconds) * 1000;
+    while (WaitForSingleObject(process, 100) == WAIT_TIMEOUT) {
+        const bool stop = cancel && cancel->load();
+        if (!stop && GetTickCount64() < deadline)
+            continue;
+        result.cancelled = stop;
+        result.timedOut = !stop;
+        if (job)
+            TerminateJobObject(job, 1);
+        else
+            TerminateProcess(process, 1);
+        WaitForSingleObject(process, 5000);
+        break;
+    }
+}
+
+} // namespace
+
+Result run(const std::string& commandLine, const std::string& input, const std::string& workingDirectory, int timeoutSeconds,
+           const CancelFlag& cancel)
 {
     Result result;
     SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
@@ -64,7 +106,7 @@ Result run(const std::string& commandLine, const std::string& input, const std::
     std::wstring line = L"cmd.exe /d /s /c \"" + widen(commandLine) + L"\"";
     const std::wstring directory = widen(workingDirectory);
     PROCESS_INFORMATION info{};
-    const BOOL ok = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+    const BOOL ok = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                                    nullptr, directory.empty() ? nullptr : directory.c_str(), &startup, &info);
     CloseHandle(inRead);
     CloseHandle(outWrite);
@@ -75,6 +117,7 @@ Result run(const std::string& commandLine, const std::string& input, const std::
         return result;
     }
     result.started = true;
+    HANDLE job = startInJob(info);
     CloseHandle(info.hThread);
 
     // Feed stdin on its own thread so a chatty child cannot deadlock against a full pipe.
@@ -91,15 +134,13 @@ Result run(const std::string& commandLine, const std::string& input, const std::
         while (ReadFile(outRead, buffer, sizeof(buffer), &read, nullptr) && read > 0)
             result.output.append(buffer, read);
     });
-    if (WaitForSingleObject(info.hProcess, DWORD(timeoutSeconds) * 1000) == WAIT_TIMEOUT) {
-        result.timedOut = true;
-        TerminateProcess(info.hProcess, 1);
-        WaitForSingleObject(info.hProcess, 5000);
-    }
+    waitForExit(info.hProcess, job, timeoutSeconds, cancel, result);
     DWORD code = 0;
     GetExitCodeProcess(info.hProcess, &code);
     result.exitCode = int(code);
     CloseHandle(info.hProcess);
+    if (job)
+        CloseHandle(job); // ends anything it left running
     writer.join();
     reader.join();
     CloseHandle(outRead);
@@ -203,7 +244,7 @@ Result run(const Command& command)
     std::wstring environment = environmentBlock(command.environment);
     const std::wstring directory = widen(command.workingDirectory);
     PROCESS_INFORMATION info{};
-    const BOOL ok = CreateProcessW(application.c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+    const BOOL ok = CreateProcessW(application.c_str(), line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                                    environment.data(), directory.empty() ? nullptr : directory.c_str(), &startup, &info);
     CloseHandle(inRead);
     CloseHandle(outWrite);
@@ -216,6 +257,7 @@ Result run(const Command& command)
         return result;
     }
     result.started = true;
+    HANDLE job = startInJob(info);
     CloseHandle(info.hThread);
     std::thread writer([inWrite, input = command.input]() {
         DWORD written = 0;
@@ -230,17 +272,23 @@ Result run(const Command& command)
         while (ReadFile(pipe, buffer, sizeof(buffer), &read, nullptr) && read > 0)
             into->append(buffer, read);
     };
-    std::thread outReader(drain, outRead, &result.output);
+    std::thread outReader([&]() {
+        char buffer[8192];
+        DWORD read = 0;
+        while (ReadFile(outRead, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+            result.output.append(buffer, read);
+            if (command.onOutput)
+                command.onOutput(buffer, read);
+        }
+    });
     std::thread errReader(drain, errRead, &result.errorOutput);
-    if (WaitForSingleObject(info.hProcess, DWORD(command.timeoutSeconds) * 1000) == WAIT_TIMEOUT) {
-        result.timedOut = true;
-        TerminateProcess(info.hProcess, 1);
-        WaitForSingleObject(info.hProcess, 5000);
-    }
+    waitForExit(info.hProcess, job, command.timeoutSeconds, command.cancel, result);
     DWORD code = 0;
     GetExitCodeProcess(info.hProcess, &code);
     result.exitCode = int(code);
     CloseHandle(info.hProcess);
+    if (job)
+        CloseHandle(job); // ends anything it left running
     writer.join();
     outReader.join();
     errReader.join();
@@ -267,7 +315,7 @@ std::string findExecutable(const std::string& name)
 
 #elif defined(__EMSCRIPTEN__) || defined(__ANDROID__)
 
-Result run(const std::string&, const std::string&, const std::string&, int)
+Result run(const std::string&, const std::string&, const std::string&, int, const CancelFlag&)
 {
     Result result;
     result.error = "running command-line tools is not supported on this platform";
@@ -288,7 +336,8 @@ Result run(const Command&)
 
 #else
 
-Result run(const std::string& commandLine, const std::string& input, const std::string& workingDirectory, int timeoutSeconds)
+Result run(const std::string& commandLine, const std::string& input, const std::string& workingDirectory, int timeoutSeconds,
+           const CancelFlag& cancel)
 {
     Result result;
     int in[2], out[2];
@@ -302,6 +351,7 @@ Result run(const std::string& commandLine, const std::string& input, const std::
         return result;
     }
     if (pid == 0) {
+        setpgid(0, 0);
         dup2(in[0], 0);
         dup2(out[1], 1);
         dup2(out[1], 2);
@@ -338,9 +388,14 @@ Result run(const std::string& commandLine, const std::string& input, const std::
                 break;
             result.output.append(buffer, size_t(n));
         }
+        if (cancel && cancel->load()) {
+            result.cancelled = true;
+            kill(-pid, SIGKILL);
+            break;
+        }
         if (std::chrono::steady_clock::now() > deadline) {
             result.timedOut = true;
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL);
             break;
         }
     }
@@ -417,6 +472,7 @@ Result run(const Command& command)
         return result;
     }
     if (pid == 0) {
+        setpgid(0, 0);
         dup2(in[0], 0);
         dup2(out[1], 1);
         dup2(err[1], 2);
@@ -456,13 +512,21 @@ Result run(const Command& command)
                     close(fds[k].fd);
                     fds[k].fd = -1;
                     --open;
-                } else
+                } else {
                     (k == 0 ? result.output : result.errorOutput).append(buffer, size_t(n));
+                    if (k == 0 && command.onOutput)
+                        command.onOutput(buffer, size_t(n));
+                }
             }
+        }
+        if (command.cancel && command.cancel->load()) {
+            result.cancelled = true;
+            kill(-pid, SIGKILL);
+            break;
         }
         if (std::chrono::steady_clock::now() > deadline) {
             result.timedOut = true;
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL);
             break;
         }
     }

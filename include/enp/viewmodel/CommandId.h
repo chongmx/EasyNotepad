@@ -20,7 +20,7 @@ enum class CommandId {
     ToggleBookmark, NextBookmark, PreviousBookmark, ClearBookmarks,
     // View
     ToggleExplorer, TogglePanel, ToggleAgentPanel, ToggleMaximizePanel,
-    ToggleWordWrap, ToggleWhitespace, ToggleLineNumbers, ToggleIndentGuides,
+    ToggleWordWrap, ToggleWhitespace, ToggleLineNumbers, ToggleIndentGuides, ToggleMarkdownView,
     ZoomIn, ZoomOut, ZoomReset, ToggleTheme, SyntaxColors,
     // Reading
     DetailFull, DetailBalanced, DetailOverview, DetailOutline,

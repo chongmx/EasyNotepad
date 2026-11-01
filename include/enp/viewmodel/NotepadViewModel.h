@@ -358,6 +358,24 @@ public:
     const ReviewViewModel& review() const { return review_; }
     LayersViewModel& layers() { return layers_; }
     LogicalMapViewModel& logicalMap() { return logicalMap_; }
+    // The agent is Claude Code: a streaming conversation that can operate the app.
+    bool agentCanStream() const { return agentCli_ && agentCli_->canStream(); }
+    // Agent set-up (the card in the Agent panel).
+    struct AgentSetup {
+        bool available = false;
+        bool checking = false;
+        bool claude = false;    // the command is Claude Code
+        std::string command;    // the command line in use
+        std::string executable; // where it was found
+    };
+    AgentSetup agentSetup() const;
+    void recheckAgent();
+    // Claude Code's official installer for this system, as typed in a terminal.
+    static std::string agentInstallCommand();
+    void installAgent(); // runs the installer in the terminal
+    void loginAgent();   // runs `claude` in the terminal, which asks the user to log in
+    void openLink(const std::string& url);
+    static constexpr const char* kAgentSetupUrl = "https://code.claude.com/docs/en/setup";
     FileDialogViewModel& fileDialog() { return fileDialog_; }
     FindInFilesViewModel& findInFiles() { return findInFiles_; }
     Event<> searchFocusRequested; // Find in Files: focus the query box

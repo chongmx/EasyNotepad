@@ -51,6 +51,10 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
     subscriptions_.push_back(agent_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(terminal_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.replied.subscribe([this](const std::string& prompt) { pointer_.guideFor(prompt); }));
+    if (agentCli_) {
+        agentCli_->setCommand(agent_.command.get());
+        subscriptions_.push_back(agent_.command.subscribe([this](const std::string& c) { agentCli_->setCommand(c); }));
+    }
     subscriptions_.push_back(logicalMap_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(foldingMode.subscribe([this](const model::OutlineMode& mode) {
         for (auto& doc : documents_)
@@ -111,6 +115,7 @@ model::Document& NotepadViewModel::addDocument(std::string title, std::string pa
     doc->buffer.setText(text);
     doc->savedText = doc->buffer.text();
     doc->language = model::languageFromPath(doc->path.empty() ? doc->title : doc->path);
+    doc->rendered = doc->language == model::Language::Markdown && !doc->path.empty(); // opened files: read first
     if (model::languageSpec(doc->language).lfByDefault)
         doc->eol = model::EolMode::Lf;
     applyDetectedIndent(*doc);
@@ -1340,6 +1345,67 @@ bool NotepadViewModel::deletePath(const std::string& path)
     return true;
 }
 
+NotepadViewModel::AgentSetup NotepadViewModel::agentSetup() const
+{
+    AgentSetup setup;
+    if (!agentCli_)
+        return setup;
+    setup.available = agentCli_->available();
+    setup.checking = agentCli_->checking();
+    setup.claude = agentCli_->isClaude();
+    setup.command = agentCli_->command();
+    setup.executable = agentCli_->executable();
+    return setup;
+}
+
+void NotepadViewModel::recheckAgent()
+{
+    if (agentCli_)
+        agentCli_->recheck();
+}
+
+std::string NotepadViewModel::agentInstallCommand()
+{
+#if defined(_WIN32)
+    return "irm https://claude.ai/install.ps1 | iex";
+#else
+    return "curl -fsSL https://claude.ai/install.sh | bash";
+#endif
+}
+
+void NotepadViewModel::installAgent()
+{
+#if defined(_WIN32)
+    // Through PowerShell explicitly: the terminal may be running Command Prompt.
+    runInTerminal("powershell -NoProfile -ExecutionPolicy Bypass -Command "" + agentInstallCommand() + """);
+#else
+    runInTerminal(agentInstallCommand());
+#endif
+    statusText.set("Installing Claude Code in the terminal; press Check again when it has finished");
+}
+
+void NotepadViewModel::loginAgent()
+{
+    const std::string found = agentCli_ ? agentCli_->executable() : std::string();
+    std::string command = "claude";
+    if (!found.empty() && found.find_first_of(" \t") == std::string::npos)
+        command = found;
+    else if (!found.empty())
+#if defined(_WIN32)
+        command = "cmd /c "" + found + """; // works from PowerShell and Command Prompt alike
+#else
+        command = """ + found + """;
+#endif
+    runInTerminal(command);
+    statusText.set("Log in to Claude Code in the terminal (it opens your browser), then type /exit");
+}
+
+void NotepadViewModel::openLink(const std::string& url)
+{
+    if (!files_ || !files_->openExternal(url))
+        statusText.set("Cannot open " + url);
+}
+
 void NotepadViewModel::revealInFileManager(const std::string& path)
 {
     if (files_ && !workspaceRoot_.empty() && !files_->reveal(absolutePath(path)))
@@ -1603,6 +1669,10 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.foldingMode", foldingMode);
     settings_.bind("view.zoom", zoom);
     settings_.bind("editor.wordWrap", wordWrap);
+    settings_.bind("agent.model", agent_.modelIndex);
+    settings_.bind("agent.mode", agent_.autonomyIndex);
+    settings_.bind("agent.command", agent_.command);
+    settings_.bind("agent.appControl", agent_.appControl);
     settings_.bind("editor.showWhitespace", showWhitespace);
     settings_.bind("editor.showLineNumbers", showLineNumbers);
     settings_.bind("editor.showIndentGuides", showIndentGuides);

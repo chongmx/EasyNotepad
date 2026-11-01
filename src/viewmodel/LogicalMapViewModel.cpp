@@ -232,7 +232,8 @@ void LogicalMapViewModel::dissectWithAgent()
             return;
         analyzing.set(false);
         if (!ok) {
-            statusMessage.emit("Agent dissection failed: " + output.substr(0, 300));
+            statusMessage.emit(output == "stopped" ? std::string("Agent dissection stopped")
+                                                   : "Agent dissection failed: " + output.substr(0, 300));
             return;
         }
         std::string error;

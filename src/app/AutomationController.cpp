@@ -177,6 +177,11 @@ const std::vector<AutomationTool>& automationTools()
         {"list_commands", "All commands with their keys (for execute_command), labels, availability and toggle state.", schema({})},
         {"execute_command", "Runs a command by key, e.g. ToggleTerminal, DetailOverview, RunAllReviews, FoldAll.",
          schema({{"command", "Command key from list_commands"}}, {"command"})},
+        {"ask_agent", "Sends a prompt to the app's own agent panel, as if the user typed it (its answer streams into the "
+                      "panel; read it with read_agent_chat).",
+         schema({{"prompt", "What to ask"}}, {"prompt"})},
+        {"read_agent_chat", "The app's agent conversation: messages (user, agent, tool steps), whether it is working and on what.",
+         schema({})},
         {"open_file", "Opens a workspace file in the editor.", schema({{"path", "Workspace-relative path, e.g. src/main.cpp"}}, {"path"})},
         {"read_document", "Full text of a document (the active one when no path is given).",
          schema({{"path", "Workspace-relative path; optional"}})},
@@ -305,18 +310,20 @@ Json handleGit(viewmodel::NotepadViewModel& vm, const std::string& method, const
     if (method == "git_diff") {
         if (git.demo())
             return error("demo data has no real diff");
-        os::process::Command c;
-        c.arguments = {"git", "-c", "core.quotepath=off", "diff"};
+        // Run by the connector's thread (a big diff must not stall the UI).
+        Json arguments = Json::array();
+        for (const char* a : {"git", "-c", "core.quotepath=off", "diff"})
+            arguments.push(a);
         if (flag("staged"))
-            c.arguments.push_back("--cached");
-        if (!params.getString("path").empty())
-            c.arguments.insert(c.arguments.end(), {"--", params.getString("path")});
-        c.workingDirectory = repo.root;
-        c.timeoutSeconds = 30;
-        const os::process::Result r = os::process::run(c);
-        if (r.exitCode != 0)
-            return error(r.errorOutput.empty() ? r.error : r.errorOutput);
-        return Json::object().set("diff", r.output.size() > 200000 ? r.output.substr(0, 200000) + "\n[cut]" : r.output);
+            arguments.push("--cached");
+        if (!params.getString("path").empty()) {
+            arguments.push("--");
+            arguments.push(params.getString("path"));
+        }
+        return Json::object().set("__process", Json::object()
+                                                   .set("arguments", std::move(arguments))
+                                                   .set("directory", repo.root)
+                                                   .set("key", "diff"));
     }
     if (method == "git_stage") {
         const std::string paths = params.getString("paths");
@@ -518,6 +525,27 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
             return error(std::string("'") + viewmodel::commandKey(id) + "' is not available right now");
         vm.execute(id);
         return Json::object().set("executed", viewmodel::commandKey(id)).set("checked", vm.isChecked(id));
+    }
+    if (method == "ask_agent") {
+        if (params.getString("prompt").empty())
+            return error("'prompt' is required");
+        if (vm.agent().busy.get())
+            return error("the app's agent is busy");
+        vm.execute(CommandId::AskAgent); // shows the panel
+        vm.agent().submitPrompt(params.getString("prompt"));
+        return Json::object().set("sent", true).set("messages", int(vm.agent().messages().size()));
+    }
+    if (method == "read_agent_chat") {
+        Json messages = Json::array();
+        for (const model::ChatMessage& m : vm.agent().messages())
+            messages.push(Json::object()
+                              .set("role", m.role == model::ChatRole::User ? "user" : m.role == model::ChatRole::Agent ? "agent" : "tool")
+                              .set("text", m.text));
+        return Json::object()
+            .set("busy", vm.agent().busy.get())
+            .set("activity", vm.agent().activity())
+            .set("session", vm.agent().sessionId())
+            .set("messages", std::move(messages));
     }
     if (method == "open_file") {
         const std::string path = params.getString("path");

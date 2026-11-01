@@ -8,6 +8,7 @@
 #include "misc/cpp/imgui_stdlib.h"
 
 #include <algorithm>
+#include <cfloat>
 
 namespace enp::view {
 
@@ -16,6 +17,16 @@ using viewmodel::CommandId;
 namespace {
 
 ImVec4 col(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
+
+// Keeps the next button on this line when it fits, else it goes on the next one.
+void sameLineIfFits(const char* label)
+{
+    const float w = ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::GetItemRectMax().x + spacing + w <= right)
+        ImGui::SameLine();
+}
 
 const char* roleName(model::ChatRole role)
 {
@@ -39,6 +50,14 @@ AgentPanel::AgentPanel(viewmodel::NotepadViewModel& vm, const Fonts& fonts, cons
 void AgentPanel::renderConversation(bool compact)
 {
     renderHeader(compact);
+    // The set-up card sits above the conversation (which scrolls to its end), scrolling itself when tall.
+    const viewmodel::NotepadViewModel::AgentSetup setup = vm_.agentSetup();
+    if (vm_.agent().live() && (vm_.agent().showSetup.get() || (!setup.available && !setup.checking))) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, ImGui::GetContentRegionAvail().y * 0.6f));
+        ImGui::BeginChild("##setupArea", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
+        renderSetup(ImGui::GetContentRegionAvail().x);
+        ImGui::EndChild();
+    }
     const float composerH = ImGui::GetTextLineHeightWithSpacing() * 4.0f + ImGui::GetFrameHeightWithSpacing() * 1.6f;
     renderMessages(std::max(40.0f * s_, ImGui::GetContentRegionAvail().y - composerH));
     renderComposer();
@@ -47,18 +66,32 @@ void AgentPanel::renderConversation(bool compact)
 void AgentPanel::renderHeader(bool compact)
 {
     viewmodel::AgentViewModel& agent = vm_.agent();
-    const float comboW = compact ? ImGui::GetContentRegionAvail().x * 0.5f - 4.0f * s_ : 160.0f * s_;
+    const float gearW = ImGui::GetFrameHeight();
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float comboW = compact ? (ImGui::GetContentRegionAvail().x - gearW - spacing * 2.0f) * 0.5f : 160.0f * s_;
     int model = agent.modelIndex.get();
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::Combo("##model", &model, agent.modelNames().data(), int(agent.modelNames().size())))
         agent.modelIndex.set(model);
-    ImGui::SetItemTooltip(agent.live() ? "Model (chosen by the agent CLI)" : "Model (sample data)");
+    ImGui::SetItemTooltip(!agent.live() ? "Model (sample data)" : vm_.agentCanStream() ? "Model for the next prompt (Default: your Claude Code setting)" : "Model (chosen by the agent CLI)");
     ImGui::SameLine();
     int autonomy = agent.autonomyIndex.get();
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::Combo("##autonomy", &autonomy, agent.autonomyNames().data(), int(agent.autonomyNames().size())))
         agent.autonomyIndex.set(autonomy);
-    ImGui::SetItemTooltip("How much the agent may do without asking");
+    ImGui::SetItemTooltip("Edits files: the agent changes files directly (the editor reloads them).\nPlan only: it reads and proposes, and changes nothing.");
+    ImGui::SameLine();
+    const bool setupOpen = agent.showSetup.get();
+    if (setupOpen)
+        ImGui::PushStyleColor(ImGuiCol_Button, col(palette_.accent));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, ImGui::GetStyle().FramePadding.y)); // the icon centred
+    if (ImGui::Button(ICON_FA_GEAR "##agentSetup", ImVec2(gearW, gearW)))
+        agent.showSetup.set(!setupOpen);
+    ImGui::PopStyleVar();
+    if (setupOpen)
+        ImGui::PopStyleColor();
+    registerLastItem("agent-setup", "button", "Agent setup", [&agent]() { agent.showSetup.set(!agent.showSetup.get()); });
+    ImGui::SetItemTooltip("Agent setup: install Claude Code, log in, choose the agent");
     if (!compact) {
         ImGui::SameLine();
         ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
@@ -69,7 +102,15 @@ void AgentPanel::renderHeader(bool compact)
     }
 }
 
-void AgentPanel::bubble(const model::ChatMessage& message, float width)
+void AgentPanel::openLink(const std::string& url)
+{
+    if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0)
+        vm_.openLink(url);
+    else // a path in the workspace, perhaps with #L12 or :12
+        vm_.openFile(url.substr(0, url.find_first_of("#")));
+}
+
+void AgentPanel::bubble(const model::ChatMessage& message, size_t index, float width)
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float pad = 8.0f * s_;
@@ -88,14 +129,32 @@ void AgentPanel::bubble(const model::ChatMessage& message, float width)
                        roleName(message.role));
     ImGui::PopFont();
     // The wrap position is window-local, not screen space.
-    ImGui::PushTextWrapPos(start.x + bubbleW - pad - ImGui::GetWindowPos().x + ImGui::GetScrollX());
-    if (message.role == model::ChatRole::Tool)
-        ImGui::TextDisabled("%s", message.text.c_str());
-    else
-        ImGui::TextUnformatted(message.text.c_str());
-    ImGui::PopTextWrapPos();
+    if (message.role == model::ChatRole::Agent) { // the agent writes Markdown
+        while (markdown_.size() <= index)
+            markdown_.emplace_back();
+        MarkdownView& view = markdown_[index];
+        if (!view.onLink)
+            view.onLink = [this](const std::string& url) { openLink(url); };
+        view.render(message.text, bubbleW - pad * 2.0f, fonts_, palette_, Fonts::kUiSize, s_);
+    } else {
+        ImGui::PushTextWrapPos(start.x + bubbleW - pad - ImGui::GetWindowPos().x + ImGui::GetScrollX());
+        if (message.role == model::ChatRole::Tool)
+            ImGui::TextDisabled("%s", message.text.c_str());
+        else
+            ImGui::TextUnformatted(message.text.c_str());
+        ImGui::PopTextWrapPos();
+    }
     ImGui::EndGroup();
     const ImVec2 end(start.x + bubbleW, ImGui::GetItemRectMax().y + pad);
+    // Right-click: copy the message (as written, Markdown included).
+    const std::string menuId = "##bubbleMenu" + std::to_string(index);
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(start, end) && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        ImGui::OpenPopup(menuId.c_str());
+    if (ImGui::BeginPopup(menuId.c_str())) {
+        if (ImGui::MenuItem(ICON_FA_COPY "  Copy message"))
+            ImGui::SetClipboardText(message.text.c_str());
+        ImGui::EndPopup();
+    }
     dl->ChannelsSetCurrent(0);
     const ImU32 bg = user ? palette_.bubbleUser : message.role == model::ChatRole::Agent ? palette_.bubbleAgent : palette_.bubbleTool;
     dl->AddRectFilled(start, end, bg, 8.0f * s_);
@@ -111,38 +170,163 @@ void AgentPanel::renderMessages(float height)
     ImGui::BeginChild("##messages", ImVec2(0.0f, height), ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleVar();
     const float width = ImGui::GetContentRegionAvail().x;
-    if (agent.messages().empty() && agent.live()) {
-        // A real workspace: say where the prompt goes (or how to connect an agent).
-        viewmodel::LogicalMapViewModel& logic = vm_.logicalMap();
+    const viewmodel::NotepadViewModel::AgentSetup setup = vm_.agentSetup();
+    const bool missing = !setup.available && !setup.checking;
+    if (agent.messages().empty() && agent.live() && !missing) {
+        // A real workspace: say where the prompt goes.
         ImGui::Spacing();
         ImGui::PushTextWrapPos(width);
-        if (logic.agentAvailable()) {
-            ImGui::TextDisabled("%s  Ask about this code.", ICON_FA_LIGHTBULB);
+        ImGui::TextDisabled("%s  Ask about this code.", ICON_FA_LIGHTBULB);
+        if (setup.claude)
+            ImGui::TextDisabled("Your question goes to Claude Code in this folder, with the file you are on as context. It is "
+                                "one conversation (New chat starts another). The agent can edit files, and can point at and "
+                                "click things in this window when you ask it to.");
+        else
             ImGui::TextDisabled("Your question goes to %s in this folder, with the file you are on as context.",
-                                logic.agentCommand().c_str());
-        } else {
-            ImGui::TextDisabled("%s  No agent CLI found (%s).", ICON_FA_PLUG, logic.agentCommand().c_str());
-            ImGui::TextDisabled("Install Claude Code, or set EASYNOTEPAD_AGENT_CLI to your agent's command. Agents can also "
-                                "work in the editor through the MCP connector (EasyNotepad --mcp).");
-        }
+                                setup.command.c_str());
         ImGui::PopTextWrapPos();
-    } else if (agent.messages().empty()) {
+    } else if (agent.messages().empty() && !agent.live()) {
         ImGui::Spacing();
         ImGui::TextDisabled("%s  Describe what you want to build or fix.", ICON_FA_LIGHTBULB);
         ImGui::TextDisabled("The agent plans, edits and runs the review tools;");
         ImGui::TextDisabled("you review the changes before they land.");
     }
     for (const model::ChatMessage& message : agent.messages())
-        bubble(message, width);
+        bubble(message, size_t(&message - agent.messages().data()), width);
     if (agent.busy.get()) {
         static const char* const dots[] = {".", "..", "..."};
-        ImGui::TextColored(col(palette_.modeAgent), ICON_FA_ROBOT "  Thinking%s", dots[int(ImGui::GetTime() * 3.0) % 3]);
+        const std::string& activity = agent.activity();
+        ImGui::PushTextWrapPos(width);
+        ImGui::TextColored(col(palette_.modeAgent), ICON_FA_ROBOT "  %s%s", activity.empty() ? "Thinking" : activity.c_str(),
+                           dots[int(ImGui::GetTime() * 3.0) % 3]);
+        ImGui::PopTextWrapPos();
     }
     if (agent.messages().size() != lastMessageCount_ || agent.busy.get()) {
         lastMessageCount_ = agent.messages().size();
         ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
+}
+
+void AgentPanel::renderSetup(float width)
+{
+    viewmodel::AgentViewModel& agent = vm_.agent();
+    const viewmodel::NotepadViewModel::AgentSetup setup = vm_.agentSetup();
+    const float pad = 10.0f * s_;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col(palette_.bubbleTool));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f * s_);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::BeginChild("##agentSetupCard", ImVec2(width, 0.0f),
+                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    const float inner = ImGui::GetContentRegionAvail().x;
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + inner);
+
+    // Title, with a close button once there is nothing left to fix.
+    ImGui::TextColored(col(palette_.modeAgent), ICON_FA_PLUG "  Agent setup");
+    if (setup.available && !agent.needsLogin()) {
+        ImGui::SameLine(ImGui::GetCursorPosX() + inner - ImGui::GetFrameHeight());
+        if (ImGui::SmallButton(ICON_FA_XMARK "##closeSetup"))
+            agent.showSetup.set(false);
+        ImGui::SetItemTooltip("Close");
+    }
+
+    // Where things stand.
+    if (setup.checking) {
+        ImGui::TextDisabled("Looking for %s...", setup.claude ? "Claude Code" : setup.command.c_str());
+    } else if (setup.available) {
+        ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(setup.claude ? "Claude Code is installed." : ("Using " + setup.command).c_str());
+        if (!setup.executable.empty())
+            ImGui::TextDisabled("%s", setup.executable.c_str());
+    } else {
+        ImGui::TextColored(col(palette_.iconRed), ICON_FA_CIRCLE_XMARK);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(setup.claude ? "Claude Code was not found." : (setup.command + " was not found.").c_str());
+    }
+    if (agent.needsLogin()) {
+        ImGui::TextColored(col(palette_.iconRed), ICON_FA_TRIANGLE_EXCLAMATION);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Claude Code could not sign in. Log in once in the terminal, then ask again.");
+    }
+
+    if (setup.claude) {
+        // 1. Install (when missing).
+        if (!setup.available && !setup.checking) {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("1. Install Claude Code with its official installer (no administrator rights needed):");
+            std::string install = viewmodel::NotepadViewModel::agentInstallCommand();
+            ImGui::PushFont(fonts_.mono, 0.0f);
+            ImGui::SetNextItemWidth(inner);
+            ImGui::InputText("##installCommand", &install, ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopFont();
+            if (ImGui::Button(ICON_FA_TERMINAL " Install in terminal"))
+                vm_.installAgent();
+            registerLastItem("agent-setup-install", "button", "Install Claude Code", [this]() { vm_.installAgent(); });
+            sameLineIfFits(ICON_FA_COPY " Copy");
+            if (ImGui::Button(ICON_FA_COPY " Copy"))
+                ImGui::SetClipboardText(viewmodel::NotepadViewModel::agentInstallCommand().c_str());
+#if defined(_WIN32)
+            ImGui::TextDisabled("Or: winget install Anthropic.ClaudeCode, or npm install -g @anthropic-ai/claude-code");
+#elif defined(__APPLE__)
+            ImGui::TextDisabled("Or: brew install --cask claude-code, or npm install -g @anthropic-ai/claude-code");
+#else
+            ImGui::TextDisabled("Or: npm install -g @anthropic-ai/claude-code (or apt / dnf, see the guide)");
+#endif
+            ImGui::Spacing();
+            ImGui::TextUnformatted("2. Log in once (needs a Claude Pro, Max, Team, Enterprise or Console account):");
+        } else if (setup.available) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Claude Code uses its own login (a Claude Pro, Max, Team, Enterprise or Console account); "
+                                "this app stores no keys.");
+        }
+        if (agent.needsLogin())
+            ImGui::PushStyleColor(ImGuiCol_Button, col(palette_.accent));
+        ImGui::BeginDisabled(!setup.available);
+        if (ImGui::Button(ICON_FA_RIGHT_TO_BRACKET " Log in in terminal"))
+            vm_.loginAgent();
+        ImGui::EndDisabled();
+        if (agent.needsLogin())
+            ImGui::PopStyleColor();
+        registerLastItem("agent-setup-login", "button", "Log in to Claude Code", [this]() { vm_.loginAgent(); });
+        ImGui::SetItemTooltip(setup.available ? "Starts claude in the terminal: follow its sign-in steps (a browser opens), then type /exit"
+                                              : "Install Claude Code first");
+        sameLineIfFits(ICON_FA_ROTATE " Check again");
+    }
+    if (ImGui::Button(ICON_FA_ROTATE " Check again"))
+        vm_.recheckAgent();
+    registerLastItem("agent-setup-recheck", "button", "Check for the agent again", [this]() { vm_.recheckAgent(); });
+    if (setup.claude) {
+        sameLineIfFits(ICON_FA_UP_RIGHT_FROM_SQUARE " Setup guide");
+        if (ImGui::Button(ICON_FA_UP_RIGHT_FROM_SQUARE " Setup guide"))
+            vm_.openLink(viewmodel::NotepadViewModel::kAgentSetupUrl);
+        ImGui::SetItemTooltip("%s", viewmodel::NotepadViewModel::kAgentSetupUrl);
+    }
+
+    // Settings.
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("Agent command");
+    if (!editingCommand_)
+        commandEdit_ = agent.command.get();
+    ImGui::SetNextItemWidth(inner);
+    ImGui::InputTextWithHint("##agentCommand", "claude -p  (Claude Code, the default)", &commandEdit_);
+    editingCommand_ = ImGui::IsItemActive();
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        agent.command.set(commandEdit_);
+    ImGui::SetItemTooltip("Leave empty for Claude Code. Any other command gets the prompt on stdin and answers on stdout\n"
+                          "(one answer at a time, without streaming or app control).");
+    bool control = agent.appControl.get();
+    if (ImGui::Checkbox("Let the agent point at and click things in this window", &control))
+        agent.appControl.set(control);
+    ImGui::SetItemTooltip("Gives Claude Code this app's MCP tools. It uses them when you ask it to show or do something in the app,\n"
+                          "with its own glowing pointer: your mouse is never moved.");
+
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+    ImGui::Spacing();
 }
 
 void AgentPanel::renderComposer()

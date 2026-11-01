@@ -50,6 +50,11 @@ bool FileService::remove(const std::string& path, bool* recycled, std::string* e
     return os::fs::deletePath(path, recycled, error);
 }
 
+bool FileService::openExternal(const std::string& url)
+{
+    return os::shell::openExternal(url);
+}
+
 bool FileService::reveal(const std::string& path)
 {
     return os::shell::revealInFileManager(path);

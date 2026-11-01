@@ -232,6 +232,7 @@ void MainView::handleShortcuts()
         {ImGuiMod_Ctrl | ImGuiKey_PageUp, C::PreviousDocument, Global},
         {ImGuiMod_Ctrl | ImGuiKey_X, C::Cut, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_C, C::Copy, Editing},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, C::ToggleMarkdownView, Global},
         {ImGuiMod_Ctrl | ImGuiKey_V, C::Paste, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_Z, C::Undo, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_Y, C::Redo, Editing},
@@ -300,6 +301,22 @@ bool MainView::flatButton(const char* label, const char* tooltip, bool enabled, 
     const bool clicked = ImGui::Button(label);
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
+    if (tooltip)
+        ImGui::SetItemTooltip("%s", tooltip);
+    return clicked;
+}
+
+bool MainView::flatIconButton(const char* label, const char* tooltip, float size, bool enabled)
+{
+    // No side padding: with it an icon wider than size - 2 * padding is pushed off centre.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col(palette_.hover));
+    ImGui::BeginDisabled(!enabled);
+    const bool clicked = ImGui::Button(label, ImVec2(size, size));
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar();
     if (tooltip)
         ImGui::SetItemTooltip("%s", tooltip);
     return clicked;
@@ -1618,11 +1635,11 @@ void MainView::renderExplorer()
         explorerFilter_.clear();
     if (files) {
         ImGui::SameLine(0.0f, spacing);
-        if (flatButton(ICON_FA_CROSSHAIRS "##reveal", "Reveal the active file", vm_.activeDocument() != nullptr))
+        if (flatIconButton(ICON_FA_CROSSHAIRS "##reveal", "Reveal the active file", button, vm_.activeDocument() != nullptr))
             explorerRevealSerial_ = -1;
         registerLastItem("explorer-reveal", "button", "Reveal the active file", [this]() { explorerRevealSerial_ = -1; });
         ImGui::SameLine(0.0f, spacing);
-        if (flatButton(ICON_FA_FOLDER_MINUS "##collapse", "Collapse all folders"))
+        if (flatIconButton(ICON_FA_FOLDER_MINUS "##collapse", "Collapse all folders", button))
             explorerCollapse_ = true;
         registerLastItem("explorer-collapse", "button", "Collapse all folders", [this]() { explorerCollapse_ = true; });
     }

@@ -55,6 +55,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::ToggleMaximizePanel: return {"Maximize", "Maximize or restore the bottom panel", ""};
     case CommandId::ToggleAgentPanel: return {"Agent Panel", "Show or hide the agent side panel", "Ctrl+Shift+I"};
     case CommandId::ToggleWordWrap: return {"Word Wrap", "Wrap long lines", "Alt+Z"};
+    case CommandId::ToggleMarkdownView: return {"Rendered", "Show this Markdown file formatted, or as text to edit", "Ctrl+Shift+V"};
     case CommandId::ToggleWhitespace: return {"Whitespace", "Show spaces and tabs", ""};
     case CommandId::ToggleLineNumbers: return {"Line Numbers", "Show line numbers", ""};
     case CommandId::ToggleIndentGuides: return {"Guides", "Show indent guides", ""};
@@ -215,6 +216,7 @@ const char* commandKey(CommandId id)
     case CommandId::ToggleAgentPanel: return "ToggleAgentPanel";
     case CommandId::ToggleMaximizePanel: return "ToggleMaximizePanel";
     case CommandId::ToggleWordWrap: return "ToggleWordWrap";
+    case CommandId::ToggleMarkdownView: return "ToggleMarkdownView";
     case CommandId::ToggleWhitespace: return "ToggleWhitespace";
     case CommandId::ToggleLineNumbers: return "ToggleLineNumbers";
     case CommandId::ToggleIndentGuides: return "ToggleIndentGuides";
