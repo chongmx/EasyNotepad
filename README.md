@@ -117,8 +117,17 @@ git clone --recursive <repo-url>
 scripts/build.sh --test --run     # build, run the tests, launch
 ```
 
-Binaries go to `bin/<os>/<arch>/`. CMake presets cover Windows (MSVC x64/ARM64, MinGW), Linux
-(native and aarch64 cross), macOS (universal) and the web; `android/` is a Gradle project.
+Binaries go to `bin/<os>/<arch>/`. CMake presets cover Windows (MSVC x64/ARM64/x86, MinGW x64/x86),
+Linux (native and aarch64 cross), macOS (universal) and the web; `android/` is a Gradle project.
+
+The Windows build runs on Windows 7 and later, 64- or 32-bit. The built-in terminal needs Windows 10
+1809 or later, and the app needs OpenGL 3.0 graphics drivers. For a 32-bit build with MinGW, install
+the x86 edition of [w64devkit](https://github.com/skeeto/w64devkit/releases) at `C:\w64devkit-x86`
+(or set `W64DEVKIT_X86` to its folder), then:
+
+```sh
+cmake --preset windows-mingw-x86 && cmake --build --preset windows-mingw-x86   # bin/windows/x86/
+```
 
 The agent CLI used for dissection is set with `EASYNOTEPAD_AGENT_CLI` (default `claude -p`); it
 gets the prompt on stdin and answers with JSON.

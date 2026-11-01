@@ -24,6 +24,21 @@
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
     {
+      "name": "windows-x86",
+      "displayName": "Windows x86, 32-bit (MSVC, newest installed Visual Studio)",
+      "inherits": "base",
+      "architecture": "Win32",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "windows-mingw-x86",
+      "displayName": "Windows x86, 32-bit (MinGW-w64 i686 GCC, e.g. w64devkit x86 at C:/w64devkit-x86, Ninja)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-x86.cmake",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
       "name": "windows-mingw",
       "displayName": "Windows (MinGW-w64 GCC, Ninja)",
       "inherits": "base",
@@ -69,7 +84,9 @@
   "buildPresets": [
     { "name": "windows-x64", "configurePreset": "windows-x64", "configuration": "Release" },
     { "name": "windows-arm64", "configurePreset": "windows-arm64", "configuration": "Release" },
+    { "name": "windows-x86", "configurePreset": "windows-x86", "configuration": "Release" },
     { "name": "windows-mingw", "configurePreset": "windows-mingw" },
+    { "name": "windows-mingw-x86", "configurePreset": "windows-mingw-x86" },
     { "name": "linux", "configurePreset": "linux" },
     { "name": "linux-arm64-cross", "configurePreset": "linux-arm64-cross" },
     { "name": "macos-universal", "configurePreset": "macos-universal" },
@@ -77,7 +94,9 @@
   ],
   "testPresets": [
     { "name": "windows-x64", "configurePreset": "windows-x64", "configuration": "Release" },
+    { "name": "windows-x86", "configurePreset": "windows-x86", "configuration": "Release" },
     { "name": "windows-mingw", "configurePreset": "windows-mingw" },
+    { "name": "windows-mingw-x86", "configurePreset": "windows-mingw-x86" },
     { "name": "linux", "configurePreset": "linux" },
     { "name": "macos-universal", "configurePreset": "macos-universal" }
   ]

@@ -5,7 +5,7 @@
 
 #if defined(_WIN32)
 #   ifndef _WIN32_WINNT
-#       define _WIN32_WINNT 0x0A00 // GetDpiForWindow / GetSystemMetricsForDpi
+#       define _WIN32_WINNT 0x0601 // Windows 7 (newer functions are looked up at run time)
 #   endif
 // glfw3native.h includes <windows.h>: without NOMINMAX, MSVC's min/max macros break std::max.
 #   ifndef NOMINMAX
@@ -47,12 +47,39 @@ bool manualFrameSupported()
 GlfwWindowFrame* g_frame = nullptr;
 WNDPROC g_glfwProc = nullptr;
 
+// The per-monitor DPI functions exist from Windows 10 1607 on. Looked up when first needed rather
+// than linked, so the app still starts on Windows 7 and 8, where the system-wide values apply.
+template <class Fn>
+Fn user32Function(const char* name)
+{
+    return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
+}
+
+UINT windowDpi(HWND hwnd)
+{
+    static const auto getDpiForWindow = user32Function<UINT(WINAPI*)(HWND)>("GetDpiForWindow");
+    if (getDpiForWindow)
+        return getDpiForWindow(hwnd);
+    UINT dpi = 96;
+    if (HDC dc = GetDC(hwnd)) {
+        dpi = UINT(GetDeviceCaps(dc, LOGPIXELSX));
+        ReleaseDC(hwnd, dc);
+    }
+    return dpi > 0 ? dpi : 96;
+}
+
+int systemMetric(int index, UINT dpi)
+{
+    static const auto getSystemMetricsForDpi = user32Function<int(WINAPI*)(int, UINT)>("GetSystemMetricsForDpi");
+    return getSystemMetricsForDpi ? getSystemMetricsForDpi(index, dpi) : GetSystemMetrics(index);
+}
+
 void frameThickness(HWND hwnd, int& x, int& y)
 {
-    const UINT dpi = GetDpiForWindow(hwnd);
-    const int padding = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-    x = GetSystemMetricsForDpi(SM_CXFRAME, dpi) + padding;
-    y = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + padding;
+    const UINT dpi = windowDpi(hwnd);
+    const int padding = systemMetric(SM_CXPADDEDBORDER, dpi);
+    x = systemMetric(SM_CXFRAME, dpi) + padding;
+    y = systemMetric(SM_CYFRAME, dpi) + padding;
 }
 
 LRESULT CALLBACK captionWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)

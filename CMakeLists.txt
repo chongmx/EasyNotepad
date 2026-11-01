@@ -18,6 +18,9 @@ elseif(ANDROID)
     set(ENP_PLATFORM android)
 elseif(WIN32)
     set(ENP_PLATFORM windows)
+    # Windows 7 and later: the headers declare nothing newer, so nothing newer is linked by accident
+    # (newer functions, such as per-monitor DPI and the pseudo console, are looked up at run time).
+    add_compile_definitions(_WIN32_WINNT=0x0601)
 elseif(APPLE)
     set(ENP_PLATFORM macos)
 else()
