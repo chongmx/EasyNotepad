@@ -429,8 +429,10 @@ void NotepadViewModel::initCommands()
     }, [this, gitReady]() { return gitReady() && activeDocument() && activeDocument()->onDisk; });
     set(C::GitGuide, [this]() { gitGuideRequested.emit(); });
     set(C::ShowGitHistory, [this]() { showPanelTab(PanelTab::History); });
+    set(C::ShowGitStatus, [this]() { showPanelTab(PanelTab::Status); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
+    set(C::EngineLab, [this]() { engineLabRequested.emit(); }, [this]() { return developerMode.get(); });
     set(C::Exit, [this]() { requestQuit(); });
 }
 
@@ -475,6 +477,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::FoldingLogical: return foldingMode.get() == model::OutlineMode::Logical;
     case C::GitBlame: return doc && git_.blameShown(doc->path);
     case C::ShowGitHistory: return showPanel.get() && panelTab.get() == PanelTab::History;
+    case C::ShowGitStatus: return showPanel.get() && panelTab.get() == PanelTab::Status;
     case C::DissectProject: return logicalMap_.analyzing.get();
     case C::ShowLayers: return showLayersMap.get() && sideBar.get() == SideBar::Layers;
     case C::ShowMinimap: return showLayersMap.get() && sideBar.get() == SideBar::Minimap;

@@ -72,6 +72,7 @@ void ReviewPanel::renderTab(PanelTab tab)
     case PanelTab::Terminal: break; // TerminalView
     case PanelTab::Search: break;   // SearchPanel
     case PanelTab::History: break;  // GitView
+    case PanelTab::Status: break;   // GitView
     }
 }
 

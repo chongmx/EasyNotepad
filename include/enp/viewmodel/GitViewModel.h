@@ -33,6 +33,10 @@ struct GitRepository {
     std::vector<model::git::Commit> compareCommits;
     std::vector<model::git::FileChange> compareFiles;
     std::string compareBase, compareTarget;
+    // The last commit, and when the remote was last fetched (0: never), for the Status tab.
+    std::string headShort, headSubject, headAuthor;
+    int64_t headTime = 0;
+    int64_t fetchedAt = 0;
     GitOperation operation = GitOperation::None;
     std::string operationLabel; // "Merging main into feature"
     int operationStep = 0, operationTotal = 0;

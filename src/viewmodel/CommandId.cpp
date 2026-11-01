@@ -143,6 +143,8 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::HashSha256: return {"SHA-256", "Show the SHA-256 hash of the selection", ""};
     case CommandId::Preferences: return {"Settings", "Preferences", ""};
     case CommandId::About: return {"About", "About EasyNotepad", ""};
+    case CommandId::EngineLab: return {"Engine Lab", "Developer: measure the on-device model on this device", ""};
+    case CommandId::ShowGitStatus: return {"Status", "Git status: branch, sync with the remote, and every changed file", ""};
     case CommandId::Exit: return {"Exit", "Quit EasyNotepad", "Alt+F4"};
 
     case CommandId::ShowGit: return {"Git", "Show the Git tab: changes, staging and commit", ""};
@@ -298,6 +300,8 @@ const char* commandKey(CommandId id)
     case CommandId::HashSha256: return "HashSha256";
     case CommandId::Preferences: return "Preferences";
     case CommandId::About: return "About";
+    case CommandId::EngineLab: return "EngineLab";
+    case CommandId::ShowGitStatus: return "ShowGitStatus";
     case CommandId::Exit: return "Exit";
     case CommandId::ShowGit: return "ShowGit";
     case CommandId::GitCommit: return "GitCommit";

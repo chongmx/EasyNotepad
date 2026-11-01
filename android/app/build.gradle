@@ -5,6 +5,9 @@ plugins {
 android {
     namespace 'com.easynotepad.app'
     compileSdk 35
+    // Another installed NDK release can be used with -PndkVersion=<its Pkg.Revision>.
+    if (project.hasProperty('ndkVersion'))
+        ndkVersion project.property('ndkVersion')
 
     defaultConfig {
         applicationId 'com.easynotepad.app'

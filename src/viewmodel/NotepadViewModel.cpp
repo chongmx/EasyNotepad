@@ -35,8 +35,10 @@ std::string fileName(const std::string& path)
 } // namespace
 
 NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService, interfaces::IFileService* fileService,
-                                   interfaces::IAgentCliService* agentCli, interfaces::IProcessService* processService)
-    : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace()), files_(fileService), terminal_(terminalService),
+                                   interfaces::IAgentCliService* agentCli, interfaces::IProcessService* processService,
+                                   interfaces::ILocalEngineService* localEngine)
+    : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace()), files_(fileService), engineLab_(localEngine),
+      terminal_(terminalService),
       logicalMap_(*this, agentCli), fileDialog_(*this, fileService),
       findInFiles_(*this, fileService), settings_(fileService)
 {
@@ -49,6 +51,8 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
 
     subscriptions_.push_back(review_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
+    subscriptions_.push_back(engineLab_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
+    subscriptions_.push_back(engineLab_.changed.subscribe([this]() { settings_.markDirty(); }));
     subscriptions_.push_back(terminal_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.replied.subscribe([this](const std::string& prompt) { pointer_.guideFor(prompt); }));
     if (agentCli_) {
@@ -1661,6 +1665,10 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.workspace", workspace);
     settings_.bind("view.showExplorer", showExplorer);
     settings_.bind("view.slimRibbon", slimRibbon);
+    settings_.bind("developer.enabled", developerMode);
+    settings_.section(
+        "engineLab", [this](const model::Json& j) { engineLab_.load(j); },
+        [this]() { return engineLab_.save(); });
     settings_.bind("view.showPanel", showPanel);
     settings_.bind("view.panelTab", panelTab);
     settings_.bind("view.showAgentPanel", showAgentPanel);

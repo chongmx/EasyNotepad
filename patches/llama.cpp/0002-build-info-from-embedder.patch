@@ -1,0 +1,28 @@
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index 8e3c88d..abf22ef 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -8,7 +8,9 @@ llama_add_compile_flags()
+ 
+ # Build info header
+ 
+-if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
++if(LLAMA_BUILD_COMMIT AND NOT LLAMA_BUILD_COMMIT STREQUAL "unknown")
++    # given by the embedding project
++elseif(EXISTS "${PROJECT_SOURCE_DIR}/.git")
+     set(GIT_DIR "${PROJECT_SOURCE_DIR}/.git")
+ 
+     # Is git submodule
+diff --git a/ggml/CMakeLists.txt b/ggml/CMakeLists.txt
+index 1196692..c8f5e99 100644
+--- a/ggml/CMakeLists.txt
++++ b/ggml/CMakeLists.txt
+@@ -11,7 +11,7 @@ set(GGML_VERSION_BASE "${GGML_VERSION_MAJOR}.${GGML_VERSION_MINOR}.${GGML_VERSIO
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
+ 
+ find_program(GIT_EXE NAMES git git.exe NO_CMAKE_FIND_ROOT_PATH)
+-if(GIT_EXE)
++if(GIT_EXE AND NOT GGML_BUILD_COMMIT)
+     # Get current git commit hash
+     execute_process(COMMAND ${GIT_EXE} rev-parse --short HEAD
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

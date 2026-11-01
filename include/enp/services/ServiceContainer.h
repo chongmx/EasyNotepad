@@ -4,6 +4,7 @@
 
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/IFileService.h"
+#include "enp/interfaces/ILocalEngineService.h"
 #include "enp/interfaces/IProcessService.h"
 #include "enp/interfaces/ITerminalService.h"
 
@@ -16,6 +17,7 @@ struct ServiceContainer {
     std::unique_ptr<interfaces::IFileService> files;
     std::unique_ptr<interfaces::IAgentCliService> agentCli;
     std::unique_ptr<interfaces::IProcessService> processes;
+    std::unique_ptr<interfaces::ILocalEngineService> localEngine;
 
     // Production services backed by the OS layer.
     static ServiceContainer createDefault();

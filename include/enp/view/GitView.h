@@ -23,6 +23,7 @@ public:
 
     void renderChanges(); // the explorer's Git tab
     void renderHistory(); // the History tab of the bottom panel
+    void renderStatus();  // the Status tab: what `git status` tells, at a glance
     void renderPopups();  // branch picker, dialogs and the guide; once per frame
     void openBranchPicker(ImVec2 anchor, bool above); // anchor: where the popup hangs from
     void openGuide();
@@ -57,6 +58,10 @@ private:
     void renderRow(const Change& change, int index);
     void renderStashes();
     void renderNotRepository();
+    // Status tab
+    void renderStatusSummary();
+    void renderStatusFiles();
+    void renderStatusRow(const Change& change);
     void renderMergeBanner();
     void clickRow(const Change& change);
     std::vector<std::string> targets(const Change& clicked) const; // the selection if it holds the row, else the row

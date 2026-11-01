@@ -19,6 +19,7 @@
 #include "enp/model/LogicalMap.h"
 #include "enp/model/Markdown.h"
 #include "enp/interfaces/IAgentCliService.h"
+#include "enp/interfaces/ILocalEngineService.h"
 #include "enp/os/Dispatch.h"
 #include "enp/os/Os.h"
 #include "enp/services/AutomationServer.h"
@@ -2754,6 +2755,10 @@ TEST(git_end_to_end_in_a_real_repository)
     CHECK(pumpUntil(vm, [&]() { return git.repo().status.changes.empty() && !git.repo().status.initial; }));
     CHECK_EQ(gitIn(dir, {"log", "-1", "--format=%B"}), std::string("First \"quoted\" $commit\n\nWith a body.\n\n"));
     CHECK(git.commitMessage.empty());
+    // The Status tab's last commit; never fetched (no remote yet).
+    CHECK(pumpUntil(vm, [&]() { return git.repo().headSubject == "First \"quoted\" $commit"; }));
+    CHECK(git.repo().headShort.size() >= 7 && git.repo().headTime > 0);
+    CHECK_EQ(git.repo().fetchedAt, int64_t(0));
 
     // Two separate changes; stage only the first through the Diff tab's rows.
     files.write(dir + "/a.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n", nullptr);
@@ -2878,6 +2883,153 @@ TEST(git_end_to_end_in_a_real_repository)
     git.setLearning(false);
     CHECK(!git.demo() && git.repo().status.branch == mainBranch);
     CHECK(git.repo().status.upstream == "origin/" + mainBranch); // the clone tracks origin
+}
+
+TEST(sha256_in_pieces_matches_one_shot)
+{
+    const std::string data(1000003, 'a');
+    model::Sha256 hash;
+    size_t at = 0;
+    for (size_t step = 1; at < data.size(); step = step * 3 + 1) { // uneven pieces across block edges
+        const size_t n = std::min(step % 9000 + 1, data.size() - at);
+        hash.update(data.data() + at, n);
+        at += n;
+    }
+    CHECK_EQ(hash.hexDigest(), model::sha256Hex(data));
+}
+
+// An engine that answers at once: files are sizes in a map, downloads finish when told to.
+struct FakeEngine final : interfaces::ILocalEngineService {
+    std::map<std::string, uint64_t> files;
+    uint64_t free = 100ull << 30;
+    std::string hashAnswer;
+    interfaces::DownloadStatus download;
+    std::string downloadPath;
+    std::vector<interfaces::EngineRunSettings> runs;
+
+    interfaces::EngineInfo info() override
+    {
+        interfaces::EngineInfo i;
+        i.available = true;
+        i.cpuName = "Test CPU";
+        i.cpuThreads = 12;
+        i.memoryTotal = 16ull << 30;
+        return i;
+    }
+    void run(const interfaces::EngineRunSettings& s, std::function<void(const std::string&)> progress,
+             std::function<void(const interfaces::EngineRunResult&)> done) override
+    {
+        runs.push_back(s);
+        progress("Generating");
+        interfaces::EngineRunResult r;
+        r.ok = true;
+        r.backend = "CPU, 6 threads";
+        r.promptTokensPerSecond = 120;
+        r.generateTokensPerSecond = s.drafterPath.empty() ? 20 : 30;
+        if (!s.drafterPath.empty()) {
+            r.drafted = 10;
+            r.accepted = 6;
+        }
+        done(r);
+    }
+    void cancel() override {}
+    bool running() const override { return false; }
+    std::string modelsDirectory() override { return "/models"; }
+    uint64_t freeSpace(const std::string&) override { return free; }
+    uint64_t fileSize(const std::string& path) override { return files.count(path) ? files[path] : 0; }
+    bool startDownload(const std::string&, const std::string& path, bool, std::string*) override
+    {
+        downloadPath = path;
+        download.state = interfaces::DownloadStatus::State::Running;
+        return true;
+    }
+    interfaces::DownloadStatus downloadStatus() override { return download; }
+    void cancelDownload() override { download.state = interfaces::DownloadStatus::State::Idle; }
+    void hashFile(const std::string&, std::function<void(double)> progress, std::function<void(const std::string&)> done) override
+    {
+        progress(0.5);
+        done(hashAnswer);
+    }
+};
+
+TEST(engine_lab_downloads_checks_and_compares)
+{
+    using Lab = viewmodel::EngineLabViewModel;
+    using State = Lab::FileState;
+    FakeEngine engine;
+    Lab lab(&engine);
+    std::string status;
+    auto sub = lab.statusMessage.subscribe([&](const std::string& s) { status = s; });
+    lab.info();
+    CHECK_EQ(lab.threads.get(), 6); // half the threads on a desktop
+    const std::string modelPath = "/models/" + std::string(Lab::modelFile().fileName);
+    const std::string drafterPath = "/models/" + std::string(Lab::drafterFile().fileName);
+    CHECK(lab.fileStatus(Lab::Which::Model).state == State::Missing);
+    CHECK(!lab.fileUsable(Lab::Which::Model));
+
+    // Not enough room: refused before anything starts.
+    engine.free = 1ull << 30;
+    lab.download(Lab::Which::Model);
+    CHECK(!lab.downloading());
+    CHECK(status.find("Not enough space") != std::string::npos);
+
+    // Download, then the checksum is checked by itself; a match makes the file ready.
+    engine.free = 100ull << 30;
+    lab.download(Lab::Which::Model);
+    CHECK(lab.downloading() && engine.downloadPath == modelPath);
+    CHECK(lab.fileStatus(Lab::Which::Model).state == State::Downloading);
+    lab.refresh(); // still running
+    CHECK(lab.downloading());
+    engine.download.state = interfaces::DownloadStatus::State::Done;
+    engine.files[modelPath] = Lab::modelFile().size;
+    engine.hashAnswer = Lab::modelFile().sha256;
+    lab.refresh();
+    CHECK(!lab.downloading());
+    CHECK(lab.fileStatus(Lab::Which::Model).state == State::Ready);
+
+    // A wrong checksum is reported, and the file is not run.
+    engine.files[drafterPath] = Lab::drafterFile().size;
+    CHECK(lab.fileStatus(Lab::Which::Drafter).state == State::Unverified);
+    engine.hashAnswer = "0000";
+    lab.verify(Lab::Which::Drafter);
+    CHECK(lab.fileStatus(Lab::Which::Drafter).state == State::Mismatch);
+    CHECK(!lab.fileUsable(Lab::Which::Drafter));
+    engine.hashAnswer = Lab::drafterFile().sha256;
+    lab.verify(Lab::Which::Drafter);
+    CHECK(lab.fileStatus(Lab::Which::Drafter).state == State::Ready);
+
+    // The comparison runs without and then with the drafter; newest first.
+    lab.runComparison();
+    CHECK_EQ(engine.runs.size(), size_t(2));
+    CHECK(engine.runs.size() == 2 && engine.runs[0].drafterPath.empty() && engine.runs[1].drafterPath == drafterPath);
+    CHECK_EQ(lab.history().size(), size_t(2));
+    CHECK(!lab.history().empty() && !lab.history().front().settings.drafterPath.empty());
+    const std::string report = lab.report();
+    CHECK(report.find("+ drafter") != std::string::npos && report.find("accepted 6 (60%)") != std::string::npos);
+
+    // Saved and loaded: results and checked files survive a restart.
+    Lab restored(&engine);
+    restored.load(model::Json::parse(lab.save().dump()).value_or(model::Json()));
+    CHECK_EQ(restored.history().size(), size_t(2));
+    CHECK(restored.fileStatus(Lab::Which::Model).state == State::Ready);
+    CHECK(!restored.history().empty() && restored.history().front().result.accepted == 6);
+
+    // A file of one's own is used as it is.
+    engine.files["/sdcard/mine.gguf"] = 123;
+    lab.customModelPath.set("/sdcard/mine.gguf");
+    CHECK(lab.fileStatus(Lab::Which::Model).state == State::Custom && lab.fileUsable(Lab::Which::Model));
+    lab.run(false);
+    CHECK(!engine.runs.empty() && engine.runs.back().modelPath == "/sdcard/mine.gguf");
+
+    // Hidden until developer mode is on.
+    viewmodel::NotepadViewModel vm(nullptr, nullptr, nullptr, nullptr, &engine);
+    int opened = 0;
+    auto openSub = vm.engineLabRequested.subscribe([&]() { ++opened; });
+    CHECK(!vm.command(CommandId::EngineLab).canExecute());
+    vm.developerMode.set(true);
+    CHECK(vm.command(CommandId::EngineLab).canExecute());
+    vm.execute(CommandId::EngineLab);
+    CHECK_EQ(opened, 1);
 }
 
 int main(int argc, char** argv)

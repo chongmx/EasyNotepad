@@ -273,7 +273,18 @@ void GitViewModel::refresh()
         }
         real_.stashes = std::move(stashes);
     }, {}, true);
+    run({"log", "-1", "--format=%h%x1f%s%x1f%an%x1f%ct"}, [this](const interfaces::ProcessResult& r) {
+        const std::vector<std::string> rows = model::git::lines(r.output);
+        const std::vector<std::string> f = rows.empty() ? std::vector<std::string>() : model::git::lines(rows.front(), '\x1f');
+        real_.headShort = f.size() > 0 ? f[0] : std::string();
+        real_.headSubject = f.size() > 1 ? f[1] : std::string();
+        real_.headAuthor = f.size() > 2 ? f[2] : std::string();
+        real_.headTime = f.size() > 3 ? std::atoll(f[3].c_str()) : 0;
+    }, {}, true);
     run({"rev-parse", "--verify", "-q", "HEAD"}, [this](const interfaces::ProcessResult&) {
+        // FETCH_HEAD is rewritten by every fetch (and pull): its time is when the remote was last asked.
+        const std::optional<interfaces::FileStamp> fetched = files_ && !gitDir_.empty() ? files_->stamp(gitDir_ + "/FETCH_HEAD") : std::nullopt;
+        real_.fetchedAt = fetched && fetched->exists ? fetched->modified : 0;
         detectOperation();
         refreshing_ = false;
         if (real_.logLoaded)
@@ -334,6 +345,11 @@ void GitViewModel::loadDemo()
     d.status.branch = "feature/git-ui";
     d.status.upstream = "origin/feature/git-ui";
     d.status.ahead = 2;
+    d.headShort = "4f2c9e1";
+    d.headSubject = "Show git status beside the history";
+    d.headAuthor = "You";
+    d.headTime = now - 25 * 60;
+    d.fetchedAt = now - 8 * 60;
     d.status.changes = {
         {"include/enp/model/Git.h", 'A', Area::Staged, {}, {}},   {"src/app/Main.cpp", 'M', Area::Changes, {}, {}},
         {"src/view/MainView.cpp", 'M', Area::Changes, {}, {}},    {"docs/notes.txt", 'D', Area::Changes, {}, {}},

@@ -455,6 +455,13 @@ int main(int argc, char** argv)
                  if (const view::UiElement* tab = view::UiAutomation::instance().find("git:history-compare"))
                      tab->activate();
              }},
+            {"git: status", [](auto& vm) { vm.execute(viewmodel::CommandId::ShowGitStatus); }},
+            {"git: status, merge in progress, groups folded", [](auto& vm) {
+                 vm.git().setDemoMerge(true);
+                 if (const view::UiElement* group = view::UiAutomation::instance().find("git-status:group:Staged"))
+                     (void)group;
+             }},
+            {"git: status back to normal", [](auto& vm) { vm.git().setDemoMerge(false); }},
             {"git: branch picker", [](auto& vm) { vm.execute(viewmodel::CommandId::GitBranches); }},
             {"git: learn git guide", [](auto& vm) { vm.execute(viewmodel::CommandId::GitGuide); }},
             {"git: guide closed", [](auto&) {

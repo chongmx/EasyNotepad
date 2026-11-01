@@ -1,0 +1,55 @@
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index 8e3c88d..70fbe69 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -57,8 +57,6 @@ include(parsers/sources.cmake)
+ 
+ add_library(${TARGET}
+     ${LLAMA_CHAT_PARSERS_SOURCES}
+-    arg.cpp
+-    arg.h
+     base64.hpp
+     chat-auto-parser-generator.cpp
+     chat-auto-parser-helpers.cpp
+@@ -74,15 +72,10 @@ add_library(${TARGET}
+     console.h
+     debug.cpp
+     debug.h
+-    download.cpp
+-    download.h
+     fit.cpp
+     fit.h
+     file-lock.cpp
+     file-lock.h
+-    hf-cache.cpp
+-    hf-cache.h
+-    http.h
+     imatrix-loader.cpp
+     imatrix-loader.h
+     json-schema-to-grammar.cpp
+@@ -101,8 +94,6 @@ add_library(${TARGET}
+     ngram-mod.h
+     peg-parser.cpp
+     peg-parser.h
+-    preset.cpp
+-    preset.h
+     reasoning-budget.cpp
+     reasoning-budget.h
+     sampling.cpp
+@@ -151,7 +142,15 @@ if (BUILD_SHARED_LIBS)
+ endif()
+ 
+ target_link_libraries(${TARGET} PUBLIC  llama-common-base)
+-target_link_libraries(${TARGET} PRIVATE cpp-httplib)
++
++# The command-line parser, the model downloader and presets need cpp-httplib (Windows 10 and
++# later). Embedders that load local files can leave them out.
++option(LLAMA_COMMON_DOWNLOAD "llama-common: include the argument parser and model downloader" ON)
++if (LLAMA_COMMON_DOWNLOAD)
++    target_sources(${TARGET} PRIVATE
++        arg.cpp arg.h download.cpp download.h hf-cache.cpp hf-cache.h http.h preset.cpp preset.h)
++    target_link_libraries(${TARGET} PRIVATE cpp-httplib)
++endif()
+ 
+ if (LLAMA_LLGUIDANCE)
+     include(ExternalProject)

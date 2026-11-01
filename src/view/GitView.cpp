@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <ctime>
 
 namespace enp::view {
 
@@ -527,6 +528,8 @@ void GitView::renderMoreMenu()
     if (ImGui::MenuItem(ICON_FA_BOX_OPEN "  Pop latest stash", nullptr, false, !repo().stashes.empty()))
         git().stashApply(0, true);
     ImGui::Separator();
+    if (ImGui::MenuItem(ICON_FA_LIST_CHECK "  Status"))
+        vm_.execute(C::ShowGitStatus);
     if (ImGui::MenuItem(ICON_FA_CLOCK_ROTATE_LEFT "  History"))
         vm_.execute(C::ShowGitHistory);
     if (ImGui::MenuItem(ICON_FA_CODE_COMPARE "  Compare branches...")) {
@@ -1554,6 +1557,292 @@ void GitView::renderHistory()
     ImGui::PopID();
 }
 
+// ---- Status tab ------------------------------------------------------------------------------
+// Everything `git status` says, at a glance: the branch and whether it is in step with the remote
+// on the left, the changed files grouped as git groups them on the right (stacked on a phone).
+
+void GitView::renderStatus()
+{
+    ImGui::PushID("gitStatus");
+    git().setVisible(true);
+    if (!repository()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled(vm_.noFolder()     ? "No folder open: open one to see its status."
+                            : git().available() ? "This folder is not a git repository: the Git tab in the Explorer can create one."
+                                                : "Git was not found: install it, or set EASYNOTEPAD_GIT to its path.");
+        ImGui::PopTextWrapPos();
+        ImGui::PopID();
+        return;
+    }
+    const float avail = ImGui::GetContentRegionAvail().x;
+    if (avail >= 620.0f * s_) {
+        const float left = std::clamp(avail * 0.38f, 280.0f * s_, 420.0f * s_);
+        ImGui::BeginChild("##summary", ImVec2(left, 0.0f));
+        renderStatusSummary();
+        ImGui::EndChild();
+        ImGui::SameLine(0.0f, 0.0f);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + 6.0f * s_, p.y), ImVec2(p.x + 6.0f * s_, p.y + ImGui::GetContentRegionAvail().y),
+                                            palette_.border);
+        ImGui::SetCursorScreenPos(ImVec2(p.x + 14.0f * s_, p.y));
+        ImGui::BeginChild("##files", ImVec2(0.0f, 0.0f));
+        renderStatusFiles();
+        ImGui::EndChild();
+    } else {
+        ImGui::BeginChild("##status", ImVec2(0.0f, 0.0f));
+        renderStatusSummary();
+        ImGui::Spacing();
+        renderStatusFiles();
+        ImGui::EndChild();
+    }
+    ImGui::PopID();
+}
+
+void GitView::renderStatusSummary()
+{
+    const viewmodel::GitRepository& r = repo();
+    const auto& st = r.status;
+    const int64_t now = int64_t(std::time(nullptr));
+    ImGui::PushTextWrapPos(0.0f);
+
+    // The branch, and what it follows on the remote.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(col(palette_.iconPurple), ICON_FA_CODE_BRANCH);
+    ImGui::SameLine();
+    ImGui::PushFont(nullptr, Fonts::kUiSize * 1.15f);
+    ImGui::TextUnformatted(st.detached ? ("Detached at " + st.branch).c_str() : st.branch.c_str());
+    ImGui::PopFont();
+    if (demo()) {
+        fit::sameLineIfFits(ImGui::CalcTextSize(ICON_FA_FLASK " Demo").x, 10.0f * s_);
+        ImGui::TextColored(col(palette_.iconOrange), ICON_FA_FLASK " Demo");
+        ImGui::SetItemTooltip("Made-up data, so you can try everything safely");
+    }
+    if (!st.upstream.empty())
+        ImGui::TextDisabled("Tracks %s", st.upstream.c_str());
+
+    // In step with the remote? One line, coloured by what it asks of you.
+    bool gone = false;
+    for (const Branch& b : r.branches)
+        gone = gone || (b.current && b.gone);
+    const std::string up = ICON_FA_ARROW_UP + std::to_string(st.ahead), down = ICON_FA_ARROW_DOWN + std::to_string(st.behind);
+    ImU32 colour = palette_.iconGreen;
+    std::string line, tip;
+    if (st.initial) {
+        colour = palette_.textDim;
+        line = ICON_FA_CIRCLE_INFO "  No commits yet";
+    } else if (st.detached) {
+        colour = palette_.iconOrange;
+        line = ICON_FA_TRIANGLE_EXCLAMATION "  Not on a branch";
+        tip = "New commits here belong to no branch: switch to a branch, or create one, to keep them.";
+    } else if (gone) {
+        colour = palette_.iconRed;
+        line = ICON_FA_TRIANGLE_EXCLAMATION "  Its remote branch was deleted";
+        tip = "Its branch on the server is gone (often after a merge). Push to create it again, or delete this branch.";
+    } else if (st.upstream.empty()) {
+        colour = palette_.textDim;
+        line = ICON_FA_CLOUD_ARROW_UP "  Not on the remote yet";
+        tip = "This branch was never pushed: Publish puts it on the server.";
+    } else if (st.ahead && st.behind) {
+        colour = palette_.iconRed;
+        line = ICON_FA_CODE_BRANCH "  Diverged: " + up + " to push, " + down + " to pull";
+        tip = "Both you and the remote have new commits. Sync pulls theirs (merging), then pushes yours.";
+    } else if (st.ahead) {
+        colour = palette_.iconOrange;
+        line = ICON_FA_ARROW_UP "  " + plural(st.ahead, "commit", "commits") + " not pushed";
+        tip = "Committed here, not yet on " + st.upstream + ".";
+    } else if (st.behind) {
+        colour = palette_.iconBlue;
+        line = ICON_FA_ARROW_DOWN "  " + plural(st.behind, "commit", "commits") + " to pull";
+        tip = st.upstream + " has commits you do not have yet.";
+    } else {
+        line = ICON_FA_CIRCLE_CHECK "  Up to date with " + st.upstream;
+        tip = "Everything committed here is on the remote, and the remote has nothing new (as of the last fetch).";
+    }
+    ImGui::TextColored(col(colour), "%s", line.c_str());
+    if (!tip.empty())
+        ImGui::SetItemTooltip("%s", tip.c_str());
+    // As of when? Ahead and behind are only as fresh as the last fetch.
+    if (!st.upstream.empty())
+        ImGui::TextDisabled(r.fetchedAt ? "Checked with the remote %s" : "Never fetched: the remote may have more",
+                            model::git::relativeTime(r.fetchedAt, now).c_str());
+
+    // The working tree, counted as git groups it.
+    int counts[4] = {0, 0, 0, 0};
+    for (const Change& c : st.changes)
+        ++counts[int(c.group)];
+    if (st.changes.empty()) {
+        ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK "  Working tree clean: nothing to commit");
+    } else {
+        struct Count { int n; const char* one; const char* many; ImU32 colour; };
+        const Count shown[] = {{counts[int(Area::Conflicts)], "conflict", "conflicts", palette_.iconOrange},
+                               {counts[int(Area::Staged)], "staged", "staged", palette_.diffAddedText},
+                               {counts[int(Area::Changes)], "not staged", "not staged", palette_.severityWarning},
+                               {counts[int(Area::Untracked)], "untracked", "untracked", palette_.textDim}};
+        bool first = true;
+        for (const Count& c : shown) {
+            if (!c.n)
+                continue;
+            const std::string text = std::to_string(c.n) + " " + (c.n == 1 ? c.one : c.many);
+            if (!first)
+                fit::sameLineIfFits(ImGui::CalcTextSize(text.c_str()).x + 12.0f * s_, 14.0f * s_);
+            ImGui::TextColored(col(c.colour), "%s", text.c_str());
+            first = false;
+        }
+    }
+
+    // Only the actions that do something now.
+    const bool busy = git().busy();
+    const bool publish = st.upstream.empty() && !st.detached && !st.initial;
+    ImGui::BeginDisabled(busy);
+    auto action = [&](const char* label, const char* id, const char* tooltip, std::function<void()> run, bool first) {
+        if (!first)
+            fit::sameLineIfFitsButton(label);
+        if (ImGui::Button(label))
+            run();
+        ImGui::SetItemTooltip("%s", tooltip);
+        registerLastItem(id, "button", tooltip, run, !busy);
+    };
+    action(ICON_FA_ROTATE "  Fetch", "git-status:fetch", "Ask the remote what is new (changes nothing here)", [this]() { git().fetch(); }, true);
+    if (publish)
+        action(ICON_FA_CLOUD_ARROW_UP "  Publish", "git-status:publish", "Put this branch on the server", [this]() { git().push(); }, false);
+    else if (st.ahead && st.behind)
+        action(ICON_FA_ARROWS_ROTATE "  Sync", "git-status:sync", "Pull, then push", [this]() { git().sync(); }, false);
+    else if (st.behind)
+        action(ICON_FA_ARROW_DOWN "  Pull", "git-status:pull", "Get the new commits", [this]() { git().pull(); }, false);
+    else if (st.ahead)
+        action(ICON_FA_ARROW_UP "  Push", "git-status:push", "Send your commits", [this]() { git().push(); }, false);
+    ImGui::EndDisabled();
+    if (busy) {
+        fit::sameLineIfFits(ImGui::CalcTextSize("Working...").x + 20.0f * s_);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled(ICON_FA_SPINNER " Working...");
+    }
+
+    if (r.operation != GitOperation::None) {
+        ImGui::Spacing();
+        ImGui::TextColored(col(palette_.iconOrange), ICON_FA_TRIANGLE_EXCLAMATION "  %s", r.operationLabel.c_str());
+        if (r.operationTotal > 0)
+            ImGui::TextDisabled("Step %d of %d. Continue or abort it in the Git tab.", r.operationStep, r.operationTotal);
+        else
+            ImGui::TextDisabled("Finish or abort it in the Git tab.");
+    }
+
+    // The last commit.
+    ImGui::Spacing();
+    if (!r.headShort.empty()) {
+        ImGui::TextDisabled("Last commit");
+        ImGui::PushFont(fonts_.mono, 0.0f);
+        ImGui::TextColored(col(palette_.textDim), "%s", r.headShort.c_str());
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::TextUnformatted(r.headSubject.c_str());
+        ImGui::TextDisabled("%s, %s", r.headAuthor.c_str(), model::git::relativeTime(r.headTime, now).c_str());
+    }
+
+    if (!r.stashes.empty())
+        ImGui::TextDisabled(ICON_FA_BOX_ARCHIVE "  %s", plural(int(r.stashes.size()), "stash", "stashes").c_str());
+    ImGui::PopTextWrapPos();
+}
+
+void GitView::renderStatusFiles()
+{
+    const auto& changes = repo().status.changes;
+    if (changes.empty()) {
+        ImGui::TextDisabled("No changed files.");
+        return;
+    }
+    struct Group { Area area; const char* title; const char* hint; };
+    const Group groups[] = {{Area::Conflicts, "Conflicts", "Changed on both sides: fix the file, then stage it"},
+                            {Area::Staged, "Staged", "Going into the next commit"},
+                            {Area::Changes, "Not staged", "Changed, but not in the next commit yet"},
+                            {Area::Untracked, "Untracked", "New files git does not track yet"}};
+    for (const Group& g : groups) {
+        const int n = int(std::count_if(changes.begin(), changes.end(), [&](const Change& c) { return c.group == g.area; }));
+        if (n == 0)
+            continue;
+        const std::string label = std::string(g.title) + "  " + std::to_string(n) + "###group-" + g.title;
+        ImGui::PushStyleColor(ImGuiCol_Header, col(palette_.panelHeaderBg));
+        const bool open = ImGui::CollapsingHeader(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+        ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("%s", g.hint);
+        registerLastItem(std::string("git-status:group:") + g.title, "button", g.title, nullptr);
+        if (!open)
+            continue;
+        for (const Change& c : changes)
+            if (c.group == g.area)
+                renderStatusRow(c);
+    }
+}
+
+void GitView::renderStatusRow(const Change& change)
+{
+    ImGui::PushID(change.path.c_str());
+    ImGui::PushID(int(change.group));
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float rowH = ImGui::GetFrameHeight();
+    if (ImGui::Selectable("##row", false, ImGuiSelectableFlags_AllowOverlap | ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0.0f, rowH))) {
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && change.status != 'D')
+            git().openFile(change.path);
+        else
+            git().showChange(change.path, change.group);
+    }
+    const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+    const ImVec2 end = ImGui::GetItemRectMax();
+    registerLastItem("git-status:file:" + change.path, "row", change.path,
+                     [this, change]() { git().showChange(change.path, change.group); });
+    ImGui::SetItemTooltip("%s%s\nClick: what changed  ·  double-click: open", change.path.c_str(),
+                          change.origPath.empty() ? "" : ("\nrenamed from " + change.origPath).c_str());
+    if (ImGui::BeginPopupContextItem("##menu")) {
+        if (change.group == Area::Staged) {
+            if (ImGui::MenuItem(ICON_FA_MINUS "  Unstage"))
+                git().unstage({change.path});
+        } else if (ImGui::MenuItem(change.group == Area::Conflicts ? ICON_FA_CHECK "  Mark resolved (stage)" : ICON_FA_PLUS "  Stage")) {
+            git().stage({change.path});
+        }
+        if (ImGui::MenuItem(ICON_FA_CODE_COMPARE "  Open diff"))
+            git().showChange(change.path, change.group);
+        if (ImGui::MenuItem(ICON_FA_FILE "  Open file", nullptr, false, change.status != 'D'))
+            git().openFile(change.path);
+        if (ImGui::MenuItem(ICON_FA_COPY "  Copy relative path"))
+            ImGui::SetClipboardText(change.path.c_str());
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_ROTATE_LEFT "  Discard changes...", nullptr, false, change.group != Area::Staged))
+            discardWithConfirm({change.path});
+        ImGui::EndPopup();
+    }
+
+    // Letter, name, folder (dim, cut short to fit), and stage/unstage at the right when hovered.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float textY = start.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+    const char letter[2] = {change.status == '!' ? 'C' : change.status, 0};
+    dl->AddText(ImVec2(start.x + 4.0f * s_, textY), statusColor(change.status), letter);
+    const float button = rowH;
+    const bool showAction = hovered && !git().busy();
+    const float right = end.x - (showAction ? button + 4.0f * s_ : 4.0f * s_);
+    float x = start.x + 22.0f * s_;
+    const std::string name = fileName(change.path);
+    const ImU32 nameColour = change.status == 'D' ? palette_.textDim : palette_.text;
+    x = fit::text(dl, ImVec2(x, textY), right, nameColour, name) + 8.0f * s_;
+    if (x < right) {
+        ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f);
+        const std::string folder = change.origPath.empty() ? folderOf(change.path) : ("from " + change.origPath);
+        fit::text(dl, ImVec2(x, textY + 1.0f * s_), right, palette_.textFaint, folder);
+        ImGui::PopFont();
+    }
+    if (showAction) {
+        ImGui::SetCursorScreenPos(ImVec2(end.x - button, start.y));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        const bool staged = change.group == Area::Staged;
+        const char* icon = staged ? ICON_FA_MINUS : change.group == Area::Conflicts ? ICON_FA_CHECK : ICON_FA_PLUS;
+        if (ImGui::Button(icon, ImVec2(button, rowH)))
+            staged ? git().unstage({change.path}) : git().stage({change.path});
+        ImGui::SetItemTooltip(staged ? "Unstage (your edits stay)" : change.group == Area::Conflicts ? "Mark resolved (stage it)" : "Stage");
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopID();
+    ImGui::PopID();
+}
+
 void GitView::renderLog()
 {
     if (!repo().logLoaded)
@@ -2016,6 +2305,7 @@ const Explanation kExplanations[] = {
     {"command:GitPull", "Pull", "Downloads other people's commits into your branch."},
     {"command:GitPush", "Push", "Uploads your commits to the server."},
     {"command:GitFetch", "Fetch", "Checks the server for news without changing your files."},
+    {"command:ShowGitStatus", "Status", "Shows the branch, whether it is pushed, and every changed file."},
     {"command:ShowGitHistory", "History", "Opens the list of commits."},
     {"command:GitBlame", "Blame", "Shows who last changed each line, and when."},
     {"command:GitStash", "Stash", "Puts unfinished changes aside."},

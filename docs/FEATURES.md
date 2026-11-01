@@ -220,6 +220,37 @@ Ribbon*) makes the ribbon slim, giving about 40 dp back to the work area:
 
 The chevron turns over to bring the full ribbon back. The choice is remembered.
 
+## Engine lab (developer view)
+
+A hidden page that shows how fast the on-device model (plan 23) runs on this device. It does not
+take up any space in the normal UI.
+
+- **Turning it on:** tap the version in About **seven times**, as with Android's developer options.
+  After that, Engine Lab appears in Help (and in About, with a *Turn off* button). It is also the
+  `EngineLab` command for agents.
+- **This device:** the chip, CPU and its features, memory, the GPUs the engine can reach, and the
+  engine version.
+- **Model files:**
+  - Google's Gemma 4 E2B (QAT, 4-bit, 3.35 GB) and its MTP drafter (77 MB), pinned to a repository
+    commit and checked by SHA-256 after the download.
+  - It checks for free space first.
+  - Downloads resume. On Android they run in the system's download manager (also in the
+    background), and they wait for Wi-Fi unless *Downloads may use mobile data* is ticked.
+  - A file already on the device can be used instead.
+- **Runs:** the CPU thread count, the GPU (when the build has one), and how many tokens to
+  generate. *Run*, *Run with drafter*, or *Compare both* (one after the other).
+- **Results:**
+  - Generating and prompt speed, the time to the first token, the load time and peak memory.
+  - With the drafter: the share of drafts accepted, and the speed-up against the run without it.
+  - The start of what the model wrote, to check it is sensible.
+  - A bar chart of the history, and *Copy report* for sharing.
+  - The history is kept with the settings.
+- **Where it runs:**
+  - 64-bit Windows, Linux and macOS, and Android.
+  - The CPU code needs AVX2 on PCs and ARMv8.2 dot product on phones; older processors get a
+    message, not a crash.
+  - 32-bit and web builds have no engine.
+
 ## Windows 7 and 32-bit Windows
 
 - The Windows build starts on **Windows 7 and later**. The per-monitor DPI functions of newer
@@ -379,6 +410,36 @@ file with no conflict markers left marks it resolved.
 - **Stash...** puts changes aside, with a name, all changes or only the selected files, with or
   without untracked files, optionally keeping staged changes. The Stashes list shows each stash's
   files; right-click a stash to apply, pop, apply on a new branch or drop it.
+
+## Git: status at a glance
+
+The **Status** tab of the bottom panel, next to History, shows everything `git status` tells you.
+It is also in Git ▸ Inspect, in the Git tab's ⋯ menu, and is the `ShowGitStatus` command.
+
+- **The branch** and the remote branch it tracks (or *Detached at …*).
+- **In step with the remote?** One line, coloured by what it asks of you:
+  - *Up to date* (green);
+  - *n commits not pushed* (orange);
+  - *n to pull* (blue);
+  - *Diverged: n to push, m to pull* (red);
+  - *Not on the remote yet* (never pushed);
+  - *Its remote branch was deleted*;
+  - *Not on a branch*.
+
+  Under it: when the remote was last checked (the last fetch), since the counts are only that
+  fresh.
+- **Counts:** conflicts, staged, not staged and untracked; or *Working tree clean*.
+- **Only the actions that apply:** Fetch always; then Pull, Push, Sync or Publish, depending on the
+  state.
+- **The rest:** a merge, rebase or cherry-pick in progress (with its step), the last commit (hash,
+  message, author, when), and the number of stashes.
+- **The files,** grouped as git groups them (Conflicts, Staged, Not staged, Untracked), each group
+  collapsible:
+  - click a file for its diff, double-click to open it;
+  - stage, unstage or mark resolved on hover;
+  - more on right-click.
+- **Layout:** summary and files side by side on a wide panel, stacked in one scrolling column on a
+  phone (Tools ▸ Status).
 
 ## Git: compare and take work from elsewhere
 

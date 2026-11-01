@@ -60,6 +60,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
       documentList_(vm, palette_, uiScale),
       agentPanel_(vm, fonts, palette_, uiScale), reviewPanel_(vm, fonts, palette_, uiScale),
       terminalView_(vm.terminal(), fonts, palette_, uiScale), agentCursor_(vm, fonts, palette_, uiScale),
+      engineLab_(vm, fonts, palette_, uiScale),
       explorerWidth_(230.0f * uiScale), agentSideWidth_(360.0f * uiScale), panelHeight_(240.0f * uiScale),
       planWidth_(270.0f * uiScale), conversationWidth_(430.0f * uiScale)
 {
@@ -150,6 +151,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
                 .set("blameColumns", double(editor_.blameColumns()));
         });
     subscriptions_.push_back(vm_.aboutRequested.subscribe([this]() { openAbout_ = true; }));
+    subscriptions_.push_back(vm_.engineLabRequested.subscribe([this]() { engineLab_.open(); }));
     subscriptions_.push_back(vm_.quitRequested.subscribe([this]() { quitRequested_ = true; }));
     subscriptions_.push_back(vm_.editorRequested.subscribe([this]() { previewTabRequest_ = 1; }));
     subscriptions_.push_back(vm_.workspace.subscribe([this](const WorkspaceMode& mode) {
@@ -232,6 +234,7 @@ void MainView::render()
     renderPreferencesPopup();
     renderSyntaxColorsPopup();
     renderAboutPopup();
+    engineLab_.render(layout_ != Layout::Desktop, pos, ImVec2(pos.x + size.x, pos.y + size.y));
     handleCaptionMouse();
     ImGui::End();
     UiAutomation::instance().endFrame();
@@ -493,6 +496,8 @@ void MainView::renderTopBar()
             vm_.execute(CommandId::StartTour);
         if (ImGui::MenuItem(ICON_FA_GRADUATION_CAP "  Learn Git"))
             vm_.execute(CommandId::GitGuide);
+        if (vm_.developerMode.get() && ImGui::MenuItem(ICON_FA_FLASK "  Engine Lab"))
+            vm_.execute(CommandId::EngineLab);
         ImGui::Separator();
         if (ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  About EasyNotepad"))
             vm_.execute(CommandId::About);
@@ -796,6 +801,8 @@ void MainView::renderCompactTopBar()
             if (ImGui::MenuItem(label.c_str()))
                 vm_.execute(id);
         }
+        if (vm_.developerMode.get() && ImGui::MenuItem(ICON_FA_FLASK "  Engine Lab"))
+            vm_.execute(CommandId::EngineLab);
         if (os::isDesktop()) {
             ImGui::Separator();
             if (ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET "  Exit"))
@@ -1556,6 +1563,7 @@ void MainView::renderBottomPanel(float width, float height)
         {PanelTab::Checklist, "CHECKLIST", std::to_string(done) + "/" + std::to_string(review.checklist().size())},
         {PanelTab::Terminal, "TERMINAL", terminals > 1 ? std::to_string(terminals) : std::string()},
         {PanelTab::Search, "SEARCH", vm_.findInFiles().hitCount() ? std::to_string(vm_.findInFiles().hitCount()) : std::string()},
+        {PanelTab::Status, "STATUS", gitView_.changeCount() ? std::to_string(gitView_.changeCount()) : std::string()},
         {PanelTab::History, "HISTORY", {}},
     };
     const PanelTab current = vm_.panelTab.get();
@@ -1653,6 +1661,8 @@ void MainView::renderBottomPanel(float width, float height)
         searchPanel_.render();
     else if (current == PanelTab::History)
         gitView_.renderHistory();
+    else if (current == PanelTab::Status)
+        gitView_.renderStatus();
     else
         reviewPanel_.renderTab(current);
     ImGui::EndChild();
@@ -2721,6 +2731,15 @@ void MainView::renderSyntaxColorsPopup()
     ImGui::EndPopup();
 }
 
+bool MainView::navigateBack()
+{
+    if (engineLab_.isOpen()) {
+        engineLab_.close();
+        return true;
+    }
+    return false;
+}
+
 void MainView::renderAboutPopup()
 {
     if (openAbout_) {
@@ -2739,6 +2758,19 @@ void MainView::renderAboutPopup()
     ImGui::TextColored(col(palette_.accent), ICON_FA_PEN_TO_SQUARE);
     ImGui::SameLine();
     ImGui::Text("EasyNotepad %s", ENP_VERSION);
+    // Seven taps on the version turn on developer mode (as on Android): nothing shows until then.
+    if (ImGui::IsItemClicked() && !vm_.developerMode.get()) {
+        if (++versionTaps_ >= 7) {
+            vm_.developerMode.set(true);
+            vm_.statusText.set("Developer mode is on: Engine Lab is in Help.");
+        } else if (versionTaps_ >= 3) {
+            vm_.statusText.set(std::to_string(7 - versionTaps_) + " more taps to turn on developer mode.");
+        }
+    }
+    registerLastItem("dialog:about:version", "text", std::string("EasyNotepad ") + ENP_VERSION, [this]() {
+        if (++versionTaps_ >= 7)
+            vm_.developerMode.set(true);
+    });
     ImGui::TextDisabled("Native text editor with Agent and Code workspaces.");
     ImGui::Separator();
     ImGui::Text("Platform: %s %s", os::osName(), os::archName());
@@ -2747,6 +2779,21 @@ void MainView::renderAboutPopup()
         ImGui::TextWrapped("Renderer: %s", rendererInfo_.c_str());
     ImGui::Spacing();
     ImGui::TextDisabled("UI preview build: running on dummy data, no services connected.");
+    if (vm_.developerMode.get()) {
+        ImGui::Spacing();
+        ImGui::TextColored(col(palette_.accent), ICON_FA_FLASK "  Developer mode is on.");
+        if (ImGui::SmallButton("Engine Lab")) {
+            ImGui::CloseCurrentPopup();
+            vm_.execute(CommandId::EngineLab);
+        }
+        registerLastItem("dialog:about:engine-lab", "button", "Engine Lab", [this]() { vm_.execute(CommandId::EngineLab); });
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Turn off")) {
+            vm_.developerMode.set(false);
+            versionTaps_ = 0;
+            engineLab_.close();
+        }
+    }
     ImGui::PopTextWrapPos();
     if (ImGui::Button("OK", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
         ImGui::CloseCurrentPopup();

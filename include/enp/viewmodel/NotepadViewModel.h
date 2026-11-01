@@ -9,6 +9,7 @@
 #include "enp/viewmodel/AgentViewModel.h"
 #include "enp/viewmodel/CommandId.h"
 #include "enp/viewmodel/EditHistory.h"
+#include "enp/viewmodel/EngineLabViewModel.h"
 #include "enp/viewmodel/ExplorerItem.h"
 #include "enp/viewmodel/FileDialogViewModel.h"
 #include "enp/viewmodel/FindInFilesViewModel.h"
@@ -42,7 +43,7 @@ enum class EditorMode { Code, Map };
 enum class WorkspaceMode { Agent, Code };
 enum class ClipboardAction { Cut, Copy, Paste };
 // Tabs of the bottom panel (VS Code's "Panel").
-enum class PanelTab { Problems, Diff, Comments, Checklist, Terminal, Search, History }; // append only: saved as numbers
+enum class PanelTab { Problems, Diff, Comments, Checklist, Terminal, Search, History, Status }; // append only: saved as numbers
 
 // A user-defined ribbon button that runs a shell command in the integrated terminal.
 struct CustomAction {
@@ -76,7 +77,8 @@ public:
     explicit NotepadViewModel(interfaces::ITerminalService* terminalService = nullptr,
                               interfaces::IFileService* fileService = nullptr,
                               interfaces::IAgentCliService* agentCli = nullptr,
-                              interfaces::IProcessService* processService = nullptr);
+                              interfaces::IProcessService* processService = nullptr,
+                              interfaces::ILocalEngineService* localEngine = nullptr);
     ~NotepadViewModel();
     NotepadViewModel(const NotepadViewModel&) = delete;
     NotepadViewModel& operator=(const NotepadViewModel&) = delete;
@@ -89,6 +91,9 @@ public:
     Property<bool> darkTheme{true};
     Property<bool> showExplorer{true};
     Property<bool> slimRibbon{false}; // icons only, one row: more room for the work
+    // Developer and power-user pages (the Engine lab). Turned on by tapping the version in About
+    // seven times; nothing of it shows otherwise.
+    Property<bool> developerMode{false};
     Property<bool> showPanel{true};
     Property<bool> panelMaximized{false};
     Property<bool> showAgentPanel{true};
@@ -148,6 +153,7 @@ public:
     Event<> goToLineRequested;
     Event<> addCommentRequested;
     Event<> aboutRequested;
+    Event<> engineLabRequested;
     Event<> preferencesRequested;
     Event<> syntaxColorsRequested;
     Event<> languagePickerRequested;
@@ -353,6 +359,7 @@ public:
     void replaceCurrent();
     void replaceAll();
 
+    EngineLabViewModel& engineLab() { return engineLab_; }
     AgentViewModel& agent() { return agent_; }
     const AgentViewModel& agent() const { return agent_; }
     ReviewViewModel& review() { return review_; }
@@ -453,6 +460,7 @@ private:
     interfaces::IFileService* files_ = nullptr;
     std::string workspaceRoot_;
     AgentViewModel agent_;
+    EngineLabViewModel engineLab_;
     ReviewViewModel review_;
     TerminalViewModel terminal_;
     LayersViewModel layers_{*this};

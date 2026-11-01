@@ -129,6 +129,11 @@ the x86 edition of [w64devkit](https://github.com/skeeto/w64devkit/releases) at 
 cmake --preset windows-mingw-x86 && cmake --build --preset windows-mingw-x86   # bin/windows/x86/
 ```
 
+The on-device engine is llama.cpp, a submodule pinned to one commit (`3rdparty/llama.cpp`). The
+build never uses it as checked out. CMake exports that commit into the build folder and applies
+`patches/llama.cpp/*.patch` there (see [patches/README.md](patches/README.md)). The engine is in
+64-bit builds only; `-DENP_LOCAL_ENGINE=OFF` leaves it out.
+
 The agent CLI used for dissection is set with `EASYNOTEPAD_AGENT_CLI` (default `claude -p`); it
 gets the prompt on stdin and answers with JSON.
 

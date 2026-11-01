@@ -3,7 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
-#include <vector>
+#include <cstring>
 
 namespace enp::model {
 
@@ -22,50 +22,79 @@ uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 
 } // namespace
 
-std::string sha256Hex(std::string_view data)
+void Sha256::block(const uint8_t* p)
 {
-    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    // Padding: 0x80, zeros, then the length in bits (big-endian) so the total is a multiple of 64.
-    std::vector<uint8_t> msg(data.begin(), data.end());
-    const uint64_t bits = uint64_t(data.size()) * 8;
-    msg.push_back(0x80);
-    while (msg.size() % 64 != 56)
-        msg.push_back(0);
-    for (int i = 7; i >= 0; --i)
-        msg.push_back(uint8_t(bits >> (i * 8)));
-
-    for (size_t chunk = 0; chunk < msg.size(); chunk += 64) {
-        uint32_t w[64];
-        for (int i = 0; i < 16; ++i)
-            w[i] = uint32_t(msg[chunk + 4 * i]) << 24 | uint32_t(msg[chunk + 4 * i + 1]) << 16 | uint32_t(msg[chunk + 4 * i + 2]) << 8 |
-                   uint32_t(msg[chunk + 4 * i + 3]);
-        for (int i = 16; i < 64; ++i) {
-            const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-            const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-        }
-        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], k = h[7];
-        for (int i = 0; i < 64; ++i) {
-            const uint32_t t1 = k + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + kRound[size_t(i)] + w[i];
-            const uint32_t t2 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
-            k = g;
-            g = f;
-            f = e;
-            e = d + t1;
-            d = c;
-            c = b;
-            b = a;
-            a = t1 + t2;
-        }
-        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += k;
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i)
+        w[i] = uint32_t(p[4 * i]) << 24 | uint32_t(p[4 * i + 1]) << 16 | uint32_t(p[4 * i + 2]) << 8 | uint32_t(p[4 * i + 3]);
+    for (int i = 16; i < 64; ++i) {
+        const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
+    uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3], e = h_[4], f = h_[5], g = h_[6], k = h_[7];
+    for (int i = 0; i < 64; ++i) {
+        const uint32_t t1 = k + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + kRound[size_t(i)] + w[i];
+        const uint32_t t2 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        k = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+    h_[0] += a; h_[1] += b; h_[2] += c; h_[3] += d; h_[4] += e; h_[5] += f; h_[6] += g; h_[7] += k;
+}
+
+void Sha256::update(const void* data, size_t size)
+{
+    auto p = static_cast<const uint8_t*>(data);
+    length_ += size;
+    if (buffered_ > 0) {
+        const size_t take = std::min(size, sizeof(buffer_) - buffered_);
+        std::memcpy(buffer_ + buffered_, p, take);
+        buffered_ += take;
+        p += take;
+        size -= take;
+        if (buffered_ < sizeof(buffer_))
+            return;
+        block(buffer_);
+        buffered_ = 0;
+    }
+    for (; size >= 64; p += 64, size -= 64)
+        block(p);
+    std::memcpy(buffer_, p, size);
+    buffered_ = size;
+}
+
+std::string Sha256::hexDigest()
+{
+    // Padding: 0x80, zeros, then the length in bits (big-endian) so the total is a multiple of 64.
+    const uint64_t bits = length_ * 8;
+    const uint8_t one = 0x80, zero = 0;
+    update(&one, 1);
+    while (buffered_ != 56)
+        update(&zero, 1);
+    uint8_t len[8];
+    for (int i = 0; i < 8; ++i)
+        len[i] = uint8_t(bits >> ((7 - i) * 8));
+    update(len, 8);
     std::string hex;
     char buf[9];
-    for (uint32_t v : h) {
+    for (uint32_t v : h_) {
         std::snprintf(buf, sizeof(buf), "%08x", unsigned(v));
         hex += buf;
     }
     return hex;
+}
+
+std::string sha256Hex(std::string_view data)
+{
+    Sha256 hash;
+    hash.update(data.data(), data.size());
+    return hash.hexDigest();
 }
 
 } // namespace enp::model

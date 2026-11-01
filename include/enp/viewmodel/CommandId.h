@@ -49,6 +49,10 @@ enum class CommandId {
     ShowGit, GitCommit, GitStageAll, GitDiscardAll, GitBranches, GitMerge, GitSync, GitPull, GitPush, GitFetch, ShowGitHistory, GitBlame, GitStash, GitStashPop, GitWriteMessage, GitGuide,
     // File (appended)
     CloseFolder,
+    // Developer (appended; hidden until developer mode is on)
+    EngineLab,
+    // Git (appended)
+    ShowGitStatus,
 
     Count
 };

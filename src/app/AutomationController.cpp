@@ -47,6 +47,7 @@ const char* panelTabName(viewmodel::PanelTab tab)
     case viewmodel::PanelTab::Terminal: return "Terminal";
     case viewmodel::PanelTab::Search: return "Search";
     case viewmodel::PanelTab::History: return "History";
+    case viewmodel::PanelTab::Status: return "Status";
     }
     return "";
 }

@@ -134,6 +134,8 @@ const char* commandIcon(CommandId id)
     case CommandId::HashSha256: return ICON_FA_HASHTAG;
     case CommandId::Preferences: return ICON_FA_GEAR;
     case CommandId::About: return ICON_FA_CIRCLE_INFO;
+    case CommandId::EngineLab: return ICON_FA_FLASK;
+    case CommandId::ShowGitStatus: return ICON_FA_LIST_CHECK;
     case CommandId::Exit: return ICON_FA_POWER_OFF;
     case CommandId::ShowGit: return ICON_FA_CODE_BRANCH;
     case CommandId::GitCommit: return ICON_FA_CODE_COMMIT;

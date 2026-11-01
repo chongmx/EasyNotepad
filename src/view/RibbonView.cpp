@@ -108,7 +108,7 @@ std::vector<RibbonView::Tab> RibbonView::tabs() const
         {"Changes", {C::GitCommit, C::GitStageAll, C::GitDiscardAll}, {C::ShowGit}},
         {"Branch", {C::GitBranches, C::GitMerge}, {}},
         {"Sync", {C::GitSync, C::GitPull, C::GitPush, C::GitFetch}, {}},
-        {"Inspect", {C::ShowGitHistory, C::GitBlame}, {}},
+        {"Inspect", {C::ShowGitStatus, C::ShowGitHistory, C::GitBlame}, {}},
         {"Stash", {C::GitStash, C::GitStashPop}, {}},
         {"Assist", {C::GitWriteMessage}, {}},
         {"Learn", {C::GitGuide}, {}},

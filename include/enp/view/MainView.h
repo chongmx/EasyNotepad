@@ -5,6 +5,7 @@
 #include "enp/view/AgentCursorView.h"
 #include "enp/view/AgentPanel.h"
 #include "enp/view/DocumentListView.h"
+#include "enp/view/EngineLabView.h"
 #include "enp/view/EditorView.h"
 #include "enp/view/FileDialogView.h"
 #include "enp/view/GitView.h"
@@ -37,6 +38,8 @@ public:
     bool quitRequested() const { return quitRequested_; }
     // Extra text shown in the About box (e.g. the GL renderer string).
     void setRendererInfo(std::string info) { rendererInfo_ = std::move(info); }
+    // Android Back: closes a full-screen page (the Engine lab); false if there was none.
+    bool navigateBack();
     // Edges of the window covered by the system (status and navigation bars, a notch, the
     // on-screen keyboard), in pixels: the UI keeps inside them.
     void setSafeArea(float left, float top, float right, float bottom) { safeArea_ = ImVec4(left, top, right, bottom); }
@@ -118,6 +121,7 @@ private:
     ReviewPanel reviewPanel_;
     TerminalView terminalView_;
     AgentCursorView agentCursor_;
+    EngineLabView engineLab_;
 
     // Layout (unscaled pixels are multiplied by s_ at use).
     float explorerWidth_;
@@ -167,6 +171,7 @@ private:
     std::string languageFilter_;
     int syntaxColorsLanguage_ = -1; // index into model::languages(); -1 = all languages
     bool openAbout_ = false;
+    int versionTaps_ = 0; // About: seven taps on the version turn on developer mode
     bool openHelpMenu_ = false; // requested by an agent
     bool quitRequested_ = false;
     std::vector<bool> panelHasHeader_; // beginPanel() nesting

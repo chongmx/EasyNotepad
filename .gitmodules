@@ -7,3 +7,7 @@
 	path = 3rdparty/IconFontCppHeaders
 	url = https://github.com/juliettef/IconFontCppHeaders.git
 	ignore = dirty
+[submodule "3rdparty/llama.cpp"]
+	path = 3rdparty/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+	shallow = true

@@ -24,8 +24,11 @@ exhaustion. Nothing it does can freeze or crash the editor.
 ## The model
 
 - **Gemma 4 E2B** (Google, April 2026, Apache 2.0, so it may be shipped, including commercially).
-  - About 2.3 B effective parameters.
-  - About 2.6 GB as Google's on-device LiteRT-LM build, about 1.3 GB quantized to 4 bits.
+  - 2.3 B effective parameters, 5.1 B with its per-layer embeddings. The embeddings are only looked
+    up, so they stay memory-mapped on the host.
+  - The download is Google's own **quantization-aware-trained Q4_0 GGUF**, 3.35 GB. bf16 and fp16
+    are only used in CI, as the reference. See [plan 23](23-local-inference-engines.md) for every
+    file and why.
   - Text in, text out. Its image and audio input is not needed at first.
 - **Not inside the exe.** It is an optional download, made on first use from Preferences ▸ Local
   agent, with:
@@ -38,21 +41,23 @@ exhaustion. Nothing it does can freeze or crash the editor.
 
 ## Runtime
 
-- **One choice, made early by a spike.** Both candidates are permissively licensed and C/C++
-  embeddable:
-  - **LiteRT-LM:** Google's runtime for exactly these models, with CPU, GPU and Android NPU.
-  - **llama.cpp:** GGUF models, with CPU (AVX2 / NEON), Vulkan, Metal and CUDA. Mature
-    fill-in-the-middle support for completion.
-- **The spike measures, on this PC and a mid-range Android phone:**
-  - time to first token;
-  - tokens per second;
-  - memory;
-  - completion quality on our own code;
-  - build size added;
-  - how cleanly the runtime builds with MSVC, MinGW (x64 and x86), clang (Linux, macOS) and the NDK.
-- **Platforms:** Windows, Linux and macOS desktops; Android (phones with 6 GB of memory or more).
-  - The web build and 32-bit Windows get no local agent: not enough memory, and no SIMD worth having.
-  - There, the features fall back to the remote agent or are hidden.
+**Decided in [plan 23](23-local-inference-engines.md): not one runtime but a ladder of engines.**
+- Every engine sits behind one small C interface.
+- The agent starts on the most compatible one: ggml CPU (llama.cpp).
+- It probes the device, acquires a faster engine (builds it locally when the tools are there,
+  otherwise downloads a prebuilt one), verifies it against the CPU engine, and switches over. It
+  drops back if the faster engine fails.
+- Phase 1 has two families:
+  - **ggml:** CPU, and Vulkan for any GPU;
+  - **TensorRT:** fixed, NVIDIA RTX.
+- Later rungs: Metal, CUDA, Android GPU, the NPUs (Qualcomm, Google Tensor, MediaTek, Samsung, AMD,
+  Intel), and WebGPU.
+
+**Platforms:**
+- Windows, Linux and macOS desktops; Android (phones with 6 GB of memory or more).
+- 32-bit Windows gets no local agent: the 3.35 GB model does not fit its address space.
+- The web build gets one later, through WebGPU (plan 23, R7).
+- Where there is no local agent, the features fall back to the remote agent or are hidden.
 
 ## Design
 
@@ -142,7 +147,8 @@ exhaustion. Nothing it does can freeze or crash the editor.
   - commit messages and summaries;
   - deciding simple agent requests;
   - first answer in the Agent panel.
-- **Hardware:** automatic / CPU only / GPU, plus a thread count.
+- **Engine:** automatic (climb the ladder) / pin a rung / CPU only, plus a thread count. Details in
+  plan 23's Engine page.
 - **Budgets:** the watchdog and token limits, with sensible defaults; most users never touch them.
 
 ## Tests

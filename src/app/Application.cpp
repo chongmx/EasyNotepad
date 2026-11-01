@@ -12,7 +12,8 @@ namespace enp::app {
 Application::Application()
     : services_(services::ServiceContainer::createDefault()),
       viewModel_(std::make_unique<viewmodel::NotepadViewModel>(services_.terminal.get(), services_.files.get(),
-                                                              services_.agentCli.get(), services_.processes.get()))
+                                                              services_.agentCli.get(), services_.processes.get(),
+                                                              services_.localEngine.get()))
 {
     if (const std::string dir = os::fs::appDataDirectory(); !dir.empty())
         viewModel_->setSettingsPath(os::fs::path::join(dir, "settings.json"));
@@ -121,6 +122,8 @@ void Application::openPath(const std::string& path)
 
 bool Application::navigateBack()
 {
+    if (view_ && view_->navigateBack())
+        return true;
     if (viewModel_->findVisible.get()) {
         viewModel_->findVisible.set(false);
         return true;

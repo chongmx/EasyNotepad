@@ -119,6 +119,57 @@ endif()
 add_library(icon_font_headers INTERFACE)
 target_include_directories(icon_font_headers INTERFACE ${ENP_THIRD_PARTY}/IconFontCppHeaders)
 
+# ---- On-device inference engine (llama.cpp, plan 23) ----------------------------------------
+# 64-bit desktop and Android only: the model's 3 GB mapping does not fit a 32-bit address space,
+# and the web build has no engine yet (WebGPU is a later rung). Also off where ggml cannot build
+# for a fixed CPU level: MSVC for ARM64 (it wants clang), and macOS universal binaries (two
+# architectures in one pass).
+set(_enp_engine_default OFF)
+if(NOT EMSCRIPTEN AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT (MSVC AND ENP_ARCH STREQUAL "arm64")
+   AND NOT ENP_ARCH STREQUAL "universal")
+    set(_enp_engine_default ON)
+endif()
+option(ENP_LOCAL_ENGINE "Build the on-device inference engine (llama.cpp)" ${_enp_engine_default})
+if(ENP_LOCAL_ENGINE)
+    if(NOT EXISTS ${ENP_THIRD_PARTY}/llama.cpp/CMakeLists.txt)
+        message(FATAL_ERROR "Submodule 3rdparty/llama.cpp missing. Run: git submodule update --init --recursive")
+    endif()
+    # The submodule stays as checked out; the build uses a patched copy (patches/llama.cpp).
+    include(cmake/PatchedSource.cmake)
+    enp_patched_source(llama.cpp SOURCE ${ENP_THIRD_PARTY}/llama.cpp PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/patches/llama.cpp
+                       OUT ENP_LLAMA_DIR PATHS CMakeLists.txt LICENSE cmake common ggml include licenses src vendor)
+    string(REGEX REPLACE "^b" "" LLAMA_BUILD_NUMBER "${ENP_LLAMA_DIR_TAG}")
+    set(LLAMA_BUILD_COMMIT ${ENP_LLAMA_DIR_COMMIT})
+    # Static libraries linked into the app; only the library and its common helpers are built.
+    set(BUILD_SHARED_LIBS OFF)
+    foreach(_opt LLAMA_BUILD_TESTS LLAMA_BUILD_TOOLS LLAMA_BUILD_EXAMPLES LLAMA_BUILD_SERVER LLAMA_BUILD_APP
+                 LLAMA_BUILD_UI LLAMA_OPENSSL LLAMA_SUBPROCESS LLAMA_ALL_WARNINGS GGML_OPENMP GGML_NATIVE)
+        set(${_opt} OFF CACHE BOOL "" FORCE)
+    endforeach()
+    set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE) # speculative decoding lives there
+    # Without the downloader (cpp-httplib needs Windows 10): the app fetches models itself.
+    set(LLAMA_COMMON_DOWNLOAD OFF CACHE BOOL "" FORCE)
+    # One fixed CPU level, not the run-time variants (those need dynamically loaded backends, which
+    # Android packaging does not handle yet). The engine checks the CPU has it before running.
+    if(ENP_ARCH STREQUAL "x64")
+        foreach(_opt GGML_AVX GGML_AVX2 GGML_FMA GGML_F16C GGML_BMI2)
+            set(${_opt} ON CACHE BOOL "" FORCE)
+        endforeach()
+    elseif(ANDROID AND ENP_ARCH STREQUAL "arm64")
+        set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
+    endif()
+    add_subdirectory(${ENP_LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
+    # The engine is always optimized, also in Debug builds of the app (the Android debug APK is
+    # what gets installed for testing; unoptimized inference is many times slower).
+    if(NOT MSVC)
+        foreach(_t ggml-base ggml-cpu ggml llama llama-common llama-common-base)
+            if(TARGET ${_t})
+                target_compile_options(${_t} PRIVATE $<$<CONFIG:Debug>:-O2>)
+            endif()
+        endforeach()
+    endif()
+endif()
+
 # ---- Windowing / GL per platform -----------------------------------------------------------
 if(ENP_IS_DESKTOP)
     # 3.4+: the platform API (X11 vs Wayland) the custom title bar relies on; distros often ship 3.3.
@@ -174,6 +225,11 @@ elseif(ENP_PLATFORM STREQUAL "android")
 elseif(ENP_PLATFORM STREQUAL "web")
     list(APPEND ENP_OS_SOURCES src/os/posix/FsPosix.cpp src/os/web/OsWeb.cpp src/os/common/PtyNone.cpp)
 endif()
+if(ENP_PLATFORM STREQUAL "android")
+    list(APPEND ENP_OS_SOURCES src/os/android/DownloadAndroid.cpp)
+else()
+    list(APPEND ENP_OS_SOURCES src/os/common/Download.cpp)
+endif()
 
 add_library(enp_os STATIC ${ENP_OS_SOURCES})
 target_include_directories(enp_os PUBLIC include)
@@ -227,15 +283,26 @@ add_library(enp_services STATIC
     src/services/AgentCliService.cpp
     src/services/ProcessService.cpp
     src/services/AutomationServer.cpp
+    src/services/LocalEngineService.cpp
     src/services/ServiceContainer.cpp
 )
 target_link_libraries(enp_services PUBLIC enp_interfaces PRIVATE enp_os)
+if(ENP_LOCAL_ENGINE)
+    target_link_libraries(enp_services PRIVATE llama-common llama)
+    target_compile_definitions(enp_services PRIVATE ENP_HAS_LOCAL_ENGINE=1)
+    if(WIN32)
+        target_link_libraries(enp_services PRIVATE psapi)
+    endif()
+else()
+    target_compile_definitions(enp_services PRIVATE ENP_HAS_LOCAL_ENGINE=0)
+endif()
 
 # viewmodel: presentation logic, depends on interfaces + model only
 add_library(enp_viewmodel STATIC
     src/viewmodel/CommandId.cpp
     src/viewmodel/DummyData.cpp
     src/viewmodel/AgentViewModel.cpp
+    src/viewmodel/EngineLabViewModel.cpp
     src/viewmodel/ReviewViewModel.cpp
     src/viewmodel/TerminalViewModel.cpp
     src/viewmodel/LayersViewModel.cpp
@@ -262,6 +329,7 @@ add_library(enp_view STATIC
     src/view/EditorView.cpp
     src/view/DiffView.cpp
     src/view/AgentPanel.cpp
+    src/view/EngineLabView.cpp
     src/view/MarkdownView.cpp
     src/view/TouchScroll.cpp
     src/view/Fit.cpp
