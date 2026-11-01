@@ -18,7 +18,10 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include <cctype>
 #include <cstdio>
+#include <cmath>
+#include <cstring>
 #include <functional>
 #include <set>
 #include <string>
@@ -85,12 +88,15 @@ public:
     int frames() const { return frames_; }
 
     void setContext(std::string where) { where_ = std::move(where); }
+    // Following frames come from a finger (ImGui's touch-screen source) instead of a mouse.
+    void setTouch(bool touch) { touch_ = touch; }
 
     // One frame with the mouse at `pos`; `button` is the left button state for this frame.
     void frame(ImVec2 pos, bool button = false)
     {
         ImGuiIO& io = ImGui::GetIO();
         io.DeltaTime = 1.0f / 60.0f;
+        io.AddMouseSourceEvent(touch_ ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
         io.AddMousePosEvent(pos.x, pos.y);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
         terminalService_.pump();
@@ -182,6 +188,7 @@ private:
     std::string where_;
     ImVec2 lastPos_{-1.0f, -1.0f};
     int frames_ = 0;
+    bool touch_ = false;
 };
 
 } // namespace
@@ -255,6 +262,84 @@ int main(int argc, char** argv)
                     h.sweep(0.0f, 0.0f, phone.size.x, phone.size.y, kCoarseStep);
                 }
             }
+            ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.settle();
+        }
+
+        // Touch: a finger drags content; a tap still clicks; a mouse drag selects as before.
+        {
+            // The scroll of the window whose own name (after the last '/') starts with `part`; "##editor#"
+            // means "##editor" followed by a digit (the editor itself, not "##editorPanel").
+            auto scrollOf = [](const char* part, int axis) {
+                std::string prefix = part;
+                const bool digit = !prefix.empty() && prefix.back() == '#';
+                if (digit)
+                    prefix.pop_back();
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    const char* own = slash ? slash + 1 : w->Name;
+                    if (w->WasActive && std::strncmp(own, prefix.c_str(), prefix.size()) == 0 &&
+                        (!digit || std::isdigit(static_cast<unsigned char>(own[prefix.size()]))))
+                        return axis == 0 ? w->Scroll.x : w->Scroll.y;
+                }
+                return -1.0f;
+            };
+            auto drag = [&h](ImVec2 from, ImVec2 to) {
+                h.frame(from);
+                h.frame(from, true);
+                for (int i = 1; i <= 12; ++i)
+                    h.frame(ImVec2(from.x + (to.x - from.x) * float(i) / 12.0f, from.y + (to.y - from.y) * float(i) / 12.0f), true);
+                h.frame(to, false);
+            };
+            auto check = [&](bool ok, const std::string& what) {
+                if (!ok)
+                    std::printf("  FAILED touch: %s\n", what.c_str()), layoutsWrong = true;
+            };
+            ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
+            h.vm().execute(viewmodel::CommandId::NewFile); // 300 lines: plenty to scroll
+            std::string text;
+            for (int i = 1; i <= 300; ++i)
+                text += "line " + std::to_string(i) + " of a long document\n";
+            h.vm().insertText(text);
+            h.vm().goToLine(0);
+            h.settle();
+            h.setTouch(true);
+            h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
+            h.settle();
+            const float before = scrollOf("##editor#", 1);
+            drag(ImVec2(200.0f, 600.0f), ImVec2(200.0f, 300.0f));
+            const float after = scrollOf("##editor#", 1);
+            check(before >= 0.0f && after - before > 250.0f && after - before < 350.0f,
+                  "a finger dragging 300 px up should scroll the editor about 300 px (" + std::to_string(after - before) + ")");
+            // Momentum: it glides on for a moment after the finger lifts.
+            for (int i = 0; i < 30; ++i)
+                h.frame(ImVec2(200.0f, 300.0f));
+            check(scrollOf("##editor#", 1) >= after, "the glide should not move backwards");
+
+            // A tap on a navigation button still switches the screen.
+            h.click(ImVec2(390.0f * 0.5f / 4.0f, 844.0f - 29.0f)); // Files
+            h.settle();
+            check(scrollOf("##explorer", 1) >= 0.0f, "a tap on Files should show the files");
+
+            // A drag that starts on a ribbon button scrolls the ribbon and does not press the button.
+            h.click(ImVec2(19.0f, 18.0f)); // the menu button: show the ribbon
+            h.settle();
+            const size_t documents = h.vm().documents().size();
+            const float ribbonBefore = scrollOf("##ribbonGroups", 0);
+            drag(ImVec2(130.0f, 95.0f), ImVec2(10.0f, 95.0f)); // starts on "New"
+            h.settle();
+            check(ribbonBefore >= 0.0f && scrollOf("##ribbonGroups", 0) > ribbonBefore + 50.0f, "a finger should scroll the ribbon");
+            check(h.vm().documents().size() == documents, "scrolling from the New button should not create a document");
+
+            // A mouse drag over the text selects, as it always did, and does not scroll.
+            h.setTouch(false);
+            h.click(ImVec2(19.0f, 18.0f)); // hide the ribbon
+            h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
+            h.settle();
+            const float mouseBefore = scrollOf("##editor#", 1);
+            drag(ImVec2(200.0f, 400.0f), ImVec2(200.0f, 300.0f));
+            check(std::fabs(scrollOf("##editor#", 1) - mouseBefore) < 1.0f, "a mouse drag should not scroll");
+            check(h.vm().activeDocument() && h.vm().activeDocument()->hasSelection(), "a mouse drag should select");
             ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
             h.settle();
         }

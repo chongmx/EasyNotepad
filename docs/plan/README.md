@@ -26,7 +26,16 @@ it is described as a feature in [../FEATURES.md](../FEATURES.md), marked here, a
 | 17 | [Git: history, stash and line-level changes](done/17-git-history-stash-lines.md) | No log, blame, stash, gutter markers or partial staging | Done |
 | 18 | [Git: compare and pick files](done/18-git-compare-and-pick.md) | Taking some commits or files from another branch, commit or stash needs several git commands | Done |
 | 19 | [Learn Git: an interactive guide](done/19-learn-git-guide.md) | Beginners need git's ideas explained on the real controls, safely; reviewers need a walkthrough of 14–18 | Done |
-| 20 | [Shared control: agent pointers and taking turns](20-shared-control.md) | Several agents and the user share one app: own pointers, the whole app reachable, one agent acting at a time, the user first | Planned |
+| 20 | [Shared control: connected agents, acting agents and the task manager](20-shared-control.md) | Up to 16 agents connect and read; 2 may act; one task manager drives the pointer; the user first | Planned |
+| 21 | [A local agent on the device (Gemma 4 E2B)](21-local-agent.md) | Offline code completion, judging agent requests, small tasks locally, escalating big ones; a safety net for its faults | Planned (after 20) |
+| 22 | [Drag-to-scroll inside Dear ImGui](22-imgui-drag-scroll.md) | Touch scrolling belongs in ImGui, not in an app-side workaround; and the ImGui version is not truly locked | Planned (not started) |
+
+Done without a plan item (see [../FEATURES.md](../FEATURES.md)):
+- The in-app agent: Claude Code streaming, set-up, Stop, and Markdown answers.
+- Markdown files shown formatted.
+- Windows 7 and 32-bit builds.
+- The phone layouts.
+- The slim ribbon.
 
 **Reviewing items 14–19:** open Help (?) › Learn Git. Each lesson names its plan item, what was built
 and anything left for later, with an "I have checked this part" box; it runs on demo data that Reset

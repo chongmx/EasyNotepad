@@ -263,6 +263,7 @@ add_library(enp_view STATIC
     src/view/DiffView.cpp
     src/view/AgentPanel.cpp
     src/view/MarkdownView.cpp
+    src/view/TouchScroll.cpp
     src/view/ReviewPanel.cpp
     src/view/TerminalView.cpp
     src/view/UiAutomation.cpp

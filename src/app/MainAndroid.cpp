@@ -123,12 +123,49 @@ void shutdownUi()
     g.uiReady = false;
 }
 
-// The part of the window not covered by the status and navigation bars or the on-screen keyboard:
-// NativeActivity reports it as contentRect (with adjustResize it shrinks when the keyboard opens).
+// MainActivity.getSafeInsets(): {left, top, right, bottom} in pixels, -1 until Android reported them.
+bool javaSafeInsets(int out[4])
+{
+    JavaVM* vm = g.app->activity->vm;
+    JNIEnv* env = nullptr;
+    if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK)
+        return false;
+    bool ok = false;
+    jobject activity = g.app->activity->clazz;
+    jclass cls = env->GetObjectClass(activity);
+    if (jmethodID id = env->GetMethodID(cls, "getSafeInsets", "()[I")) {
+        auto array = static_cast<jintArray>(env->CallObjectMethod(activity, id));
+        if (array && env->GetArrayLength(array) == 4) {
+            jint values[4];
+            env->GetIntArrayRegion(array, 0, 4, values);
+            ok = values[0] >= 0;
+            for (int i = 0; i < 4; ++i)
+                out[i] = values[i];
+        }
+    }
+    if (env->ExceptionCheck())
+        env->ExceptionClear();
+    vm->DetachCurrentThread();
+    return ok;
+}
+
+// The part of the window not covered by the status and navigation bars, a notch or the on-screen
+// keyboard. Android 15 draws apps edge to edge, under the navigation bar, and NativeActivity's
+// contentRect does not shrink for it: the window insets (MainActivity) are what tell. Checked every
+// few frames; contentRect is the fallback until the insets are known.
 // Rotation needs nothing else: the window is resized, ImGui reads its new size every frame, and
 // the view picks the layout for that shape.
 void updateSafeArea()
 {
+    static int frames = 0;
+    static bool haveInsets = false;
+    static int insets[4] = {0, 0, 0, 0};
+    if (frames++ % 8 == 0)
+        haveInsets = javaSafeInsets(insets);
+    if (haveInsets) {
+        g.application->setSafeArea(float(insets[0]), float(insets[1]), float(insets[2]), float(insets[3]));
+        return;
+    }
     const int width = ANativeWindow_getWidth(g.app->window);
     const int height = ANativeWindow_getHeight(g.app->window);
     const ARect& r = g.app->contentRect;

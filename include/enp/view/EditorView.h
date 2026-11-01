@@ -26,6 +26,8 @@ public:
     // Find bar (when visible) plus the text area, filling `size`.
     void render(ImVec2 size);
     void focus() { focusRequested_ = true; }
+    // A phone layout: no side bar (layers, minimap); the text gets the whole width.
+    void setCompact(bool compact) { compact_ = compact; }
 
 private:
     // One visual row: a whole line, a wrapped piece of it, or the summary of a folded region.
@@ -113,6 +115,8 @@ private:
     int firstVisibleLine_ = 0;    // for the minimap's viewport frame
     int lastVisibleLine_ = 0;
     bool focused_ = false;
+    bool compact_ = false;
+    bool tapPending_ = false; // a finger went down on the text: a tap places the caret on release
     bool revealCaret_ = true;
     bool focusRequested_ = true;
     bool focusFind_ = false;

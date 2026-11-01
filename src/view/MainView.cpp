@@ -3,6 +3,7 @@
 #include "enp/view/PanelFrame.h"
 
 #include "enp/os/Platform.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/model/Highlighter.h"
 #include "enp/view/Icons.h"
 #include "enp/view/SyntaxColors.h"
@@ -167,6 +168,7 @@ MainView::~MainView()
 void MainView::render()
 {
     UiAutomation::instance().beginFrame();
+    touch::update(s_); // a finger drags content (before the UI: it may cancel the press)
     terminalView_.setBlinkCursor(vm_.blinkCaret.get());
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     // Inside the safe area (system bars, notch, on-screen keyboard).
@@ -174,6 +176,7 @@ void MainView::render()
     const ImVec2 size(std::max(1.0f, viewport->WorkSize.x - safeArea_.x - safeArea_.z),
                       std::max(1.0f, viewport->WorkSize.y - safeArea_.y - safeArea_.w));
     layout_ = chooseLayout(size.x / s_, size.y / s_);
+    editor_.setCompact(layout_ != Layout::Desktop);
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));

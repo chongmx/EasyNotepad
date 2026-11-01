@@ -4,6 +4,7 @@
 
 #include "enp/model/Highlighter.h"
 #include "enp/view/SyntaxColors.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 
 #include "IconsFontAwesome6.h"
@@ -317,7 +318,7 @@ void EditorView::render(ImVec2 size)
     m.blameW = gitFile && vm_.git().blameShown(doc->path) ? blameColumns_ * m.charW * 0.85f : 0.0f;
     m.gutterW = m.markerW + m.blameW + m.changeW + m.foldW +
                 (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 6.0f * s_ : 0.0f);
-    const bool sideBar = vm_.showLayersMap.get();
+    const bool sideBar = vm_.showLayersMap.get() && !compact_;
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
     sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
@@ -444,7 +445,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
                 vm_.openFile(url.substr(0, url.find('#')));
         };
 
-    const bool sideBar = vm_.showLayersMap.get();
+    const bool sideBar = vm_.showLayersMap.get() && !compact_;
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
     sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
@@ -636,7 +637,19 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
     if (hoveredRow && (hoveredRow->fold >= 0 || (inFoldColumn && vm_.regionAt(hoveredRow->line))))
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // A finger acts on release, and only if it did not drag the text (touch::update scrolls it).
+    bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool finger = touch::fingerDown();
+    if (finger) {
+        if (click && hovered)
+            tapPending_ = true;
+        click = false;
+        if (tapPending_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            tapPending_ = false;
+            click = !touch::moved();
+        }
+    }
+    if (hovered && click) {
         lastActivity_ = ImGui::GetTime();
         preferredVcol_ = -1.0f;
         const TextPos pos = hitTest(doc, io.MousePos, m);
@@ -683,7 +696,7 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
             vm_.setSelection(doc.buffer.wordStart(pos), doc.buffer.wordEnd(pos));
         } else {
             vm_.setCaret(pos, io.KeyShift);
-            dragging_ = true;
+            dragging_ = !finger; // a finger's drag scrolls instead
         }
     }
     if (!dragging_)

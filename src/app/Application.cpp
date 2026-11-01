@@ -2,6 +2,8 @@
 
 #include "AutomationController.h"
 
+#include "enp/view/TouchScroll.h"
+
 #include "enp/os/Fs.h"
 #include "enp/os/Os.h"
 
@@ -148,7 +150,7 @@ void Application::setSafeArea(float left, float top, float right, float bottom)
 bool Application::animating() const
 {
     const viewmodel::NotepadViewModel& vm = *viewModel_;
-    return vm.agent().busy.get() || vm.tourRunning() || vm.agentPointer.get().visible ||
+    return vm.agent().busy.get() || vm.tourRunning() || vm.agentPointer.get().visible || view::touch::gliding() ||
            const_cast<viewmodel::NotepadViewModel&>(vm).logicalMap().analyzing.get();
 }
 

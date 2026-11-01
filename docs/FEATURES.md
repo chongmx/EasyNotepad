@@ -121,6 +121,9 @@ sample workspace only. Opening a folder clears them all and switches to live mod
     language and have a copy button. Right-click a message to copy it as written.
   - The status bar shows the turns and cost of each answer.
   - The model, the mode, the agent command and app control are remembered between sessions.
+  - **Other agents can use it too:** the connector's `ask_agent` sends it a prompt, as if typed
+    into the panel, and `read_agent_chat` returns the conversation, whether the agent is working,
+    and on what.
   The agent runs in the background and the editor stays responsive
   while it works. **Stop** ends the agent program and anything it started
   within a fraction of a second, whether it is answering the chat, dissecting the project or
@@ -182,8 +185,18 @@ narrow desktop window and the web behave alike.
 - **Switching screens:** the app does it for you. Opening a file shows the editor, *Ask* shows the
   agent, and terminal, search or review commands show Tools.
 - **Rotation** switches between the two phone layouts as it happens.
-- **Android:** the app keeps clear of the status and navigation bars and the on-screen keyboard,
-  which shrinks the screen instead of covering it.
+- **Android:** the app keeps clear of the status and navigation bars (including the three-button
+  bar), a notch, and the on-screen keyboard, which shrinks the screen instead of covering it.
+  - The safe area comes from Android's window insets, measured against the app's own view. That
+    works both when Android 15 draws the app under the bars and when older versions keep it clear.
+- **Touch scrolling:** drag the content with a finger. This works in the editor, the ribbon, the
+  files, the chat, the terminal and the panels.
+  - The content follows the finger and glides on after release; the next touch stops it.
+  - A drag that starts on a button scrolls instead of pressing it, while a tap still presses.
+  - In the editor a tap places the caret and a drag scrolls (a mouse still selects by dragging).
+  - It works on Windows touch screens too.
+- The editor's side bar (layers, minimap) is hidden in the phone layouts, giving the text the
+  full width.
 - The bottom panel's tabs become a drop-down when they do not fit.
 - **Trying it on a desktop:** `--window-size=390x844` opens a phone-sized window (in dp).
   `--safe-area=left,top,right,bottom` pretends the system covers those edges (in dp).
@@ -197,6 +210,21 @@ Ribbon*) makes the ribbon slim, giving about 40 dp back to the work area:
 - The extra commands of each group sit behind a small caret.
 
 The chevron turns over to bring the full ribbon back. The choice is remembered.
+
+## Windows 7 and 32-bit Windows
+
+- The Windows build starts on **Windows 7 and later**. The per-monitor DPI functions of newer
+  Windows are looked up when the app runs, and the system-wide values are used where they are
+  missing. Nothing newer than Windows 7 is linked, so Windows can always start the program.
+- **32-bit (x86) builds:**
+  - With Visual Studio: the `windows-x86` preset, which CI also builds and tests.
+  - With MinGW-w64: the `windows-mingw-x86` preset, for example with w64devkit's x86 edition at
+    `C:\w64devkit-x86`.
+  - Either way, the output goes to `bin/windows/x86/`.
+- **On older Windows:**
+  - The built-in terminal needs Windows 10 1809 or later. Before that it is simply unavailable.
+  - Claude Code itself needs Windows 10 1809 or later.
+  - Graphics drivers must offer OpenGL 3.0.
 
 ## Large files stay fast
 
