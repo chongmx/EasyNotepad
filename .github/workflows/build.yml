@@ -18,8 +18,8 @@ jobs:
           - { name: windows-x64,     os: windows-latest,   preset: windows-x64,     test: true }
           - { name: windows-x86,     os: windows-latest,   preset: windows-x86,     test: true }
           - { name: windows-arm64,   os: windows-latest,   preset: windows-arm64,   test: false }
-          - { name: linux-x64,       os: ubuntu-24.04,     preset: linux,           test: true }
-          - { name: linux-arm64,     os: ubuntu-24.04-arm, preset: linux,           test: true }
+          - { name: linux-x64,       os: ubuntu-22.04,     preset: linux,           test: true }
+          - { name: linux-arm64,     os: ubuntu-22.04-arm, preset: linux,           test: true }
           - { name: macos-universal, os: macos-latest,     preset: macos-universal, test: true }
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -88,7 +88,7 @@ jobs:
           path: bin/web/
 
   android:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
         with:
