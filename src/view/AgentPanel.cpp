@@ -4,6 +4,8 @@
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
 
+#include "enp/os/Os.h"
+
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
 
@@ -52,7 +54,9 @@ void AgentPanel::renderConversation(bool compact)
     renderHeader(compact);
     // The set-up card sits above the conversation (which scrolls to its end), scrolling itself when tall.
     const viewmodel::NotepadViewModel::AgentSetup setup = vm_.agentSetup();
-    if (vm_.agent().live() && (vm_.agent().showSetup.get() || (!setup.available && !setup.checking))) {
+    // Opened by itself only when no agent can answer: a ready local model stands in for a missing Claude.
+    const bool standIn = vm_.agent().localFallback.get() && vm_.agent().localReady();
+    if (vm_.agent().showSetup.get() || (vm_.agent().live() && !setup.available && !setup.checking && !standIn)) {
         ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, ImGui::GetContentRegionAvail().y * 0.6f));
         ImGui::BeginChild("##setupArea", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
         renderSetup(ImGui::GetContentRegionAvail().x);
@@ -68,7 +72,20 @@ void AgentPanel::renderHeader(bool compact)
     viewmodel::AgentViewModel& agent = vm_.agent();
     const float gearW = ImGui::GetFrameHeight();
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    const float comboW = compact ? (ImGui::GetContentRegionAvail().x - gearW - spacing * 2.0f) * 0.5f : 160.0f * s_;
+    // Who answers first, then Claude's own model and mode (greyed out for the local model).
+    const float choiceW = 84.0f * s_;
+    const float comboW = std::clamp((ImGui::GetContentRegionAvail().x - choiceW - gearW - spacing * 3.0f) * 0.5f, 70.0f * s_,
+                                    compact ? 1000.0f * s_ : 150.0f * s_);
+    int choice = agent.agentChoice.get();
+    ImGui::SetNextItemWidth(choiceW);
+    if (ImGui::Combo("##agentChoice", &choice, agent.choiceNames().data(), int(agent.choiceNames().size())))
+        agent.agentChoice.set(choice);
+    ImGui::SetItemTooltip("Who answers:\nAuto: the local model for quick questions about the code, Claude Code for the rest\n"
+                          "Claude: always Claude Code\nLocal: always the model on this device (offline, free)");
+    registerLastItem("agent-choice", "button", "Who answers", nullptr);
+    ImGui::SameLine();
+    const bool localOnly = choice == int(viewmodel::AgentViewModel::Choice::Local);
+    ImGui::BeginDisabled(localOnly);
     int model = agent.modelIndex.get();
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::Combo("##model", &model, agent.modelNames().data(), int(agent.modelNames().size())))
@@ -80,6 +97,7 @@ void AgentPanel::renderHeader(bool compact)
     if (ImGui::Combo("##autonomy", &autonomy, agent.autonomyNames().data(), int(agent.autonomyNames().size())))
         agent.autonomyIndex.set(autonomy);
     ImGui::SetItemTooltip("Edits files: the agent changes files directly (the editor reloads them).\nPlan only: it reads and proposes, and changes nothing.");
+    ImGui::EndDisabled();
     ImGui::SameLine();
     const bool setupOpen = agent.showSetup.get();
     if (setupOpen)
@@ -93,10 +111,10 @@ void AgentPanel::renderHeader(bool compact)
     registerLastItem("agent-setup", "button", "Agent setup", [&agent]() { agent.showSetup.set(!agent.showSetup.get()); });
     ImGui::SetItemTooltip("Agent setup: install Claude Code, log in, choose the agent");
     if (!compact) {
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
-                                                                  ImGui::CalcTextSize(ICON_FA_PLUS " New chat").x -
-                                                                  ImGui::GetStyle().FramePadding.x * 2.0f));
+        // At the right of the row, or on a row of its own when the panel is narrow.
+        const float newChatW = ImGui::CalcTextSize(ICON_FA_PLUS " New chat").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        sameLineIfFits(ICON_FA_PLUS " New chat");
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - newChatW));
         if (ImGui::Button(ICON_FA_PLUS " New chat"))
             vm_.execute(CommandId::NewChat);
     }
@@ -125,8 +143,11 @@ void AgentPanel::bubble(const model::ChatMessage& message, size_t index, float w
     ImGui::SetCursorScreenPos(ImVec2(start.x + pad, start.y + pad));
     ImGui::BeginGroup();
     ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f);
-    ImGui::TextColored(col(message.role == model::ChatRole::Agent ? palette_.modeAgent : palette_.textDim), "%s",
-                       roleName(message.role));
+    // Answers say who gave them: the local model or Claude Code.
+    const bool local = message.by == "Local";
+    const std::string role = std::string(roleName(message.role)) + (message.by.empty() ? "" : "  ·  " + message.by);
+    ImGui::TextColored(col(message.role != model::ChatRole::Agent ? palette_.textDim : local ? palette_.iconTeal : palette_.modeAgent),
+                       "%s", role.c_str());
     ImGui::PopFont();
     // The wrap position is window-local, not screen space.
     if (message.role == model::ChatRole::Agent) { // the agent writes Markdown
@@ -172,7 +193,16 @@ void AgentPanel::renderMessages(float height)
     const float width = ImGui::GetContentRegionAvail().x;
     const viewmodel::NotepadViewModel::AgentSetup setup = vm_.agentSetup();
     const bool missing = !setup.available && !setup.checking;
-    if (agent.messages().empty() && agent.live() && !missing) {
+    if (agent.messages().empty() && agent.live() && missing && agent.localFallback.get() && agent.localReady()) {
+        // No Claude Code here (a phone, say): the local model answers.
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(width);
+        ImGui::TextDisabled("%s  Ask about this code.", ICON_FA_LIGHTBULB);
+        ImGui::TextDisabled("Claude Code is not available here, so the local model answers, on this device and offline. "
+                            "It reads the code you are looking at (the selection, or the lines around the caret); it "
+                            "cannot edit files.");
+        ImGui::PopTextWrapPos();
+    } else if (agent.messages().empty() && agent.live() && !missing) {
         // A real workspace: say where the prompt goes.
         ImGui::Spacing();
         ImGui::PushTextWrapPos(width);
@@ -193,6 +223,15 @@ void AgentPanel::renderMessages(float height)
     }
     for (const model::ChatMessage& message : agent.messages())
         bubble(message, size_t(&message - agent.messages().data()), width);
+    // The last answer came from the local model: Claude Code can have a go too.
+    if (!agent.busy.get() && !agent.messages().empty() && agent.messages().back().by == "Local" && agent.claudeReady()) {
+        const int index = int(agent.messages().size()) - 1;
+        if (ImGui::SmallButton(ICON_FA_ROBOT "  Ask Claude instead"))
+            vm_.agent().askClaudeInstead(index);
+        registerLastItem("agent-ask-claude", "button", "Ask Claude instead", [this, index]() { vm_.agent().askClaudeInstead(index); });
+        ImGui::SetItemTooltip("Send the same question to Claude Code");
+        ImGui::Spacing();
+    }
     if (agent.busy.get()) {
         static const char* const dots[] = {".", "..", "..."};
         const std::string& activity = agent.activity();
@@ -223,9 +262,22 @@ void AgentPanel::renderSetup(float width)
     const float inner = ImGui::GetContentRegionAvail().x;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + inner);
 
+    if (os::isMobile()) {
+        ImGui::TextColored(col(palette_.modeAgent), ICON_FA_PLUG "  Agent setup");
+        ImGui::SameLine(ImGui::GetCursorPosX() + inner - ImGui::GetFrameHeight());
+        if (ImGui::SmallButton(ICON_FA_XMARK "##closeSetup"))
+            agent.showSetup.set(false);
+        ImGui::TextDisabled("Claude Code does not run on phones: here the agent is the local model.");
+        renderLocalSetup(inner);
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+        ImGui::Spacing();
+        return;
+    }
+
     // Title, with a close button once there is nothing left to fix.
     ImGui::TextColored(col(palette_.modeAgent), ICON_FA_PLUG "  Agent setup");
-    if (setup.available && !agent.needsLogin()) {
+    if ((setup.available && !agent.needsLogin()) || (agent.localFallback.get() && agent.localReady())) {
         ImGui::SameLine(ImGui::GetCursorPosX() + inner - ImGui::GetFrameHeight());
         if (ImGui::SmallButton(ICON_FA_XMARK "##closeSetup"))
             agent.showSetup.set(false);
@@ -305,6 +357,8 @@ void AgentPanel::renderSetup(float width)
         ImGui::SetItemTooltip("%s", viewmodel::NotepadViewModel::kAgentSetupUrl);
     }
 
+    renderLocalSetup(inner);
+
     // Settings.
     ImGui::Spacing();
     ImGui::Separator();
@@ -327,6 +381,70 @@ void AgentPanel::renderSetup(float width)
     ImGui::PopTextWrapPos();
     ImGui::EndChild();
     ImGui::Spacing();
+}
+
+// The local model in the set-up card: whether it is here, getting it, and when it answers.
+void AgentPanel::renderLocalSetup(float inner)
+{
+    using Lab = viewmodel::EngineLabViewModel;
+    using State = Lab::FileState;
+    viewmodel::AgentViewModel& agent = vm_.agent();
+    Lab& lab = vm_.engineLab();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextColored(col(palette_.iconTeal), ICON_FA_MICROCHIP "  Local model (offline, on this device)");
+    if (!lab.hasEngine() || !lab.info().available) {
+        ImGui::TextDisabled("%s", lab.hasEngine() ? lab.info().unavailableReason.c_str() : "This build has no local model.");
+        return;
+    }
+    const Lab::FileStatus model = lab.fileStatus(Lab::Which::Model);
+    const Lab::FileStatus drafter = lab.fileStatus(Lab::Which::Drafter);
+    const bool ready = lab.fileUsable(Lab::Which::Model);
+    char size[32];
+    std::snprintf(size, sizeof(size), "%.2f GB", double(Lab::modelFile().size) / 1e9);
+    if (model.state == State::Downloading || drafter.state == State::Downloading) {
+        const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter;
+        const float fraction = d.total ? float(double(d.have) / double(d.total)) : 0.0f;
+        ImGui::TextUnformatted(lab.importing() ? "Copying the file in..." : "Downloading...");
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, col(palette_.accent));
+        ImGui::ProgressBar(fraction, ImVec2(inner, 0.0f));
+        ImGui::PopStyleColor();
+        if (!d.note.empty())
+            ImGui::TextColored(col(palette_.iconOrange), "%s", d.note.c_str());
+        if (ImGui::Button(ICON_FA_STOP " Stop"))
+            lab.cancelDownload();
+    } else if (model.state == State::Verifying || drafter.state == State::Verifying) {
+        ImGui::TextDisabled("Checking the download...");
+    } else if (ready) {
+        ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(lab.fileUsable(Lab::Which::Drafter) ? "Gemma 4 E2B is here, with its drafter (faster)."
+                                                                   : "Gemma 4 E2B is here.");
+        if (!lab.fileUsable(Lab::Which::Drafter)) {
+            if (ImGui::Button(ICON_FA_DOWNLOAD " Get the drafter (77 MB, faster answers)"))
+                lab.download(Lab::Which::Drafter);
+            registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
+        }
+    } else {
+        ImGui::TextWrapped("Gemma 4 E2B (%s) answers quick questions about your code on this device, without a network "
+                           "or an account. It reads what you are looking at; it cannot edit files.", size);
+        if (ImGui::Button(ICON_FA_DOWNLOAD " Download"))
+            lab.download(Lab::Which::Model);
+        registerLastItem("agent-local-download", "button", "Download the local model", [&lab]() { lab.download(Lab::Which::Model); });
+        if (lab.canImport()) {
+            sameLineIfFits(ICON_FA_FILE_IMPORT " Import file...");
+            if (ImGui::Button(ICON_FA_FILE_IMPORT " Import file..."))
+                lab.importFile(Lab::Which::Model);
+            ImGui::SetItemTooltip("Pick the file if you downloaded it elsewhere (for example in the browser)");
+        }
+    }
+    if (!lab.notice().empty() && lab.noticeIsError())
+        ImGui::TextColored(col(palette_.iconRed), ICON_FA_TRIANGLE_EXCLAMATION "  %s", lab.notice().c_str());
+    bool fallback = agent.localFallback.get();
+    if (ImGui::Checkbox("Fall back to the local model", &fallback))
+        agent.localFallback.set(fallback);
+    ImGui::SetItemTooltip("When Claude Code is not installed, not logged in, offline or fails, the local model answers instead");
+    ImGui::TextDisabled("Who answers is chosen at the top of the panel: Auto, Claude or Local.");
 }
 
 void AgentPanel::renderComposer()

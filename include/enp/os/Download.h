@@ -1,6 +1,6 @@
 // Downloading large files (models): resumable, one at a time, progress polled by the caller.
-// Desktop runs curl (part of Windows 10 and later, macOS and Linux); Android hands the transfer to
-// the system's DownloadManager, which keeps going while the app is in the background.
+// Desktop runs curl (part of Windows 10 and later, macOS and Linux); Android downloads in the app
+// (HTTP with Range resume and retries), and can also copy in a file picked in the system picker.
 #pragma once
 
 #include <cstdint>
@@ -25,5 +25,11 @@ std::string directory();
 bool start(const std::string& url, const std::string& path, bool allowMetered, std::string* error);
 Status status();
 void cancel();
+// True on a metered network (mobile data, a hotspot): large downloads ask first. Desktop: false.
+bool meteredNetwork();
+// Android: the system file picker, then the chosen file is copied to `path` (followed by status()
+// like a download). Elsewhere a path can simply be typed, so there is no import.
+bool canImport();
+bool importFile(const std::string& path, std::string* error);
 
 } // namespace enp::os::download

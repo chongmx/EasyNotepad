@@ -4,6 +4,7 @@
 #include "enp/model/Diff.h"
 #include "enp/model/Git.h"
 #include "enp/model/Document.h"
+#include "enp/model/AgentRoute.h"
 #include "enp/model/Hash.h"
 #include "enp/model/Highlighter.h"
 #include "enp/model/Indent.h"
@@ -2905,6 +2906,9 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     std::string hashAnswer;
     interfaces::DownloadStatus download;
     std::string downloadPath;
+    bool downloadMetered = false;
+    bool metered = false;
+    std::string refuse; // startDownload fails with this
     std::vector<interfaces::EngineRunSettings> runs;
 
     interfaces::EngineInfo info() override
@@ -2937,14 +2941,49 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     std::string modelsDirectory() override { return "/models"; }
     uint64_t freeSpace(const std::string&) override { return free; }
     uint64_t fileSize(const std::string& path) override { return files.count(path) ? files[path] : 0; }
-    bool startDownload(const std::string&, const std::string& path, bool, std::string*) override
+    bool startDownload(const std::string&, const std::string& path, bool allowMetered, std::string* error) override
     {
+        if (!refuse.empty()) {
+            if (error)
+                *error = refuse;
+            return false;
+        }
         downloadPath = path;
+        downloadMetered = allowMetered;
         download.state = interfaces::DownloadStatus::State::Running;
         return true;
     }
     interfaces::DownloadStatus downloadStatus() override { return download; }
     void cancelDownload() override { download.state = interfaces::DownloadStatus::State::Idle; }
+    bool meteredNetwork() override { return metered; }
+    std::string importPath;
+    bool canImport() override { return true; }
+    bool importFile(const std::string& path, std::string*) override
+    {
+        importPath = path;
+        download.state = interfaces::DownloadStatus::State::Running;
+        return true;
+    }
+    // The local agent: answers at once, in two pieces (or fails when told to).
+    std::vector<interfaces::LocalChatRequest> chats;
+    bool chatFails = false;
+    void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
+              std::function<void(const std::string&)> text, std::function<void(const interfaces::LocalChatResult&)> done) override
+    {
+        chats.push_back(request);
+        interfaces::LocalChatResult r;
+        if (chatFails) {
+            r.error = "out of memory";
+            done(r);
+            return;
+        }
+        stage("Writing");
+        text("Local ");
+        text("answer.");
+        r.ok = true;
+        r.generatedTokens = 3;
+        done(r);
+    }
     void hashFile(const std::string&, std::function<void(double)> progress, std::function<void(const std::string&)> done) override
     {
         progress(0.5);
@@ -2973,8 +3012,32 @@ TEST(engine_lab_downloads_checks_and_compares)
     CHECK(!lab.downloading());
     CHECK(status.find("Not enough space") != std::string::npos);
 
-    // Download, then the checksum is checked by itself; a match makes the file ready.
+    // On mobile data it asks first; confirmed, it downloads over mobile data.
     engine.free = 100ull << 30;
+    engine.metered = true;
+    lab.download(Lab::Which::Model);
+    CHECK(lab.confirmationPending() && !lab.downloading() && lab.pendingDownload() == Lab::Which::Model);
+    lab.cancelConfirmation();
+    CHECK(!lab.confirmationPending() && !lab.downloading());
+    lab.download(Lab::Which::Model);
+    lab.confirmMobileDownload();
+    CHECK(lab.downloading() && engine.downloadMetered);
+    lab.cancelDownload();
+    engine.metered = false;
+
+    // Failures are told in the lab itself and stay on the file until it is tried again.
+    engine.refuse = "SecurityException: not allowed";
+    lab.download(Lab::Which::Model);
+    CHECK(!lab.downloading() && lab.noticeIsError() && lab.notice().find("not allowed") != std::string::npos);
+    CHECK(lab.downloadError(Lab::Which::Model).find("not allowed") != std::string::npos);
+    engine.refuse.clear();
+    lab.download(Lab::Which::Model);
+    CHECK(lab.downloading() && lab.downloadError(Lab::Which::Model).empty() && !lab.noticeIsError());
+    engine.download.state = interfaces::DownloadStatus::State::Idle; // dropped by the system
+    lab.refresh();
+    CHECK(!lab.downloading() && lab.noticeIsError() && !lab.downloadError(Lab::Which::Model).empty());
+
+    // Download, then the checksum is checked by itself; a match makes the file ready.
     lab.download(Lab::Which::Model);
     CHECK(lab.downloading() && engine.downloadPath == modelPath);
     CHECK(lab.fileStatus(Lab::Which::Model).state == State::Downloading);
@@ -2997,6 +3060,16 @@ TEST(engine_lab_downloads_checks_and_compares)
     engine.hashAnswer = Lab::drafterFile().sha256;
     lab.verify(Lab::Which::Drafter);
     CHECK(lab.fileStatus(Lab::Which::Drafter).state == State::Ready);
+
+    // A file picked on the phone is copied in like a download, then checked.
+    lab.importFile(Lab::Which::Drafter);
+    CHECK(lab.importing() && engine.importPath == drafterPath);
+    CHECK(lab.fileStatus(Lab::Which::Drafter).state == State::Downloading);
+    engine.download.state = interfaces::DownloadStatus::State::Done;
+    engine.files[drafterPath] = Lab::drafterFile().size;
+    engine.hashAnswer = Lab::drafterFile().sha256;
+    lab.refresh();
+    CHECK(!lab.importing() && lab.fileStatus(Lab::Which::Drafter).state == State::Ready);
 
     // The comparison runs without and then with the drafter; newest first.
     lab.runComparison();
@@ -3026,10 +3099,119 @@ TEST(engine_lab_downloads_checks_and_compares)
     int opened = 0;
     auto openSub = vm.engineLabRequested.subscribe([&]() { ++opened; });
     CHECK(!vm.command(CommandId::EngineLab).canExecute());
+    // The download itself is for everyone: the Local Model command opens the agent set-up card.
+    CHECK(vm.command(CommandId::LocalModel).canExecute());
+    vm.execute(CommandId::LocalModel);
+    CHECK(vm.agent().showSetup.get() && vm.showAgentPanel.get());
     vm.developerMode.set(true);
     CHECK(vm.command(CommandId::EngineLab).canExecute());
     vm.execute(CommandId::EngineLab);
     CHECK_EQ(opened, 1);
+}
+
+TEST(agent_auto_route_rules)
+{
+    using model::AgentRoute;
+    auto route = [](const std::string& prompt) { return model::routeTask(prompt).route; };
+    CHECK(route("Explain this function") == AgentRoute::Local);
+    CHECK(route("what does parseArgs return?") == AgentRoute::Local);
+    CHECK(route("Write a commit message for these changes") == AgentRoute::Local);
+    CHECK(route("is this thread safe?") == AgentRoute::Local);
+    CHECK(route("What's the address it binds to?") == AgentRoute::Local); // "address" is not "add"
+    CHECK(route("Refactor the parser into two classes") == AgentRoute::Claude);
+    CHECK(route("Add tests for TextBuffer") == AgentRoute::Claude);
+    CHECK(route("fix the crash in main.cpp") == AgentRoute::Claude);
+    CHECK(route("rename it across all files") == AgentRoute::Claude);
+    CHECK(route("Please look at this") == AgentRoute::Claude); // unclear: the stronger agent
+    CHECK(route("why? " + std::string(700, 'x')) == AgentRoute::Claude); // long
+}
+
+TEST(agent_chooses_local_or_claude_and_falls_back)
+{
+    using Choice = viewmodel::AgentViewModel::Choice;
+    FakeEngine engine;
+    FakeStreamingAgent cli;
+    viewmodel::AgentViewModel agent;
+    bool ready = true;
+    agent.setLocal(
+        &engine,
+        [&]() {
+            viewmodel::AgentViewModel::LocalSetup s;
+            s.ready = ready;
+            s.why = ready ? "" : "the model is not downloaded yet";
+            s.modelPath = "/models/m.gguf";
+            return s;
+        },
+        []() { return std::string("```\nint parse(const char* s);\n```"); });
+    agent.goLive(&cli, "/work");
+    CHECK(agent.claudeReady() && agent.localReady());
+    const auto last = [&]() { return agent.messages().back(); };
+
+    // Auto: a question about the code goes to the local model, with the code itself.
+    agent.submitPrompt("Explain this function", "src/a.cpp:3");
+    CHECK_EQ(engine.chats.size(), size_t(1));
+    CHECK(!engine.chats.empty() && engine.chats.back().messages.front().role == "system");
+    CHECK(!engine.chats.empty() && engine.chats.back().messages.back().text.find("int parse(const char* s);") != std::string::npos);
+    CHECK(!engine.chats.empty() && engine.chats.back().messages.back().text.find("src/a.cpp:3") != std::string::npos);
+    CHECK(last().by == "Local" && last().text == "Local answer." && !agent.busy.get());
+
+    // Auto: a change goes to Claude Code, and its answer is tagged.
+    agent.submitPrompt("Refactor the parser");
+    CHECK(agent.busy.get() && cli.request.prompt.find("Refactor the parser") != std::string::npos);
+    cli.onLine(R"({"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"s-1","num_turns":1,"total_cost_usd":0.01})");
+    CHECK(last().by == "Claude" && !agent.busy.get());
+
+    // A follow-up in Claude's conversation stays with Claude, even a quick question.
+    agent.submitPrompt("why is that?");
+    CHECK_EQ(engine.chats.size(), size_t(1));
+    cli.onLine(R"({"type":"result","subtype":"success","is_error":false,"result":"Because.","session_id":"s-1","num_turns":1,"total_cost_usd":0.01})");
+
+    // Claude Code fails: the local model answers, and says why.
+    agent.submitPrompt("Add tests for it");
+    cli.finished(false, "network is unreachable");
+    CHECK_EQ(engine.chats.size(), size_t(2));
+    CHECK(last().by == "Local" && !agent.busy.get());
+    bool explained = false;
+    for (const model::ChatMessage& m : agent.messages())
+        explained = explained || m.text.find("so the local model answers") != std::string::npos;
+    CHECK(explained);
+    // The earlier turns went along, alternating and starting with the user.
+    const auto& sent = engine.chats.back().messages;
+    CHECK(sent.size() >= 3 && sent[1].role == "user");
+    for (size_t i = 2; i < sent.size(); ++i)
+        CHECK(sent[i].role != sent[i - 1].role);
+
+    // Ask Claude instead: the same question goes to Claude Code.
+    agent.askClaudeInstead(int(agent.messages().size()) - 1);
+    CHECK(agent.busy.get() && cli.request.prompt.find("Add tests for it") != std::string::npos);
+    cli.onLine(R"({"type":"result","subtype":"success","is_error":false,"result":"Added.","session_id":"s-1","num_turns":1,"total_cost_usd":0.01})");
+    CHECK(last().by == "Claude");
+
+    // Always local, even for a change.
+    agent.agentChoice.set(int(Choice::Local));
+    agent.submitPrompt("Refactor everything");
+    CHECK(last().by == "Local");
+
+    // A failing local model says so.
+    engine.chatFails = true;
+    agent.submitPrompt("Explain it again");
+    CHECK(last().role == model::ChatRole::Tool && last().text.find("out of memory") != std::string::npos && !agent.busy.get());
+    engine.chatFails = false;
+
+    // Not downloaded: it says what to do instead of failing silently.
+    ready = false;
+    agent.submitPrompt("explain");
+    CHECK(last().role == model::ChatRole::Tool && last().text.find("not downloaded") != std::string::npos);
+
+    // Always Claude, with the fallback off: the local model is not used.
+    ready = true;
+    agent.agentChoice.set(int(Choice::Claude));
+    agent.localFallback.set(false);
+    const size_t chats = engine.chats.size();
+    agent.submitPrompt("Explain this function");
+    CHECK(agent.busy.get() && engine.chats.size() == chats);
+    cli.finished(false, "network is unreachable");
+    CHECK(engine.chats.size() == chats && !agent.busy.get());
 }
 
 int main(int argc, char** argv)

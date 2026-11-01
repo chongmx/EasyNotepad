@@ -145,6 +145,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::About: return {"About", "About EasyNotepad", ""};
     case CommandId::EngineLab: return {"Engine Lab", "Developer: measure the on-device model on this device", ""};
     case CommandId::ShowGitStatus: return {"Status", "Git status: branch, sync with the remote, and every changed file", ""};
+    case CommandId::LocalModel: return {"Local Model", "The offline model for the agent: download it and choose when it answers", ""};
     case CommandId::Exit: return {"Exit", "Quit EasyNotepad", "Alt+F4"};
 
     case CommandId::ShowGit: return {"Git", "Show the Git tab: changes, staging and commit", ""};
@@ -302,6 +303,7 @@ const char* commandKey(CommandId id)
     case CommandId::About: return "About";
     case CommandId::EngineLab: return "EngineLab";
     case CommandId::ShowGitStatus: return "ShowGitStatus";
+    case CommandId::LocalModel: return "LocalModel";
     case CommandId::Exit: return "Exit";
     case CommandId::ShowGit: return "ShowGit";
     case CommandId::GitCommit: return "GitCommit";

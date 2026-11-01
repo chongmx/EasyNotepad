@@ -1,5 +1,6 @@
 #include "enp/viewmodel/AgentViewModel.h"
 
+#include "enp/model/AgentRoute.h"
 #include "enp/model/Json.h"
 #include "enp/viewmodel/DummyData.h"
 
@@ -13,6 +14,14 @@ namespace enp::viewmodel {
 namespace {
 
 constexpr double kReplyDelay = 1.2; // seconds of simulated thinking
+constexpr double kLocalIdleUnload = 300.0; // the local model leaves memory after this long unused
+constexpr size_t kLocalHistoryChars = 6000; // earlier turns sent to the local model (about 1,500 tokens)
+
+// Told to the local model with every question.
+constexpr const char* kLocalSystemPrompt =
+    "You are the assistant inside the EasyNotepad code editor, running offline on this device. Answer briefly and "
+    "precisely, in Markdown. You see only the code the user shows you: you cannot open other files, edit files or "
+    "run commands. If a request needs that, say so in one sentence and suggest asking Claude Code.";
 
 } // namespace
 
@@ -25,6 +34,12 @@ const std::vector<const char*>& AgentViewModel::modelNames()
 {
     // The first is whatever Claude Code is set to; the others are its model aliases (--model).
     static const std::vector<const char*> names = {"Default model", "Opus", "Sonnet", "Haiku"};
+    return names;
+}
+
+const std::vector<const char*>& AgentViewModel::choiceNames()
+{
+    static const std::vector<const char*> names = {"Auto", "Claude", "Local"};
     return names;
 }
 
@@ -58,12 +73,195 @@ void AgentViewModel::submitPrompt(const std::string& prompt, const std::string& 
         text += "\n[context: " + context + "]";
     messages_.push_back({model::ChatRole::User, std::move(text)});
     pendingPrompt_ = prompt;
+    lastContext_ = context;
     busy.set(true);
+    route(prompt, context);
+}
+
+void AgentViewModel::setLocal(interfaces::ILocalEngineService* engine, std::function<LocalSetup()> setup,
+                              std::function<std::string()> contextText)
+{
+    local_ = engine;
+    localSetup_ = std::move(setup);
+    localContext_ = std::move(contextText);
+}
+
+bool AgentViewModel::localReady() const { return local_ && localSetup_ && localSetup_().ready; }
+
+bool AgentViewModel::claudeReady() const { return live_ && cli_ && cli_->available() && !needsLogin_; }
+
+std::string AgentViewModel::lastAnswerBy() const
+{
+    for (auto it = messages_.rbegin(); it != messages_.rend(); ++it)
+        if (it->role == model::ChatRole::Agent)
+            return it->by;
+    return {};
+}
+
+// Who answers: the user's choice; in Auto, the rules of model::routeTask; and the local model when
+// Claude Code cannot (if allowed). The sample workspace has no real Claude: a ready local model
+// answers there instead of the made-up replies.
+void AgentViewModel::route(const std::string& prompt, const std::string& context)
+{
+    const Choice choice = Choice(agentChoice.get());
+    const bool local = localReady(), claude = claudeReady();
+    if (choice == Choice::Local) {
+        askLocal(prompt, context, {});
+        return;
+    }
+    if (choice == Choice::Auto && local) {
+        // A follow-up in a conversation Claude is having stays with Claude.
+        const bool claudeConversation = claude && !sessionId_.empty() && lastAnswerBy() == "Claude";
+        if (model::routeTask(prompt).route == model::AgentRoute::Local && !claudeConversation) {
+            askLocal(prompt, context, {});
+            return;
+        }
+    }
+    if (!claude && local && (localFallback.get() || choice == Choice::Auto)) {
+        askLocal(prompt, context, live_ ? "Claude Code is not available here, so the local model answers." : std::string());
+        return;
+    }
+    askClaude(prompt, context);
+}
+
+void AgentViewModel::askClaude(const std::string& prompt, const std::string& context)
+{
+    claudeFrom_ = messages_.size();
     if (live_) {
         askCli(prompt, context);
         return;
     }
-    replyAt_ = now_ + kReplyDelay;
+    replyAt_ = now_ + kReplyDelay; // the sample workspace: a made-up reply
+}
+
+void AgentViewModel::tagClaude()
+{
+    for (size_t i = claudeFrom_; i < messages_.size(); ++i)
+        if (messages_[i].role == model::ChatRole::Agent && messages_[i].by.empty())
+            messages_[i].by = "Claude";
+}
+
+bool AgentViewModel::fallBackToLocal(const std::string& prompt, const std::string& why)
+{
+    if (!localFallback.get() || !localReady())
+        return false;
+    askLocal(prompt, lastContext_, why + ", so the local model answers.");
+    return true;
+}
+
+void AgentViewModel::askLocal(const std::string& prompt, const std::string& context, const std::string& note)
+{
+    const LocalSetup setup = localSetup_ ? localSetup_() : LocalSetup{};
+    if (!local_ || !setup.ready) {
+        messages_.push_back({model::ChatRole::Tool,
+                             "The local model is not ready: " +
+                                 (setup.why.empty() ? std::string("download it in the agent set-up (the gear).") : setup.why)});
+        activity_.clear();
+        busy.set(false);
+        replied.emit(prompt);
+        return;
+    }
+    if (!note.empty())
+        messages_.push_back({model::ChatRole::Tool, note});
+
+    interfaces::LocalChatRequest request;
+    request.modelPath = setup.modelPath;
+    request.drafterPath = setup.drafterPath;
+    request.threads = setup.threads;
+    request.useGpu = setup.gpu;
+    request.messages.push_back({"system", kLocalSystemPrompt});
+    // Earlier turns, the newest kept, within a budget (the local model reads about 100 tokens a
+    // second on a phone). This question itself is sent last, with the code it is about.
+    size_t end = messages_.size();
+    while (end > 0 && messages_[end - 1].role != model::ChatRole::User)
+        --end;
+    if (end > 0)
+        --end;
+    std::vector<interfaces::LocalChatMessage> history;
+    size_t chars = 0;
+    for (size_t i = end; i-- > 0;) {
+        const model::ChatMessage& m = messages_[i];
+        if (m.role == model::ChatRole::Tool || m.text.empty())
+            continue;
+        std::string text = m.text;
+        if (const size_t cut = text.find("\n[context: "); cut != std::string::npos)
+            text.erase(cut);
+        if (chars + text.size() > kLocalHistoryChars)
+            break;
+        chars += text.size();
+        history.push_back({m.role == model::ChatRole::User ? "user" : "assistant", std::move(text)});
+    }
+    std::reverse(history.begin(), history.end());
+    // The chat format wants the turns to alternate, starting with the user.
+    while (!history.empty() && history.front().role != "user")
+        history.erase(history.begin());
+    for (interfaces::LocalChatMessage& m : history)
+        if (request.messages.back().role != m.role)
+            request.messages.push_back(std::move(m));
+    if (request.messages.back().role == "user")
+        request.messages.pop_back();
+    std::string question = prompt;
+    const std::string code = localContext_ ? localContext_() : std::string();
+    if (!code.empty())
+        question = "I am looking at " + (context.empty() ? std::string("this code") : context) + ":\n\n" + code + "\n\n" + prompt;
+    request.messages.push_back({"user", std::move(question)});
+
+    const int generation = ++generation_;
+    messages_.push_back({model::ChatRole::Agent, std::string(), "Local"});
+    const size_t at = messages_.size() - 1;
+    activity_ = "Local model";
+    local_->chat(
+        request,
+        [this, generation](const std::string& stage) {
+            if (generation == generation_)
+                activity_ = "Local model: " + stage;
+        },
+        [this, generation, at](const std::string& piece) {
+            if (generation == generation_ && at < messages_.size())
+                messages_[at].text += piece;
+        },
+        [this, generation, at, prompt](const interfaces::LocalChatResult& r) {
+            if (generation != generation_)
+                return; // stopped or replaced
+            activity_.clear();
+            if (!r.ok) {
+                if (at < messages_.size() && messages_[at].text.empty())
+                    messages_.erase(messages_.begin() + long(at));
+                messages_.push_back({model::ChatRole::Tool, "The local model failed: " + r.error});
+            } else {
+                char line[128];
+                std::snprintf(line, sizeof(line), "Local model: %d tokens, %.1f tokens/s, first token after %.1f s%s",
+                              r.generatedTokens, r.tokensPerSecond, r.firstTokenSeconds, r.loaded ? " (loaded the model)" : "");
+                statusMessage.emit(line);
+            }
+            busy.set(false);
+            replied.emit(prompt);
+        });
+}
+
+void AgentViewModel::askClaudeInstead(int answerIndex)
+{
+    if (busy.get() || !claudeReady() || answerIndex <= 0 || answerIndex >= int(messages_.size()))
+        return;
+    for (int i = answerIndex - 1; i >= 0; --i) {
+        if (messages_[size_t(i)].role != model::ChatRole::User)
+            continue;
+        const std::string asked = messages_[size_t(i)].text;
+        std::string prompt = asked, context;
+        if (const size_t cut = prompt.find("\n[context: "); cut != std::string::npos) {
+            context = prompt.substr(cut + 11);
+            if (!context.empty() && context.back() == ']')
+                context.pop_back();
+            prompt.erase(cut);
+        }
+        // The question again, as the user's turn: Claude's answer follows it like any other.
+        messages_.push_back({model::ChatRole::User, asked});
+        pendingPrompt_ = prompt;
+        lastContext_ = context;
+        busy.set(true);
+        askClaude(prompt, context);
+        return;
+    }
 }
 
 void AgentViewModel::newChat()
@@ -84,6 +282,8 @@ void AgentViewModel::stop()
     ++generation_; // the CLI's answer, if it still comes, is dropped
     if (cli_)
         cli_->cancel();
+    if (local_ && local_->chatting())
+        local_->cancel();
     activity_.clear();
     messages_.push_back({model::ChatRole::Tool, "Stopped by user."});
     busy.set(false);
@@ -122,6 +322,8 @@ void AgentViewModel::rejectAll()
 void AgentViewModel::tick(double now)
 {
     now_ = now;
+    if (local_)
+        local_->unloadIfIdle(kLocalIdleUnload);
     if (replyAt_ < 0.0 || now < replyAt_)
         return;
     replyAt_ = -1.0;
@@ -185,8 +387,12 @@ void AgentViewModel::askCli(const std::string& prompt, const std::string& contex
         if (generation != generation_)
             return; // stopped or superseded
         messages_.push_back({ok ? model::ChatRole::Agent : model::ChatRole::Tool, ok ? output : "The agent failed: " + output});
-        if (!ok)
+        tagClaude();
+        if (!ok) {
             noteFailure(output);
+            if (fallBackToLocal(prompt, "The agent failed"))
+                return;
+        }
         busy.set(false);
         replied.emit(prompt);
     });
@@ -280,6 +486,9 @@ void AgentViewModel::askStream(const std::string& prompt, const std::string& con
                                                            : "The agent failed: " + error});
             noteFailure(error);
             activity_.clear();
+            tagClaude();
+            if (fallBackToLocal(prompt, "Claude Code did not answer"))
+                return;
             busy.set(false);
             replied.emit(prompt);
         });
@@ -366,6 +575,12 @@ void AgentViewModel::streamLine(const std::string& line, const std::string& prom
             const std::string why = event->getString("result");
             messages_.push_back({model::ChatRole::Tool, "The agent stopped: " + (why.empty() ? event->getString("subtype") : why)});
             noteFailure(why);
+            tagClaude();
+            if (fallBackToLocal(prompt, "Claude Code stopped")) {
+                activity_.clear();
+                streamingMessage_ = -1;
+                return;
+            }
         } else {
             needsLogin_ = false;
             if (messages_.empty() || messages_.back().role == model::ChatRole::User)
@@ -374,6 +589,7 @@ void AgentViewModel::streamLine(const std::string& line, const std::string& prom
         char cost[64];
         std::snprintf(cost, sizeof(cost), "%.2f", event->getNumber("total_cost_usd"));
         statusMessage.emit("Agent answered in " + std::to_string(int(event->getNumber("num_turns"))) + " turn(s), $" + cost);
+        tagClaude();
         activity_.clear();
         streamingMessage_ = -1;
         busy.set(false);

@@ -541,7 +541,8 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
         for (const model::ChatMessage& m : vm.agent().messages())
             messages.push(Json::object()
                               .set("role", m.role == model::ChatRole::User ? "user" : m.role == model::ChatRole::Agent ? "agent" : "tool")
-                              .set("text", m.text));
+                              .set("text", m.text)
+                              .set("by", m.by));
         return Json::object()
             .set("busy", vm.agent().busy.get())
             .set("activity", vm.agent().activity())

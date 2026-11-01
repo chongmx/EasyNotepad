@@ -154,6 +154,7 @@ public:
     Event<> addCommentRequested;
     Event<> aboutRequested;
     Event<> engineLabRequested;
+    Event<> localModelRequested; // the agent set-up card, local model part
     Event<> preferencesRequested;
     Event<> syntaxColorsRequested;
     Event<> languagePickerRequested;
@@ -252,6 +253,7 @@ public:
     bool canRedo() const;
     // "src/main.cpp:12-20", used as agent prompt context.
     std::string selectionContextLabel() const;
+    std::string agentContextText() const; // the code itself, for the local model
 
     // ---- Reading: outline, folding, summaries (active document) --------------------------
     static constexpr int kDetailLevels = 4;

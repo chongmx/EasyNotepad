@@ -138,6 +138,20 @@ download:
 
 Sideloaded APKs (testing) and desktops have no asset packs, and keep the in-app download below.
 
+**Downloading on Android:**
+- **Not DownloadManager.** On a Galaxy S24 Ultra it first needed the INTERNET permission, then
+  stalled at "waiting to retry" with no reason given. Hugging Face answers with a redirect to a
+  signed, expiring CDN address, which a retried transfer may keep reusing.
+- **Now (Engine Lab):** the app downloads the file itself. Every attempt asks the original URL again
+  (so it gets a fresh signed address), resumes the `.part` file with an HTTP Range request, retries 8
+  times with growing pauses, and shows the actual error. The app has to stay alive while it runs.
+- **Also: Import file...** The system file picker copies a file the user downloaded elsewhere (for
+  example in the browser) into the app's folder. On Android 13 and later, apps cannot read the
+  Download folder directly.
+- **For a release:** run the same code as a **user-initiated data transfer job** on Android 14 and
+  later (Google's API for long downloads the user starts, with a progress notification), and as a
+  WorkManager foreground worker on older Android. Play Store installs use asset packs instead.
+
 **Downloads** come from Hugging Face directly, pinned by **repository commit and SHA-256** in our
 engine catalogue. Nothing is fetched by name alone, and nothing that is not in the catalogue is
 fetched at all. Downloads resume, and the user can cancel or remove them.

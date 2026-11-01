@@ -35,11 +35,14 @@ uint64_t fileSize(const std::string& path) { return fs::stat(path).size; }
 
 std::string directory()
 {
-    std::string dir = fs::appDataDirectory();
-    if (dir.empty())
-        return {};
-    dir = fs::path::join(dir, "models");
-    fs::createDirectories(dir);
+    static const std::string dir = []() {
+        const std::string base = fs::appDataDirectory();
+        if (base.empty())
+            return std::string();
+        std::string d = fs::path::join(base, "models");
+        fs::createDirectories(d);
+        return d;
+    }();
     return dir;
 }
 
@@ -97,6 +100,17 @@ Status status()
     Status s = job->status;
     s.received = fileSize(job->path);
     return s;
+}
+
+bool meteredNetwork() { return false; }
+
+bool canImport() { return false; }
+
+bool importFile(const std::string&, std::string* error)
+{
+    if (error)
+        *error = "not needed here: enter the file's path instead";
+    return false;
 }
 
 void cancel()

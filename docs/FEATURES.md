@@ -220,6 +220,35 @@ Ribbon*) makes the ribbon slim, giving about 40 dp back to the work area:
 
 The chevron turns over to bring the full ribbon back. The choice is remembered.
 
+## Local agent (offline, on the device)
+
+Gemma 4 E2B answers in the Agent panel on the device itself: no network, no account. It is
+downloaded once from the agent set-up (the gear), or from the Engine Lab.
+
+- **Who answers** (the picker at the left of the Agent panel's header; remembered):
+  - **Auto** (default): the local model for quick questions about the code (explain, what, why,
+    how, summaries, commit messages, short questions); Claude Code for changes, several files,
+    plans, tests and long or unclear requests. A follow-up in a conversation Claude is having
+    stays with Claude.
+  - **Claude**: always Claude Code.
+  - **Local**: always the local model.
+- **Fallback** (*Fall back to the local model*, on by default): when Claude Code is not installed,
+  not logged in, offline or fails, the local model answers instead, with a line saying why. On a
+  phone, where Claude Code does not run, the local model is the agent. In the sample workspace a
+  ready local model answers instead of the made-up replies.
+- **Answers say who gave them** (*Agent · Local* or *Agent · Claude*). Under a local answer, **Ask
+  Claude instead** sends the same question to Claude Code.
+- **What the local model sees:**
+  - the selection, or the 40 lines around the caret, with the question (it cannot open files
+    itself);
+  - the recent conversation.
+  It cannot edit files or use the app, and says so when asked.
+- **Speed:**
+  - it streams as it writes, using the drafter when it is downloaded;
+  - the model loads on the first question (a few seconds) and is unloaded after 5 idle minutes,
+    giving its memory back;
+  - S24 Ultra (CPU): about 30 tokens/s writing, about 100 tokens/s reading the question.
+
 ## Engine lab (developer view)
 
 A hidden page that shows how fast the on-device model (plan 23) runs on this device. It does not

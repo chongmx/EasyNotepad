@@ -54,7 +54,19 @@ public:
     FileStatus fileStatus(Which which) const;
     std::string pathFor(Which which) const; // the file a run would use
     bool fileUsable(Which which) const;
+    // On mobile data the download waits for confirmMobileDownload() (the view asks); on Wi-Fi it
+    // starts at once. A download paused waiting for Wi-Fi can be moved to mobile data the same way.
     void download(Which which);
+    void useMobileData(); // for the download in progress (it starts again)
+    // Phones: copy a file picked in the system file picker (e.g. downloaded in the browser).
+    bool canImport() const { return engine_ && engine_->canImport(); }
+    void importFile(Which which);
+    bool importing() const { return downloading_ >= 0 && importing_; }
+    bool confirmationPending() const { return confirm_ >= 0; }
+    Which pendingDownload() const { return Which(confirm_ < 0 ? 0 : confirm_); }
+    void confirmMobileDownload();
+    void cancelConfirmation() { confirm_ = -1; }
+    bool waitingForWifi() const;
     void cancelDownload();
     void verify(Which which);
     bool downloading() const { return downloading_ >= 0; }
@@ -84,11 +96,25 @@ public:
     model::Json save() const;
     void load(const model::Json& j);
 
+    // The lab's own message line (a phone has no status bar): what just happened, or went wrong.
+    const std::string& notice() const { return notice_; }
+    bool noticeIsError() const { return noticeError_; }
+    void clearNotice() { notice_.clear(); }
+    // Why the last download (or check) of this file failed; shown on its row until it is retried.
+    const std::string& downloadError(Which which) const;
+
     Event<> changed;                      // something saved changed
     Event<std::string> statusMessage;
 
 private:
     void startRun(bool withDrafter, bool thenWithDrafter);
+    void startDownload(Which which, bool mobileData);
+    int confirm_ = -1; // Which, waiting for "download on mobile data?"
+    bool importing_ = false; // the transfer is a copy from the file picker
+    void say(const std::string& text, bool error = false);
+    std::string notice_;
+    bool noticeError_ = false;
+    std::string downloadErrors_[2];
     std::string deviceLabel();
 
     interfaces::ILocalEngineService* engine_ = nullptr;

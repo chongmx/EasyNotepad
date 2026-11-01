@@ -267,6 +267,7 @@ add_library(enp_model STATIC
     src/model/Json.cpp
     src/model/LogicalMap.cpp
     src/model/Git.cpp
+    src/model/AgentRoute.cpp
 )
 target_include_directories(enp_model PUBLIC include)
 

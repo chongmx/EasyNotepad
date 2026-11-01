@@ -30,6 +30,7 @@ private:
     void renderRun();
     void renderLatest();
     void renderHistory();
+    void renderMobileDataPrompt();
     // A collapsible section header (open at first); false while collapsed.
     bool section(const char* icon, const char* title);
     void stat(const char* label, const std::string& value, float width, bool big = false);

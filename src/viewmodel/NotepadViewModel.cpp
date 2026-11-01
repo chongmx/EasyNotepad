@@ -53,6 +53,33 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
     subscriptions_.push_back(agent_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(engineLab_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(engineLab_.changed.subscribe([this]() { settings_.markDirty(); }));
+    // The local agent uses the Engine Lab's model files and settings.
+    agent_.setLocal(
+        localEngine,
+        [this]() {
+            AgentViewModel::LocalSetup s;
+            using Which = EngineLabViewModel::Which;
+            if (!engineLab_.hasEngine()) {
+                s.why = "this build has no local model.";
+                return s;
+            }
+            if (const interfaces::EngineInfo& info = engineLab_.info(); !info.available) {
+                s.why = info.unavailableReason;
+                return s;
+            }
+            if (!engineLab_.fileUsable(Which::Model)) {
+                s.why = "the model is not downloaded yet (agent set-up, the gear).";
+                return s;
+            }
+            s.ready = true;
+            s.modelPath = engineLab_.pathFor(Which::Model);
+            if (engineLab_.fileUsable(Which::Drafter))
+                s.drafterPath = engineLab_.pathFor(Which::Drafter);
+            s.threads = engineLab_.threads.get();
+            s.gpu = engineLab_.useGpu.get();
+            return s;
+        },
+        [this]() { return agentContextText(); });
     subscriptions_.push_back(terminal_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.replied.subscribe([this](const std::string& prompt) { pointer_.guideFor(prompt); }));
     if (agentCli_) {
@@ -1010,6 +1037,30 @@ void NotepadViewModel::goToLine(int line)
     caretRevealRequested.emit();
 }
 
+// The code the local model gets with a question (it cannot open files itself): the selection, or
+// the lines around the caret, at most about 2,500 characters (some 600 tokens: the model reads about
+// 100 tokens a second, so every one is felt before the first word).
+std::string NotepadViewModel::agentContextText() const
+{
+    const model::Document* doc = activeDocument();
+    if (!doc || doc->buffer.lineCount() == 0)
+        return {};
+    std::string code;
+    if (doc->hasSelection()) {
+        code = doc->buffer.text(doc->selectionStart(), doc->selectionEnd());
+    } else {
+        const int first = std::max(0, doc->caret.line - 20);
+        const int last = std::min(doc->buffer.lineCount() - 1, doc->caret.line + 20);
+        code = doc->buffer.text({first, 0}, {last, int(doc->buffer.line(last).size())});
+    }
+    constexpr size_t kMaxChars = 2500;
+    if (code.size() > kMaxChars)
+        code = code.substr(0, kMaxChars) + "\n...";
+    if (code.find_first_not_of(" \t\r\n") == std::string::npos)
+        return {};
+    return "```\n" + code + "\n```";
+}
+
 std::string NotepadViewModel::selectionContextLabel() const
 {
     const model::Document* doc = activeDocument();
@@ -1631,6 +1682,7 @@ void NotepadViewModel::stopTour()
 void NotepadViewModel::tick(double now)
 {
     settings_.flush(now);
+    engineLab_.refresh(); // a model download, started from the lab or the agent set-up
     if (now >= nextDiskCheck_) {
         nextDiskCheck_ = now + 2.0;
         checkDiskChanges();
@@ -1682,6 +1734,8 @@ void NotepadViewModel::bindSettings()
     settings_.bind("agent.mode", agent_.autonomyIndex);
     settings_.bind("agent.command", agent_.command);
     settings_.bind("agent.appControl", agent_.appControl);
+    settings_.bind("agent.choice", agent_.agentChoice);
+    settings_.bind("agent.localFallback", agent_.localFallback);
     settings_.bind("editor.showWhitespace", showWhitespace);
     settings_.bind("editor.showLineNumbers", showLineNumbers);
     settings_.bind("editor.showIndentGuides", showIndentGuides);

@@ -462,6 +462,7 @@ int main(int argc, char** argv)
                      (void)group;
              }},
             {"git: status back to normal", [](auto& vm) { vm.git().setDemoMerge(false); }},
+            {"agent: local model set-up (open to everyone)", [](auto& vm) { vm.execute(viewmodel::CommandId::LocalModel); }},
             {"git: branch picker", [](auto& vm) { vm.execute(viewmodel::CommandId::GitBranches); }},
             {"git: learn git guide", [](auto& vm) { vm.execute(viewmodel::CommandId::GitGuide); }},
             {"git: guide closed", [](auto&) {

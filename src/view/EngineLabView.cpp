@@ -120,6 +120,16 @@ void EngineLabView::render(bool fullScreen, ImVec2 areaMin, ImVec2 areaMax)
     ImGui::PushTextWrapPos(0.0f);
     // A fixed header with the state at a glance; the sections scroll below it (also by finger).
     renderSummary();
+    // What just happened, or went wrong (the phone layout has no status bar to show it).
+    if (!lab().notice().empty()) {
+        const bool error = lab().noticeIsError();
+        ImGui::TextColored(col(error ? palette_.iconRed : palette_.textDim), "%s  %s",
+                           error ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_CIRCLE_INFO, lab().notice().c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_XMARK "##notice"))
+            lab().clearNotice();
+        ImGui::SetItemTooltip("Dismiss");
+    }
     ImGui::Separator();
     ImGui::BeginChild("##lab-body", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
     ImGui::PushTextWrapPos(0.0f);
@@ -138,8 +148,47 @@ void EngineLabView::render(bool fullScreen, ImVec2 areaMin, ImVec2 areaMax)
     ImGui::PopTextWrapPos();
     ImGui::EndChild();
     ImGui::PopTextWrapPos();
+    renderMobileDataPrompt();
     ImGui::End();
     open_ = open;
+}
+
+// "You are on mobile data": a large download asks before it uses the data plan.
+void EngineLabView::renderMobileDataPrompt()
+{
+    viewmodel::EngineLabViewModel& l = lab();
+    const char* title = "Download on mobile data?###engine-lab-mobile-data";
+    if (l.confirmationPending() && !ImGui::IsPopupOpen(title))
+        ImGui::OpenPopup(title);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
+    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+    const auto& file = l.pendingDownload() == Which::Model ? viewmodel::EngineLabViewModel::modelFile()
+                                                           : viewmodel::EngineLabViewModel::drafterFile();
+    const uint64_t have = lab().fileStatus(l.pendingDownload()).have;
+    const uint64_t left = file.size > have ? file.size - have : 0;
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(380.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 60.0f * s_));
+    ImGui::TextColored(col(palette_.iconOrange), ICON_FA_TRIANGLE_EXCLAMATION "  You are on mobile data.");
+    ImGui::TextWrapped("%s needs about %s, which counts against your data plan.", file.label, gigabytes(left).c_str());
+    ImGui::PopTextWrapPos();
+    bool always = l.allowMobileData.get();
+    if (ImGui::Checkbox("Don't ask again", &always))
+        l.allowMobileData.set(always);
+    ImGui::Spacing();
+    const bool go = ImGui::Button(ICON_FA_DOWNLOAD "  Download");
+    registerLastItem("engine-lab:mobile-data:download", "button", "Download on mobile data", [&l]() { l.confirmMobileDownload(); });
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    registerLastItem("engine-lab:mobile-data:cancel", "button", "Cancel", [&l]() { l.cancelConfirmation(); });
+    if (go || cancel || !l.confirmationPending()) {
+        if (go)
+            l.confirmMobileDownload();
+        else
+            l.cancelConfirmation();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void EngineLabView::renderDevice()
@@ -153,7 +202,9 @@ void EngineLabView::renderDevice()
     }
     if (!info.socName.empty())
         ImGui::Text("Chip: %s", info.socName.c_str());
-    ImGui::Text("CPU: %s, %d threads", info.cpuName.empty() ? "unknown" : info.cpuName.c_str(), info.cpuThreads);
+    // Phones report the model (e.g. SM-S928B) where desktops name the CPU.
+    ImGui::Text(info.socName.empty() ? "CPU: %s, %d threads" : "Phone: %s, %d CPU threads",
+                info.cpuName.empty() ? "unknown" : info.cpuName.c_str(), info.cpuThreads);
     if (!info.cpuFeatures.empty())
         ImGui::TextDisabled("CPU features: %s", info.cpuFeatures.c_str());
     if (info.memoryTotal)
@@ -189,7 +240,7 @@ void EngineLabView::renderFile(Which which)
     case FileState::Missing: chip = "not downloaded, " + gigabytes(file.size); break;
     case FileState::Partial: chip = "partly downloaded: " + gigabytes(st.have) + " of " + gigabytes(st.total); break;
     case FileState::Downloading:
-        chip = "downloading " + gigabytes(st.have) + " of " + gigabytes(st.total);
+        chip = (lab().importing() ? "copying " : "downloading ") + gigabytes(st.have) + " of " + gigabytes(st.total);
         chipColour = palette_.accent;
         break;
     case FileState::Verifying: chip = "checking the checksum"; chipColour = palette_.accent; break;
@@ -208,21 +259,43 @@ void EngineLabView::renderFile(Which which)
         ImGui::PopStyleColor();
         if (!st.note.empty())
             ImGui::TextColored(col(palette_.iconOrange), "%s", st.note.c_str());
+        if (lab().waitingForWifi()) {
+            if (ImGui::Button(ICON_FA_SIGNAL "  Use mobile data"))
+                lab().useMobileData();
+            ImGui::SetItemTooltip("Start again on mobile data (asks first)");
+            registerLastItem(std::string("engine-lab:") + id + ":mobile-data", "button", "Use mobile data", [this]() { lab().useMobileData(); });
+            fit::sameLineIfFitsButton("Stop download");
+        }
     }
 
+    const std::string& failed = lab().downloadError(which);
+    if (!failed.empty() && st.state != FileState::Downloading && st.state != FileState::Verifying)
+        ImGui::TextColored(col(palette_.iconRed), ICON_FA_TRIANGLE_EXCLAMATION "  Last try: %s", failed.c_str());
     const bool busy = lab().downloading() || st.state == FileState::Verifying;
     if (st.state == FileState::Downloading) {
         if (ImGui::Button(ICON_FA_STOP "  Stop download"))
             lab().cancelDownload();
         registerLastItem(std::string("engine-lab:") + id + ":stop", "button", "Stop download", [this]() { lab().cancelDownload(); });
     } else if (st.state != FileState::Ready && st.state != FileState::Custom && st.state != FileState::Verifying) {
-        const char* label = st.state == FileState::Partial ? ICON_FA_DOWNLOAD "  Resume" : ICON_FA_DOWNLOAD "  Download";
+        const char* label = !failed.empty() ? ICON_FA_ROTATE_RIGHT "  Try again"
+                            : st.state == FileState::Partial ? ICON_FA_DOWNLOAD "  Resume" : ICON_FA_DOWNLOAD "  Download";
         ImGui::BeginDisabled(busy);
         if (ImGui::Button(label))
             lab().download(which);
         ImGui::EndDisabled();
         registerLastItem(std::string("engine-lab:") + id + ":download", "button", "Download",
                          [this, which]() { lab().download(which); }, !busy);
+        if (lab().canImport()) {
+            // A file downloaded elsewhere (the browser): apps cannot read Downloads directly.
+            fit::sameLineIfFitsButton("    Import file...");
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Button(ICON_FA_FILE_IMPORT "  Import file..."))
+                lab().importFile(which);
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Pick the file (e.g. downloaded in the browser); it is copied into the app");
+            registerLastItem(std::string("engine-lab:") + id + ":import", "button", "Import file",
+                             [this, which]() { lab().importFile(which); }, !busy);
+        }
         if (st.state == FileState::Unverified) {
             fit::sameLineIfFitsButton("Check");
             if (ImGui::Button("Check"))

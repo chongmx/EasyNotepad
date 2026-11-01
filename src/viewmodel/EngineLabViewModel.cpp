@@ -162,11 +162,79 @@ void EngineLabViewModel::download(Which which)
 {
     if (!engine_ || downloading_ >= 0)
         return;
+    if (engine_->meteredNetwork() && !allowMobileData.get()) {
+        confirm_ = int(which); // the view asks first
+        return;
+    }
+    startDownload(which, allowMobileData.get());
+}
+
+void EngineLabViewModel::confirmMobileDownload()
+{
+    if (confirm_ < 0)
+        return;
+    const Which which = Which(confirm_);
+    confirm_ = -1;
+    if (downloading_ == int(which)) // moving a download that waits for Wi-Fi: start it again
+        cancelDownload();
+    startDownload(which, true);
+}
+
+void EngineLabViewModel::importFile(Which which)
+{
+    if (!engine_ || downloading_ >= 0)
+        return;
+    const CatalogFile& file = which == Which::Model ? kModel : kDrafter;
+    const std::string dir = engine_->modelsDirectory();
+    if (dir.empty()) {
+        say("No folder to keep models in on this device.", true);
+        return;
+    }
+    const std::string path = dir + "/" + file.fileName;
+    const uint64_t free = engine_->freeSpace(path);
+    if (free && free < file.size + kSpareBytes) {
+        say("Not enough space: " + gigabytes(file.size) + " needed plus " + gigabytes(kSpareBytes) + " spare, " + gigabytes(free) + " free.", true);
+        return;
+    }
+    std::string error;
+    if (!engine_->importFile(path, &error)) {
+        say("Import failed to start: " + error, true);
+        downloadErrors_[int(which)] = "could not import: " + error;
+        return;
+    }
+    if (which == Which::Model)
+        customModelPath.set({});
+    else
+        customDrafterPath.set({});
+    mismatched_.erase(std::remove(mismatched_.begin(), mismatched_.end(), path), mismatched_.end());
+    downloadErrors_[int(which)].clear();
+    downloading_ = int(which);
+    importing_ = true;
+    lastDownload_ = {};
+    lastDownload_.state = DownloadStatus::State::Running;
+    say(std::string("Choose ") + file.fileName + " (e.g. in Downloads); it is copied into the app.");
+}
+
+void EngineLabViewModel::useMobileData()
+{
+    if (downloading_ >= 0)
+        confirm_ = downloading_;
+}
+
+bool EngineLabViewModel::waitingForWifi() const
+{
+    return downloading_ >= 0 && lastDownload_.error.find("Wi-Fi") != std::string::npos;
+}
+
+void EngineLabViewModel::startDownload(Which which, bool mobileData)
+{
+    if (!engine_ || downloading_ >= 0)
+        return;
     const CatalogFile& file = which == Which::Model ? kModel : kDrafter;
     // Always into the models folder: a custom path is the user's own file.
     const std::string dir = engine_->modelsDirectory();
     if (dir.empty()) {
-        statusMessage.emit("No folder to keep models in on this device.");
+        say("No folder to keep models in on this device.", true);
         return;
     }
     const std::string path = dir + "/" + file.fileName;
@@ -174,8 +242,9 @@ void EngineLabViewModel::download(Which which)
     const uint64_t need = file.size > have ? file.size - have : 0;
     const uint64_t free = engine_->freeSpace(path);
     if (free && free < need + kSpareBytes) {
-        statusMessage.emit("Not enough space: " + gigabytes(need) + " needed plus " + gigabytes(kSpareBytes) +
-                           " spare, " + gigabytes(free) + " free.");
+        say("Not enough space: " + gigabytes(need) + " needed plus " + gigabytes(kSpareBytes) +
+                           " spare, " + gigabytes(free) + " free.", true);
+        downloadErrors_[int(which)] = "not enough space: " + gigabytes(free) + " free";
         return;
     }
     if (which == Which::Model)
@@ -184,16 +253,28 @@ void EngineLabViewModel::download(Which which)
         customDrafterPath.set({});
     mismatched_.erase(std::remove(mismatched_.begin(), mismatched_.end(), path), mismatched_.end());
     std::string error;
-    if (!engine_->startDownload(file.url, path, allowMobileData.get(), &error)) {
-        statusMessage.emit("Download failed to start: " + error);
+    if (!engine_->startDownload(file.url, path, mobileData, &error)) {
+        say("Download failed to start: " + error, true);
+        downloadErrors_[int(which)] = "could not start: " + error;
         return;
     }
+    downloadErrors_[int(which)].clear();
     downloading_ = int(which);
+    importing_ = false;
     lastDownload_ = {};
     lastDownload_.state = DownloadStatus::State::Running;
     lastDownload_.received = have;
-    statusMessage.emit("Downloading " + std::string(file.label) + "...");
+    say("Downloading " + std::string(file.label) + "...");
 }
+
+void EngineLabViewModel::say(const std::string& text, bool error)
+{
+    notice_ = text;
+    noticeError_ = error;
+    statusMessage.emit(text);
+}
+
+const std::string& EngineLabViewModel::downloadError(Which which) const { return downloadErrors_[int(which)]; }
 
 void EngineLabViewModel::cancelDownload()
 {
@@ -201,7 +282,7 @@ void EngineLabViewModel::cancelDownload()
         return;
     engine_->cancelDownload();
     downloading_ = -1;
-    statusMessage.emit("Download stopped. Downloading again resumes it where possible.");
+    say("Download stopped. Downloading again resumes it where possible.");
 }
 
 void EngineLabViewModel::verify(Which which)
@@ -214,17 +295,19 @@ void EngineLabViewModel::verify(Which which)
     verifyFraction_ = 0;
     engine_->hashFile(
         path, [this](double fraction) { verifyFraction_ = fraction; },
-        [this, path, expected = std::string(file.sha256)](const std::string& sha) {
+        [this, which, path, expected = std::string(file.sha256)](const std::string& sha) {
             verifying_ = -1;
             verified_.erase(std::remove_if(verified_.begin(), verified_.end(), [&](const auto& v) { return v.first == path; }),
                             verified_.end());
             mismatched_.erase(std::remove(mismatched_.begin(), mismatched_.end(), path), mismatched_.end());
             if (sha == expected) {
                 verified_.emplace_back(path, sha);
-                statusMessage.emit("Checksum matches.");
+                downloadErrors_[int(which)].clear();
+                say("Checksum matches.");
             } else {
                 mismatched_.push_back(path);
-                statusMessage.emit(sha.empty() ? "The file could not be read." : "Checksum does not match: download it again.");
+                say(sha.empty() ? "The file could not be read." : "Checksum does not match: download it again.", true);
+                downloadErrors_[int(which)] = sha.empty() ? "could not be read" : "checksum does not match";
             }
             changed.emit();
         });
@@ -240,10 +323,15 @@ void EngineLabViewModel::refresh()
     const Which which = Which(downloading_);
     downloading_ = -1;
     if (lastDownload_.state == DownloadStatus::State::Done) {
-        statusMessage.emit("Downloaded; checking the checksum...");
+        say(importing_ ? "Copied; checking the checksum..." : "Downloaded; checking the checksum...");
         verify(which);
     } else if (lastDownload_.state == DownloadStatus::State::Failed) {
-        statusMessage.emit("Download failed: " + lastDownload_.error);
+        say((importing_ ? "Import failed: " : "Download failed: ") + lastDownload_.error, true);
+        downloadErrors_[int(which)] = lastDownload_.error.empty() ? std::string("failed") : lastDownload_.error;
+    } else {
+        // Stopped without finishing (cancelled, or the app was restarted meanwhile).
+        say(importing_ ? "The import stopped." : "The download stopped. Download again to resume it.", true);
+        downloadErrors_[int(which)] = "stopped before it finished";
     }
 }
 
@@ -265,11 +353,11 @@ void EngineLabViewModel::startRun(bool withDrafter, bool thenWithDrafter)
     if (!engine_ || running_)
         return;
     if (!fileUsable(Which::Model)) {
-        statusMessage.emit("Download the model first.");
+        say("Download the model first.", true);
         return;
     }
     if (withDrafter && !fileUsable(Which::Drafter)) {
-        statusMessage.emit("Download the drafter first.");
+        say("Download the drafter first.", true);
         return;
     }
     EngineRunSettings settings;
@@ -291,13 +379,13 @@ void EngineLabViewModel::startRun(bool withDrafter, bool thenWithDrafter)
                 history_.resize(100);
             changed.emit();
             if (!result.ok) {
-                statusMessage.emit("Run failed: " + result.error);
+                say("Run failed: " + result.error, true);
                 return;
             }
             char buf[96];
             std::snprintf(buf, sizeof(buf), "%.1f tokens/s generating, %.0f tokens/s reading the prompt",
                           result.generateTokensPerSecond, result.promptTokensPerSecond);
-            statusMessage.emit(buf);
+            say(buf);
             if (thenWithDrafter)
                 startRun(true, false);
         });

@@ -430,6 +430,13 @@ void NotepadViewModel::initCommands()
     set(C::GitGuide, [this]() { gitGuideRequested.emit(); });
     set(C::ShowGitHistory, [this]() { showPanelTab(PanelTab::History); });
     set(C::ShowGitStatus, [this]() { showPanelTab(PanelTab::Status); });
+    // The agent set-up card, where the local model is downloaded (open to everyone, not only developers).
+    set(C::LocalModel, [this]() {
+        if (workspace.get() == WorkspaceMode::Code)
+            showAgentPanel.set(true);
+        agent_.showSetup.set(true);
+        localModelRequested.emit();
+    });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
     set(C::EngineLab, [this]() { engineLabRequested.emit(); }, [this]() { return developerMode.get(); });

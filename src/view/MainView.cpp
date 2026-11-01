@@ -89,6 +89,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
             break;
         }
     }));
+    subscriptions_.push_back(vm_.localModelRequested.subscribe([this]() { screen_ = Screen::Agent; }));
     subscriptions_.push_back(vm_.focusPromptRequested.subscribe([this]() {
         agentPanel_.focusPrompt();
         screen_ = Screen::Agent;
@@ -496,6 +497,8 @@ void MainView::renderTopBar()
             vm_.execute(CommandId::StartTour);
         if (ImGui::MenuItem(ICON_FA_GRADUATION_CAP "  Learn Git"))
             vm_.execute(CommandId::GitGuide);
+        if (ImGui::MenuItem(ICON_FA_MICROCHIP "  Local model (offline agent)"))
+            vm_.execute(CommandId::LocalModel);
         if (vm_.developerMode.get() && ImGui::MenuItem(ICON_FA_FLASK "  Engine Lab"))
             vm_.execute(CommandId::EngineLab);
         ImGui::Separator();
@@ -796,8 +799,11 @@ void MainView::renderCompactTopBar()
         ImGui::Separator();
         if (ImGui::MenuItem(vm_.darkTheme.get() ? ICON_FA_SUN "  Light theme" : ICON_FA_MOON "  Dark theme"))
             vm_.execute(CommandId::ToggleTheme);
-        for (CommandId id : {CommandId::Preferences, CommandId::StartTour, CommandId::GitGuide, CommandId::About}) {
-            const std::string label = std::string(commandIcon(id)) + "  " + commandInfo(id).tooltip;
+        for (CommandId id : {CommandId::Preferences, CommandId::LocalModel, CommandId::StartTour, CommandId::GitGuide,
+                             CommandId::About}) {
+            const std::string label = std::string(commandIcon(id)) + "  " + (id == CommandId::LocalModel
+                                                                                ? "Local model (offline agent)"
+                                                                                : commandInfo(id).tooltip);
             if (ImGui::MenuItem(label.c_str()))
                 vm_.execute(id);
         }

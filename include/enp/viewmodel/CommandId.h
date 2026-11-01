@@ -53,6 +53,8 @@ enum class CommandId {
     EngineLab,
     // Git (appended)
     ShowGitStatus,
+    // Agent (appended)
+    LocalModel,
 
     Count
 };

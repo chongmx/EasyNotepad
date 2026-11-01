@@ -1,13 +1,15 @@
 package com.easynotepad.app;
 
-import android.app.DownloadManager;
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Insets;
+import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.view.DisplayCutout;
 import android.view.KeyEvent;
 import android.view.View;
@@ -15,6 +17,12 @@ import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -123,85 +131,221 @@ public class MainActivity extends NativeActivity {
         return c == null ? 0 : c;
     }
 
-    // ---- Large downloads (models) through the system's DownloadManager ----------------------
-    // It keeps going in the background and across app restarts; a running transfer to the same
-    // file is picked up again instead of starting a second one.
+    // ---- Large downloads (models): fetched by the app itself -----------------------------------
+    // Android's DownloadManager gave no reason when it stalled ("waiting to retry"), and Hugging
+    // Face answers with a redirect to a signed, expiring address. So the app downloads by itself:
+    // each attempt asks the original URL again (a fresh signed address), resumes from the ".part"
+    // file with an HTTP Range request, retries with growing pauses, and reports the actual error.
+    // It runs while the app is alive (for a release: a user-initiated data transfer job, see plan 23).
+    // A file the user picked in the system file picker is copied in the same way ("import").
 
-    private long downloadId = -1;
+    private static final int IDLE = 0, RUNNING = 1, RETRYING = 2, DONE = 3, FAILED = 4;
+    private static final int ATTEMPTS = 8;
+    private static final int PICK_FILE = 4711;
 
-    /** Starts (or rejoins) a download of `url` to the absolute `path`; returns false on failure. */
+    private volatile int transferState = IDLE;
+    private volatile long transferReceived, transferTotal;
+    private volatile String transferMessage = "";
+    private volatile boolean transferCancel;
+    private Thread transferThread;
+    private String importTarget; // where a picked file goes, while the picker is open
+
+    private boolean transferBusy() {
+        return transferThread != null && transferThread.isAlive();
+    }
+
+    /** Starts downloading `url` to the absolute `path` (via path + ".part"); false if one runs already. */
     public boolean startDownload(String url, String path, boolean allowMetered) {
-        try {
-            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-            Uri target = Uri.fromFile(new File(path));
-            long existing = findDownload(dm, target);
-            if (existing >= 0) {
-                downloadId = existing;
-                return true;
-            }
-            File file = new File(path);
-            file.getParentFile().mkdirs();
-            file.delete(); // DownloadManager does not resume a file it did not start
-            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url))
-                    .setDestinationUri(target)
-                    .setTitle(file.getName())
-                    .setDescription("EasyNotepad engine lab")
-                    .setAllowedOverMetered(allowMetered)
-                    .setAllowedOverRoaming(false)
-                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
-            downloadId = dm.enqueue(request);
-            return true;
-        } catch (Exception e) {
+        if (transferBusy())
             return false;
-        }
+        transferCancel = false;
+        transferState = RUNNING;
+        transferMessage = "";
+        transferReceived = 0;
+        transferTotal = 0;
+        transferThread = new Thread(() -> download(url, path), "model-download");
+        transferThread.start();
+        return true;
     }
 
-    private static long findDownload(DownloadManager dm, Uri target) {
-        DownloadManager.Query query = new DownloadManager.Query().setFilterByStatus(
-                DownloadManager.STATUS_PENDING | DownloadManager.STATUS_RUNNING | DownloadManager.STATUS_PAUSED);
-        try (Cursor c = dm.query(query)) {
-            while (c != null && c.moveToNext()) {
-                String local = c.getString(c.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI));
-                if (target.toString().equals(local))
-                    return c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_ID));
+    private void download(String url, String path) {
+        File target = new File(path);
+        File part = new File(path + ".part");
+        File parent = target.getParentFile();
+        if (parent != null)
+            parent.mkdirs();
+        for (int attempt = 1; attempt <= ATTEMPTS && !transferCancel; ++attempt) {
+            HttpURLConnection c = null;
+            try {
+                long have = part.length();
+                c = (HttpURLConnection) new URL(url).openConnection();
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(20000);
+                c.setReadTimeout(60000);
+                c.setRequestProperty("User-Agent", "EasyNotepad");
+                if (have > 0)
+                    c.setRequestProperty("Range", "bytes=" + have + "-");
+                int code = c.getResponseCode();
+                if (code == 416 && have > 0) { // nothing left: the .part is the whole file
+                    finish(part, target);
+                    return;
+                }
+                boolean append = code == 206;
+                if (code != 200 && code != 206)
+                    throw new IOException("HTTP " + code + " " + c.getResponseMessage());
+                if (!append)
+                    have = 0; // the server sent it all again
+                long length = c.getContentLengthLong();
+                transferTotal = length > 0 ? have + length : 0;
+                transferReceived = have;
+                transferState = RUNNING;
+                transferMessage = "";
+                try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(part, append)) {
+                    byte[] buffer = new byte[1 << 20];
+                    for (int n; (n = in.read(buffer)) > 0;) {
+                        if (transferCancel)
+                            throw new IOException("stopped");
+                        out.write(buffer, 0, n);
+                        transferReceived += n;
+                    }
+                }
+                if (transferTotal > 0 && part.length() < transferTotal)
+                    throw new IOException("the connection closed early");
+                finish(part, target);
+                return;
+            } catch (Exception e) {
+                if (transferCancel) {
+                    transferState = IDLE;
+                    return;
+                }
+                String why = e.getClass().getSimpleName() + (e.getMessage() != null ? ": " + e.getMessage() : "");
+                if (attempt == ATTEMPTS) {
+                    transferMessage = why;
+                    transferState = FAILED;
+                    return;
+                }
+                int pause = Math.min(60, 2 << attempt); // 4, 8, 16, 32, 60 ... seconds
+                transferMessage = "retrying in " + pause + " s (" + attempt + "/" + ATTEMPTS + "): " + why;
+                transferState = RETRYING;
+                try {
+                    Thread.sleep(pause * 1000L);
+                } catch (InterruptedException ignored) {
+                    transferState = IDLE;
+                    return;
+                }
+            } finally {
+                if (c != null)
+                    c.disconnect();
             }
         }
-        return -1;
+        if (transferCancel)
+            transferState = IDLE;
     }
 
-    /**
-     * {state, received bytes, total bytes, reason}: state 0 none, 1 running (2 when paused, e.g.
-     * waiting for Wi-Fi), 3 done, 4 failed. The reason is DownloadManager's code.
-     */
-    public long[] downloadStatus() {
-        long[] result = {0, 0, 0, 0};
-        if (downloadId < 0)
-            return result;
-        DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-        try (Cursor c = dm.query(new DownloadManager.Query().setFilterById(downloadId))) {
-            if (c == null || !c.moveToFirst())
-                return result;
-            int status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
-            result[1] = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
-            result[2] = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
-            result[3] = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON));
-            switch (status) {
-                case DownloadManager.STATUS_PAUSED: result[0] = 2; break;
-                case DownloadManager.STATUS_SUCCESSFUL: result[0] = 3; break;
-                case DownloadManager.STATUS_FAILED: result[0] = 4; break;
-                default: result[0] = 1; break;
+    private void finish(File part, File target) throws IOException {
+        target.delete();
+        if (!part.renameTo(target))
+            throw new IOException("could not rename " + part.getName());
+        transferReceived = target.length();
+        transferTotal = transferReceived;
+        transferState = DONE;
+    }
+
+    /** Opens the system file picker; the chosen file is copied to `path` (progress as a download). */
+    public boolean importFile(String path) {
+        if (transferBusy())
+            return false;
+        importTarget = path;
+        runOnUiThread(() -> {
+            Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            pick.addCategory(Intent.CATEGORY_OPENABLE);
+            pick.setType("*/*");
+            try {
+                startActivityForResult(pick, PICK_FILE);
+            } catch (Exception e) {
+                transferMessage = "no file picker: " + e.getMessage();
+                transferState = FAILED;
             }
-        } catch (Exception e) {
-            // keep the zeros
-        }
-        return result;
+        });
+        transferCancel = false;
+        transferMessage = "choose the file";
+        transferReceived = 0;
+        transferTotal = 0;
+        transferState = RUNNING;
+        return true;
     }
 
-    public void cancelDownload() {
-        if (downloadId < 0)
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_FILE)
             return;
-        DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-        dm.remove(downloadId);
-        downloadId = -1;
+        final Uri uri = data != null && resultCode == RESULT_OK ? data.getData() : null;
+        final String path = importTarget;
+        if (uri == null || path == null) {
+            transferMessage = "no file chosen";
+            transferState = FAILED;
+            return;
+        }
+        transferThread = new Thread(() -> copyIn(uri, path), "model-import");
+        transferThread.start();
+    }
+
+    private void copyIn(Uri uri, String path) {
+        File target = new File(path);
+        File part = new File(path + ".part");
+        File parent = target.getParentFile();
+        if (parent != null)
+            parent.mkdirs();
+        transferMessage = "";
+        try (Cursor c = getContentResolver().query(uri, new String[] {OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0))
+                transferTotal = c.getLong(0);
+        } catch (Exception ignored) {
+        }
+        try (InputStream in = getContentResolver().openInputStream(uri); OutputStream out = new FileOutputStream(part, false)) {
+            if (in == null)
+                throw new IOException("the file could not be opened");
+            byte[] buffer = new byte[1 << 20];
+            for (int n; (n = in.read(buffer)) > 0;) {
+                if (transferCancel)
+                    throw new IOException("stopped");
+                out.write(buffer, 0, n);
+                transferReceived += n;
+            }
+            out.close();
+            finish(part, target);
+        } catch (Exception e) {
+            part.delete();
+            if (transferCancel) {
+                transferState = IDLE;
+                return;
+            }
+            transferMessage = e.getClass().getSimpleName() + (e.getMessage() != null ? ": " + e.getMessage() : "");
+            transferState = FAILED;
+        }
+    }
+
+    /** {state, received bytes, total bytes, 0}: state 0 none, 1 running, 2 retrying, 3 done, 4 failed. */
+    public long[] downloadStatus() {
+        return new long[] {transferState, transferReceived, transferTotal, 0};
+    }
+
+    /** The current retry note, or why it failed. */
+    public String getLastDownloadError() {
+        return transferMessage;
+    }
+
+    /** True on a metered network (mobile data, a hotspot): the app asks before a large download. */
+    public boolean isMeteredNetwork() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        return cm != null && cm.isActiveNetworkMetered();
+    }
+
+    /** Stops the transfer; a download's ".part" stays, so the next one resumes. */
+    public void cancelDownload() {
+        transferCancel = true;
+        if (transferThread != null)
+            transferThread.interrupt();
     }
 }

@@ -30,6 +30,7 @@ private:
     void openLink(const std::string& url); // a web link in the browser, a file path in the editor
     // Install / log in / settings for the agent: shown when it is missing or not logged in, or on request.
     void renderSetup(float width);
+    void renderLocalSetup(float inner);
 
     viewmodel::NotepadViewModel& vm_;
     const Fonts& fonts_;

@@ -4,6 +4,7 @@
 #include "enp/model/Diff.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace enp::model {
@@ -13,6 +14,13 @@ enum class ChatRole { User, Agent, Tool };
 struct ChatMessage {
     ChatRole role = ChatRole::User;
     std::string text;
+    std::string by; // an answer: "Local" or "Claude" (empty: sample data or unknown)
+
+    ChatMessage() = default;
+    ChatMessage(ChatRole r, std::string t, std::string answeredBy = {})
+        : role(r), text(std::move(t)), by(std::move(answeredBy))
+    {
+    }
 };
 
 enum class TaskState { Pending, Running, Done };
