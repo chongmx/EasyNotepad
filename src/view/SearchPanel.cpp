@@ -26,8 +26,10 @@ void SearchPanel::render()
     ImGui::SetItemTooltip("Replace in files");
     ImGui::SameLine();
     const float optionsW = 3.0f * (ImGui::GetFrameHeight() + 4.0f * s_);
-    const float includeW = 170.0f * s_;
-    ImGui::SetNextItemWidth(std::max(120.0f * s_, ImGui::GetContentRegionAvail().x - optionsW - includeW - 16.0f * s_));
+    // Narrow (a phone): the file filter gets a line of its own under the query.
+    const bool narrow = ImGui::GetContentRegionAvail().x < 520.0f * s_;
+    const float includeW = narrow ? 0.0f : 170.0f * s_;
+    ImGui::SetNextItemWidth(std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - optionsW - includeW - 16.0f * s_));
     if (focusQuery_) {
         ImGui::SetKeyboardFocusHere();
         focusQuery_ = false;
@@ -49,7 +51,12 @@ void SearchPanel::render()
     toggle("Aa", "Match case", find.options.matchCase, "search:match-case");
     toggle("ab", "Whole word", find.options.wholeWord, "search:whole-word");
     toggle(".*", "Regular expression", find.options.regex, "search:regex");
-    ImGui::SameLine(0.0f, 8.0f * s_);
+    if (narrow) {
+        ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0.0f));
+        ImGui::SameLine();
+    } else {
+        ImGui::SameLine(0.0f, 8.0f * s_);
+    }
     ImGui::SetNextItemWidth(-1.0f);
     run = ImGui::InputTextWithHint("##include", "Files: *.cpp;*.h", &find.include, ImGuiInputTextFlags_EnterReturnsTrue) || run;
     registerLastItem("search:include", "textbox", "Files to include", nullptr);
@@ -85,6 +92,7 @@ void SearchPanel::render()
         find.search();
 
     // Summary.
+    ImGui::PushTextWrapPos(0.0f);
     if (!find.error.get().empty())
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityError), "%s", find.error.get().c_str());
     else if (find.running.get())
@@ -94,6 +102,7 @@ void SearchPanel::render()
                             find.truncated() ? " (stopped: too many)" : "", find.filesSearched());
     else
         ImGui::TextDisabled("Searches every file of the workspace (open files in their current text).");
+    ImGui::PopTextWrapPos();
 
     // Results: file -> lines, the match highlighted.
     ImGui::BeginChild("##results", ImVec2(0.0f, 0.0f));

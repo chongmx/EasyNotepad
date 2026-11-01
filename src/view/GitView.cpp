@@ -1,5 +1,7 @@
 #include "enp/view/GitView.h"
 
+#include "enp/view/Fit.h"
+
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
 
@@ -158,7 +160,8 @@ void GitView::renderConfirm()
         ImGui::OpenPopup("Please confirm##gitConfirm");
         openConfirm_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(440.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(440.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Please confirm##gitConfirm", nullptr, ImGuiWindowFlags_NoResize))
         return;
     ImGui::PushFont(nullptr, Fonts::kUiSize * 1.1f);
@@ -193,7 +196,8 @@ void GitView::renderInput()
         ImGui::OpenPopup("##gitInput");
         openInput_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(420.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(420.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("##gitInput", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar))
         return;
     ImGui::TextUnformatted(input_.title.c_str());
@@ -230,7 +234,8 @@ void GitView::renderProblem()
         return;
     if (!ImGui::IsPopupOpen("##gitProblem"))
         ImGui::OpenPopup("##gitProblem");
-    ImGui::SetNextWindowSize(ImVec2(470.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(470.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("##gitProblem", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar))
         return;
     std::string title, text, primary;
@@ -993,7 +998,8 @@ void GitView::renderStashDialog()
             stashSelectedOnly_ = false;
         openStash_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(440.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(440.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Stash changes", nullptr, ImGuiWindowFlags_NoResize))
         return;
     ImGui::TextWrapped("A stash puts changes aside and gives you clean files. Pop it later to bring them back.");
@@ -1074,7 +1080,8 @@ void GitView::renderRemotesDialog()
         newRemoteUrl_.clear();
         openRemotes_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(620.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(620.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Remotes##gitRemotes", nullptr, ImGuiWindowFlags_NoResize))
         return;
     ImGui::TextWrapped("A remote is a copy of this repository on a server (GitHub, GitLab, your company's server). "
@@ -1151,7 +1158,8 @@ void GitView::renderCloneDialog()
         }
         openClone_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(560.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(560.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Clone a repository##gitClone", nullptr, ImGuiWindowFlags_NoResize))
         return;
     ImGui::TextWrapped("Cloning copies a repository from a server to a new folder on this computer, with its whole history, "
@@ -1211,7 +1219,8 @@ void GitView::renderPopups()
         ImGui::OpenPopup("Git output##gitOutput");
         showOutput_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(620.0f * s_, 360.0f * s_), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(620.0f * s_, 360.0f * s_)), ImGuiCond_Appearing);
+    fit::constrainNextWindow();
     if (ImGui::BeginPopupModal("Git output##gitOutput", nullptr)) {
         ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * 0.9f);
         ImGui::BeginChild("##text", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_Borders);
@@ -1277,7 +1286,7 @@ void GitView::renderBranchPicker()
         openPicker_ = false;
     }
     ImGui::SetNextWindowPos(pickerAnchor_, ImGuiCond_Appearing, ImVec2(0.0f, pickerAbove_ ? 1.0f : 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(460.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(460.0f * s_, 0.0f)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * s_, 10.0f * s_));
     if (!ImGui::BeginPopup("##branchPicker")) {
         ImGui::PopStyleVar();
@@ -1437,7 +1446,8 @@ void GitView::renderCleanupDialog()
         cleanupChecks_.assign(candidates.size(), 1);
         openCleanup_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(460.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(460.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Clean up branches", nullptr, ImGuiWindowFlags_NoResize))
         return;
     cleanupChecks_.resize(candidates.size(), 1);
@@ -1511,9 +1521,11 @@ void GitView::renderHistory()
     ImGui::PushID("gitHistory");
     git().setVisible(true);
     if (!repository()) {
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled(vm_.noFolder()     ? "No folder open: open one to see its history."
                             : git().available() ? "This folder is not a git repository: the Git tab in the Explorer can create one."
                                                 : "Git was not found: install it, or set EASYNOTEPAD_GIT to its path.");
+        ImGui::PopTextWrapPos();
         ImGui::PopID();
         return;
     }
@@ -1529,12 +1541,12 @@ void GitView::renderHistory()
     ImGui::SameLine(0.0f, 2.0f * s_);
     modeButton(ICON_FA_CODE_COMPARE "  Compare", 1, "git:history-compare");
     if (demo()) {
-        ImGui::SameLine(0.0f, 10.0f * s_);
+        fit::sameLineIfFits(ImGui::CalcTextSize(ICON_FA_FLASK " Demo data").x, 10.0f * s_);
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(col(guideOpen_ ? palette_.iconPurple : palette_.iconOrange), ICON_FA_FLASK " Demo data");
         ImGui::SetItemTooltip("Made-up commits, so you can try everything safely");
     }
-    ImGui::SameLine(0.0f, 12.0f * s_);
+    fit::sameLineIfFits(150.0f * s_, 12.0f * s_);
     if (historyMode_ == 0)
         renderLog();
     else
@@ -1546,29 +1558,36 @@ void GitView::renderLog()
 {
     if (!repo().logLoaded)
         git().loadLog(historyBranch_ == 1, historyPath_);
-    ImGui::SetNextItemWidth(170.0f * s_);
+    ImGui::SetNextItemWidth(fit::itemWidth(170.0f * s_, 120.0f * s_));
     const std::string current = ICON_FA_CODE_BRANCH "  " + branch();
     const char* choices[] = {current.c_str(), ICON_FA_CODE_BRANCH "  All branches"};
     if (ImGui::Combo("##branch", &historyBranch_, choices, 2))
         git().loadLog(historyBranch_ == 1, historyPath_);
-    ImGui::SameLine();
     if (!historyPath_.empty()) {
-        if (ImGui::Button((ICON_FA_FILE "  " + fileName(historyPath_) + "  " ICON_FA_XMARK).c_str())) {
+        const std::string pathLabel = ICON_FA_FILE "  " + fileName(historyPath_) + "  " ICON_FA_XMARK;
+        fit::sameLineIfFitsButton(pathLabel.c_str());
+        if (ImGui::Button(pathLabel.c_str())) {
             historyPath_.clear();
             git().loadLog(historyBranch_ == 1, historyPath_);
         }
         ImGui::SetItemTooltip("History of %s only: click to show every file", historyPath_.c_str());
-        ImGui::SameLine();
     }
-    ImGui::SetNextItemWidth(260.0f * s_);
+    fit::sameLineIfFits(140.0f * s_);
+    ImGui::SetNextItemWidth(fit::itemWidth(260.0f * s_, 140.0f * s_));
     ImGui::InputTextWithHint("##filter", ICON_FA_MAGNIFYING_GLASS "  Message, author or hash", &historyFilter_);
     registerLastItem("git:history-filter", "textbox", "Filter history", nullptr);
-    ImGui::SameLine();
     const std::vector<Commit>& commits = repo().log;
-    ImGui::TextColored(col(palette_.textFaint), "%d commits", int(commits.size()));
+    const std::string count = std::to_string(commits.size()) + " commits";
+    fit::sameLineIfFits(ImGui::CalcTextSize(count.c_str()).x);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(col(palette_.textFaint), "%s", count.c_str());
 
-    const float detailsW = std::min(460.0f * s_, ImGui::GetContentRegionAvail().x * 0.42f);
-    ImGui::BeginChild("##commits", ImVec2(ImGui::GetContentRegionAvail().x - detailsW - 8.0f * s_, 0.0f));
+    // Wide: the details beside the list. Narrow (a phone): below it, the full width.
+    const ImVec2 room = ImGui::GetContentRegionAvail();
+    const bool stacked = room.x < 640.0f * s_;
+    const float detailsW = stacked ? 0.0f : std::min(460.0f * s_, room.x * 0.42f);
+    const ImVec2 listSize = stacked ? ImVec2(0.0f, std::max(150.0f * s_, room.y * 0.5f)) : ImVec2(room.x - detailsW - 8.0f * s_, 0.0f);
+    ImGui::BeginChild("##commits", listSize);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rowH = ImGui::GetTextLineHeightWithSpacing() + 4.0f * s_;
     const float laneW = 14.0f * s_;
@@ -1607,8 +1626,22 @@ void GitView::renderLog()
         centers.push_back(start.y + rowH * 0.5f);
         shown.push_back(i);
         float x = start.x + (filtered ? 4.0f * s_ : graphW);
+        // Columns from the right, dropped by priority when the row is narrow: the author first, then
+        // the hash; the time stays longest. The message (with its ref badges) gets the rest.
+        const float right = ImGui::GetItemRectMax().x - 4.0f * s_;
+        const float hashW = 70.0f * s_, whenW = 100.0f * s_, authorW = 120.0f * s_, messageMin = 140.0f * s_;
+        const float room = right - x;
+        const bool showWhen = room - whenW >= messageMin * 0.7f;
+        const bool showHash = showWhen && room - whenW - hashW >= messageMin;
+        const bool showAuthor = showHash && room - whenW - hashW - authorW >= messageMin + 60.0f * s_;
+        const float hashX = showHash ? right - hashW + 8.0f * s_ : right;
+        const float whenX = showWhen ? (showHash ? right - hashW : right) - whenW + 8.0f * s_ : right;
+        const float authorX = showAuthor ? whenX - authorW : whenX;
+        const float messageEnd = (showAuthor ? authorX : showWhen ? whenX : hashX) - 10.0f * s_;
         // Ref badges, then the message.
-        for (std::string ref : splitRefs(c.refs)) {
+        const std::vector<std::string> refs = splitRefs(c.refs);
+        for (size_t r = 0; r < refs.size(); ++r) {
+            std::string ref = refs[r];
             const bool tag = ref.rfind("tag: ", 0) == 0;
             if (tag)
                 ref = ref.substr(5);
@@ -1618,28 +1651,34 @@ void GitView::renderLog()
                                              [&](const Branch& b) { return b.kind == RefKind::Local && b.name == ref; });
             const ImU32 tint = head ? palette_.accent : tag ? palette_.iconOrange : remote ? palette_.iconTeal : palette_.iconPurple;
             const std::string text = std::string(tag ? ICON_FA_TAG " " : remote ? ICON_FA_CLOUD " " : "") + ref;
+            // Badges leave the message some room; the last one that fits is cut short, the rest are counted.
+            const float badgeEnd = messageEnd - 60.0f * s_;
             ImGui::PushFont(nullptr, Fonts::kUiSize * 0.8f);
             const ImVec2 size = ImGui::CalcTextSize(text.c_str());
             const float y = start.y + (rowH - size.y) * 0.5f;
-            dl->AddRectFilled(ImVec2(x, y - 1.0f * s_), ImVec2(x + size.x + 10.0f * s_, y + size.y + 1.0f * s_), withAlpha(tint, 45), 3.0f * s_);
-            dl->AddText(ImVec2(x + 5.0f * s_, y), tint, text.c_str());
+            if (x + 40.0f * s_ > badgeEnd) {
+                const std::string more = "+" + std::to_string(refs.size() - r);
+                dl->AddText(ImVec2(x, y), palette_.textFaint, more.c_str());
+                x += ImGui::CalcTextSize(more.c_str()).x + 8.0f * s_;
+                ImGui::PopFont();
+                break;
+            }
+            const float w = std::min(size.x + 10.0f * s_, badgeEnd - x);
+            dl->AddRectFilled(ImVec2(x, y - 1.0f * s_), ImVec2(x + w, y + size.y + 1.0f * s_), withAlpha(tint, 45), 3.0f * s_);
+            fit::text(dl, ImVec2(x + 5.0f * s_, y), x + w - 4.0f * s_, tint, text);
             ImGui::PopFont();
-            x += size.x + 16.0f * s_;
+            x += w + 6.0f * s_;
         }
-        dl->AddText(ImVec2(x, textY), palette_.text, c.message.c_str());
-        const float right = ImGui::GetItemRectMax().x;
-        const float hashX = right - 70.0f * s_;
-        const float whenX = hashX - 100.0f * s_;
-        const float authorX = whenX - 120.0f * s_;
-        if (selectedCommit_ != i)
-            dl->AddRectFilled(ImVec2(authorX - 20.0f * s_, start.y), ImVec2(right, start.y + rowH), palette_.panelBg);
-        dl->PushClipRect(ImVec2(authorX, start.y), ImVec2(whenX - 8.0f * s_, start.y + rowH), true);
-        dl->AddText(ImVec2(authorX, textY), palette_.textDim, c.author.c_str());
-        dl->PopClipRect();
-        dl->AddText(ImVec2(whenX, textY), palette_.textFaint, c.when.c_str());
-        ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * 0.9f);
-        dl->AddText(ImVec2(hashX, textY), palette_.textFaint, c.shortHash.c_str());
-        ImGui::PopFont();
+        fit::text(dl, ImVec2(x, textY), messageEnd, palette_.text, c.message);
+        if (showAuthor)
+            fit::text(dl, ImVec2(authorX, textY), whenX - 10.0f * s_, palette_.textDim, c.author);
+        if (showWhen)
+            fit::text(dl, ImVec2(whenX, textY), hashX - 8.0f * s_, palette_.textFaint, c.when);
+        if (showHash) {
+            ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * 0.9f);
+            dl->AddText(ImVec2(hashX, textY), palette_.textFaint, c.shortHash.c_str());
+            ImGui::PopFont();
+        }
         ImGui::PopID();
     }
     // Graph: lane lines between rows, then the commit dots over them (not while filtering: the
@@ -1669,7 +1708,8 @@ void GitView::renderLog()
     }
     ImGui::EndChild();
 
-    ImGui::SameLine(0.0f, 8.0f * s_);
+    if (!stacked)
+        ImGui::SameLine(0.0f, 8.0f * s_);
     ImGui::BeginChild("##details", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
     if (selectedCommit_ >= 0 && selectedCommit_ < int(commits.size())) {
         git().loadCommitFiles(selectedCommit_);
@@ -1684,22 +1724,23 @@ void GitView::renderCommitDetails(const Commit& c)
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * 0.9f);
     ImGui::TextColored(col(palette_.textFaint), "%s", c.shortHash.c_str());
     ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::TextColored(col(palette_.textDim), "%s  ·  %s", c.author.c_str(), c.when.c_str());
+    const std::string byline = c.author + "  ·  " + c.when;
+    fit::sameLineIfFits(ImGui::CalcTextSize(byline.c_str()).x);
+    ImGui::TextColored(col(palette_.textDim), "%s", byline.c_str());
     ImGui::Spacing();
     if (ImGui::SmallButton(ICON_FA_RIGHT_LEFT "  Checkout"))
         confirm("Check out " + c.shortHash + "?", "You will look at the files as they were at this commit, outside any branch "
                                                   "(\"detached\"). Switch back to a branch to keep working.",
                 "Check out", [this, hash = c.hash]() { git().checkoutDetached(hash); }, false);
-    ImGui::SameLine();
+    fit::sameLineIfFitsButton(ICON_FA_CODE_PULL_REQUEST "  Cherry-pick", true);
     if (ImGui::SmallButton(ICON_FA_CODE_PULL_REQUEST "  Cherry-pick"))
         git().cherryPick({c.hash});
     ImGui::SetItemTooltip("Copy this commit onto %s", branch().c_str());
-    ImGui::SameLine();
+    fit::sameLineIfFitsButton(ICON_FA_ROTATE_LEFT "  Revert", true);
     if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT "  Revert"))
         git().revert(c.hash);
     ImGui::SetItemTooltip("Undo this commit with a new commit (safe even after pushing)");
-    ImGui::SameLine();
+    fit::sameLineIfFitsButton(ICON_FA_ELLIPSIS "##more", true);
     if (ImGui::SmallButton(ICON_FA_ELLIPSIS "##more"))
         ImGui::OpenPopup("##commitMenu");
     if (ImGui::BeginPopup("##commitMenu")) {
@@ -1707,8 +1748,10 @@ void GitView::renderCommitDetails(const Commit& c)
         ImGui::EndPopup();
     }
     ImGui::Separator();
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(col(palette_.textFaint), "%s  ·  right-click a file for more",
                        plural(int(c.files.size()), "changed file", "changed files").c_str());
+    ImGui::PopTextWrapPos();
     for (const FileChange& f : c.files)
         fileRow(f, c.hash, Source::Commit);
 }
@@ -1756,7 +1799,7 @@ void GitView::renderCompare()
     compareBase_ = std::clamp(compareBase_, 0, int(list.size()) - 1);
     compareTarget_ = std::clamp(compareTarget_, 0, int(list.size()) - 1);
     auto refCombo = [&](const char* id, int& value) {
-        ImGui::SetNextItemWidth(190.0f * s_);
+        ImGui::SetNextItemWidth(fit::itemWidth(190.0f * s_, 120.0f * s_));
         if (ImGui::BeginCombo(id, list[size_t(value)].c_str(), ImGuiComboFlags_HeightLarge)) {
             for (int i = 0; i < int(list.size()); ++i)
                 if (ImGui::Selectable(list[size_t(i)].c_str(), i == value))
@@ -1768,11 +1811,12 @@ void GitView::renderCompare()
     ImGui::TextColored(col(palette_.textDim), "Into");
     ImGui::SameLine();
     refCombo("##base", compareBase_);
-    ImGui::SameLine();
+    fit::sameLineIfFitsButton(ICON_FA_RIGHT_LEFT "##swap");
     if (ImGui::Button(ICON_FA_RIGHT_LEFT "##swap"))
         std::swap(compareBase_, compareTarget_);
     ImGui::SetItemTooltip("Swap");
-    ImGui::SameLine();
+    fit::sameLineIfFits(ImGui::CalcTextSize("take from").x + 130.0f * s_);
+    ImGui::AlignTextToFramePadding();
     ImGui::TextColored(col(palette_.textDim), "take from");
     ImGui::SameLine();
     refCombo("##target", compareTarget_);
@@ -1793,16 +1837,28 @@ void GitView::renderCompare()
     }
     const bool intoCurrent = compareBase_ == 0; // refNames() lists the current branch first
 
-    const float half = (ImGui::GetContentRegionAvail().x - 8.0f * s_) * 0.5f;
+    // A heading with controls at its right; on a narrow pane the controls go under it.
+    auto controlsAtRight = [&](float width) {
+        const float headingEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + ImGui::GetScrollX();
+        if (headingEnd + 12.0f * s_ + width <= contentMaxX())
+            ImGui::SameLine(contentMaxX() - width);
+    };
+    // Wide: commits and files side by side. Narrow (a phone): one above the other.
+    const ImVec2 room = ImGui::GetContentRegionAvail();
+    const bool stacked = room.x < 640.0f * s_;
+    const ImVec2 commitsSize = stacked ? ImVec2(0.0f, std::max(140.0f * s_, (room.y - 8.0f * s_) * 0.5f))
+                                       : ImVec2((room.x - 8.0f * s_) * 0.5f, 0.0f);
     // Commits on the target that the base lacks.
-    ImGui::BeginChild("##compareCommits", ImVec2(half, 0.0f), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##compareCommits", commitsSize, ImGuiChildFlags_Borders);
     int commitsPicked = 0;
     for (int v : pickCommits_)
         commitsPicked += v;
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(col(palette_.textFaint), "%s on %s, not on %s", plural(int(commits.size()), "COMMIT", "COMMITS").c_str(),
                        target.c_str(), base.c_str());
+    ImGui::PopTextWrapPos();
     const std::string pickLabel = ICON_FA_CODE_PULL_REQUEST "  Cherry-pick " + std::to_string(commitsPicked);
-    ImGui::SameLine(contentMaxX() - smallButtonWidth(pickLabel));
+    controlsAtRight(smallButtonWidth(pickLabel));
     ImGui::BeginDisabled(commitsPicked == 0 || !intoCurrent || git().busy());
     if (ImGui::SmallButton(pickLabel.c_str())) {
         std::vector<std::string> hashes;
@@ -1830,9 +1886,16 @@ void GitView::renderCompare()
         ImGui::TextColored(col(palette_.textFaint), "%s", c.shortHash.c_str());
         ImGui::PopFont();
         ImGui::SameLine();
-        ImGui::TextUnformatted(c.message.c_str());
-        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), contentMaxX() - 90.0f * s_));
-        ImGui::TextColored(col(palette_.textFaint), "%s", c.when.c_str());
+        // The message is cut short before the time; a narrow pane leaves the time out.
+        const float rowRight = ImGui::GetWindowPos().x - ImGui::GetScrollX() + contentMaxX();
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const bool showWhen = rowRight - at.x > 220.0f * s_;
+        const float whenX = rowRight - 90.0f * s_;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        fit::text(dl, at, (showWhen ? whenX : rowRight) - 8.0f * s_, palette_.text, c.message);
+        if (showWhen)
+            fit::text(dl, ImVec2(whenX, at.y), rowRight, palette_.textFaint, c.when);
+        ImGui::Dummy(ImVec2(std::max(1.0f, rowRight - at.x), ImGui::GetTextLineHeight()));
         ImGui::PopID();
     }
     if (commits.empty())
@@ -1840,7 +1903,8 @@ void GitView::renderCompare()
     ImGui::EndChild();
 
     // Files that differ; take the checked ones into the working tree.
-    ImGui::SameLine(0.0f, 8.0f * s_);
+    if (!stacked)
+        ImGui::SameLine(0.0f, 8.0f * s_);
     ImGui::BeginChild("##compareFiles", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
     int filesPicked = 0;
     for (int v : pickFiles_)
@@ -1848,7 +1912,7 @@ void GitView::renderCompare()
     ImGui::TextColored(col(palette_.textFaint), "%s THAT DIFFER", plural(int(files.size()), "FILE", "FILES").c_str());
     const std::string takeLabel = ICON_FA_FILE_ARROW_DOWN "  Take " + plural(filesPicked, "file", "files");
     const float stageW = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("Stage").x;
-    ImGui::SameLine(contentMaxX() - smallButtonWidth(takeLabel) - stageW - ImGui::GetStyle().ItemSpacing.x);
+    controlsAtRight(smallButtonWidth(takeLabel) + stageW + ImGui::GetStyle().ItemSpacing.x);
     ImGui::Checkbox("Stage", &stageTaken_);
     ImGui::SetItemTooltip("Stage the files after taking them");
     ImGui::SameLine();
@@ -2445,7 +2509,7 @@ void GitView::renderGuide()
     }
     // Fits its content, but never taller than the app window (it scrolls instead): a window that
     // pokes out of the main viewport would become a separate OS window.
-    ImGui::SetNextWindowSize(ImVec2(470.0f * s_, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(470.0f * s_, 0.0f)), ImGuiCond_Always);
     ImGui::SetNextWindowViewport(vp->ID);
     bool open = true;
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |

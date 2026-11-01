@@ -1,4 +1,5 @@
 #include "enp/view/MainView.h"
+#include "enp/view/Fit.h"
 
 #include "enp/view/PanelFrame.h"
 
@@ -235,6 +236,8 @@ void MainView::render()
     ImGui::End();
     UiAutomation::instance().endFrame();
     agentCursor_.render(); // on top of everything, using this frame's element positions
+    if (layout_ != Layout::Desktop)
+        keepWindowsOnScreen();
 }
 
 // ---- Input --------------------------------------------------------------------------------------
@@ -704,6 +707,31 @@ float MainView::renderDocumentTabs(float x0, float x1, float y, float height)
 
 // ---- Phone layouts ------------------------------------------------------------------------------
 
+void MainView::keepWindowsOnScreen()
+{
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float margin = 6.0f * s_;
+    const ImVec2 min(viewport->WorkPos.x + safeArea_.x + margin, viewport->WorkPos.y + safeArea_.y + margin);
+    const ImVec2 max(viewport->WorkPos.x + viewport->WorkSize.x - safeArea_.z - margin,
+                     viewport->WorkPos.y + viewport->WorkSize.y - safeArea_.w - margin);
+    const ImVec2 room(std::max(1.0f, max.x - min.x), std::max(1.0f, max.y - min.y));
+    for (ImGuiWindow* w : GImGui->Windows) {
+        // Root floating windows only: not the app itself, not children, not tooltips (ImGui keeps
+        // those on screen itself).
+        if (!w->Active || (w->Flags & (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_Tooltip)) || std::strcmp(w->Name, "##main") == 0)
+            continue;
+        ImVec2 size = w->Size;
+        if (!(w->Flags & ImGuiWindowFlags_AlwaysAutoResize) && (size.x > room.x || size.y > room.y)) {
+            size = ImVec2(std::min(size.x, room.x), std::min(size.y, room.y));
+            ImGui::SetWindowSize(w, size, ImGuiCond_Always); // from the next frame
+        }
+        const ImVec2 pos(std::clamp(w->Pos.x, min.x, std::max(min.x, max.x - size.x)),
+                         std::clamp(w->Pos.y, min.y, std::max(min.y, max.y - size.y)));
+        if (pos.x != w->Pos.x || pos.y != w->Pos.y)
+            ImGui::SetWindowPos(w, pos, ImGuiCond_Always);
+    }
+}
+
 MainView::Layout MainView::chooseLayout(float widthDp, float heightDp)
 {
     if (widthDp < 600.0f) // a phone, or a narrow window
@@ -948,7 +976,7 @@ void MainView::renderTerminalWindow()
     ImGui::SetNextWindowClass(&windowClass);
     const ImGuiViewport* main = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(main->Pos.x + main->Size.x * 0.2f, main->Pos.y + main->Size.y * 0.25f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(main->Size.x * 0.6f, main->Size.y * 0.5f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(main->Size.x * 0.6f, main->Size.y * 0.5f)), ImGuiCond_FirstUseEver);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, col(palette_.panelBg));
     bool open = true;
@@ -973,6 +1001,7 @@ void MainView::renderHashResult()
     if (!vm_.hashResult.get().empty() && !ImGui::IsPopupOpen("SHA-256"))
         ImGui::OpenPopup("SHA-256");
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("SHA-256", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     if (vm_.hashResult.get().empty()) {
@@ -1008,7 +1037,7 @@ void MainView::renderLanguagePicker()
     }
     const ImGuiViewport* main = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(main->Pos.x + main->Size.x * 0.5f, main->Pos.y + 120.0f * s_), ImGuiCond_Appearing, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(320.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(320.0f * s_, 0.0f)));
     if (!ImGui::BeginPopup("##languagePicker"))
         return;
     model::Document* doc = vm_.activeDocument();
@@ -1071,6 +1100,7 @@ void MainView::renderSaveChangesPrompt()
     if (index >= 0 && !ImGui::IsPopupOpen("Save changes?"))
         ImGui::OpenPopup("Save changes?");
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Save changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     if (index < 0) {
@@ -1112,6 +1142,7 @@ void MainView::renderCloseFolderPrompt()
     if (pending && !ImGui::IsPopupOpen("Close the folder?"))
         ImGui::OpenPopup("Close the folder?");
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Close the folder?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     if (!pending) {
@@ -1158,6 +1189,7 @@ void MainView::renderQuitPrompt()
     if (pending && !ImGui::IsPopupOpen("Quit EasyNotepad?"))
         ImGui::OpenPopup("Quit EasyNotepad?");
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Quit EasyNotepad?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     if (!pending) {
@@ -2134,7 +2166,8 @@ void MainView::renderExplorerPrompt()
         ImGui::OpenPopup("##explorerPrompt");
         openExplorerPrompt_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(420.0f * s_, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(420.0f * s_, 0.0f)));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("##explorerPrompt", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar))
         return;
     ExplorerPrompt& p = explorerPrompt_;
@@ -2363,6 +2396,7 @@ void MainView::renderGoToLinePopup()
         openGoToLine_ = false;
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Go To Line", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     const model::Document* doc = vm_.activeDocument();
@@ -2392,6 +2426,7 @@ void MainView::renderCommentPopup()
         commentDraft_.clear();
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Add Review Comment", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     const model::Document* doc = vm_.activeDocument();
@@ -2423,6 +2458,7 @@ void MainView::renderPreferencesPopup()
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     bool open = true;
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Preferences", &open, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     if (registerWindowClose("dialog:preferences:close", "Close Preferences"))
@@ -2539,8 +2575,9 @@ void MainView::renderSyntaxColorsPopup()
                     syntaxColorsLanguage_ = int(i);
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(820.0f * s_, 560.0f * s_), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(820.0f * s_, 560.0f * s_)), ImGuiCond_Appearing);
     bool open = true;
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Syntax Colours", &open))
         return;
     if (registerWindowClose("dialog:syntax-colours:close", "Close Syntax Colours"))
@@ -2553,7 +2590,8 @@ void MainView::renderSyntaxColorsPopup()
     const float footerH = ImGui::GetFrameHeightWithSpacing() + 8.0f * s_;
 
     // Languages.
-    ImGui::BeginChild("##languages", ImVec2(190.0f * s_, -footerH), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##languages", ImVec2(std::min(190.0f * s_, ImGui::GetContentRegionAvail().x * 0.36f), -footerH),
+                      ImGuiChildFlags_Borders);
     auto languageRow = [&](int index, const char* label, const std::string& languageKey) {
         const bool custom = vm_.hasSyntaxColors(dark, languageKey);
         // No "##" suffix: a name like "C#" would turn it into "###".
@@ -2590,10 +2628,12 @@ void MainView::renderSyntaxColorsPopup()
     const SyntaxColors effective = spec ? resolveSyntaxColors(palette_, vm_, spec->id) : base;
     const float previewH = 190.0f * s_;
     ImGui::BeginChild("##tokens", ImVec2(0.0f, -footerH - previewH - 8.0f * s_), ImGuiChildFlags_Borders);
+    const bool roomy = ImGui::GetContentRegionAvail().x > 420.0f * s_; // measured before the table
     if (ImGui::BeginTable("##tokenTable", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Colour", ImGuiTableColumnFlags_WidthFixed, 36.0f * s_);
         ImGui::TableSetupColumn("Token", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, 200.0f * s_);
+        // Where the colour comes from: a fixed column when there is room, otherwise it shares the space.
+        ImGui::TableSetupColumn("Source", roomy ? ImGuiTableColumnFlags_WidthFixed : ImGuiTableColumnFlags_WidthStretch, roomy ? 200.0f * s_ : 0.0f);
         for (model::Token token : tokens) {
             ImGui::TableNextRow();
             ImGui::PushID(int(token));
@@ -2689,10 +2729,13 @@ void MainView::renderAboutPopup()
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     bool open = true;
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("About EasyNotepad", &open, ImGuiWindowFlags_AlwaysAutoResize))
         return;
     if (registerWindowClose("dialog:about:close", "Close About"))
         ImGui::CloseCurrentPopup();
+    // Lines wrap at a readable width, or the screen's on a phone.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(460.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 60.0f * s_));
     ImGui::TextColored(col(palette_.accent), ICON_FA_PEN_TO_SQUARE);
     ImGui::SameLine();
     ImGui::Text("EasyNotepad %s", ENP_VERSION);
@@ -2704,6 +2747,7 @@ void MainView::renderAboutPopup()
         ImGui::TextWrapped("Renderer: %s", rendererInfo_.c_str());
     ImGui::Spacing();
     ImGui::TextDisabled("UI preview build: running on dummy data, no services connected.");
+    ImGui::PopTextWrapPos();
     if (ImGui::Button("OK", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
         ImGui::CloseCurrentPopup();
     ImGui::EndPopup();

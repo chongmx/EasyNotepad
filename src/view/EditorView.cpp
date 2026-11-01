@@ -3,6 +3,7 @@
 #include "enp/view/PanelFrame.h"
 
 #include "enp/model/Highlighter.h"
+#include "enp/view/Fit.h"
 #include "enp/view/SyntaxColors.h"
 #include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
@@ -546,13 +547,15 @@ void EditorView::renderDiskBar(model::Document& doc)
 void EditorView::renderFindBar()
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * s_, 5.0f * s_));
-    const float rows = vm_.replaceVisible.get() ? 2.0f : 1.0f;
-    const float h = rows * ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().ItemSpacing.y + 10.0f * s_;
-    panel::beginChild("##findBar", ImVec2(0.0f, h), palette_.panelHeaderBg, ImGuiChildFlags_AlwaysUseWindowPadding,
+    // As tall as its rows: on a narrow screen the buttons wrap onto another line.
+    panel::beginChild("##findBar", ImVec2(0.0f, 0.0f), palette_.panelHeaderBg,
+                      ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
 
-    const float inputW = 280.0f * s_;
+    // The fields shrink to leave the buttons room (five of them, and the match count).
+    const float buttonsW = 5.0f * (ImGui::GetFrameHeight() + 4.0f * s_) + 70.0f * s_;
+    const float inputW = std::clamp(ImGui::GetContentRegionAvail().x - buttonsW, 120.0f * s_, 280.0f * s_);
     bool findActive = false;
     if (focusFind_) {
         ImGui::SetKeyboardFocusHere();
@@ -569,25 +572,31 @@ void EditorView::renderFindBar()
         vm_.findQuery.set(findBuffer_);
     findActive = ImGui::IsItemActive();
 
-    ImGui::SameLine();
     const auto& matches = vm_.findMatches();
     if (!vm_.findQuery.get().empty()) {
+        char count[64];
         if (matches.empty())
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityError), "No results");
+            std::snprintf(count, sizeof(count), "No results");
         else if (vm_.currentMatch.get() >= 0)
-            ImGui::TextDisabled("%d of %d", vm_.currentMatch.get() + 1, int(matches.size()));
+            std::snprintf(count, sizeof(count), "%d of %d", vm_.currentMatch.get() + 1, int(matches.size()));
         else
-            ImGui::TextDisabled("%d results", int(matches.size()));
-        ImGui::SameLine();
+            std::snprintf(count, sizeof(count), "%d results", int(matches.size()));
+        fit::sameLineIfFits(ImGui::CalcTextSize(count).x);
+        ImGui::AlignTextToFramePadding();
+        if (matches.empty())
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityError), "%s", count);
+        else
+            ImGui::TextDisabled("%s", count);
     }
+    fit::sameLineIfFitsButton(ICON_FA_ARROW_UP);
     if (ImGui::Button(ICON_FA_ARROW_UP))
         vm_.findNext(-1);
     ImGui::SetItemTooltip("Previous match (Shift+F3)");
-    ImGui::SameLine(0.0f, 2.0f * s_);
+    fit::sameLineIfFits(fit::buttonWidth(ICON_FA_ARROW_DOWN), 2.0f * s_);
     if (ImGui::Button(ICON_FA_ARROW_DOWN))
         vm_.findNext(+1);
     ImGui::SetItemTooltip("Next match (F3)");
-    ImGui::SameLine();
+    fit::sameLineIfFitsButton("Aa");
     const bool matchCase = vm_.matchCase.get();
     if (matchCase)
         ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(palette_.accentSoft));
@@ -596,11 +605,11 @@ void EditorView::renderFindBar()
     if (matchCase)
         ImGui::PopStyleColor();
     ImGui::SetItemTooltip("Match case");
-    ImGui::SameLine(0.0f, 2.0f * s_);
+    fit::sameLineIfFits(fit::buttonWidth(ICON_FA_RIGHT_LEFT), 2.0f * s_);
     if (ImGui::Button(ICON_FA_RIGHT_LEFT))
         vm_.replaceVisible.set(!vm_.replaceVisible.get());
     ImGui::SetItemTooltip("Toggle replace");
-    ImGui::SameLine(0.0f, 2.0f * s_);
+    fit::sameLineIfFits(fit::buttonWidth(ICON_FA_XMARK), 2.0f * s_);
     if (ImGui::Button(ICON_FA_XMARK) || (findActive && ImGui::IsKeyPressed(ImGuiKey_Escape)))
         vm_.findVisible.set(false);
     ImGui::SetItemTooltip("Close (Esc)");
@@ -611,10 +620,10 @@ void EditorView::renderFindBar()
             replaceBuffer_ = vm_.replaceText.get();
         if (ImGui::InputTextWithHint("##replace", ICON_FA_RIGHT_LEFT "  Replace", &replaceBuffer_))
             vm_.replaceText.set(replaceBuffer_);
-        ImGui::SameLine();
+        fit::sameLineIfFitsButton("Replace");
         if (ImGui::Button("Replace"))
             vm_.replaceCurrent();
-        ImGui::SameLine(0.0f, 2.0f * s_);
+        fit::sameLineIfFits(fit::buttonWidth("Replace All"), 2.0f * s_);
         ImGui::BeginDisabled(matches.empty());
         if (ImGui::Button("Replace All"))
             vm_.replaceAll();

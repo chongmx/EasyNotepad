@@ -50,6 +50,9 @@ public:
 
 private:
     void handleShortcuts();
+    // Phone layouts: every dialog, popup and floating window kept inside the visible screen, and
+    // shrunk to it when larger (they are laid out for a desktop).
+    void keepWindowsOnScreen();
     void renderTopBar();
     // Phone layouts: one screen at a time.
     enum class Screen { Files, Editor, Agent, Tools };

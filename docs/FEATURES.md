@@ -198,6 +198,15 @@ narrow desktop window and the web behave alike.
 - The editor's side bar (layers, minimap) is hidden in the phone layouts, giving the text the
   full width.
 - The bottom panel's tabs become a drop-down when they do not fit.
+- **Nothing overlaps on a narrow screen:**
+  - Text that could run into its neighbour is cut short with "..." or wraps.
+  - Rows of buttons and fields wrap onto another line.
+  - History lists drop their less important columns (author, then hash) to keep the message readable.
+  - History and Compare put details below the list instead of beside it.
+  - The Problems table drops its Tool column and wraps long messages.
+  - Search moves its file filter to a line of its own.
+  - Dialogs (stash, branches, Learn Git, colours, preferences, About, ...) are never larger than
+    the screen and are kept on it.
 - **Trying it on a desktop:** `--window-size=390x844` opens a phone-sized window (in dp).
   `--safe-area=left,top,right,bottom` pretends the system covers those edges (in dp).
 

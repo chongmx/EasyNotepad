@@ -1,12 +1,14 @@
 #include "enp/view/ReviewPanel.h"
 
 #include "enp/view/DiffView.h"
+#include "enp/view/Fit.h"
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
 
+#include <cstdio>
 #include <string>
 
 namespace enp::view {
@@ -78,11 +80,15 @@ void ReviewPanel::renderTab(PanelTab tab)
 void ReviewPanel::renderToolChips()
 {
     viewmodel::ReviewViewModel& review = vm_.review();
+    bool first = true;
     for (ReviewTool tool : model::kAllReviewTools) {
         const CommandId run = runCommand(tool);
         const bool visible = review.toolVisible(tool);
         const std::string label = std::string(commandIcon(run)) + " " + model::reviewToolName(tool) + "  " +
                                   (review.hasRun(tool) ? std::to_string(review.count(tool)) : std::string("-"));
+        if (!first)
+            fit::sameLineIfFits(fit::buttonWidth(label.c_str(), true), 4.0f * s_);
+        first = false;
         ImGui::PushID(int(tool));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f * s_);
         ImGui::PushStyleColor(ImGuiCol_Button, visible ? col(palette_.accentSoft) : ImVec4(0, 0, 0, 0));
@@ -102,13 +108,11 @@ void ReviewPanel::renderToolChips()
             ImGui::EndTooltip();
         }
         ImGui::PopID();
-        ImGui::SameLine(0.0f, 4.0f * s_);
     }
-    ImGui::Dummy(ImVec2(8.0f * s_, 0.0f));
-    ImGui::SameLine();
+    fit::sameLineIfFits(fit::buttonWidth(ICON_FA_CHECK_DOUBLE " Run all", true), 12.0f * s_);
     if (ImGui::SmallButton(ICON_FA_CHECK_DOUBLE " Run all"))
         vm_.execute(CommandId::RunAllReviews);
-    ImGui::SameLine();
+    fit::sameLineIfFits(ImGui::GetFrameHeight() + ImGui::CalcTextSize("Resolved").x + ImGui::GetStyle().ItemInnerSpacing.x);
     bool showResolved = review.showResolved.get();
     if (ImGui::Checkbox("Resolved", &showResolved))
         review.showResolved.set(showResolved);
@@ -118,9 +122,9 @@ void ReviewPanel::renderToolChips()
                                 "   " ICON_FA_TRIANGLE_EXCLAMATION " " + std::to_string(review.count(Severity::Warning)) +
                                 "   " ICON_FA_CIRCLE_INFO " " + std::to_string(review.count(Severity::Info));
     const float w = ImGui::CalcTextSize(summary.c_str()).x;
-    ImGui::SameLine();
+    fit::sameLineIfFits(w);
     const float x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w;
-    if (x > ImGui::GetCursorPosX()) {
+    if (x >= ImGui::GetCursorPosX()) {
         ImGui::SetCursorPosX(x);
         ImGui::TextColored(col(palette_.severityError), ICON_FA_CIRCLE_EXCLAMATION " %d", review.count(Severity::Error));
         ImGui::SameLine();
@@ -140,17 +144,21 @@ void ReviewPanel::renderProblems()
     const std::vector<int> visible = review.visibleFindings();
     if (visible.empty()) {
         ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled(review.findings().empty() ? "No findings. Run a review tool from the Review tab."
                                                       : "No findings match the current filter.");
+        ImGui::PopTextWrapPos();
         return;
     }
     const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
                                   ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp;
+    const bool narrow = ImGui::GetContentRegionAvail().x < 560.0f * s_; // measured before the table
     if (!ImGui::BeginTable("##findings", 5, flags))
         return;
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 22.0f * s_);
-    ImGui::TableSetupColumn("Tool", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+    // A narrow panel leaves the tool out (each row's icon still shows its kind).
+    ImGui::TableSetupColumn("Tool", ImGuiTableColumnFlags_WidthStretch | (narrow ? ImGuiTableColumnFlags_Disabled : 0), 1.1f);
     ImGui::TableSetupColumn("Location", ImGuiTableColumnFlags_WidthStretch, 1.6f);
     ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 5.0f);
     ImGui::TableSetupColumn("Done", ImGuiTableColumnFlags_WidthFixed, 40.0f * s_);
@@ -172,10 +180,14 @@ void ReviewPanel::renderProblems()
         ImGui::TableSetColumnIndex(2);
         ImGui::TextColored(col(palette_.accent), "%s:%d", f.file.c_str(), f.line + 1);
         ImGui::TableSetColumnIndex(3);
+        if (narrow)
+            ImGui::PushTextWrapPos(0.0f);
         if (f.resolved)
             ImGui::TextDisabled("%s", f.message.c_str());
         else
             ImGui::TextUnformatted(f.message.c_str());
+        if (narrow)
+            ImGui::PopTextWrapPos();
         ImGui::SetItemTooltip("%s\n%s", f.rule.c_str(), f.message.c_str());
         ImGui::TableSetColumnIndex(4);
         bool resolved = f.resolved;
@@ -194,8 +206,10 @@ void ReviewPanel::renderDiff()
     const viewmodel::ReviewViewModel& review = vm_.review();
     if (review.diffTitle().empty()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("Nothing to compare yet. Use Review > Vs Saved to compare the document with its");
-        ImGui::TextDisabled("saved version, or Review > Changes to inspect the agent's proposal.");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("Nothing to compare yet. Use Review > Vs Saved to compare the document with its saved "
+                            "version, or Review > Changes to inspect the agent's proposal.");
+        ImGui::PopTextWrapPos();
         return;
     }
     const model::DiffStats stats = model::diffStats(review.diff());
@@ -222,9 +236,11 @@ void ReviewPanel::renderDiff()
             picked += b ? 1 : 0;
         using Rows = viewmodel::GitViewModel::RowsAction;
         const bool staged = context.area == model::git::Area::Staged;
-        ImGui::SameLine(0.0f, 16.0f * s_);
-        ImGui::TextDisabled(picked ? "%d line(s) chosen" : "Click lines to choose them", picked);
-        ImGui::SameLine();
+        char chosenText[64];
+        std::snprintf(chosenText, sizeof(chosenText), picked ? "%d line(s) chosen" : "Click lines to choose them", picked);
+        fit::sameLineIfFits(ImGui::CalcTextSize(chosenText).x, 16.0f * s_);
+        ImGui::TextDisabled("%s", chosenText);
+        fit::sameLineIfFitsButton(staged ? ICON_FA_MINUS "  Unstage chosen" : ICON_FA_PLUS "  Stage chosen", true);
         ImGui::BeginDisabled(picked == 0 || git.busy());
         if (ImGui::SmallButton(staged ? ICON_FA_MINUS "  Unstage chosen" : ICON_FA_PLUS "  Stage chosen")) {
             git.applyRows(chosen_, staged ? Rows::Unstage : Rows::Stage);
@@ -232,7 +248,7 @@ void ReviewPanel::renderDiff()
         }
         registerLastItem("diff:stage-chosen", "button", staged ? "Unstage the chosen lines" : "Stage the chosen lines", nullptr);
         if (!staged) {
-            ImGui::SameLine();
+            fit::sameLineIfFitsButton(ICON_FA_ROTATE_LEFT "  Discard chosen", true);
             if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT "  Discard chosen")) {
                 git.applyRows(chosen_, Rows::Discard);
                 chosen_.assign(chosen_.size(), false);
@@ -240,11 +256,11 @@ void ReviewPanel::renderDiff()
             ImGui::SetItemTooltip("Take the chosen changes out of the file (save the file first if it is open with edits)");
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
+        fit::sameLineIfFitsButton("All", true);
         if (ImGui::SmallButton("All"))
             for (size_t i = 0; i < chosen_.size(); ++i)
                 chosen_[i] = context.rows[i].kind != model::DiffKind::Same;
-        ImGui::SameLine();
+        fit::sameLineIfFitsButton("None", true);
         if (ImGui::SmallButton("None"))
             chosen_.assign(chosen_.size(), false);
     }

@@ -1,4 +1,5 @@
 #include "enp/view/FileDialogView.h"
+#include "enp/view/Fit.h"
 
 #include "enp/model/Language.h"
 #include "enp/view/UiAutomation.h"
@@ -42,8 +43,9 @@ void FileDialogView::render()
         focusName_ = true;
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(780.0f * s_, 500.0f * s_), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(780.0f * s_, 500.0f * s_)), ImGuiCond_Appearing);
     bool open = true;
+    fit::constrainNextWindow();
     const bool shown = ImGui::BeginPopupModal(title, &open);
     // The title bar's ×: ImGui closes the popup and returns false in the same frame, so tell the
     // view-model here (else it stays visible and the dialog reopens on the next frame).

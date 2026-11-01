@@ -1,4 +1,5 @@
 #include "enp/view/RibbonView.h"
+#include "enp/view/Fit.h"
 
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
@@ -546,9 +547,10 @@ void RibbonView::renderCustomActions(float& x, float top)
 
 void RibbonView::renderCustomizeDialog()
 {
-    ImGui::SetNextWindowSize(ImVec2(760.0f * s_, 500.0f * s_), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(760.0f * s_, 500.0f * s_)), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     bool open = true;
+    fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal("Customize Ribbon", &open, ImGuiWindowFlags_NoSavedSettings))
         return;
     if (registerWindowClose("dialog:customize-ribbon:close", "Close Customize Ribbon"))
