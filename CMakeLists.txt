@@ -280,6 +280,7 @@ endif()
 add_library(enp_model STATIC
     src/model/TextBuffer.cpp
     src/model/Document.cpp
+    src/model/WorkspaceFile.cpp
     src/model/Diff.cpp
     src/model/Review.cpp
     src/model/TerminalScreen.cpp
@@ -361,6 +362,7 @@ add_library(enp_viewmodel STATIC
     src/viewmodel/NotepadViewModel.cpp
     src/viewmodel/NotepadCommands.cpp
     src/viewmodel/LineOperations.cpp
+    src/viewmodel/MultiCursor.cpp
 )
 target_link_libraries(enp_viewmodel PUBLIC enp_interfaces)
 

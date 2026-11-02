@@ -77,6 +77,57 @@ caret line. Files deleted in the meantime are skipped. Untitled documents are no
 session (they are asked about when quitting). Starting with a folder or files opens those instead;
 with no session at all, the sample workspace is shown.
 
+**Ctrl+R** opens the same list as a picker: recent folders first (the open one left out, so the
+first entry, already highlighted, is the folder you were in before), then recent files. Type to
+filter; Up/Down or Ctrl+R again choose, Enter opens, Escape cancels.
+
+## Several carets and VS Code's editing keys
+
+The editor takes VS Code's multi-cursor and line keys:
+
+| Keys | What it does |
+|---|---|
+| Alt+click | Another caret (Alt+click on a caret removes it); dragging after it selects from it |
+| Ctrl+Alt+Up / Down | A caret on the line above / below, at the same visual column |
+| Shift+Alt+drag, middle-button drag | Column (box) selection: one caret per line |
+| Ctrl+D | Selects the word at the caret; again, adds the next occurrence of the selection (whole words when it started from the caret, wrapping at the end) |
+| Ctrl+Shift+L | Every occurrence of the selection (or of the word at the caret) |
+| Shift+Alt+I | A caret at the end of every selected line |
+| Escape | Back to one caret |
+| Alt+Up / Down (and Ctrl+Shift+Up / Down) | Move the lines of every caret |
+| Shift+Alt+Up / Down | Copy the lines up / down (Duplicate is Shift+Alt+Down) |
+| Ctrl+Shift+K | Delete the lines |
+| Ctrl+R | Switch to a recent folder or file |
+| Ctrl+E | Jump to the terminal (it starts one if needed); again, back to the editor |
+| Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab | Close the file, next tab, previous tab |
+
+With several carets, typing, Enter, Tab, Backspace, Delete (and their Ctrl word forms), the arrow keys,
+Home and End, Cut, Copy, Paste, upper/lower case, comment, indent and the line commands act at
+every caret, and each edit is a single undo step that brings the carets back with the text. Carets
+that meet merge. Line commands work on blocks of lines: carets on the same or adjacent lines share
+one block, so no line is moved, copied or deleted twice, and Move Up/Down does nothing when a block
+is already at the top or bottom. Copy joins the selections one per line; pasting text with as many
+lines as there are carets puts one line at each caret (anything else is pasted whole at each). The
+status bar shows the extra carets (`12:5 +3`) and the characters selected across all of them.
+
+These keys replace two older ones: Ctrl+D (was Duplicate, now Shift+Alt+Down), Ctrl+Shift+L (was
+Delete Line, now Ctrl+Shift+K). Ctrl+Shift+Up/Down still move lines.
+
+## Import a VS Code workspace or a Visual Studio solution
+
+**File > Open Workspace** (also on the Home ribbon's File group) opens the dialog on workspace
+files only; a workspace file given on the command line is imported the same way.
+
+- **`.code-workspace`** (comments and trailing commas are fine): the first folder becomes the
+  workspace; the other local folders of a multi-root workspace go into the recent folders, one
+  Ctrl+R away (remote folders are left out). `editor.tabSize` and `editor.insertSpaces` become the
+  indentation of new files and files with nothing indented yet, while that folder is open (not
+  saved; files already indented keep their own style).
+- **`.sln`** and the XML **`.slnx`**: the workspace is the folder holding the solution and all its
+  projects (solution folders and web-site URLs are not projects); if the projects are spread so far
+  apart that this would be a drive's root, the solution's own folder. The status bar says how many
+  projects it found.
+
 ## Find in Files
 
 **Ctrl+Shift+F** (Find > In Files) opens the **Search** tab of the bottom panel, with the selected

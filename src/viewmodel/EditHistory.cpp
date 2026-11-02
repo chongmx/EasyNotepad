@@ -10,9 +10,9 @@ void EditHistory::begin(model::Document& doc, Kind kind)
     if (h.depth++ > 0)
         return; // inside another edit: its step takes these changes too
     const bool coalesce = kind != Kind::Other && kind == h.lastKind && doc.caret == h.lastCaret && !doc.hasSelection() &&
-                          !h.undo.empty();
+                          doc.cursors.size() == h.lastCursors && !h.undo.empty();
     if (!coalesce) {
-        h.undo.push_back({{}, doc.caret, doc.anchor, doc.caret, doc.anchor});
+        h.undo.push_back({{}, doc.caret, doc.anchor, doc.caret, doc.anchor, doc.cursors, doc.cursors});
         if (h.undo.size() > kMaxSteps)
             h.undo.erase(h.undo.begin());
     }
@@ -32,10 +32,12 @@ bool EditHistory::end(model::Document& doc)
         step.changes.insert(step.changes.end(), std::make_move_iterator(changes.begin()), std::make_move_iterator(changes.end()));
         step.caretAfter = doc.caret;
         step.anchorAfter = doc.anchor;
+        step.cursorsAfter = doc.cursors;
         if (step.changes.empty())
             h.undo.pop_back(); // nothing changed: no step
     }
     h.lastCaret = doc.caret;
+    h.lastCursors = doc.cursors.size();
     return true;
 }
 
@@ -50,6 +52,7 @@ void EditHistory::undo(model::Document& doc)
     doc.buffer.revert(step.changes);
     doc.caret = step.caretBefore;
     doc.anchor = step.anchorBefore;
+    doc.cursors = step.cursorsBefore;
     h.redo.push_back(std::move(step));
 }
 
@@ -64,6 +67,7 @@ void EditHistory::redo(model::Document& doc)
     doc.buffer.reapply(step.changes);
     doc.caret = step.caretAfter;
     doc.anchor = step.anchorAfter;
+    doc.cursors = step.cursorsAfter;
     h.undo.push_back(std::move(step));
 }
 

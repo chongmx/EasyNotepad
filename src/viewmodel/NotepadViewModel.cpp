@@ -2,6 +2,7 @@
 
 #include "enp/model/BinaryInfo.h"
 #include "enp/model/Json.h"
+#include "enp/model/WorkspaceFile.h"
 #include "enp/viewmodel/DummyData.h"
 
 #include <algorithm>
@@ -287,6 +288,7 @@ void NotepadViewModel::closeFolder()
     while (!documents_.empty())
         closeDocument(0);
     os::mem::release(workspaceRoot_);
+    workspaceIndent_.reset();
     terminal_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string()); // no folder: home
     os::mem::release(explorer_.children);
     os::mem::release(explorer_.name);
@@ -772,6 +774,7 @@ void NotepadViewModel::reloadFromDisk(model::Document& doc)
     doc.savedText = doc.buffer.text();
     doc.modified = false;
     doc.caret = doc.anchor = doc.buffer.clamp({line, 0});
+    doc.cursors.clear();
     history_.forget(doc.id); // the old steps no longer apply to this text
     ++doc.revision;
     recordDiskStamp(doc);
@@ -913,6 +916,7 @@ bool NotepadViewModel::openFolder(const std::string& path)
     while (root.size() > 1 && root.back() == '/')
         root.pop_back();
     workspaceRoot_ = root;
+    workspaceIndent_.reset(); // a workspace file sets it again after opening its folder
     terminal_.setWorkingDirectory(root); // new terminals start in the open folder
     refreshExplorer();
     findInFiles_.folder.clear();
@@ -939,14 +943,72 @@ bool NotepadViewModel::openFolder(const std::string& path)
     return true;
 }
 
+bool NotepadViewModel::isWorkspaceFile(const std::string& path)
+{
+    return model::isWorkspaceFile(path);
+}
+
+bool NotepadViewModel::openWorkspaceFile(const std::string& path)
+{
+    if (!files_) {
+        statusText.set("Cannot open workspace files here (no file access)");
+        return false;
+    }
+    const std::string file = files_->absolute(path);
+    std::string error;
+    const std::optional<std::string> text = files_->read(file, &error);
+    if (!text) {
+        statusText.set("Cannot read " + file + (error.empty() ? std::string() : ": " + error));
+        return false;
+    }
+    const std::optional<model::WorkspaceImport> w = model::parseWorkspaceFile(file, *text, &error);
+    if (!w) {
+        statusText.set(error);
+        return false;
+    }
+    if (!openFolder(w->root)) {
+        statusText.set("The folder of " + w->name + " does not exist: " + w->root);
+        return false;
+    }
+    // The other folders of a multi-root workspace: one Ctrl+R away (oldest first, so the list
+    // keeps the workspace's order below the open one).
+    for (size_t i = w->folders.size(); i-- > 1;)
+        if (files_->isDirectory(w->folders[i]))
+            remember(recentFolders_, w->folders[i], kMaxRecentFolders);
+    remember(recentFolders_, workspaceRoot_, kMaxRecentFolders);
+    if (w->tabSize || w->insertSpaces) {
+        model::IndentStyle style = indentFor(model::Language::PlainText);
+        if (w->tabSize)
+            style.width = *w->tabSize;
+        if (w->insertSpaces)
+            style.tabs = !*w->insertSpaces;
+        workspaceIndent_ = style;
+    }
+    std::string message;
+    if (w->kind == model::WorkspaceImport::Kind::Solution) {
+        message = "Imported the solution " + w->name + ": " + std::to_string(w->projects.size()) + " project(s) in " + workspaceRoot_;
+    } else {
+        message = "Imported the workspace " + w->name + ": " + workspaceRoot_;
+        if (w->folders.size() > 1)
+            message += " (" + std::to_string(w->folders.size() - 1) + " more folder(s) under Recent, Ctrl+R)";
+    }
+    if (workspaceIndent_)
+        message += std::string(", indent ") + (workspaceIndent_->tabs ? "tabs" : "spaces") + " " + std::to_string(workspaceIndent_->width);
+    statusText.set(message);
+    return true;
+}
+
 void NotepadViewModel::openStartupDocuments(const std::vector<std::string>& arguments)
 {
     if (workspaceRoot_.empty()) {
         openFile(dummy::kWelcomePath);
         openFile("src/main.cpp");
     }
-    for (const std::string& argument : arguments)
+    for (const std::string& argument : arguments) {
+        if (isWorkspaceFile(argument) && openWorkspaceFile(argument))
+            continue;
         openFile(argument);
+    }
     if (workspaceRoot_.empty())
         statusText.set("Ready - running on sample data (open a folder: EasyNotepad <folder>)");
 }
@@ -970,11 +1032,15 @@ void NotepadViewModel::applyText(const std::string& path, const std::string& tex
 
 // ---- Editing ------------------------------------------------------------------------------------
 
-void NotepadViewModel::setCaret(model::TextPos pos, bool extendSelection)
+void NotepadViewModel::setCaret(model::TextPos pos, bool extendSelection, bool keepCursors)
 {
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    if (!keepCursors) {
+        os::mem::release(doc->cursors); // thousands after Ctrl+Shift+L: give the room back
+        occurrence_ = {}; // Ctrl+D starts over
+    }
     MacroScope scope(*this);
     const model::TextPos before = doc->caret;
     doc->caret = doc->buffer.clamp(pos);
@@ -982,6 +1048,8 @@ void NotepadViewModel::setCaret(model::TextPos pos, bool extendSelection)
         recordMacro({MacroStep::Kind::Move, {}, doc->caret.line - before.line, doc->caret.column - before.column, extendSelection, CommandId::Count});
     if (!extendSelection)
         doc->anchor = doc->caret;
+    if (keepCursors)
+        model::normalizeCursors(*doc);
 }
 
 void NotepadViewModel::setSelection(model::TextPos anchor, model::TextPos caret)
@@ -989,6 +1057,8 @@ void NotepadViewModel::setSelection(model::TextPos anchor, model::TextPos caret)
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    os::mem::release(doc->cursors);
+    occurrence_ = {};
     doc->anchor = doc->buffer.clamp(anchor);
     doc->caret = doc->buffer.clamp(caret);
 }
@@ -1002,9 +1072,39 @@ void NotepadViewModel::selectAll()
 std::string NotepadViewModel::selectedText() const
 {
     const model::Document* doc = activeDocument();
-    if (!doc || !doc->hasSelection())
+    if (!doc)
+        return {};
+    if (doc->multiCursor()) {
+        std::vector<model::Selection> all = doc->selections();
+        std::sort(all.begin(), all.end(), [](const model::Selection& a, const model::Selection& b) { return a.start() < b.start(); });
+        std::string text;
+        bool first = true;
+        for (const model::Selection& sel : all) {
+            if (sel.empty())
+                continue;
+            if (!first)
+                text += '\n';
+            text += doc->buffer.text(sel.start(), sel.end());
+            first = false;
+        }
+        return text;
+    }
+    if (!doc->hasSelection())
         return {};
     return doc->buffer.text(doc->selectionStart(), doc->selectionEnd());
+}
+
+bool NotepadViewModel::anySelection() const
+{
+    const model::Document* doc = activeDocument();
+    if (!doc)
+        return false;
+    if (doc->hasSelection())
+        return true;
+    for (const model::Selection& sel : doc->cursors)
+        if (!sel.empty())
+            return true;
+    return false;
 }
 
 void NotepadViewModel::insertText(std::string_view text)
@@ -1015,7 +1115,10 @@ void NotepadViewModel::insertText(std::string_view text)
     MacroScope scope(*this);
     if (scope.outer)
         recordMacro({MacroStep::Kind::Text, std::string(text), 0, 0, false, CommandId::Count});
-    beginEdit(text.size() == 1 && text[0] != '\n' ? EditKind::Typing : EditKind::Other);
+    const EditKind kind = text.size() == 1 && text[0] != '\n' ? EditKind::Typing : EditKind::Other;
+    if (forEachCursor(kind, [&](size_t) { insertText(text); }))
+        return;
+    beginEdit(kind);
     model::TextPos at = doc->buffer.erase(doc->selectionStart(), doc->selectionEnd());
     doc->caret = doc->anchor = doc->buffer.insert(at, text);
     // Typing a closer ("}", "</", "endif(", "fi ", "else:") moves its line to the opener's indent.
@@ -1057,6 +1160,8 @@ void NotepadViewModel::newline()
     MacroScope scope(*this);
     if (scope.outer)
         recordMacro({MacroStep::Kind::Newline, {}, 0, 0, false, CommandId::Count});
+    if (forEachCursor(EditKind::Other, [&](size_t) { newline(); }))
+        return;
     if (!smartIndent.get()) {
         const std::string indent = leadingWhitespace(doc->buffer.line(doc->selectionStart().line));
         insertText("\n" + indent);
@@ -1086,6 +1191,8 @@ void NotepadViewModel::insertIndent()
     MacroScope scope(*this);
     if (scope.outer)
         recordMacro({MacroStep::Kind::Indent, {}, 0, 0, false, CommandId::Count});
+    if (forEachCursor(EditKind::Other, [&](size_t) { insertIndent(); }))
+        return;
     if (doc->indent.tabs) {
         insertText("\t");
         return;
@@ -1131,6 +1238,8 @@ void NotepadViewModel::backspace()
     MacroScope scope(*this);
     if (scope.outer)
         recordMacro({MacroStep::Kind::Backspace, {}, 0, 0, false, CommandId::Count});
+    if (forEachCursor(EditKind::Deleting, [&](size_t) { backspace(); }))
+        return;
     if (doc->hasSelection()) {
         deleteSelection();
         return;
@@ -1160,6 +1269,8 @@ void NotepadViewModel::deleteForward()
     MacroScope scope(*this);
     if (scope.outer)
         recordMacro({MacroStep::Kind::Delete, {}, 0, 0, false, CommandId::Count});
+    if (forEachCursor(EditKind::Deleting, [&](size_t) { deleteForward(); }))
+        return;
     if (doc->hasSelection()) {
         deleteSelection();
         return;
@@ -1174,7 +1285,9 @@ void NotepadViewModel::deleteForward()
 void NotepadViewModel::deleteSelection()
 {
     model::Document* doc = activeDocument();
-    if (!doc || !doc->hasSelection())
+    if (!doc || !anySelection())
+        return;
+    if (forEachCursor(EditKind::Other, [&](size_t) { deleteSelection(); }))
         return;
     beginEdit(EditKind::Other);
     doc->caret = doc->anchor = doc->buffer.erase(doc->selectionStart(), doc->selectionEnd());
@@ -1239,6 +1352,7 @@ void NotepadViewModel::endEdit()
     model::Document* doc = activeDocument();
     if (!history_.end(*doc))
         return; // a nested edit: the outer one finishes it
+    model::normalizeCursors(*doc);
     ++doc->revision;
     doc->modified = !doc->buffer.equals(doc->savedText);
     refreshFind();
@@ -1265,8 +1379,7 @@ bool NotepadViewModel::canRedo() const
 
 void NotepadViewModel::afterHistoryMove(model::Document& doc)
 {
-    doc.caret = doc.buffer.clamp(doc.caret);
-    doc.anchor = doc.buffer.clamp(doc.anchor);
+    model::normalizeCursors(doc); // clamps every caret
     doc.modified = !doc.buffer.equals(doc.savedText);
     ++doc.revision;
     refreshFind();
@@ -1366,6 +1479,7 @@ void NotepadViewModel::replaceAll()
         doc->buffer.insert(at, replaceText.get());
     }
     doc->caret = doc->anchor = doc->buffer.clamp(doc->caret);
+    doc->cursors.clear();
     endEdit();
     statusText.set("Replaced " + std::to_string(count) + " occurrence(s)");
 }
@@ -2090,6 +2204,8 @@ void NotepadViewModel::setPreferredIndent(std::optional<model::IndentStyle> styl
 
 model::IndentStyle NotepadViewModel::indentFor(model::Language language) const
 {
+    if (workspaceIndent_)
+        return *workspaceIndent_;
     return preferredIndent_ ? *preferredIndent_ : model::defaultIndent(model::languageSpec(language));
 }
 

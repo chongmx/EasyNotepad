@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace enp::model {
 
@@ -24,6 +25,18 @@ const char* encodingName(Encoding encoding);
 // JSON and YAML: shown as text (to edit), as a tree with the chosen value beside it, or as nested
 // sections that open and close. (Markdown and CSV use Document::rendered.)
 enum class DataView { Text, Tree, Accordion };
+
+// One caret with its selection: [min(anchor, caret), max(anchor, caret)).
+struct Selection {
+    TextPos anchor;
+    TextPos caret;
+
+    bool empty() const { return anchor == caret; }
+    TextPos start() const { return anchor < caret ? anchor : caret; }
+    TextPos end() const { return anchor < caret ? caret : anchor; }
+    bool operator==(const Selection& o) const { return anchor == o.anchor && caret == o.caret; }
+    bool operator!=(const Selection& o) const { return !(*this == o); }
+};
 
 struct Document {
     int id = 0;
@@ -55,14 +68,25 @@ struct Document {
 
     TextPos caret;
     TextPos anchor; // selection is [min(anchor, caret), max(anchor, caret))
+    // Multi-cursor editing: the other carets (each with its selection) besides the primary one
+    // above. Empty with a single caret. Kept sorted and without overlaps by normalizeCursors().
+    std::vector<Selection> cursors;
     std::set<int> bookmarks;
     std::set<int> folded;   // start lines of folded outline regions
     int detailLevel = -1;   // detail level last applied to `folded` (-1: never)
     uint64_t revision = 0;  // bumped on every text change
 
     bool hasSelection() const { return anchor != caret; }
+    bool multiCursor() const { return !cursors.empty(); }
+    Selection primary() const { return {anchor, caret}; }
+    // Every caret, the primary first, then the others in document order.
+    std::vector<Selection> selections() const;
     TextPos selectionStart() const { return anchor < caret ? anchor : caret; }
     TextPos selectionEnd() const { return anchor < caret ? caret : anchor; }
 };
+
+// Clamps every caret into the buffer, merges carets that overlap or touch the same place (the
+// primary absorbs the others it meets) and sorts the other carets by position.
+void normalizeCursors(Document& doc);
 
 } // namespace enp::model

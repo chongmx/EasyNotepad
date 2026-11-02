@@ -13,7 +13,7 @@ namespace enp::viewmodel {
 
 class NotepadViewModel;
 
-enum class FileDialogMode { Open, SaveAs, OpenFolder };
+enum class FileDialogMode { Open, SaveAs, OpenFolder, OpenWorkspace }; // OpenWorkspace: a .code-workspace, .sln or .slnx
 
 class FileDialogViewModel {
 public:

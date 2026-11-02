@@ -32,12 +32,14 @@ private:
         std::vector<model::TextChange> changes;
         model::TextPos caretBefore, anchorBefore;
         model::TextPos caretAfter, anchorAfter;
+        std::vector<model::Selection> cursorsBefore, cursorsAfter; // the other carets
     };
     struct History {
         std::vector<Step> undo;
         std::vector<Step> redo;
         Kind lastKind = Kind::Other;
         model::TextPos lastCaret{-1, -1};
+        size_t lastCursors = 0; // other carets after the last edit (typing with more or fewer is a new step)
         int depth = 0;
     };
     std::map<int, History> histories_;
