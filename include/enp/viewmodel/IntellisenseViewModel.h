@@ -169,6 +169,17 @@ public:
     // changes (use it within the frame).
     std::optional<model::SymbolView> lookup(std::string_view name, std::string_view preferPath) const;
 
+    // Where Go to Definition jumped from, to go back (Alt+Left) and forward again (Alt+Right).
+    // Places are remembered by document id and path, never by pointer: a closed document is
+    // opened again from its path, an untitled one that closed is skipped. At most kMaxHistory
+    // each way; released with the workspace.
+    static constexpr size_t kMaxHistory = 50;
+    bool canGoBack() const { return !back_.empty(); }
+    bool canGoForward() const { return !forward_.empty(); }
+    bool goBack();
+    bool goForward();
+    size_t historySize() const { return back_.size() + forward_.size(); }
+
 private:
     struct IndexSource { // a file to read for the index
         std::string path;
@@ -191,6 +202,17 @@ private:
     // The position of the best declaration named `name` (a definition first, then one in
     // `preferPath`), leaving out those in `skipPath`; -1 when there is none.
     long best(std::string_view name, std::string_view preferPath, std::string_view skipPath) const;
+    struct Place {
+        int documentId = -1;
+        std::string path; // empty for an untitled document
+        model::TextPos caret;
+    };
+    Place here() const;                 // the active document and its caret
+    bool show(const Place& place);      // activates or reopens it; false when it is gone
+    void remember();                    // here() onto the back list; the forward list is dropped
+    bool step(std::vector<Place>& from, std::vector<Place>& to, const char* done, const char* none);
+    std::vector<Place> back_;
+    std::vector<Place> forward_;
 
     NotepadViewModel& owner_;
     interfaces::IFileService* files_;

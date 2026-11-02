@@ -517,7 +517,7 @@ and its documents, asking first to save or discard unsaved changes. The Explorer
 open" with **Open a folder** and the recent folders. An open file's right-click menu in the Explorer
 has **Close**. Every dialog's **×** closes it (agents can use it too, through the connector).
 
-## IntelliSense: completion, Go to Definition and declarations on hover
+## IntelliSense: completion, Go to Definition, Ctrl+click, Back and Forward
 
 **Suggestions while typing.** In code (C/C++, C#, Java, JavaScript, TypeScript, Python, Rust, Go,
 Lua, shell, PowerShell, CMake), after two letters of a name a list of suggestions opens at the
@@ -537,10 +537,21 @@ definitions before declarations. On a declaration already (a prototype in a head
 other place (the body in the source file). While the workspace is still being read, it waits and
 jumps when it is ready.
 
+**Ctrl+click** (Cmd+click on macOS): holding Ctrl over the code underlines the name under the mouse
+and shows a hand when the workspace declares it; clicking goes to its definition, as F12 does from
+there (also for names only this document declares, saved or not, which are not underlined). A
+Ctrl+click on anything that is not a name places the caret as usual.
+
+**Back and Forward** (Alt+Left and Alt+Right, also in Edit › IntelliSense and Read › Navigate): every
+jump of Go to Definition or Ctrl+click remembers where it started; Back returns there, Forward goes
+to the jump again. A document closed since is opened again from its file; an untitled one that
+closed is skipped. A new jump drops the way forward. The last 50 places are kept each way, and they
+are forgotten when the folder closes.
+
 **On hover:** resting the mouse on a name for half a second shows its declaration and where it is.
 
 **The index.** The workspace's code is read in the background the first time IntelliSense is used
-in a folder (the project first, vendored folders after; build output, `node_modules` and files over
+in a folder (a list of suggestions, F12, or Ctrl held over the code; the project first, vendored folders after; build output, `node_modules` and files over
 2 MB are skipped; at most 5,000 files). Saving a file updates its entries; renaming or deleting files
 reads the workspace again on next use; **Rebuild Index** does so at once. Declarations are found by
 reading the text (no compiler): the names are exact, the types of expressions are not known, so

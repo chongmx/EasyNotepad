@@ -159,6 +159,8 @@ const char* commandIcon(CommandId id)
     case CommandId::GoToDefinition: return ICON_FA_LOCATION_CROSSHAIRS;
     case CommandId::ToggleAutoComplete: return ICON_FA_KEYBOARD;
     case CommandId::RebuildSymbolIndex: return ICON_FA_ROTATE;
+    case CommandId::NavigateBack: return ICON_FA_ARROW_LEFT;
+    case CommandId::NavigateForward: return ICON_FA_ARROW_RIGHT;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;

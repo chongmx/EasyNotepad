@@ -93,6 +93,13 @@ private:
     // declaration of the name under the mouse.
     void renderCompletion(const model::Document& doc, const Metrics& m);
     void drawSymbolTooltip(const model::Document& doc, const Metrics& m);
+    // The name under the mouse: its row and byte range in the line; false between words, in the
+    // gutter or on a folded summary.
+    bool nameAt(const model::Document& doc, const Metrics& m, ImVec2 mouse, int& row, int& begin, int& end) const;
+    // Ctrl (Cmd on macOS) held over a name: underlined with a hand cursor when the index knows it;
+    // a click goes to its definition. Returns true when the click was taken.
+    bool handleDefinitionLink(const model::Document& doc, const Metrics& m, bool hovered);
+    void drawDefinitionLink(const model::Document& doc, const Metrics& m);
     void revealCaret(const model::Document& doc, const Metrics& m);
     // Git: merge-conflict blocks (tints, accept buttons, a bar with next / previous), the change
     // peek opened from a change bar, and blame.
@@ -179,6 +186,9 @@ private:
     bool completionFocused_ = false;
     int completionSerial_ = -1;      // the list's selection last scrolled into view
     ImVec2 hoverPos_{-1.0f, -1.0f};  // the mouse resting for a symbol's tooltip
+    int linkRow_ = -1;               // Ctrl+hover: the name under the mouse, this frame
+    int linkBegin_ = 0;
+    int linkEnd_ = 0;
     double hoverSince_ = 0.0;
 };
 

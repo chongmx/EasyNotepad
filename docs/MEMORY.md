@@ -108,7 +108,7 @@ frees it, so a scope's live bytes are exactly what that subsystem still holds. S
 | `git` | repository state, logs, diffs |
 | `layers`, `logical-map` | the Read ribbon's layers and map |
 | `find` | find-in-files results |
-| `intellisense` | the workspace's symbol index (one text pool and one entry array, `model::SymbolIndex`), open completion suggestions, context chosen for an AI provider (`IntellisenseViewModel`): released by `workspaceChanged()`; a background build is cancelled and its late result dropped |
+| `intellisense` | the workspace's symbol index (one text pool and one entry array, `model::SymbolIndex`), open completion suggestions, context chosen for an AI provider, the Back/Forward places (at most 50 each way, by document id and path) (`IntellisenseViewModel`): released by `workspaceChanged()`; a background build is cancelled and its late result dropped |
 | `markdown` | rendered Markdown and parsed formulas |
 | `images` | decoding (the pixels themselves are in `imgui`) |
 | `emoji` | the emoji pack's index and reading pictures from it (`EmojiCache`, `services::EmojiPack`) |

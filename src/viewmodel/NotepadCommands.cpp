@@ -460,6 +460,8 @@ void NotepadViewModel::initCommands()
                                                         : "Auto complete off: Ctrl+Space suggests names");
     });
     set(C::RebuildSymbolIndex, [this]() { intellisense_.rebuildIndex(); });
+    set(C::NavigateBack, [this]() { intellisense_.goBack(); }, [this]() { return intellisense_.canGoBack(); });
+    set(C::NavigateForward, [this]() { intellisense_.goForward(); }, [this]() { return intellisense_.canGoForward(); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
     set(C::EngineLab, [this]() { engineLabRequested.emit(); }, [this]() { return developerMode.get(); });

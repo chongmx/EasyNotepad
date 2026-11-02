@@ -3808,6 +3808,7 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
         CHECK(!vm.intellisense().contextFor("value", "src/f7.cpp", "int x = value3;").empty());
         vm.setCaret({3, 6}, false);
         vm.intellisense().goToDefinition();
+        vm.intellisense().goBack();
         os::dispatch::pump();
         vm.closeFolder();
         os::dispatch::pump();
@@ -4198,6 +4199,77 @@ TEST(intellisense_goes_to_definitions_in_the_file_and_the_workspace)
     CHECK(vm.intellisense().lookup("renamedFunction", "").has_value());
     CHECK(vm.intellisense().lookup("widthOf", "").has_value()); // still declared in the header
     vm.closeFolder();
+}
+
+TEST(intellisense_goes_back_and_forward_through_its_jumps)
+{
+    using C = viewmodel::CommandId;
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-history");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+    auto at = [&](const char* path, int line, int column) {
+        const model::Document* doc = vm.activeDocument();
+        return doc && doc->path == path && doc->caret.line == line && doc->caret.column == column;
+    };
+    CHECK(!vm.command(C::NavigateBack).canExecute() && !vm.command(C::NavigateForward).canExecute());
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 9}, false); // "Widget"
+    CHECK(is.goToDefinition());
+    CHECK(at("src/widget.h", 2, 6));
+    vm.setCaret({4, 11}, false); // "resize"
+    CHECK(is.goToDefinition());
+    CHECK(at("src/widget.cpp", 1, 17));
+    CHECK_EQ(is.historySize(), size_t(2));
+    CHECK(vm.command(C::NavigateBack).canExecute());
+
+    vm.execute(C::NavigateBack);
+    CHECK(at("src/widget.h", 4, 11));
+    CHECK(is.goBack());
+    CHECK(at("src/main.cpp", 3, 9));
+    CHECK(!is.canGoBack() && !is.goBack());
+    CHECK(at("src/main.cpp", 3, 9)); // nothing to go back to: it stays
+    vm.execute(C::NavigateForward);
+    CHECK(at("src/widget.h", 4, 11));
+    // A document closed since is opened again from its path.
+    vm.closeDocument(vm.documentIndex("src/widget.cpp"));
+    CHECK(is.goForward());
+    CHECK(at("src/widget.cpp", 1, 17));
+    CHECK(!is.canGoForward());
+    // A new jump drops the way forward.
+    CHECK(is.goBack());
+    CHECK(is.canGoForward());
+    vm.setCaret({5, 9}, false); // "widthOf"
+    CHECK(is.goToDefinition());
+    CHECK(at("src/widget.cpp", 2, 16));
+    CHECK(!is.canGoForward());
+    // An untitled document that closed is skipped on the way back.
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int later = helper();\nint helper() { return 1; }\n");
+    vm.setCaret({0, 14}, false);
+    CHECK(is.goToDefinition()); // in the untitled document itself
+    CHECK_EQ(vm.activeDocument()->caret.line, 1);
+    vm.closeDocument(vm.activeIndex.get());
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 9}, false);
+    CHECK(is.goToDefinition());
+    CHECK(is.goBack());
+    CHECK(at("src/main.cpp", 3, 9));
+    CHECK(is.goBack()); // skips both places in the closed untitled document
+    CHECK(at("src/widget.h", 5, 9));
+    // At most kMaxHistory places are kept each way.
+    for (int i = 0; i < 70; ++i) {
+        vm.openFile("src/main.cpp");
+        vm.setCaret({3, 9}, false);
+        is.goToDefinition();
+    }
+    CHECK_EQ(is.historySize(), viewmodel::IntellisenseViewModel::kMaxHistory);
+    // The folder's places go with it.
+    vm.closeFolder();
+    CHECK_EQ(is.historySize(), size_t(0));
 }
 
 TEST(intellisense_chooses_context_for_an_ai_provider_and_drops_late_answers)

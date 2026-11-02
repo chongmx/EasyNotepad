@@ -546,6 +546,41 @@ int main(int argc, char** argv)
                 if (is.active())
                     fail("Escape did not close the list", round);
             }
+            // Ctrl+click on a name goes to its definition; Alt+Left comes back to the click.
+            {
+                h.setContext("IntelliSense Ctrl+click and Alt+Left");
+                h.vm().newDocument();
+                h.vm().activeDocument()->language = model::Language::Cpp;
+                h.vm().insertText("int x = helperFunction();\n\n\nint helperFunction() { return 1; }\n");
+                h.vm().goToLine(0);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Agent);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+                h.settle();
+                const ImGuiWindow* text = windowNamed("##editorText");
+                ImGuiIO& io = ImGui::GetIO();
+                bool jumped = false;
+                io.AddKeyEvent(ImGuiMod_Ctrl, true);
+                h.frame(away);
+                for (float y = text ? text->Pos.y + 4.0f : 0.0f; text && y < text->Pos.y + 30.0f && !jumped; y += 4.0f)
+                    for (float x = text->Pos.x + 30.0f; x < text->Pos.x + 420.0f && !jumped; x += 6.0f) {
+                        h.click(ImVec2(x, y));
+                        jumped = is.canGoBack();
+                    }
+                io.AddKeyEvent(ImGuiMod_Ctrl, false);
+                h.frame(away);
+                const model::Document* doc = h.vm().activeDocument();
+                if (!jumped || !doc || doc->caret.line != 3)
+                    fail("Ctrl+click did not go to the definition", 0);
+                io.AddKeyEvent(ImGuiMod_Alt, true);
+                key(ImGuiKey_LeftArrow);
+                io.AddKeyEvent(ImGuiMod_Alt, false);
+                h.frame(away);
+                doc = h.vm().activeDocument();
+                if (!doc || doc->caret.line != 0 || doc->caret.column != 8) // the start of the clicked name
+                    fail("Alt+Left did not come back to where Ctrl+click started", 0);
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+            }
             if (windowsContaining("##completion") > 2) // the list and its scrolling child
                 std::printf("  FAILED IntelliSense: %d windows for the suggestion list\n", windowsContaining("##completion")), layoutsWrong = true;
             h.vm().execute(viewmodel::CommandId::TriggerCompletion);

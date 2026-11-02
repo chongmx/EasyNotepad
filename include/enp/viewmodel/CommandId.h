@@ -56,7 +56,7 @@ enum class CommandId {
     // Agent (appended)
     LocalModel,
     // IntelliSense (appended)
-    TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex,
+    TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex, NavigateBack, NavigateForward,
 
     Count
 };

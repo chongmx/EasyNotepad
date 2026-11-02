@@ -250,6 +250,8 @@ void IntellisenseViewModel::workspaceChanged()
     dismiss();
     os::mem::release(pendingDefinition_);
     pendingDocument_ = -1;
+    os::mem::release(back_); // places in the folder that closed
+    os::mem::release(forward_);
 }
 
 void IntellisenseViewModel::invalidate()
@@ -864,6 +866,7 @@ bool IntellisenseViewModel::goToDefinition()
         }
     }
     auto goLocal = [&]() {
+        remember();
         owner_.goToLine(localLine);
         owner_.setCaret({localLine, localColumn}, false);
         owner_.caretRevealRequested.emit();
@@ -895,16 +898,98 @@ bool IntellisenseViewModel::goToDefinition()
         const model::SymbolView target = index_.at(size_t(i));
         const std::string path(index_.path(target.file)); // a copy: opening the file may change the index
         const int targetLine = target.line, targetColumn = target.column;
-        if (jumpTo(path, targetLine, targetColumn)) {
-            status("Definition of " + name + ": " + path + ":" + std::to_string(targetLine + 1));
-            return true;
+        remember();
+        if (!jumpTo(path, targetLine, targetColumn)) {
+            back_.pop_back(); // nowhere was reached
+            return false;
         }
-        return false;
+        status("Definition of " + name + ": " + path + ":" + std::to_string(targetLine + 1));
+        return true;
     }
     if (found)
         return goLocal();
     status(onDeclaration ? name + " is declared here" : "No definition found for " + name);
     return false;
+}
+
+// ---- Jump history ---------------------------------------------------------------------------------
+
+IntellisenseViewModel::Place IntellisenseViewModel::here() const
+{
+    Place place;
+    if (const model::Document* doc = owner_.activeDocument()) {
+        place.documentId = doc->id;
+        place.path = doc->path;
+        place.caret = doc->caret;
+    }
+    return place;
+}
+
+void IntellisenseViewModel::remember()
+{
+    if (!owner_.activeDocument())
+        return;
+    os::mem::Scope scope("intellisense");
+    back_.push_back(here());
+    if (back_.size() > kMaxHistory)
+        back_.erase(back_.begin());
+    os::mem::release(forward_); // a new jump starts a new way forward
+}
+
+bool IntellisenseViewModel::show(const Place& place)
+{
+    const int index = owner_.documentIndexById(place.documentId);
+    if (index >= 0 && owner_.documents()[size_t(index)]->path == place.path) {
+        owner_.activate(index);
+    } else if (!place.path.empty()) {
+        owner_.openFile(place.path); // closed since: opened again
+        const model::Document* doc = owner_.activeDocument();
+        if (!doc || doc->path != place.path)
+            return false;
+    } else {
+        return false; // an untitled document that closed
+    }
+    owner_.goToLine(place.caret.line);
+    owner_.setCaret(place.caret, false); // clamped to the text as it is now
+    owner_.caretRevealRequested.emit();
+    return true;
+}
+
+bool IntellisenseViewModel::step(std::vector<Place>& from, std::vector<Place>& to, const char* done, const char* none)
+{
+    dismiss();
+    while (!from.empty()) {
+        Place target;
+        Place current;
+        {
+            os::mem::Scope scope("intellisense");
+            target = std::move(from.back());
+            from.pop_back();
+            current = here();
+        }
+        if (!show(target))
+            continue; // gone: the next one
+        if (current.documentId >= 0) {
+            os::mem::Scope scope("intellisense");
+            to.push_back(std::move(current));
+            if (to.size() > kMaxHistory)
+                to.erase(to.begin());
+        }
+        status(done);
+        return true;
+    }
+    status(none);
+    return false;
+}
+
+bool IntellisenseViewModel::goBack()
+{
+    return step(back_, forward_, "Back to where Go to Definition started", "Nothing to go back to");
+}
+
+bool IntellisenseViewModel::goForward()
+{
+    return step(forward_, back_, "Forward again", "Nothing to go forward to");
 }
 
 } // namespace enp::viewmodel

@@ -619,7 +619,10 @@ void EditorView::render(ImVec2 size)
     const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
                          !(markdownDoc && markdownSwitchRect(switchAt, s_).Contains(ImGui::GetMousePos())) &&
                          !(dataSwitch && data_.switchRect(*doc, switchAt).Contains(ImGui::GetMousePos()));
-    handleMouse(*doc, m, hovered);
+    if (!handleDefinitionLink(*doc, m, hovered)) // Ctrl+click on a name goes to its definition
+        handleMouse(*doc, m, hovered);
+    if (linkRow_ >= 0)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     if (focused_)
         handleKeyboard(*doc, m);
     viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
@@ -649,6 +652,7 @@ void EditorView::render(ImVec2 size)
     if (!conflicts_.empty() && !rows_.empty())
         drawConflictBackgrounds(m, firstRow, lastRow);
     drawRows(*doc, m, firstRow, lastRow);
+    drawDefinitionLink(*doc, m);
     dl->PopClipRect();
     drawGutter(*doc, m, firstRow, lastRow);
     if (m.blameW > 0.0f && !rows_.empty())
@@ -1069,11 +1073,12 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         return !arrow && key != ImGuiKey_Enter && key != ImGuiKey_KeypadEnter && key != ImGuiKey_Tab && key != ImGuiKey_Escape;
     };
 
-    if (pressed(ImGuiKey_LeftArrow)) {
+    const bool altArrows = io.KeyAlt && !ctrl; // Alt+Left / Alt+Right: back and forward (global shortcuts)
+    if (!altArrows && pressed(ImGuiKey_LeftArrow)) {
         vm_.setCaret(!shift && doc.hasSelection() ? doc.selectionStart() : ctrl ? wordLeft(buffer, caret) : buffer.prev(caret), shift);
         acted = horizontal = true;
     }
-    if (pressed(ImGuiKey_RightArrow)) {
+    if (!altArrows && pressed(ImGuiKey_RightArrow)) {
         vm_.setCaret(!shift && doc.hasSelection() ? doc.selectionEnd() : ctrl ? wordRight(buffer, caret) : buffer.next(caret), shift);
         acted = horizontal = true;
     }
@@ -2163,17 +2168,10 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
     }
     if (ImGui::GetTime() - hoverSince_ < 0.5)
         return;
-    const Row& row = rows_[size_t(rowAt(mouse, m))];
-    if (row.fold >= 0)
+    int r = 0, b = 0, e = 0;
+    if (!nameAt(doc, m, mouse, r, b, e))
         return;
-    const std::string& text = doc.buffer.line(row.line);
-    // The character under the mouse (not the nearest gap between characters).
-    const int column = columnAtX(doc, row, (mouse.x - m.origin.x) / m.charW - 0.5f);
-    if (column < row.begin || column >= row.end || column >= int(text.size()) || !model::isIdentifierChar(text[size_t(column)]))
-        return;
-    const auto [b, e] = model::identifierAround(text, column);
-    if (b == e)
-        return;
+    const std::string& text = doc.buffer.line(rows_[size_t(r)].line);
     const std::optional<model::SymbolView> symbol = intellisense.lookup(std::string_view(text).substr(size_t(b), size_t(e - b)), doc.path);
     if (!symbol)
         return;
@@ -2190,9 +2188,73 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
     ImGui::TextUnformatted(symbol->detail.data(), symbol->detail.data() + symbol->detail.size());
     ImGui::PopFont();
     ImGui::TextDisabled("%s", where);
-    ImGui::TextDisabled("F12: go to definition");
+    ImGui::TextDisabled("F12 or Ctrl+click: go to definition");
     ImGui::EndTooltip();
     ImGui::PopFont();
+}
+
+bool EditorView::nameAt(const model::Document& doc, const Metrics& m, ImVec2 mouse, int& row, int& begin, int& end) const
+{
+    if (rows_.empty() || mouse.x < m.viewMin.x + m.gutterW)
+        return false;
+    row = rowAt(mouse, m);
+    const Row& r = rows_[size_t(row)];
+    if (r.fold >= 0)
+        return false;
+    const std::string& text = doc.buffer.line(r.line);
+    // The character under the mouse (not the nearest gap between characters).
+    const int column = columnAtX(doc, r, (mouse.x - m.origin.x) / m.charW - 0.5f);
+    if (column < r.begin || column >= r.end || column >= int(text.size()) || !model::isIdentifierChar(text[size_t(column)]))
+        return false;
+    const auto [b, e] = model::identifierAround(text, column);
+    begin = b;
+    end = e;
+    return b < e;
+}
+
+bool EditorView::handleDefinitionLink(const model::Document& doc, const Metrics& m, bool hovered)
+{
+    linkRow_ = -1;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!hovered || !io.KeyCtrl || io.KeyShift || io.KeyAlt || dragging_ || touch::fingerDown())
+        return false;
+    int row = 0, begin = 0, end = 0;
+    if (!nameAt(doc, m, io.MousePos, row, begin, end))
+        return false;
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        // Any name: Go to Definition also finds what this document declares (unsaved too), and
+        // says so in the status bar when nothing is found.
+        vm_.setCaret({rows_[size_t(row)].line, begin}, false);
+        intellisense.goToDefinition();
+        dragging_ = false;
+        revealCaret_ = true;
+        lastActivity_ = ImGui::GetTime();
+        return true;
+    }
+    // Underlined only for names the index knows (it is read on first use: holding Ctrl over the
+    // code starts it). A view into the line: nothing allocated per frame.
+    intellisense.ensureIndex();
+    const std::string& text = doc.buffer.line(rows_[size_t(row)].line);
+    if (intellisense.lookup(std::string_view(text).substr(size_t(begin), size_t(end - begin)), doc.path)) {
+        linkRow_ = row;
+        linkBegin_ = begin;
+        linkEnd_ = end;
+    }
+    return false;
+}
+
+void EditorView::drawDefinitionLink(const model::Document& doc, const Metrics& m)
+{
+    if (linkRow_ < 0 || linkRow_ >= int(rows_.size()))
+        return;
+    const Row& row = rows_[size_t(linkRow_)];
+    if (row.fold >= 0 || linkEnd_ > int(doc.buffer.line(row.line).size()))
+        return; // the text changed under it this frame
+    const float x0 = rowX(doc, row, std::clamp(linkBegin_, row.begin, row.end), m);
+    const float x1 = rowX(doc, row, std::clamp(linkEnd_, row.begin, row.end), m);
+    const float y = m.origin.y + float(linkRow_) * m.lineH + (m.lineH + ImGui::GetFontSize()) * 0.5f;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y), ImVec2(x1, y), palette_.accent, std::max(1.0f, s_));
 }
 
 } // namespace enp::view

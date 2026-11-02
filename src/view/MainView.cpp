@@ -298,6 +298,8 @@ void MainView::handleShortcuts()
         {ImGuiMod_Ctrl | ImGuiKey_G, C::GoToLine, Global},
         {ImGuiMod_Ctrl | ImGuiKey_Space, C::TriggerCompletion, Editing},
         {ImGuiKey_F12, C::GoToDefinition, Editing},
+        {ImGuiMod_Alt | ImGuiKey_LeftArrow, C::NavigateBack, Editing},
+        {ImGuiMod_Alt | ImGuiKey_RightArrow, C::NavigateForward, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_F2, C::ToggleBookmark, Global},
         {ImGuiKey_F2, C::NextBookmark, Global},
         {ImGuiMod_Shift | ImGuiKey_F2, C::PreviousBookmark, Global},

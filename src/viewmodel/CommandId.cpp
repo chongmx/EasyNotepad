@@ -169,6 +169,8 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::GoToDefinition: return {"Definition", "Go to where the name under the caret is declared, in this file or the workspace", "F12"};
     case CommandId::ToggleAutoComplete: return {"Auto Complete", "Suggest names while typing code", ""};
     case CommandId::RebuildSymbolIndex: return {"Rebuild Index", "Read the workspace's code again for completion and Go to Definition", ""};
+    case CommandId::NavigateBack: return {"Back", "Go back to where Go to Definition jumped from", "Alt+Left"};
+    case CommandId::NavigateForward: return {"Forward", "Go forward again after going back", "Alt+Right"};
 
     case CommandId::Count: break;
     }
@@ -330,6 +332,8 @@ const char* commandKey(CommandId id)
     case CommandId::GoToDefinition: return "GoToDefinition";
     case CommandId::ToggleAutoComplete: return "ToggleAutoComplete";
     case CommandId::RebuildSymbolIndex: return "RebuildSymbolIndex";
+    case CommandId::NavigateBack: return "NavigateBack";
+    case CommandId::NavigateForward: return "NavigateForward";
     case CommandId::Count: break;
     }
     return "";
