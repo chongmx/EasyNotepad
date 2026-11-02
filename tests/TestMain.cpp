@@ -53,6 +53,15 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#   include <csignal>
+#   include <unistd.h>
+#   if defined(__APPLE__) || defined(__GLIBC__)
+#       include <execinfo.h>
+#       define ENP_TEST_BACKTRACE 1
+#   endif
+#endif
+
 namespace {
 
 int g_failures = 0;
@@ -3656,7 +3665,14 @@ TEST(opening_another_folder_forgets_the_previous_one)
 TEST(process_stats_describe_this_process)
 {
     const os::ProcessStats s = os::processStats();
-#if defined(__linux__) || defined(_WIN32)
+#if defined(_WIN32)
+    // Not the working set: os::trimMemory() (the test before) empties it on Windows, so it can be
+    // far below a megabyte. The commit charge stays.
+    CHECK(s.residentBytes > 0);
+    CHECK(s.privateBytes > 1024 * 1024);
+    CHECK(s.threads >= 1);
+    CHECK(s.handles >= 3); // stdin, stdout, stderr at least
+#elif defined(__linux__)
     CHECK(s.residentBytes > 1024 * 1024);
     CHECK(s.threads >= 1);
     CHECK(s.handles >= 3); // stdin, stdout, stderr at least
@@ -4186,16 +4202,59 @@ TEST(source_rules_no_raw_allocation_outside_the_os_layer)
     CHECK(violations.empty());
 }
 
+// A crash names the test it happened in, with a backtrace where the platform has one: stdout is
+// flushed after every test, so the log shows how far the run got.
+const char* volatile g_currentTest = "";
+
+#if !defined(_WIN32)
+extern "C" void onFatalSignal(int sig)
+{
+    const char* name = g_currentTest;
+    const char head[] = "\n*** fatal signal in test: ";
+    (void)!::write(2, head, sizeof(head) - 1);
+    (void)!::write(2, name, std::strlen(name));
+    (void)!::write(2, "\n", 1);
+#if defined(ENP_TEST_BACKTRACE)
+    void* frames[64];
+    const int n = ::backtrace(frames, 64);
+    ::backtrace_symbols_fd(frames, n, 2);
+#endif
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
+void installCrashReport()
+{
+    // An alternate stack, so that a stack overflow on the main thread is reported too.
+    static char altStack[64 * 1024];
+    stack_t ss{};
+    ss.ss_sp = altStack;
+    ss.ss_size = sizeof(altStack);
+    ::sigaltstack(&ss, nullptr);
+    struct sigaction sa{};
+    sa.sa_handler = onFatalSignal;
+    sa.sa_flags = SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT})
+        ::sigaction(sig, &sa, nullptr);
+}
+#else
+void installCrashReport() {}
+#endif
+
 int main(int argc, char** argv)
 {
+    installCrashReport();
     os::InitParams params;
     params.argc = argc;
     params.argv = argv;
     os::init(params);
     for (auto& [name, fn] : registry()) {
         const int before = g_failures;
+        g_currentTest = name;
         fn();
         std::printf("%s %s\n", g_failures == before ? "[ OK ]" : "[FAIL]", name);
+        std::fflush(stdout);
     }
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
