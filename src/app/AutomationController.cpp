@@ -223,7 +223,10 @@ const std::vector<AutomationTool>& automationTools()
          schema({{"prompt", "What to ask"}}, {"prompt"})},
         {"read_agent_chat", "The app's agent conversation: messages (user, agent, tool steps), whether it is working and on what.",
          schema({})},
-        {"open_file", "Opens a workspace file in the editor.", schema({{"path", "Workspace-relative path, e.g. src/main.cpp"}}, {"path"})},
+        {"open_file", "Opens a workspace file in the editor, optionally with the caret at a line and column.",
+         schema({{"path", "Workspace-relative path, e.g. src/main.cpp"}, {"line", "1-based line for the caret (optional)"},
+                 {"column", "1-based column (byte) for the caret (optional, with line)"}},
+                {"path"})},
         {"open_folder", "Opens a folder as the workspace (closing the current one).", schema({{"path", "Absolute path of the folder"}}, {"path"})},
         {"memory_trace", "Developer builds with ENP_MEMORY_TRACE: 'mark' forgets the traced blocks, 'dump' writes the call stacks "
                          "of blocks allocated since the mark and still live to `file`.",
@@ -600,6 +603,10 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
         vm.openFile(path);
         if (!vm.activeDocument())
             return error("cannot open " + path);
+        if (const int line = int(params.getNumber("line", 0)); line > 0) {
+            vm.goToLine(line - 1);
+            vm.setCaret({line - 1, std::max(0, int(params.getNumber("column", 1)) - 1)}, false);
+        }
         return documentInfo(*vm.activeDocument());
     }
     if (method == "memory_trace") {

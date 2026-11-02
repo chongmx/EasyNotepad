@@ -4466,6 +4466,32 @@ TEST(intellisense_goes_to_definitions_in_the_file_and_the_workspace)
     vm.closeFolder();
 }
 
+TEST(intellisense_suggests_with_one_caret_only)
+{
+    // Each caret has its own word: one list cannot complete them all, so with several carets
+    // (Alt+click, Ctrl+D, Ctrl+Alt+Down) it does not open, and an open one closes.
+    viewmodel::NotepadViewModel vm;
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int widthOne = 1;\nint widthTwo = 2;\nint a = wi;\nint b = wi;\n");
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    vm.setCaret({2, 10}, false);
+    is.trigger();
+    CHECK(is.active() && itemIndex(is, "widthOne") >= 0);
+    vm.execute(viewmodel::CommandId::AddCursorBelow);
+    CHECK_EQ(vm.cursorCount(), 2);
+    is.sync();
+    CHECK(!is.active());
+    is.trigger();
+    CHECK(!is.active());
+    typeText(vm, "d");
+    CHECK(!is.active());
+    CHECK(vm.activeDocument()->buffer.line(2) == "int a = wid;" && vm.activeDocument()->buffer.line(3) == "int b = wid;");
+    vm.clearExtraCursors();
+    is.trigger();
+    CHECK(is.active());
+}
+
 TEST(intellisense_goes_back_and_forward_through_its_jumps)
 {
     using C = viewmodel::CommandId;

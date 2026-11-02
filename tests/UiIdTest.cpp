@@ -556,7 +556,14 @@ int main(int argc, char** argv)
                 h.vm().workspace.set(viewmodel::WorkspaceMode::Agent);
                 h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
                 h.settle();
-                const ImGuiWindow* text = windowNamed("##editorText");
+                const ImGuiWindow* text = nullptr; // a child window: its name is "<parent>/##editorText_<id>"
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    if (w->WasActive && std::strncmp(slash ? slash + 1 : w->Name, "##editorText", 12) == 0)
+                        text = w;
+                }
+                if (!text)
+                    fail("the text window was not found", 0);
                 ImGuiIO& io = ImGui::GetIO();
                 bool jumped = false;
                 io.AddKeyEvent(ImGuiMod_Ctrl, true);

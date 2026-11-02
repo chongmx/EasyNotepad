@@ -100,6 +100,9 @@ The editor takes VS Code's multi-cursor and line keys:
 | Ctrl+R | Switch to a recent folder or file |
 | Ctrl+E | Jump to the terminal (it starts one if needed); again, back to the editor |
 | Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab | Close the file, next tab, previous tab |
+| Ctrl+Space | Suggestions for the word at the caret (IntelliSense, below) |
+| F12, Ctrl+click | Go to the definition of the name (Ctrl+hover underlines it) |
+| Alt+Left / Alt+Right | Back to where the last jump to a definition started / forward again |
 
 With several carets, typing, Enter, Tab, Backspace, Delete (and their Ctrl word forms), the arrow keys,
 Home and End, Cut, Copy, Paste, upper/lower case, comment, indent and the line commands act at
@@ -580,7 +583,9 @@ the file declaring it; the chosen one shows its declaration below the list. **Up
 Up/Down** choose, **Enter** or **Tab** (or a click) insert it, **Esc** closes the list. It never opens
 by itself inside a comment or a string. **Ctrl+Space** (Edit › IntelliSense › Complete) opens it
 anywhere, also with nothing typed and in any language; **Auto Complete** turns the automatic list
-off (saved). Inserting a suggestion is one ordinary edit: Undo takes it back.
+off (saved). Inserting a suggestion is one ordinary edit: Undo takes it back. Suggestions work with
+one caret: with several (Alt+click, Ctrl+D), they do not open by themselves and Ctrl+Space says to go
+back to one caret (Escape).
 
 **Go to Definition** (F12, also in Read › Navigate): jumps to where the name under the caret is
 declared. The current document is searched first in its current, unsaved text; then the workspace,

@@ -112,8 +112,9 @@ def main():
     ap.add_argument("--folder", required=True, help="the folder to open each cycle (absolute path)")
     ap.add_argument("--files", nargs="*", default=[], help="workspace-relative files to open each cycle")
     ap.add_argument("--steps", nargs="*", default=[],
-                    help="after the files, each cycle: open=FILE, click=AUTOMATION_ID or command=NAME, in order "
-                         "(e.g. open=data.json click=data-view:tree click=data-view:accordion)")
+                    help="after the files, each cycle: open=FILE[:LINE[:COLUMN]] (the caret there), click=AUTOMATION_ID "
+                         "command=NAME or wait=SECONDS, in order (e.g. open=data.json click=data-view:tree click=data-view:accordion; "
+                         "open=src/main.cpp:12:9 command=GoToDefinition command=NavigateBack)")
     ap.add_argument("--cycles", type=int, default=8)
     ap.add_argument("--warmup", type=int, default=3, help="cycles that may still grow (caches, driver buffers)")
     ap.add_argument("--csv", help="write every reading to this CSV file (cycle, heap, blocks, private, rss, mappings...)")
@@ -160,10 +161,20 @@ def main():
                 time.sleep(0.3)
             for step in args.steps:
                 kind, _, value = step.partition("=")
+                if kind == "wait":  # wait=SECONDS: let background work finish (an index being read)
+                    time.sleep(float(value))
+                    continue
                 method, params = {"open": ("open_file", {"path": value}), "click": ("click", {"id": value}),
                                   "command": ("execute_command", {"command": value})}.get(kind, (None, None))
+                if kind == "open":  # path[:line[:column]]
+                    parts = value.split(":")
+                    params = {"path": parts[0]}
+                    if len(parts) > 1 and parts[1].isdigit():
+                        params["line"] = int(parts[1])
+                    if len(parts) > 2 and parts[2].isdigit():
+                        params["column"] = int(parts[2])
                 if not method:
-                    sys.exit(f"unknown step {step!r}: use open=, click= or command=")
+                    sys.exit(f"unknown step {step!r}: use open=, click=, command= or wait=")
                 try:
                     call(endpoint, method, params)
                 except RuntimeError as e:
