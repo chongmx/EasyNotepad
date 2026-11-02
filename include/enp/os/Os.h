@@ -39,8 +39,12 @@ double now();
 // objects: windows, cursors, fonts; threads: work never joined). 0 where the platform cannot tell.
 struct ProcessStats {
     std::uint64_t residentBytes = 0; // working set (Windows) / resident set (POSIX)
-    std::uint64_t privateBytes = 0;  // committed private memory (Windows), anonymous memory (Linux)
-    int handles = 0;                 // kernel handles (Windows) / open descriptors (Linux, Android)
+    std::uint64_t privateBytes = 0;  // committed private memory (Windows), anonymous memory (Linux),
+                                     // physical footprint (macOS: Activity Monitor's "Memory")
+    std::uint64_t sharedBytes = 0;   // Linux: shared memory the process has written (RssShmem: the
+                                     // window's frames handed to the X server by MIT-SHM, memfd
+                                     // buffers); not in privateBytes, part of what the app holds
+    int handles = 0;                 // kernel handles (Windows) / open descriptors (Linux, Android, macOS)
     int gdiObjects = 0;              // Windows only
     int userObjects = 0;             // Windows only
     int threads = 0;

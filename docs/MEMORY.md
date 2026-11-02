@@ -70,7 +70,8 @@ gives everything back. Concretely, all of these hold:
    show in a task manager by itself. When a folder or the last document closes, the view-model
    sets `takeMemoryTrimRequest()`; `Application::endFrame()` then compacts ImGui's buffers and the
    font atlas and calls `os::trimMemory()` (glibc `malloc_trim`; Windows `_heapmin` and a working
-   set trim) twice: four frames later, once the textures released by the close are destroyed, and
+   set trim; macOS `malloc_zone_pressure_relief`, which madvises every zone's free pages away as
+   memory pressure would; Android `M_PURGE`) twice: four frames later, once the textures released by the close are destroyed, and
    1.5 s later, once late results of background work are freed too. The app keeps drawing until
    both have run. A change that frees something large elsewhere sets the request too.
    On glibc, `os::init()` also fixes the allocator's thresholds (`mallopt`: 128 KB mmap, 1 MB
@@ -128,6 +129,7 @@ frees it, so a scope's live bytes are exactly what that subsystem still holds. S
 | `library` | what a library or program contains while its view shows it (`LibraryView`, `model::bin::Image`): freed on close or when opened as text |
 | `views` | everything else the views allocate (`Application::frame`) |
 | `imgui` | Dear ImGui: windows, draw buffers, font atlas, textures |
+| `automation` | the automation connector, the app's side of a test bench or the MCP bridge: its connection threads, requests, replies and calls queued for the main thread (`services::AutomationServer`). Ended connections are reaped every 200 ms; idle, it holds 0 bytes, and while a reading is taken it holds exactly that request |
 | `other` | not attributed: startup, services, threads |
 
 **Any new subsystem that builds state of more than a few kilobytes gets its own scope** and a
@@ -205,6 +207,9 @@ Where to read it:
   background thread is cancelled by a close, its late result is dropped, and the `intellisense`
   scope is back to the byte afterwards, also when the view-model is destroyed mid-build. The cycle
   test also requires that scope to be exactly 0 after every close.
+- `automation_connector_holds_nothing_per_request` (`enp_tests`): the app's side of a test bench
+  holds the same after 10 and after 200 requests (0 bytes once they have ended), and nothing once
+  stopped. A planted leak of 40 bytes per request fails it (858 -> 16,328 bytes).
 - `source_rules_no_raw_allocation_outside_the_os_layer` and `measurement_pool_is_a_fixed_first_fit_manager`.
 - `enp_ui_tests`: renders every layout state headless for hundreds of thousands of frames, fails
   on growth of ImGui's live allocations and windows in the steady state, and opens and closes
@@ -230,6 +235,20 @@ or threads grow. On Linux it prints the private memory per mapping class (malloc
 GPU driver) between the first close after the warm-up and the last. Use a folder the size of a
 real project, and include every kind of file the change touches.
 
+What it counts is the whole process; nothing of the app is left out:
+
+| Reading | Linux | macOS | Windows |
+|---|---|---|---|
+| `private` (checked) | anonymous memory + shared memory the process wrote (`RssAnon` + `RssShmem`: the window's MIT-SHM frame buffer with a software GL driver, memfd buffers) | physical footprint (`TASK_VM_INFO.phys_footprint`, Activity Monitor's "Memory": dirty and compressed pages, IOKit/GPU memory the app owns) | committed private bytes |
+| heap, blocks, scopes (checked) | the accounted C++ heap (`os::mem`) | same | same |
+| by mapping (checked) | malloc heap, thread arenas, GPU driver mappings (`/proc/<pid>/smaps`) | - | - |
+| threads, handles | `/proc/self/status`, `/proc/self/fd` | `task_threads`, `/dev/fd` | toolhelp, handle count, GDI/USER |
+
+Only the bench itself is told apart: the script's own process is not the app's, and the app's
+side of the connection is the `automation` scope, which must read the same at every reading (the
+script fails otherwise). Before 2026-11, `os::processStats()` had no macOS branch: private,
+resident and threads read 0 there, in the status bar and in `get_state`.
+
 Things that make measurements wrong:
 
 - **Commands that start the agent CLI** (Dissect Project, Ask, Explain, Generate Tests) run Claude
@@ -239,6 +258,17 @@ Things that make measurements wrong:
 - **Comparing RSS alone.** RSS includes shared libraries and the GL driver (about 55 MB here).
   Compare the accounted heap first, then private memory.
 - **A memtrace or asan binary** left in `bin/linux/x64` from a previous run.
+- **The malloc tracer's own table.** `tools/malloc-trace/preload.so` maps a 288 MB table and fills
+  it as it records: it shows as one anonymous mapping growing to hundreds of MB. Leave it out of
+  any reading taken under the tracer (it is the bench's memory, not the app's).
+- **A binary just built.** Its code pages are dirty in the page cache until written back (about
+  7 MB of `Private_Dirty` in the executable's mapping, not anonymous): file-backed and reclaimable,
+  not the app's memory. `RssAnon` does not count them; `smaps_rollup`'s `Private_Dirty` does.
+- **Screenshots** (`screenshot` over automation). The first one costs a one-time 6.3 MB in Mesa
+  llvmpipe (a window-sized RGBA block, 1332x800x4 bytes, and the shader variants LLVM compiles for
+  an RGBA8 target; LLVM's C++ allocations show as 4 blocks in `other`); 20 more add 64 KB, then
+  nothing. `glFinish()` after deleting the capture texture changes nothing: it is the driver's
+  cache. `memory_cycle.py` takes none.
 - **Building with `-j 24`** on a busy machine: the linker has been OOM-killed. Use `-j 8`.
 
 ## 6. Leaks found so far
@@ -260,6 +290,9 @@ Kept so the same mistakes are recognised quickly. Each row is fixed and has a te
 | 33 MB private kept per closed folder, anon arenas climbing about 1 MB a cycle, heap back to the byte | the IntelliSense index was built on a background thread: its blocks lived in that thread's malloc arena; freed, they merged into the arena's top, which `malloc_trim()` never returns, and glibc's dynamic trim threshold (raised by earlier large frees) kept `free()` from returning it too. Found with `malloc_stats()` under gdb: arenas of 33 MB and 12 MB with 3 KB in use | 9: fixed `mallopt` thresholds in `os::init()`; the index pools its text into a handful of large blocks (mapped on their own) instead of about 190,000 small ones |
 | (Prevented, IntelliSense) a scope would have kept bytes after close although its owner freed everything | code running inside `Scope("intellisense")` called into the main view-model (status text, opening a file, recent files): what those allocated outlives the folder and would be counted as IntelliSense's | 8: a scope covers only the subsystem's own state; calls into other owners happen outside it (`IntellisenseViewModel::status()` uses `Scope("other")`) |
 | Private memory swinging 1.6 MB from close to close (47.0-48.6 MB) and the malloc heap's dirty pages creeping (+19 KB a cycle) with IntelliSense, although every live byte was the same after each close | churn, not growth: each cycle allocated and freed about 175 MB for IntelliSense in about 4,200 blocks (a new string per file read for the index, the index's pool doubled 54 times then copied, text copies grown line by line), and every index build ran on a new thread, so whichever malloc arena that thread got kept up to the trim threshold (then 1 MB) of its free top. Found with `tools/malloc-trace/churn.c` and a per-mapping diff of the anonymous mappings between closes: all of the swing was in two thread arenas | 10: one 2 MB read buffer per build, the index reserved from the sources' size, exact-size text copies, documents read in place, the ranking buffer reused; builds on one `os::dispatch::Worker` thread; trim threshold 128 KB. IntelliSense churn 35 MB in about 100 blocks a cycle; over 30 cycles private 46.1-46.6 MB and thread arenas 13.23-13.41 MB, every trend flat |
+| macOS CI: `enp_ui_tests` failed "Ctrl+click did not go to the definition", Linux and Windows passed (investigated as a possible OS-layer memory difference: it is not memory) | the test pressed `ImGuiMod_Ctrl`; on macOS (`io.ConfigMacOSXBehaviors`) ImGui swaps the keys a backend reports (Cmd arrives as Ctrl, the Ctrl key as Super) and turns Super+left click into a right click, so the editor saw a right click. The app was right: a user's Cmd+click arrives as Ctrl. Reproduced on Linux by switching the mac mapping on | the UI test now runs the Ctrl+click block with both mappings on every platform, pressing Cmd under the mac one |
+| macOS: the status bar and `get_state` read 0 MB private, 0 resident, 0 threads; closing a folder trimmed nothing | `os::processStats()` and `os::trimMemory()` had no macOS branch (glibc-only `malloc_trim`/`mallopt`, `/proc` reads) | Mach `task_info(TASK_VM_INFO)` (`phys_footprint`, `resident_size`), `task_threads` (its rights and array given back), `/dev/fd`; `malloc_zone_pressure_relief` |
+| The test bench's readings could include its own connections (thread per request, last one kept until the next) and left 4.3 MB of the app uncounted (shared memory) | `AutomationServer` reaped an ended connection only when the next arrived; `privateBytes` on Linux was `RssAnon` only | `automation` scope, ended connections reaped every 200 ms, the scope checked at every reading; `sharedBytes` (`RssShmem`) counted in the status bar and in the script's private reading. 5,100 bench requests (get_state, list_elements, list_commands, screenshots) on an idle app: C++ heap identical to the byte from request 510 to 5,100, `automation` the same at every reading, threads and descriptors constant |
 | **Open:** about 1.5 MB/s while idle with a large repo, Windows only | not reproduced on Linux (flat for minutes in every mode); Windows-only code audited without a finding | watch the developer readout on Windows: which counter climbs names it |
 
 ## 7. What "Rust-like" means here, and what it does not

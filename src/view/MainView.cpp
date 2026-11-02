@@ -2520,15 +2520,17 @@ void MainView::renderStatusBar()
                 std::snprintf(t, sizeof(t), bytes >= (100ull << 20) ? "%.0fM" : "%.1fM", double(bytes) / double(1 << 20));
                 return std::string(t);
             };
-            resourceText_ = std::string(ICON_FA_MEMORY " ") + mb(p.privateBytes) + "  " ICON_FA_CUBES " " + mb(heap.liveBytes);
+            // Everything the process holds: its private memory and the shared memory it wrote.
+            resourceText_ = std::string(ICON_FA_MEMORY " ") + mb(p.privateBytes + p.sharedBytes) + "  " ICON_FA_CUBES " " + mb(heap.liveBytes);
             char tip[512];
             std::snprintf(tip, sizeof(tip),
                           "Process memory (developer mode, every second)\n\n"
-                          "Private memory: %llu KB\nResident: %llu KB\nC++ heap: %llu KB in %llu blocks\n"
+                          "Private memory: %llu KB\nShared memory: %llu KB\nResident: %llu KB\nC++ heap: %llu KB in %llu blocks\n"
                           "Handles: %d\nGDI objects: %d\nUSER objects: %d\nThreads: %d\n"
                           "ImGui: %d allocations, %d windows\n\n"
                           "A number that climbs while the app is idle points at a leak.",
-                          static_cast<unsigned long long>(p.privateBytes >> 10), static_cast<unsigned long long>(p.residentBytes >> 10),
+                          static_cast<unsigned long long>(p.privateBytes >> 10), static_cast<unsigned long long>(p.sharedBytes >> 10),
+                          static_cast<unsigned long long>(p.residentBytes >> 10),
                           static_cast<unsigned long long>(heap.liveBytes >> 10), static_cast<unsigned long long>(heap.liveBlocks),
                           p.handles, p.gdiObjects, p.userObjects, p.threads,
                           g.DebugAllocInfo.TotalAllocCount - g.DebugAllocInfo.TotalFreeCount, g.Windows.Size);

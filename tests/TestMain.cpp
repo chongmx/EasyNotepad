@@ -2945,6 +2945,79 @@ TEST(automation_endpoint_end_to_end)
     CHECK(!stoppedError.empty());
 }
 
+TEST(automation_connector_holds_nothing_per_request)
+{
+    // A test bench polls the app once per request, for hours (scripts/memory_cycle.py). The app's
+    // side of that connection must not grow with the number of requests: after 10 and after 200
+    // requests the connector ("automation" scope: its threads, sockets, requests and replies)
+    // holds exactly the same, and once the bench has disconnected nothing per connection is left.
+    if (!os::mem::enabled()) {
+        std::printf("  (memory accounting off: skipped)\n");
+        return;
+    }
+#if defined(_WIN32)
+    _putenv_s("EASYNOTEPAD_ENDPOINT", (os::fs::appDataDirectory() + "/test-endpoint.json").c_str());
+#else
+    setenv("EASYNOTEPAD_ENDPOINT", (os::fs::appDataDirectory() + "/test-endpoint.json").c_str(), 1);
+#endif
+    const std::uint64_t before = os::mem::liveBytes("automation");
+    {
+        services::AutomationServer server([](const std::string& method, const model::Json& params) {
+            // About the size of a get_state reply.
+            model::Json documents = model::Json::array();
+            for (int i = 0; i < 20; ++i)
+                documents.push(model::Json::object().set("path", "/some/where/file" + std::to_string(i) + ".cpp").set("line", i));
+            return model::Json::object().set("method", method).set("echo", params).set("documents", std::move(documents));
+        });
+        CHECK(server.start());
+        auto requests = [](int n) {
+            int answered = 0;
+            for (int i = 0; i < n; ++i) {
+                std::optional<model::Json> reply;
+                std::atomic<bool> done{false};
+                std::thread client([&]() {
+                    std::string error;
+                    reply = app::forwardToRunningApp("get_state", model::Json::object().set("i", i), &error);
+                    done = true;
+                });
+                for (int t = 0; t < 4000 && !done; ++t) { // the handler runs here, on the "UI thread"
+                    os::dispatch::pump();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                client.join();
+                answered += reply && reply->find("documents") ? 1 : 0;
+            }
+            return answered;
+        };
+        auto settled = [before]() {
+            // Ended connections are reaped every 200 ms; wait for the connector to go back to idle.
+            std::uint64_t last = os::mem::liveBytes("automation");
+            for (int t = 0; t < 40; ++t) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                os::dispatch::pump();
+                const std::uint64_t now = os::mem::liveBytes("automation");
+                if (now == last && t >= 8)
+                    break;
+                last = now;
+            }
+            return os::mem::liveBytes("automation") - before;
+        };
+        CHECK_EQ(requests(10), 10);
+        const std::uint64_t after10 = settled();
+        CHECK_EQ(requests(190), 190);
+        const std::uint64_t after200 = settled();
+        CHECK_EQ(after200, after10);
+        // Idle, nothing per connection (the listening socket and its thread were made by start()).
+        CHECK_EQ(after10, std::uint64_t(0));
+        if (after200 != after10 || after10 != 0)
+            std::printf("  automation scope: %llu bytes after 10 requests, %llu after 200\n",
+                        (unsigned long long)after10, (unsigned long long)after200);
+        server.stop();
+    }
+    os::fs::writeFile(services::AutomationServer::endpointPath(), "");
+    CHECK_EQ(os::mem::liveBytes("automation"), before); // stopped: nothing at all
+}
+
 // ---- Pseudo-terminal backend (real process) -----------------------------------------------------
 
 TEST(pty_runs_a_real_process)

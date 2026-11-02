@@ -22,6 +22,10 @@
 #elif defined(__linux__) || defined(__ANDROID__)
 #   include <dirent.h>
 #   include <malloc.h>
+#elif defined(__APPLE__)
+#   include <dirent.h>
+#   include <mach/mach.h>
+#   include <malloc/malloc.h>
 #endif
 
 namespace enp::os {
@@ -94,12 +98,41 @@ ProcessStats processStats()
                 s.residentBytes = value * 1024;
             else if (std::sscanf(line, "RssAnon: %llu", &value) == 1)
                 s.privateBytes = value * 1024;
+            else if (std::sscanf(line, "RssShmem: %llu", &value) == 1)
+                s.sharedBytes = value * 1024;
             else if (std::sscanf(line, "Threads: %llu", &value) == 1)
                 s.threads = int(value);
         }
         std::fclose(f);
     }
     if (DIR* dir = ::opendir("/proc/self/fd")) {
+        while (dirent* d = ::readdir(dir))
+            if (d->d_name[0] != '.')
+                ++s.handles;
+        ::closedir(dir);
+        --s.handles; // the directory handle itself
+    }
+#elif defined(__APPLE__)
+    // Mach's own accounting: phys_footprint is what Activity Monitor shows as the app's memory
+    // (dirty private pages, compressed ones included, plus IOKit/GPU memory the process owns),
+    // the macOS counterpart of Windows' private bytes and Linux's anonymous memory.
+    task_vm_info_data_t vm{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) == KERN_SUCCESS) {
+        s.residentBytes = vm.resident_size;
+        s.privateBytes = vm.phys_footprint;
+    }
+    // The thread list is a send right per thread in memory the kernel allocated for us: both are
+    // given back before returning (one right or page kept per call would be a leak per frame).
+    thread_act_array_t threads = nullptr;
+    mach_msg_type_number_t threadCount = 0;
+    if (task_threads(mach_task_self(), &threads, &threadCount) == KERN_SUCCESS) {
+        s.threads = int(threadCount);
+        for (mach_msg_type_number_t i = 0; i < threadCount; ++i)
+            mach_port_deallocate(mach_task_self(), threads[i]);
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), vm_size_t(threadCount * sizeof(thread_act_t)));
+    }
+    if (DIR* dir = ::opendir("/dev/fd")) {
         while (dirent* d = ::readdir(dir))
             if (d->d_name[0] != '.')
                 ++s.handles;
@@ -213,6 +246,12 @@ void trimMemory()
     malloc_trim(0); // returns free pages at the top of the heap and inside it (MADV_DONTNEED)
 #elif defined(__ANDROID__) && defined(M_PURGE) && __ANDROID_API__ >= 26
     mallopt(M_PURGE, 0); // bionic: release cached pages (mallopt is API 26+; minSdk is 24)
+#elif defined(__APPLE__)
+    // libmalloc keeps freed pages of its tiny/small/medium regions (and recently freed large
+    // blocks in its cache) mapped and counted in the footprint until the system is short of
+    // memory. Pressure relief does now what memory pressure would: every zone madvises its free
+    // pages away (0: as much as it can).
+    malloc_zone_pressure_relief(nullptr, 0);
 #endif
 }
 

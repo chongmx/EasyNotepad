@@ -17,6 +17,14 @@ buffers), the readings after each close may oscillate but must not climb. On Lin
 memory is split by mapping: the malloc heap and thread arenas must stay flat; the GPU driver's
 mappings must keep their sizes (pages first written inside them are reported, not failed: they are
 the driver's fixed command buffers filling up once, docs/MEMORY.md section 6).
+
+What is counted: the whole process. "private" is the private memory plus the shared memory the app
+wrote (Linux: anonymous + RssShmem, which holds the window's MIT-SHM frame buffer; macOS: the
+physical footprint, Activity Monitor's figure, which includes graphics memory; Windows: committed
+private bytes). Only the bench's own side is told apart: the app's automation connector counts its
+memory in the "automation" scope, which must read the same at every reading (the request being
+answered), so polling the app never adds to what is measured. The per-mapping split needs
+/proc/<pid>/smaps (Linux); elsewhere the totals and the trend are checked.
 """
 import argparse
 import json
@@ -88,7 +96,11 @@ def snapshot(endpoint, settle):
     return {
         "heapKB": mem["liveKB"],
         "blocks": mem["blocks"],
-        "privateKB": proc["privateKB"],
+        # Everything the process holds: private memory plus the shared memory it wrote (Linux:
+        # the window's MIT-SHM frame buffer), nothing left out. On macOS privateKB is the physical
+        # footprint (Activity Monitor's figure), on Windows the committed private bytes.
+        "privateKB": proc["privateKB"] + proc.get("sharedKB", 0),
+        "sharedKB": proc.get("sharedKB", 0),
         "residentKB": proc["residentKB"],
         "handles": proc.get("handles", 0),
         "gdi": proc.get("gdiObjects", 0),
@@ -96,6 +108,9 @@ def snapshot(endpoint, settle):
         "threads": proc.get("threads", 0),
         "imguiWindows": st.get("imgui", {}).get("windows", 0),
         "scopes": {s["name"]: s["liveKB"] for s in mem["scopes"] if s["blocks"]},
+        # The test bench's own side in the app (the automation connector): while this reading is
+        # taken it holds exactly this request; it must read the same every time.
+        "automationBytes": next((int(s.get("liveBytes", s["liveKB"] * 1024)) for s in mem["scopes"] if s["name"] == "automation"), 0),
     }
 
 
@@ -256,6 +271,9 @@ def main():
             for key in ("handles", "gdi", "user", "threads"):
                 if last[key] > first[key] + 2:
                     failures.append(f"{key} grow per cycle: {first[key]} -> {last[key]}")
+        connector = sorted({c["automationBytes"] for c in [fresh] + closes})
+        if len(connector) > 1:
+            failures.append(f"the automation connector's memory changes between readings: {connector} bytes")
         grown = {k: v for k, v in last["scopes"].items() if v > fresh["scopes"].get(k, 0) + 16}
         if grown:
             print("scopes above the fresh start after the last close (KB):",

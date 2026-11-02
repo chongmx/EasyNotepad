@@ -95,11 +95,12 @@ Json getState(viewmodel::NotepadViewModel& vm)
         for (int i = 0; i < heap.count; ++i) {
             const os::mem::ScopeStats& sc = heap.scopes[i];
             if (sc.liveBlocks > 0)
-                scopes.push(Json::object().set("name", sc.name).set("liveKB", int(sc.liveBytes / 1024)).set("blocks", int(sc.liveBlocks)));
+                scopes.push(Json::object().set("name", sc.name).set("liveKB", int(sc.liveBytes / 1024)).set("liveBytes", double(sc.liveBytes)).set("blocks", int(sc.liveBlocks)));
         }
         state.set("memory", Json::object()
                                 .set("accounting", os::mem::enabled())
                                 .set("liveKB", int(heap.total.liveBytes / 1024))
+                                .set("liveBytes", double(heap.total.liveBytes))
                                 .set("blocks", int(heap.total.liveBlocks))
                                 .set("allocations", double(heap.total.totalAllocations))
                                 .set("poolKB", int(os::mem::pool::usage().used / 1024))
@@ -108,6 +109,7 @@ Json getState(viewmodel::NotepadViewModel& vm)
     state.set("process", Json::object()
                              .set("residentKB", int(p.residentBytes / 1024))
                              .set("privateKB", int(p.privateBytes / 1024))
+                             .set("sharedKB", int(p.sharedBytes / 1024))
                              .set("handles", p.handles)
                              .set("gdiObjects", p.gdiObjects)
                              .set("userObjects", p.userObjects)
