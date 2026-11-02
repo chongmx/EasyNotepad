@@ -9,6 +9,7 @@
 // and require every scope to be back at zero and the total to be flat.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace enp::os::mem {
