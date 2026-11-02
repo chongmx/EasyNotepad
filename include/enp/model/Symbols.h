@@ -6,6 +6,7 @@
 #pragma once
 
 #include "enp/model/Language.h"
+#include "enp/model/TextBuffer.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -50,6 +51,8 @@ std::pair<int, int> identifierAround(std::string_view line, int column);
 bool canExtractSymbols(Language language);
 // Appends the declarations of `text` (a whole file, any line endings) to `out`, numbered `file`.
 void extractSymbols(std::string_view text, Language language, int file, std::vector<Symbol>& out);
+// The same for an open document, read line by line in place (no copy of its text).
+void extractSymbols(const TextBuffer& text, Language language, int file, std::vector<Symbol>& out);
 
 // How well `word` matches what was typed: -1 when it does not, higher is better. Every typed
 // character must appear in order (case-insensitive); the first at the start of the word or of one
@@ -99,6 +102,9 @@ public:
     // A file was saved: its symbols and includes are replaced (the file is added when it is new),
     // the text of the old ones is dropped from the pool, and the index is sorted again.
     void replaceFile(std::string_view path, std::vector<Symbol>& symbols, const std::vector<Include>& includes);
+    // Room for the index of `sourceBytes` of code in `files` files, taken once before adding (an
+    // index is about a sixth of its source): nothing is reallocated while it is built.
+    void reserve(size_t sourceBytes, size_t files);
     void finish(); // sorts by name, then file and line: after adding
     void release(); // empties it and frees the storage (docs/MEMORY.md rule 5)
 

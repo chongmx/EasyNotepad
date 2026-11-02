@@ -205,6 +205,20 @@ public:
     {
     }
 
+    // An open document: its lines in place.
+    void runLines(const TextBuffer& text)
+    {
+        for (int l = 0; l < text.lineCount(); ++l) {
+            raw_ = text.line(l);
+            cleaner_.clean(raw_, code_);
+            if (family_ == Family::Python)
+                pythonLine();
+            else
+                bracedLine();
+            ++line_;
+        }
+    }
+
     void run(std::string_view text)
     {
         size_t start = 0;
@@ -994,6 +1008,14 @@ bool canExtractSymbols(Language language)
     return familyOf(language) != Family::None;
 }
 
+void extractSymbols(const TextBuffer& text, Language language, int file, std::vector<Symbol>& out)
+{
+    if (!canExtractSymbols(language))
+        return;
+    Parser parser(language, file, out);
+    parser.runLines(text);
+}
+
 void extractSymbols(std::string_view text, Language language, int file, std::vector<Symbol>& out)
 {
     if (!canExtractSymbols(language))
@@ -1143,6 +1165,17 @@ void SymbolIndex::replaceFile(std::string_view path, std::vector<Symbol>& symbol
     std::swap(*this, kept); // the old storage goes with `kept`
 }
 
+void SymbolIndex::reserve(size_t sourceBytes, size_t files)
+{
+    // Measured on C/C++ trees: about 1.8 declarations and 120 bytes of text per KB of source;
+    // these leave room to spare (the room never touched is never resident: these are mappings).
+    text_.reserve(sourceBytes / 6 + 4096);
+    entries_.reserve(sourceBytes / 400 + 64);
+    includes_.reserve(files * 8);
+    paths_.reserve(files * 48);
+    pathEnds_.reserve(files);
+}
+
 void SymbolIndex::finish()
 {
     std::sort(entries_.begin(), entries_.end(), [this](const Entry& a, const Entry& b) {
@@ -1153,12 +1186,17 @@ void SymbolIndex::finish()
         return a.line < b.line;
     });
     std::stable_sort(includes_.begin(), includes_.end(), [](const IncludeEntry& a, const IncludeEntry& b) { return a.file < b.file; });
-    // Exactly what it holds: a large index was grown by doubling.
-    text_.shrink_to_fit();
-    entries_.shrink_to_fit();
-    includes_.shrink_to_fit();
-    paths_.shrink_to_fit();
-    pathEnds_.shrink_to_fit();
+    // Copied down only when the room taken was far more than needed (a copy of a large index is
+    // itself churn); a sensible estimate stays as it is.
+    auto trim = [](auto& c) {
+        if (c.capacity() > 2 * c.size() + 4096)
+            c.shrink_to_fit();
+    };
+    trim(text_);
+    trim(entries_);
+    trim(includes_);
+    trim(paths_);
+    trim(pathEnds_);
 }
 
 void SymbolIndex::release()

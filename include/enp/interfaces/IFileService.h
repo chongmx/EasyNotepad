@@ -28,6 +28,16 @@ class IFileService {
 public:
     virtual ~IFileService() = default;
     virtual std::optional<std::string> read(const std::string& path, std::string* error = nullptr) = 0;
+    // Reads a whole file into `out`, reusing its storage (one buffer for a whole scan); false when
+    // it cannot be read or is larger than `maxBytes`.
+    virtual bool readInto(const std::string& path, std::string& out, size_t maxBytes, std::string* error = nullptr)
+    {
+        std::optional<std::string> text = read(path, error);
+        if (!text || text->size() > maxBytes)
+            return false;
+        out.assign(*text);
+        return true;
+    }
     virtual bool write(const std::string& path, std::string_view data, std::string* error = nullptr) = 0;
     // Part of a file: up to `size` bytes from `offset` (fewer at the end), so a large file is read in
     // pieces; `*total` gets the file's size. nullopt where it cannot be read (or the service cannot).

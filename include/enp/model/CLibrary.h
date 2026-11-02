@@ -61,6 +61,7 @@ int detectCStandard(std::string_view buildFile);
 
 // #include lines (model::Include, in Symbols.h).
 void scanIncludes(std::string_view text, std::vector<Include>& out);
+void scanIncludes(const TextBuffer& text, std::vector<Include>& out); // an open document, in place
 
 // ---- Implementation of the template ---------------------------------------------------------
 

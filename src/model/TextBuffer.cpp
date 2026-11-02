@@ -70,13 +70,20 @@ std::string TextBuffer::text(TextPos from, TextPos to, std::string_view eol) con
         std::swap(from, to);
     if (from.line == to.line)
         return lines_[size_t(from.line)].substr(size_t(from.column), size_t(to.column - from.column));
-    std::string out = lines_[size_t(from.line)].substr(size_t(from.column));
+    // The exact size first: one allocation, not one per doubling as the text grows.
+    size_t size = lines_[size_t(from.line)].size() - size_t(from.column) + size_t(to.column);
+    for (int l = from.line + 1; l < to.line; ++l)
+        size += lines_[size_t(l)].size();
+    size += eol.size() * size_t(to.line - from.line);
+    std::string out;
+    out.reserve(size);
+    out.append(lines_[size_t(from.line)], size_t(from.column), std::string::npos);
     for (int l = from.line + 1; l < to.line; ++l) {
         out += eol;
         out += lines_[size_t(l)];
     }
     out += eol;
-    out += lines_[size_t(to.line)].substr(0, size_t(to.column));
+    out.append(lines_[size_t(to.line)], 0, size_t(to.column));
     return out;
 }
 

@@ -11,6 +11,11 @@ std::optional<std::string> FileService::read(const std::string& path, std::strin
     return os::fs::readFile(path, error);
 }
 
+bool FileService::readInto(const std::string& path, std::string& out, size_t maxBytes, std::string* error)
+{
+    return os::fs::readFileInto(path, out, maxBytes, error);
+}
+
 std::optional<std::string> FileService::readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total)
 {
     return os::fs::readFileRange(path, offset, size, total);

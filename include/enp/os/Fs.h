@@ -27,6 +27,9 @@ struct DirEntry {
 
 // ---- Native file access (implemented per platform) ----------------------------
 std::optional<std::string> readFile(const std::string& path, std::string* error = nullptr);
+// Reads a whole file into `out`, reusing its storage (a buffer reserved once serves every file of
+// a scan); false, and `out` untouched, when it cannot be read or is larger than `maxBytes`.
+bool readFileInto(const std::string& path, std::string& out, size_t maxBytes, std::string* error = nullptr);
 bool writeFile(const std::string& path, std::string_view data, std::string* error = nullptr);
 FileInfo stat(const std::string& path);
 // Directories first, then files; both sorted case-insensitively. Excludes "." and ".."; hidden

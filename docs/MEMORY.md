@@ -80,6 +80,18 @@ gives everything back. Concretely, all of these hold:
    top of a thread's arena, so without this, memory built on a background thread (the
    IntelliSense index) stayed private after its folder closed. Prefer a few large blocks to many
    small ones for big state built off the main thread (`model::SymbolIndex` pools its text).
+10. **Preallocate what is allocated over and over.** A scan or a burst that allocates a buffer per
+   item, or grows a container by doubling, frees everything at the end and still leaves the heap's
+   pages moved around (`tools/malloc-trace/churn.c` shows it, section 3). Take the room once: one
+   buffer reserved at the largest size and reused for every item (`os::fs::readFileInto`,
+   `IFileService::readInto`: the IntelliSense index build reads 4,000 files into one 2 MB buffer),
+   containers reserved from an estimate before they are filled (`SymbolIndex::reserve`,
+   `TextBuffer::text()`), and buffers reused while a feature is active (the suggestion list's
+   ranking), released when it ends. Read documents in place rather than copying their text.
+   Background work that recurs runs on one `os::dispatch::Worker` thread kept by its owner, not a
+   new thread each time (`runAsync`): a new thread gets whichever malloc arena is free, and each
+   arena keeps up to the trim threshold of its free top, so the same work moved memory between
+   arenas from cycle to cycle.
 
 ## 2. Heap accounting (`enp/os/Memory.h`)
 
@@ -168,7 +180,12 @@ Where to read it:
    `python3 tools/malloc-trace/sites.py first.txt second.txt`: it prints the net bytes per call
    site. Growth that is real stays positive over several pairs of dumps; churn changes sign. The
    app runs several times slower while traced, and its RSS includes the tracer's table.
-5. **Telling a climb from settling.** Run at least ten cycles and look at the after-close readings
+5. **What is allocated at all** (and freed again): `tools/malloc-trace/churn.c`, built and preloaded
+   the same way with `CHURN_DIR=<dir>`, totals every allocation of 1 KB or more per call stack between
+   `<dir>/start` and `<dir>/dump`; `python3 tools/malloc-trace/churn.py <dir>/churn.txt 2` groups it by
+   the app function that asked. Live bytes can be identical cycle after cycle while hundreds of MB
+   are allocated and freed: such buffers move which pages are dirty. Preallocate them (rule 10).
+6. **Telling a climb from settling.** Run at least ten cycles and look at the after-close readings
    from cycle 4 on. A per-mapping split (the script prints it) says whose memory it is. A driver
    mapping whose size stays the same while its dirty pages grow is a fixed buffer being written
    for the first time (bounded by its size); a new mapping, or a growing size, is a real leak.
@@ -242,7 +259,7 @@ Kept so the same mistakes are recognised quickly. Each row is fixed and has a te
 | About +100 KB private per cycle over the first cycles (investigated, not a leak) | the C++ heap was identical to the byte, and every `malloc` caller oscillated (net -416 B between cycles 3 and 9, traced); the one-way part was the NVIDIA driver writing new pages of its own command buffers: 21 mappings, 16.5 MB, sizes unchanged, two rings already full | section 3, items 4 and 5 |
 | 33 MB private kept per closed folder, anon arenas climbing about 1 MB a cycle, heap back to the byte | the IntelliSense index was built on a background thread: its blocks lived in that thread's malloc arena; freed, they merged into the arena's top, which `malloc_trim()` never returns, and glibc's dynamic trim threshold (raised by earlier large frees) kept `free()` from returning it too. Found with `malloc_stats()` under gdb: arenas of 33 MB and 12 MB with 3 KB in use | 9: fixed `mallopt` thresholds in `os::init()`; the index pools its text into a handful of large blocks (mapped on their own) instead of about 190,000 small ones |
 | (Prevented, IntelliSense) a scope would have kept bytes after close although its owner freed everything | code running inside `Scope("intellisense")` called into the main view-model (status text, opening a file, recent files): what those allocated outlives the folder and would be counted as IntelliSense's | 8: a scope covers only the subsystem's own state; calls into other owners happen outside it (`IntellisenseViewModel::status()` uses `Scope("other")`) |
-| Malloc heap dirty pages +19 KB a cycle over cycles 21-30 of a 30-cycle run with code suggestions from a command (a child process each cycle) (investigated, not a leak) | C++ heap 6,153/6,155 KB in 12,651 blocks after every close; private memory oscillating 47.5-48.4 MB. `tools/malloc-trace` dumps after closes 7, 13 and 19: the live bytes of every library identical (the GL driver 46,691,769 each time, X11, LLVM, GLX alike), the app's own +191 bytes over 12 cycles in per-frame view temporaries caught mid-frame (lower at close 13): which pages are dirty moves, what is allocated does not | section 3, items 4 and 5 |
+| Private memory swinging 1.6 MB from close to close (47.0-48.6 MB) and the malloc heap's dirty pages creeping (+19 KB a cycle) with IntelliSense, although every live byte was the same after each close | churn, not growth: each cycle allocated and freed about 175 MB for IntelliSense in about 4,200 blocks (a new string per file read for the index, the index's pool doubled 54 times then copied, text copies grown line by line), and every index build ran on a new thread, so whichever malloc arena that thread got kept up to the trim threshold (then 1 MB) of its free top. Found with `tools/malloc-trace/churn.c` and a per-mapping diff of the anonymous mappings between closes: all of the swing was in two thread arenas | 10: one 2 MB read buffer per build, the index reserved from the sources' size, exact-size text copies, documents read in place, the ranking buffer reused; builds on one `os::dispatch::Worker` thread; trim threshold 128 KB. IntelliSense churn 35 MB in about 100 blocks a cycle; over 30 cycles private 46.1-46.6 MB and thread arenas 13.23-13.41 MB, every trend flat |
 | **Open:** about 1.5 MB/s while idle with a large repo, Windows only | not reproduced on Linux (flat for minutes in every mode); Windows-only code audited without a finding | watch the developer readout on Windows: which counter climbs names it |
 
 ## 7. What "Rust-like" means here, and what it does not

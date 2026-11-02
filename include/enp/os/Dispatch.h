@@ -2,6 +2,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 namespace enp::os::dispatch {
 
@@ -21,5 +22,26 @@ bool hasPending();
 // Run `work` on a background thread when the platform has threads; otherwise it is
 // deferred to the next pump() on the main thread (single-threaded wasm).
 void runAsync(Task work);
+
+// One background thread kept for its owner's lifetime, running its tasks one at a time in order.
+// Work that recurs (an index rebuilt for every folder) runs on the same thread every time, so it
+// uses the same stack and the same malloc arena: what that arena keeps after the work is the same
+// memory each time, instead of whichever arena a new thread happens to get (docs/MEMORY.md rule
+// 10). The thread starts with the first task. Destroying the worker waits for the task running
+// then (it should be cancelled first) and drops those still queued. Without threads (wasm) tasks
+// run on the main thread at the next pump().
+class Worker {
+public:
+    Worker();
+    ~Worker();
+    Worker(const Worker&) = delete;
+    Worker& operator=(const Worker&) = delete;
+    void post(Task task);
+    bool started() const;
+
+private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
 
 } // namespace enp::os::dispatch

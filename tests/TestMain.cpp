@@ -46,6 +46,7 @@
 #include <atomic>
 #include <cstring>
 #include <map>
+#include <set>
 #include <regex>
 #include <chrono>
 #include <cstdio>
@@ -5127,6 +5128,114 @@ TEST(code_assistant_writes_code_with_the_chosen_model)
     }
     settle();
     CHECK_EQ(os::mem::liveBytes("intellisense"), memoryBefore); // every byte back
+}
+
+TEST(intellisense_reads_and_builds_without_reallocating)
+{
+    // A scan reads every file into one buffer reserved once.
+    const std::string dir = scratchDirectory() + "/enp-test-read-into";
+    os::fs::createDirectories(dir);
+    services::FileService files;
+    files.write(dir + "/small.txt", "hello\nworld\n", nullptr);
+    files.write(dir + "/big.txt", std::string(5000, 'x'), nullptr);
+    std::string buffer;
+    buffer.reserve(4096);
+    const char* storage = buffer.data();
+    CHECK(files.readInto(dir + "/small.txt", buffer, 4096));
+    CHECK(buffer == "hello\nworld\n" && buffer.data() == storage); // the same storage: nothing allocated
+    CHECK(!files.readInto(dir + "/big.txt", buffer, 4096));        // over the limit: refused, untouched
+    CHECK(buffer == "hello\nworld\n");
+    CHECK(!files.readInto(dir + "/missing.txt", buffer, 4096));
+
+    // Copying a document's text is one allocation, not one per doubling.
+    model::TextBuffer text;
+    std::string many;
+    for (int i = 0; i < 2000; ++i)
+        many += "line number " + std::to_string(i) + " of the text\n";
+    text.setText(many);
+    if (os::mem::enabled()) {
+        const std::uint64_t before = os::mem::stats().totalAllocations;
+        const std::string copy = text.text();
+        CHECK_EQ(os::mem::stats().totalAllocations - before, std::uint64_t(1));
+        CHECK(copy == many);
+    }
+
+    // In place (open documents) or from text: the same declarations and #include lines.
+    model::TextBuffer source("#include <vector>\n#include \"a.h\"\nclass Widget {\n    int size() const;\n};\nint helper(int x) { return x; }\n");
+    std::vector<model::Symbol> fromText, inPlace;
+    model::extractSymbols(source.text(), model::Language::Cpp, 0, fromText);
+    model::extractSymbols(source, model::Language::Cpp, 0, inPlace);
+    CHECK(fromText.size() == inPlace.size() && fromText.size() >= 3);
+    for (size_t i = 0; i < fromText.size() && i < inPlace.size(); ++i)
+        CHECK(fromText[i].name == inPlace[i].name && fromText[i].line == inPlace[i].line && fromText[i].detail == inPlace[i].detail);
+    std::vector<model::Include> a, b;
+    model::scanIncludes(source.text(), a);
+    model::scanIncludes(source, b);
+    CHECK(a.size() == 2 && b.size() == 2 && a[1].name == b[1].name && b[1].name == "a.h" && b[0].system);
+
+    // An index reserved for its source does not reallocate while it is built.
+    std::string code;
+    for (int i = 0; i < 300; ++i)
+        code += "int function" + std::to_string(i) + "(int value) { return value + " + std::to_string(i) + "; }\n";
+    model::SymbolIndex index;
+    // (This code declares a function every 55 bytes, ten times denser than real code: room for it.
+    // Denser code than reserved for still works: the index then grows as usual.)
+    index.reserve(code.size() * 4 * 10, 4);
+    const size_t reserved = index.bytes();
+    std::vector<model::Symbol> symbols;
+    for (int f = 0; f < 4; ++f) {
+        model::extractSymbols(code, model::Language::Cpp, int(index.fileCount()), symbols);
+        index.addFile("file" + std::to_string(f) + ".cpp");
+        index.add(symbols);
+    }
+    CHECK_EQ(index.bytes(), reserved); // grown into the room taken, never reallocated
+    index.finish();
+    CHECK_EQ(index.size(), size_t(1200));
+    CHECK(index.bytes() <= reserved);
+}
+
+TEST(dispatch_worker_runs_tasks_in_order_on_one_thread)
+{
+    // Recurring background work reuses one thread (and its malloc arena) instead of a new one per task.
+    std::mutex m;
+    std::vector<int> order;
+    std::set<std::thread::id> threads;
+    std::atomic<int> done{0};
+    {
+        os::dispatch::Worker worker;
+        CHECK(!worker.started());
+        for (int i = 0; i < 20; ++i)
+            worker.post([&, i]() {
+                std::lock_guard<std::mutex> lock(m);
+                order.push_back(i);
+                threads.insert(std::this_thread::get_id());
+                ++done;
+            });
+        CHECK(worker.started());
+        for (int i = 0; i < 1000 && done.load() < 20; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_EQ(done.load(), 20);
+    CHECK_EQ(threads.size(), size_t(1));
+    CHECK(threads.count(std::this_thread::get_id()) == 0);
+    bool ordered = true;
+    for (int i = 0; i < int(order.size()); ++i)
+        ordered = ordered && order[size_t(i)] == i;
+    CHECK(ordered);
+    // Destroyed with work queued: the running task finishes, the rest is dropped (and freed).
+    auto held = std::make_shared<int>(7);
+    std::atomic<bool> release{false};
+    {
+        os::dispatch::Worker worker;
+        worker.post([&]() {
+            while (!release.load())
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        });
+        worker.post([held]() { (void)held; });
+        CHECK_EQ(held.use_count(), 2L);
+        release = true;
+    }
+    CHECK_EQ(held.use_count(), 1L); // the queued task, never run, let go of what it held
 }
 
 TEST(measurement_pool_is_a_fixed_first_fit_manager)

@@ -70,6 +70,43 @@ std::optional<std::string> readFileRange(const std::string& path, std::uint64_t 
     return data;
 }
 
+bool readFileInto(const std::string& path, std::string& out, size_t maxBytes, std::string* error)
+{
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        if (error)
+            *error = errnoMessage();
+        return false;
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || st.st_size < 0 || size_t(st.st_size) > maxBytes) {
+        if (error)
+            *error = "too large";
+        ::close(fd);
+        return false;
+    }
+    out.resize(size_t(st.st_size)); // within the buffer's reserved room: no allocation
+    size_t got = 0;
+    while (got < out.size()) {
+        ssize_t n = ::read(fd, &out[got], out.size() - got);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0) {
+            if (error)
+                *error = errnoMessage();
+            ::close(fd);
+            out.clear();
+            return false;
+        }
+        if (n == 0)
+            break; // shorter than it was a moment ago
+        got += size_t(n);
+    }
+    out.resize(got);
+    ::close(fd);
+    return true;
+}
+
 std::optional<std::string> readFile(const std::string& path, std::string* error)
 {
     int fd = ::open(path.c_str(), O_RDONLY);

@@ -503,6 +503,40 @@ int detectCStandard(std::string_view text)
     return found;
 }
 
+namespace {
+
+// One line: an #include, or nothing.
+void includeOf(std::string_view l, int line, std::vector<Include>& out)
+{
+    size_t i = 0;
+    while (i < l.size() && (l[i] == ' ' || l[i] == '\t'))
+        ++i;
+    if (i >= l.size() || l[i] != '#')
+        return;
+    ++i;
+    while (i < l.size() && (l[i] == ' ' || l[i] == '\t'))
+        ++i;
+    if (l.compare(i, 7, "include") != 0)
+        return;
+    i += 7;
+    while (i < l.size() && (l[i] == ' ' || l[i] == '\t'))
+        ++i;
+    if (i < l.size() && (l[i] == '"' || l[i] == '<')) {
+        const char close = l[i] == '"' ? '"' : '>';
+        const size_t e = l.find(close, i + 1);
+        if (e != std::string_view::npos && e > i + 1)
+            out.push_back({std::string(l.substr(i + 1, e - i - 1)), close == '>', line});
+    }
+}
+
+} // namespace
+
+void scanIncludes(const TextBuffer& text, std::vector<Include>& out)
+{
+    for (int l = 0; l < text.lineCount(); ++l)
+        includeOf(text.line(l), l, out);
+}
+
 void scanIncludes(std::string_view text, std::vector<Include>& out)
 {
     int line = 0;

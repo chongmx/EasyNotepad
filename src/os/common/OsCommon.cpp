@@ -42,9 +42,10 @@ bool init(const InitParams& params)
     // arena (where background work, such as the IntelliSense index, allocates) is never given back
     // - malloc_trim() does not release a thread arena's top, only free() past this threshold does.
     // Fixed: a block of 128 KB or more is its own mapping, unmapped when freed, whichever thread
-    // made it; an arena gives back its free top beyond 1 MB as soon as it is freed.
+    // made it; an arena gives back its free top beyond 128 KB (glibc's own starting value) as soon
+    // as it is freed: a thread arena keeps at most that much after its work.
     mallopt(M_MMAP_THRESHOLD, 128 * 1024);
-    mallopt(M_TRIM_THRESHOLD, 1024 * 1024);
+    mallopt(M_TRIM_THRESHOLD, 128 * 1024);
 #endif
     g_arguments.clear();
     g_initialized = detail::platformInit(params, g_arguments);

@@ -15,6 +15,15 @@ namespace {
 
 std::atomic<int> g_runningBuilds{0};
 
+// Carried by a build's task: counts it as running from the moment it is queued until the task is
+// destroyed, whether it ran or was dropped (a worker destroyed with it still queued).
+struct BuildTicket {
+    BuildTicket() { ++g_runningBuilds; }
+    BuildTicket(const BuildTicket&) { ++g_runningBuilds; }
+    BuildTicket& operator=(const BuildTicket&) = default;
+    ~BuildTicket() { --g_runningBuilds; }
+};
+
 // Read after the project's own code: what a project vendors is useful, but its own names come first.
 bool isVendorFolder(const std::string& name)
 {
@@ -33,21 +42,12 @@ bool isSkippedFolder(const std::string& name)
     return name.rfind("build-", 0) == 0 || name.rfind("cmake-build", 0) == 0;
 }
 
-bool looksBinary(const std::string& text)
+bool looksBinary(std::string_view text)
 {
     return text.find('\0') < std::min<size_t>(text.size(), 8192);
 }
 
-// A candidate while ranking: views into the document, the index or the language table, all
-// alive for the duration of refresh().
-struct Candidate {
-    std::string_view label;
-    model::SymbolKind kind = model::SymbolKind::Word;
-    int score = 0;
-    long symbol = -1; // position in the index, -1 for a keyword or a word of the document
-    const model::LibraryName* library = nullptr; // a name of the standard library
-    bool reached = true; // C and C++: its header is included (directly or through others)
-};
+using Candidate = IntellisenseViewModel::Candidate;
 
 bool isHeaderPath(std::string_view path)
 {
@@ -211,7 +211,21 @@ int IntellisenseViewModel::runningBuilds()
 
 std::vector<IntellisenseViewModel::IndexSource> IntellisenseViewModel::collect() const
 {
+    // Sized first (a count of the tree, nothing allocated), so the list is not regrown per file.
+    size_t files = owner_.documents().size();
+    auto count = [&](auto&& self, const ExplorerItem& folder) -> void {
+        for (const ExplorerItem& item : folder.children) {
+            if (files >= kMaxFiles)
+                return;
+            if (item.isDirectory)
+                self(self, item);
+            else if (model::canExtractSymbols(model::languageFromPath(item.name)))
+                ++files;
+        }
+    };
+    count(count, owner_.explorer());
     std::vector<IndexSource> sources;
+    sources.reserve(std::min(files, kMaxFiles));
     // Open documents in their current text (unsaved edits included).
     for (const auto& doc : owner_.documents()) {
         if (doc->kind != model::FileKind::Text || doc->path.empty() || !model::canExtractSymbols(doc->language))
@@ -258,24 +272,35 @@ std::vector<IntellisenseViewModel::IndexSource> IntellisenseViewModel::collect()
 void IntellisenseViewModel::build(std::vector<IndexSource>& sources, interfaces::IFileService* files, const std::atomic<bool>* cancel,
                                   model::SymbolIndex& out)
 {
+    // Preallocated: the index sized from the sources' total size, and one read buffer (the
+    // largest file allowed) for every file. Nothing grows or is allocated per file while it runs
+    // but the declarations' own small strings (reused vector) and the index's few entries.
+    size_t sourceBytes = 0;
+    for (const IndexSource& source : sources) {
+        if (cancel && cancel->load())
+            break;
+        if (source.hasText)
+            sourceBytes += source.text.size();
+        else if (files)
+            if (const std::optional<interfaces::FileStamp> stamp = files->stamp(source.disk); stamp && stamp->size <= kMaxFileBytes)
+                sourceBytes += size_t(stamp->size);
+    }
+    out.reserve(std::min(sourceBytes, kMaxReadBytes), sources.size());
+    std::string buffer;
+    buffer.reserve(kMaxFileBytes);
     std::vector<model::Symbol> symbols; // reused for every file
     std::vector<model::Include> includes;
     size_t readBytes = 0;
     for (IndexSource& source : sources) {
         if (cancel && cancel->load())
             break;
-        std::string text;
+        std::string_view text;
         if (source.hasText) {
-            text.swap(source.text);
+            text = source.text;
         } else {
-            if (!files)
+            if (!files || !files->readInto(source.disk, buffer, kMaxFileBytes))
                 continue;
-            if (const std::optional<interfaces::FileStamp> stamp = files->stamp(source.disk); stamp && stamp->size > kMaxFileBytes)
-                continue;
-            std::optional<std::string> read = files->read(source.disk);
-            if (!read)
-                continue;
-            text.swap(*read);
+            text = buffer;
         }
         if (text.size() > kMaxFileBytes || looksBinary(text))
             continue;
@@ -285,10 +310,11 @@ void IntellisenseViewModel::build(std::vector<IndexSource>& sources, interfaces:
         model::extractSymbols(text, source.language, int(out.fileCount()), symbols);
         if (source.language == model::Language::Cpp)
             model::scanIncludes(text, includes);
-        os::mem::release(text);
+        if (source.hasText)
+            os::mem::release(source.text);
         if (symbols.empty() && includes.empty())
             continue;
-        const int file = out.addFile(std::move(source.path));
+        const int file = out.addFile(source.path);
         out.add(symbols);
         out.addIncludes(file, includes);
         includes.clear();
@@ -305,30 +331,34 @@ void IntellisenseViewModel::ensureIndex()
         return;
     if (owner_.workspaceRoot().empty() && owner_.explorer().children.empty() && owner_.documents().empty())
         return;
-    os::mem::Scope scope("intellisense");
     building_ = true;
     indexing.set(true);
-    auto cancel = std::make_shared<std::atomic<bool>>(false);
-    cancel_ = cancel;
-    std::vector<IndexSource> sources = collect();
-    const int generation = generation_;
-    std::weak_ptr<bool> alive = alive_;
-    ++g_runningBuilds;
-    os::dispatch::runAsync([this, alive, generation, cancel, sources = std::move(sources), files = files_]() mutable {
-        os::mem::Scope scope("intellisense");
-        model::SymbolIndex index;
-        build(sources, files, cancel.get(), index);
-        os::mem::release(sources); // the inputs go as soon as they are read
-        cancel.reset();
-        // Only `this` once on the main thread, and only while it lives and the workspace is the
-        // same: otherwise the index is freed with this task.
-        os::dispatch::postToMain([this, alive, generation, index = std::move(index)]() mutable {
-            if (alive.expired() || generation != generation_)
-                return;
-            apply(std::move(index));
-        });
-        --g_runningBuilds;
-    });
+    os::dispatch::Task task;
+    {
+        os::mem::Scope scope("intellisense"); // what the build is given is IntelliSense's
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        cancel_ = cancel;
+        std::vector<IndexSource> sources = collect();
+        const int generation = generation_;
+        std::weak_ptr<bool> alive = alive_;
+        task = [this, alive, generation, cancel, sources = std::move(sources), files = files_, ticket = BuildTicket()]() mutable {
+            os::mem::Scope scope("intellisense");
+            model::SymbolIndex index;
+            build(sources, files, cancel.get(), index);
+            os::mem::release(sources); // the inputs go as soon as they are read
+            cancel.reset();
+            // Only `this` once on the main thread, and only while it lives and the workspace is
+            // the same: otherwise the index is freed with this task.
+            os::dispatch::postToMain([this, alive, generation, index = std::move(index)]() mutable {
+                if (alive.expired() || generation != generation_)
+                    return;
+                apply(std::move(index));
+            });
+        };
+    }
+    // The worker's thread and queue are made once and kept with this view-model: not the
+    // folder's memory, so not counted in its scope.
+    worker_.post(std::move(task));
 }
 
 void IntellisenseViewModel::buildIndexNow()
@@ -600,7 +630,9 @@ void IntellisenseViewModel::refreshItems(const model::Document& document)
     revision_ = doc->revision;
     caret_ = caret;
 
-    std::vector<Candidate> candidates;
+    // Reused while the list is open: after the first keystroke ranking allocates nothing more.
+    std::vector<Candidate>& candidates = candidates_;
+    candidates.clear();
     const bool members = member_ || !memberOf_.empty();
     // C and C++: what the file includes, and the standard, decide the library's names.
     const bool cFamily = doc->language == model::Language::Cpp;
@@ -835,7 +867,7 @@ void IntellisenseViewModel::ask(const model::Document& doc, Request::Purpose pur
         const bool c = model::isCSource(doc.path.empty() ? doc.title : doc.path);
         request.standard = model::standardName(c ? cStandardInUse() : cppStandardInUse(), c);
         std::vector<model::Include> includes;
-        model::scanIncludes(doc.buffer.text(), includes);
+        model::scanIncludes(doc.buffer, includes); // in place: no copy of the document
         for (const model::Include& i : includes)
             request.headers.push_back((i.system ? "<" : "\"") + i.name + (i.system ? ">" : "\""));
     }
@@ -1099,6 +1131,7 @@ void IntellisenseViewModel::dismiss()
     documentId_ = -1;
     selected_ = 0;
     os::mem::release(items_);
+    os::mem::release(candidates_);
     os::mem::release(provided_);
     os::mem::release(prefix_);
     os::mem::release(memberOf_);
@@ -1171,7 +1204,7 @@ bool IntellisenseViewModel::goToDefinition()
     if (model::canExtractSymbols(doc->language)) {
         os::mem::Scope scope("intellisense");
         std::vector<model::Symbol> symbols;
-        model::extractSymbols(doc->buffer.text(), doc->language, -1, symbols);
+        model::extractSymbols(doc->buffer, doc->language, -1, symbols); // in place: no copy
         for (const model::Symbol& s : symbols) {
             if (s.name != name)
                 continue;
@@ -1412,7 +1445,7 @@ IntellisenseViewModel::Reach IntellisenseViewModel::reachFrom(const model::Docum
     Reach reach;
     reach.files.assign(index_.fileCount(), 0);
     std::vector<model::Include> direct;
-    model::scanIncludes(doc.buffer.text(), direct);
+    model::scanIncludes(doc.buffer, direct);
     std::vector<int> queue;
     auto visit = [&](std::string_view name, bool system, std::string_view from) {
         const int file = resolveInclude(name, system, from);
@@ -1460,7 +1493,7 @@ std::vector<std::string> IntellisenseViewModel::includedHeaders(const model::Doc
 {
     std::vector<std::string> out;
     std::vector<model::Include> direct;
-    model::scanIncludes(doc.buffer.text(), direct);
+    model::scanIncludes(doc.buffer, direct);
     for (const model::Include& i : direct)
         out.push_back((i.system ? "<" : "\"") + i.name + (i.system ? ">" : "\""));
     const Reach reach = reachFrom(doc);

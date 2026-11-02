@@ -29,6 +29,7 @@
 #include "enp/model/CLibrary.h"
 #include "enp/model/Document.h"
 #include "enp/model/Symbols.h"
+#include "enp/os/Dispatch.h"
 #include "enp/viewmodel/Observable.h"
 
 #include <atomic>
@@ -255,6 +256,20 @@ private:
                       model::SymbolIndex& out);
     void apply(model::SymbolIndex index);
     void start(bool explicitRequest); // what comes before the word (".", "::") is read from the text
+public:
+    // A candidate while ranking: views into the document, the index or the language table, valid
+    // during refreshItems() only.
+    struct Candidate {
+        std::string_view label;
+        model::SymbolKind kind = model::SymbolKind::Word;
+        int score = 0;
+        long symbol = -1; // position in the index, -1 for a keyword or a word of the document
+        const model::LibraryName* library = nullptr; // a name of the standard library
+        bool reached = true; // C and C++: its header is included (directly or through others)
+    };
+
+private:
+    std::vector<Candidate> candidates_; // reused while a list is open, released when it closes
     void refresh();
     void refreshItems(const model::Document& doc);
     void status(const std::string& text); // the status bar, not counted as IntelliSense's memory
@@ -331,6 +346,11 @@ private:
     bool detected_ = false;
     int detectedCpp_ = 0, detectedC_ = 0;
     std::string cppSource_, cSource_;
+
+    // Index builds run on this thread, one after the other: the same thread (and malloc arena)
+    // for every folder, not a new one each time (docs/MEMORY.md rule 10). Last member: destroyed
+    // first, after the destructor cancelled a build still running.
+    os::dispatch::Worker worker_;
 };
 
 } // namespace enp::viewmodel
