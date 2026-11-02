@@ -3762,6 +3762,10 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
     {
         os::mem::Scope scope("test-scope");
         std::vector<char> block(100000);
+        // Used, so the allocation stays: libc++ allocates through __builtin_operator_new, and
+        // clang -O3 removes a vector whose memory is never looked at.
+        char* volatile keep = block.data();
+        (void)keep;
         CHECK(os::mem::liveBytes("test-scope") >= 100000);
     }
     CHECK_EQ(os::mem::liveBytes("test-scope"), std::uint64_t(0)); // freed outside the scope: still attributed to it
