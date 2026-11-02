@@ -11,15 +11,29 @@
 #define STBI_WRITE_NO_STDIO
 #define STBIW_MALLOC(size) ::operator new(size, std::nothrow)
 #define STBIW_REALLOC_SIZED(ptr, oldSize, newSize) enp::services::stbiwRealloc(ptr, oldSize, newSize)
-#define STBIW_FREE(ptr) ::operator delete(ptr)
+#define STBIW_FREE(ptr) enp::services::stbiwFree(ptr)
 
 namespace enp::services {
+// Not inlined, on purpose: stb frees a stretchy buffer as `a ? FREE((int*)a - 2) : 0`, and with
+// ::operator delete visible clang -O3 drops that test as a redundant "null check before free",
+// so it deletes (int*)nullptr - 2 for every empty hash bucket (a crash on macOS).
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+void stbiwFree(void* ptr)
+{
+    if (ptr)
+        ::operator delete(ptr);
+}
+
 inline void* stbiwRealloc(void* ptr, size_t oldSize, size_t newSize)
 {
     void* fresh = ::operator new(newSize, std::nothrow);
     if (ptr && fresh)
         std::memcpy(fresh, ptr, std::min(oldSize, newSize));
-    ::operator delete(ptr);
+    stbiwFree(ptr);
     return fresh;
 }
 } // namespace enp::services

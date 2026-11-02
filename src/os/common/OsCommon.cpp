@@ -199,8 +199,8 @@ void trimMemory()
     SetProcessWorkingSetSize(GetCurrentProcess(), SIZE_T(-1), SIZE_T(-1));
 #elif defined(__GLIBC__)
     malloc_trim(0); // returns free pages at the top of the heap and inside it (MADV_DONTNEED)
-#elif defined(__ANDROID__) && defined(M_PURGE)
-    mallopt(M_PURGE, 0); // bionic: release cached pages
+#elif defined(__ANDROID__) && defined(M_PURGE) && __ANDROID_API__ >= 26
+    mallopt(M_PURGE, 0); // bionic: release cached pages (mallopt is API 26+; minSdk is 24)
 #endif
 }
 
