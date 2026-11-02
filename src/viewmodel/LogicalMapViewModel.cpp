@@ -1,5 +1,7 @@
 #include "enp/viewmodel/LogicalMapViewModel.h"
 
+#include "enp/os/Memory.h"
+
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include <algorithm>
@@ -67,6 +69,7 @@ void LogicalMapViewModel::ensure()
     const std::string key = owner_.workspaceRoot() + "|" + owner_.explorer().name;
     if (key == key_)
         return;
+    os::mem::Scope scope("logical-map");
     key_ = key;
     focus_[0].clear();
     focus_[1].clear();
@@ -85,6 +88,25 @@ void LogicalMapViewModel::ensure()
         if (!item.isDirectory && (item.name == "README.md" || item.name == "readme.md"))
             readme = owner_.readWorkspaceFile(item.path);
     map_ = model::dissect(owner_.explorer().name, collectSources(), readme);
+}
+
+void LogicalMapViewModel::workspaceChanged()
+{
+    // An agent dissection of the folder that is going away: stop it, and ignore its answer (it
+    // would merge into the next folder's map and write that folder's cache).
+    ++generation_;
+    if (analyzing.get()) {
+        if (agent_)
+            agent_->cancel();
+        analyzing.set(false);
+    }
+    os::mem::release(map_.nodes);
+    os::mem::release(map_.edges);
+    map_ = model::LogicalMap{};
+    os::mem::release(key_);
+    os::mem::release(focus_[0]);
+    os::mem::release(focus_[1]);
+    os::mem::release(highlight_);
 }
 
 const model::LogicalMap& LogicalMapViewModel::map()
@@ -194,8 +216,10 @@ void LogicalMapViewModel::revealCaret()
 void LogicalMapViewModel::refresh()
 {
     key_.clear();
-    if (!owner_.workspaceRoot().empty())
-        owner_.writeWorkspaceFile(kCachePath, ""); // forget the agent's version
+    // Forget the agent's version, if there is one: never create .easynotepad/ in a repository
+    // that had no cache (a refresh is not a reason to write into the user's folder).
+    if (!owner_.workspaceRoot().empty() && !owner_.readWorkspaceFile(kCachePath).empty())
+        owner_.writeWorkspaceFile(kCachePath, "");
     ensure();
     statusMessage.emit("Map rebuilt by local dissection: " + std::to_string(map_.nodes.size()) + " parts");
 }
@@ -227,9 +251,10 @@ void LogicalMapViewModel::dissectWithAgent()
     analyzing.set(true);
     statusMessage.emit("The agent is dissecting the project (" + agent_->command() + ")...");
     std::weak_ptr<bool> alive = alive_;
-    agent_->run(model::agentPrompt(map_), owner_.workspaceRoot(), [this, alive](bool ok, const std::string& output) {
-        if (alive.expired())
-            return;
+    const int generation = generation_;
+    agent_->run(model::agentPrompt(map_), owner_.workspaceRoot(), [this, alive, generation](bool ok, const std::string& output) {
+        if (alive.expired() || generation != generation_)
+            return; // the folder it was about has been closed
         analyzing.set(false);
         if (!ok) {
             statusMessage.emit(output == "stopped" ? std::string("Agent dissection stopped")

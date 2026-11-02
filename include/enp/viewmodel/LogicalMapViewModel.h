@@ -45,6 +45,8 @@ public:
     int zoomDirection() const { return zoomDirection_; }
 
     void refresh();          // dissect locally again (drops agent results)
+    // The folder closed or another opened: the map (several MB for a large project) goes with it.
+    void workspaceChanged();
     void dissectWithAgent(); // ask the agent CLI to refine the map
     bool agentAvailable() const;
     std::string agentCommand() const;
@@ -64,6 +66,7 @@ private:
     int zoomSerial_ = 0;
     int zoomDirection_ = 0;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    int generation_ = 0; // bumped when the workspace changes: a late agent result is dropped
 };
 
 } // namespace enp::viewmodel

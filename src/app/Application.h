@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace enp::app {
 
@@ -34,6 +35,9 @@ public:
 
     // Builds the UI (between ImGui::NewFrame() and ImGui::Render()).
     void frame();
+    // After the frame was rendered and presented: work that must not touch what the frame drew
+    // (giving memory back once a folder or the last document closed).
+    void endFrame();
     // Window edges covered by the system (bars, notch, on-screen keyboard), in pixels.
     void setSafeArea(float left, float top, float right, float bottom);
 
@@ -45,13 +49,31 @@ public:
     int maxFramesPerSecond() const; // 0: uncapped
     bool blinkCaret() const;
 
+    // A screenshot was asked for (the automation's "screenshot"): after drawing this frame, the main
+    // loop captures it (FrameCapture) and hands the pixels to deliverCapture, which answers.
+    bool captureWanted() const { return !captures_.empty(); }
+    void deliverCapture(bool ok, int width, int height, std::vector<unsigned char>& rgba, const std::string& failure);
+
 private:
     services::ServiceContainer services_; // outlives the view-model that uses it
     std::unique_ptr<viewmodel::NotepadViewModel> viewModel_;
+    // Frames left before memory is given back after a close (-1: none pending). Some releases
+    // land a frame or two later (GPU textures go through the backend first), so the trim waits
+    // for them, and the app keeps drawing until it has run.
+    int trimFrames_ = -1;
+    // A second trim once things have settled: results of background work (git, processes) and
+    // textures the backend destroys late are freed in the seconds after a close.
+    double lateTrimAt_ = -1.0;
+    void giveMemoryBack();
     view::Fonts fonts_;
     std::unique_ptr<view::MainView> view_;
     // Local endpoint for the MCP connector (`EasyNotepad --mcp`); stopped before the view-model goes.
     std::unique_ptr<services::AutomationServer> automation_;
+    struct Capture {
+        std::string path; // also written there when set
+        services::AutomationServer::Reply reply;
+    };
+    std::vector<Capture> captures_; // screenshots waiting for the next frame
 };
 
 } // namespace enp::app

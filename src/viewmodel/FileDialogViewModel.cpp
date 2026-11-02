@@ -83,7 +83,7 @@ void FileDialogViewModel::load()
     if (!files_)
         return;
     for (const interfaces::DirectoryEntry& e : files_->list(folder_)) {
-        if (mode_ == FileDialogMode::OpenFolder && !e.isDirectory)
+        if (e.hidden || (mode_ == FileDialogMode::OpenFolder && !e.isDirectory))
             continue;
         entries_.push_back({e.name, e.isDirectory});
     }

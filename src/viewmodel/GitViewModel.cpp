@@ -1,4 +1,5 @@
 #include "enp/viewmodel/GitViewModel.h"
+#include "enp/os/Memory.h"
 
 #include "enp/viewmodel/NotepadViewModel.h"
 
@@ -195,13 +196,13 @@ void GitViewModel::workspaceChanged()
 {
     real_ = GitRepository{};
     gitFound_ = false;
-    unavailable_.clear();
+    os::mem::release(unavailable_);
     diff_ = {};
-    lineCache_.clear();
-    blames_.clear();
-    blameShown_.clear();
-    remotes_.clear();
-    lastOutput_.clear();
+    os::mem::release(lineCache_);
+    os::mem::release(blames_);
+    os::mem::release(blameShown_);
+    os::mem::release(remotes_);
+    os::mem::release(lastOutput_);
     if (owner_.workspaceRoot().empty() || !processes_)
         return;
     run({"--version"}, [this](const interfaces::ProcessResult& r) {
@@ -248,6 +249,7 @@ void GitViewModel::refresh()
 {
     if (demo() || !real_.repository || refreshing_)
         return;
+    os::mem::Scope scope("git");
     refreshing_ = true;
     refreshWanted_ = false;
     lastRefresh_ = now_;

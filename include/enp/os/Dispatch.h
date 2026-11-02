@@ -15,6 +15,8 @@ void setWakeCallback(std::function<void()> wake);
 
 // Main thread only: run all queued tasks. Call once per frame.
 void pump();
+// Tasks are waiting for pump() (a minimized window's loop runs a frame for them).
+bool hasPending();
 
 // Run `work` on a background thread when the platform has threads; otherwise it is
 // deferred to the next pump() on the main thread (single-threaded wasm).

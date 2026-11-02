@@ -71,6 +71,13 @@ endif()
 
 option(ENP_BUILD_TESTS "Build the unit tests (desktop only)" ${ENP_IS_DESKTOP})
 option(ENP_FETCH_GLFW "Download GLFW if it is not installed (desktop)" ON)
+option(ENP_MEMORY_ACCOUNTING "Count every heap allocation by subsystem (developer readout, leak tests)" ON)
+option(ENP_MEMORY_TRACE "Compile the allocation call-stack trace (services/debug; Linux developer builds)" OFF)
+option(ENP_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer (GCC/Clang)" OFF)
+if(ENP_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
 set(ENP_WEB_GLFW "contrib" CACHE STRING "Emscripten GLFW implementation: 'contrib' (--use-port=contrib.glfw3) or 'builtin' (-sUSE_GLFW=3)")
 
 set(ENP_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty)
@@ -118,6 +125,21 @@ endif()
 # Font Awesome codepoint headers (header only).
 add_library(icon_font_headers INTERFACE)
 target_include_directories(icon_font_headers INTERFACE ${ENP_THIRD_PARTY}/IconFontCppHeaders)
+
+# LLVM's demangler (C++ names of GCC/Clang and MSVC, Rust, D), vendored from llvm-project
+# llvmorg-19.1.7 (llvm/lib/Demangle); it needs nothing else from LLVM.
+add_library(llvm_demangle STATIC
+    ${ENP_THIRD_PARTY}/llvm-demangle/lib/Demangle.cpp
+    ${ENP_THIRD_PARTY}/llvm-demangle/lib/ItaniumDemangle.cpp
+    ${ENP_THIRD_PARTY}/llvm-demangle/lib/MicrosoftDemangle.cpp
+    ${ENP_THIRD_PARTY}/llvm-demangle/lib/MicrosoftDemangleNodes.cpp
+    ${ENP_THIRD_PARTY}/llvm-demangle/lib/RustDemangle.cpp
+    ${ENP_THIRD_PARTY}/llvm-demangle/lib/DLangDemangle.cpp
+)
+target_include_directories(llvm_demangle PUBLIC ${ENP_THIRD_PARTY}/llvm-demangle/include)
+if(NOT MSVC)
+    target_compile_options(llvm_demangle PRIVATE -w)
+endif()
 
 # ---- On-device inference engine (llama.cpp, plan 23) ----------------------------------------
 # 64-bit desktop and Android only: the model's 3 GB mapping does not fit a 32-bit address space,
@@ -213,6 +235,7 @@ set(ENP_OS_SOURCES
     src/os/common/Process.cpp
     src/os/common/Socket.cpp
     src/os/common/OsCommon.cpp
+    src/os/common/Memory.cpp
     src/os/common/Dispatch.cpp
     src/os/common/Path.cpp
 )
@@ -232,9 +255,12 @@ else()
 endif()
 
 add_library(enp_os STATIC ${ENP_OS_SOURCES})
+if(ENP_MEMORY_ACCOUNTING)
+    target_compile_definitions(enp_os PUBLIC ENP_MEMORY_ACCOUNTING=1)
+endif()
 target_include_directories(enp_os PUBLIC include)
 if(ENP_PLATFORM STREQUAL "windows")
-    target_link_libraries(enp_os PRIVATE comdlg32 shell32 ws2_32)
+    target_link_libraries(enp_os PRIVATE comdlg32 shell32 user32 ws2_32)
     target_compile_definitions(enp_os PRIVATE UNICODE _UNICODE)
 elseif(ENP_PLATFORM MATCHES "linux|macos")
     find_package(Threads REQUIRED)
@@ -259,6 +285,14 @@ add_library(enp_model STATIC
     src/model/TerminalScreen.cpp
     src/model/Outline.cpp
     src/model/Markdown.cpp
+    src/model/Math.cpp
+    src/model/FileKind.cpp
+    src/model/Emoji.cpp
+    src/model/Csv.cpp
+    src/model/DataTree.cpp
+    src/model/BinaryInfo.cpp
+    src/model/BinaryElf.cpp
+    src/model/BinaryPe.cpp
     src/model/Language.cpp
     src/model/Highlighter.cpp
     src/model/Indent.cpp
@@ -270,6 +304,7 @@ add_library(enp_model STATIC
     src/model/AgentRoute.cpp
 )
 target_include_directories(enp_model PUBLIC include)
+target_link_libraries(enp_model PRIVATE llvm_demangle)
 
 # interfaces: service contracts (header only)
 add_library(enp_interfaces INTERFACE)
@@ -286,8 +321,16 @@ add_library(enp_services STATIC
     src/services/AutomationServer.cpp
     src/services/LocalEngineService.cpp
     src/services/ServiceContainer.cpp
+    src/services/ImageDecoder.cpp
+    src/services/ImageEncoder.cpp
+    src/services/EmojiPack.cpp
 )
+target_include_directories(enp_services PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stb)
 target_link_libraries(enp_services PUBLIC enp_interfaces PRIVATE enp_os)
+if(ENP_MEMORY_TRACE)
+    target_sources(enp_services PRIVATE src/services/debug/MemoryTrace.cpp)
+    target_compile_definitions(enp_services PUBLIC ENP_MEMORY_TRACE=1)
+endif()
 if(ENP_LOCAL_ENGINE)
     target_link_libraries(enp_services PRIVATE llama-common llama)
     target_compile_definitions(enp_services PRIVATE ENP_HAS_LOCAL_ENGINE=1)
@@ -332,6 +375,12 @@ add_library(enp_view STATIC
     src/view/AgentPanel.cpp
     src/view/EngineLabView.cpp
     src/view/MarkdownView.cpp
+    src/view/MarkdownImages.cpp
+    src/view/EmojiCache.cpp
+    src/view/DataViews.cpp
+    src/view/LibraryView.cpp
+    src/view/TableReset.cpp
+    src/view/MathView.cpp
     src/view/TouchScroll.cpp
     src/view/Fit.cpp
     src/view/ReviewPanel.cpp
@@ -348,7 +397,7 @@ add_library(enp_view STATIC
     src/view/AgentCursorView.cpp
     src/view/MainView.cpp
 )
-target_link_libraries(enp_view PUBLIC enp_viewmodel imgui PRIVATE icon_font_headers enp_os)
+target_link_libraries(enp_view PUBLIC enp_viewmodel imgui PRIVATE icon_font_headers enp_os enp_services)
 target_compile_definitions(enp_view PRIVATE ENP_VERSION="${PROJECT_VERSION}")
 
 # ---- Application -------------------------------------------------------------------------------
@@ -360,7 +409,7 @@ add_library(enp_automation STATIC
 target_include_directories(enp_automation PUBLIC src/app)
 target_link_libraries(enp_automation PUBLIC enp_view enp_services enp_viewmodel PRIVATE enp_os)
 
-set(ENP_APP_SOURCES src/app/Application.cpp)
+set(ENP_APP_SOURCES src/app/Application.cpp src/app/FrameCapture.cpp)
 
 if(ENP_PLATFORM STREQUAL "android")
     add_library(easynotepad SHARED ${ENP_APP_SOURCES} src/app/MainAndroid.cpp)
@@ -425,6 +474,7 @@ if(ENP_BUILD_TESTS AND ENP_IS_DESKTOP)
     add_executable(enp_tests tests/TestMain.cpp)
     target_link_libraries(enp_tests PRIVATE enp_viewmodel enp_model enp_os enp_services enp_automation)
     target_include_directories(enp_tests PRIVATE tests src/app)
+    target_compile_definitions(enp_tests PRIVATE ENP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     enp_set_warnings(enp_tests)
     add_test(NAME enp_tests COMMAND enp_tests)
 
@@ -432,6 +482,7 @@ if(ENP_BUILD_TESTS AND ENP_IS_DESKTOP)
     add_executable(enp_ui_tests tests/UiIdTest.cpp)
     target_link_libraries(enp_ui_tests PRIVATE enp_view enp_os)
     target_include_directories(enp_ui_tests PRIVATE tests)
+    target_compile_definitions(enp_ui_tests PRIVATE ENP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     enp_set_warnings(enp_ui_tests)
     add_custom_command(TARGET enp_ui_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory

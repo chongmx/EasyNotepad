@@ -1,4 +1,5 @@
 #include "enp/viewmodel/FindInFilesViewModel.h"
+#include "enp/os/Memory.h"
 
 #include "enp/os/Dispatch.h"
 #include "enp/viewmodel/NotepadViewModel.h"
@@ -158,6 +159,7 @@ void FindInFilesViewModel::search()
 
 void FindInFilesViewModel::searchNow()
 {
+    os::mem::Scope scope("find");
     ++generation_;
     if (query.empty()) {
         clear();
@@ -169,7 +171,7 @@ void FindInFilesViewModel::searchNow()
 void FindInFilesViewModel::clear()
 {
     ++generation_;
-    results_.clear();
+    os::mem::release(results_); // not clear(): the storage goes too (docs/MEMORY.md)
     hitCount_ = filesSearched_ = 0;
     truncated_ = false;
     error.set({});

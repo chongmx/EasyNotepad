@@ -1,7 +1,9 @@
 #include "enp/view/MarkdownView.h"
 
+#include "enp/model/Emoji.h"
 #include "enp/model/Highlighter.h"
 #include "enp/model/Language.h"
+#include "enp/view/MathView.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -21,7 +23,17 @@ struct MarkdownView::Style {
     float s = 1.0f;     // UI scale
     const Palette* palette = nullptr;
     ImU32 text = 0, dim = 0, link = 0, rule = 0, codeBg = 0, quoteBar = 0, tableHeaderBg = 0;
+    const std::function<const MarkdownImage*(const std::string&)>* images = nullptr;
+    EmojiCache* emoji = nullptr;
+    std::map<std::string, model::math::Node>* math = nullptr;
     float lineH() const { return std::floor(size * 1.45f); }
+    const model::math::Node& formula(const std::string& source) const
+    {
+        auto it = math->find(source);
+        if (it == math->end())
+            it = math->emplace(source, model::math::parse(source)).first;
+        return it->second;
+    }
 };
 
 namespace {
@@ -52,7 +64,7 @@ public:
             text(span);
     }
 
-    float bottom() const { return y_ + lineH_; }
+    float bottom() const { return lineEmpty_ ? y_ : y_ + lineH_; }
     float x() const { return x_; }
 
 private:
@@ -66,6 +78,7 @@ private:
     // Code span background: one box per span and line, rounded only at its two ends.
     bool spanStart_ = false, spanEnd_ = false;
     float lineStartY_ = -1.0f; // y of the line the last code piece was on
+    bool lineEmpty_ = false;   // after an image: the next line has nothing on it yet
 
     void newline()
     {
@@ -73,8 +86,169 @@ private:
         y_ += lineH_;
     }
 
+    // An image on lines of its own, at its pixel size (scaled with the UI) within the column.
+    void image(const md::Span& span)
+    {
+        const MarkdownImage* img = st_.images && *st_.images ? (*st_.images)(span.url) : nullptr;
+        if (!img || img->failed || !img->texture) {
+            placeholder(span, img ? img->note : std::string("images are not shown here"));
+            return;
+        }
+        const float maxW = right_ - left_;
+        float w = float(img->width) * st_.s, h = float(img->height) * st_.s;
+        if (w > maxW) {
+            h *= maxW / w;
+            w = maxW;
+        }
+        if (x_ > left_ || lineEmpty_)
+            newline(), lineEmpty_ = false;
+        const float top = y_;
+        if (draw_)
+            dl_->AddImage(img->texture->GetTexRef(), ImVec2(x_, top), ImVec2(x_ + w, top + h));
+        // Text goes on below it; the block ends there when nothing follows.
+        x_ = left_;
+        y_ = top + h + 4.0f * st_.s;
+        lineEmpty_ = true;
+    }
+
+    // An image that cannot be shown: a framed box with the picture icon, the alt text and the
+    // reason, the source on hover. It takes the room a small image would, so the layout reads
+    // the same with and without it.
+    void placeholder(const md::Span& span, const std::string& note)
+    {
+        const std::string title = span.text.empty() ? span.url : span.text;
+        const std::string detail = note.empty() ? span.url : note + (span.url.empty() ? std::string() : "  ·  " + span.url);
+        const float pad = 8.0f * st_.s;
+        const float small = size_ * 0.85f;
+        const float iconW = measure(st_.ui, size_, ICON_FA_IMAGE, ICON_FA_IMAGE + sizeof(ICON_FA_IMAGE) - 1) + pad;
+        const float maxW = right_ - left_;
+        const float wantW = std::max({160.0f * st_.s, iconW + measure(st_.ui, size_, title.data(), title.data() + title.size()) + pad * 2.0f,
+                                      measure(st_.ui, small, detail.data(), detail.data() + detail.size()) + pad * 2.0f});
+        const float w = std::min(maxW, wantW);
+        const float h = lineH_ + small * 1.3f + pad * 2.0f;
+        if (x_ > left_ || lineEmpty_)
+            newline(), lineEmpty_ = false;
+        const float top = y_;
+        if (draw_) {
+            const ImVec2 a(x_, top), b(x_ + w, top + h);
+            dl_->AddRectFilled(a, b, st_.codeBg, 4.0f * st_.s);
+            dl_->AddRect(a, b, st_.rule, 4.0f * st_.s, 1.0f * st_.s);
+            dl_->AddText(st_.ui, size_, ImVec2(x_ + pad, top + pad), st_.dim, ICON_FA_IMAGE);
+            // The texts are clipped to the box.
+            dl_->PushClipRect(a, b, true);
+            dl_->AddText(st_.ui, size_, ImVec2(x_ + pad + iconW, top + pad), st_.dim, title.c_str());
+            dl_->AddText(st_.ui, small, ImVec2(x_ + pad, top + pad + lineH_), st_.palette->textFaint, detail.c_str());
+            dl_->PopClipRect();
+            if (!span.url.empty() && ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(a, b))
+                ImGui::SetTooltip("%s", span.url.c_str());
+        }
+        x_ = left_;
+        y_ = top + h + 4.0f * st_.s;
+        lineEmpty_ = true;
+    }
+
+    // Inline math, on the text's baseline; a formula taller than the line (a fraction) shrinks to it.
+    void math(const md::Span& span)
+    {
+        if (!st_.math)
+            return;
+        const model::math::Node& node = st_.formula(span.text);
+        MathStyle ms;
+        ms.font = st_.ui;
+        ms.size = size_;
+        ms.scale = st_.s;
+        ms.color = color_;
+        ms.display = false;
+        MathBox box = measureMath(node, ms);
+        if (box.height() > lineH_ && box.height() > 0.0f) {
+            ms.size *= lineH_ / box.height();
+            box = measureMath(node, ms);
+        }
+        const float w = box.width + 0.1f * size_;
+        if (x_ > left_ && x_ + w > right_ + 0.5f)
+            newline();
+        lineEmpty_ = false;
+        if (draw_) {
+            ImFontBaked* baked = st_.ui->GetFontBaked(size_);
+            const float ascent = baked ? baked->Ascent : size_ * 0.8f;
+            const float baseline = y_ + (lineH_ - size_) * 0.5f + ascent;
+            drawMath(dl_, node, ImVec2(x_ + 0.05f * size_, baseline), ms);
+        }
+        x_ += w;
+    }
+
+    // An emoji: its picture at text height on the line, or (a sequence the pack has no picture for)
+    // its parts side by side, or the base without the skin tone; as a last resort its characters.
+    // Measuring and drawing take the same branch: has() answers the same in both.
+    void emoji(const md::Span& span)
+    {
+        EmojiCache* cache = st_.emoji;
+        if (!cache) {
+            md::Span plain = span;
+            plain.style &= ~unsigned(md::Emoji);
+            text(plain);
+            return;
+        }
+        if (cache->has(span.emoji)) {
+            picture(span, span.emoji);
+            return;
+        }
+        if (span.emoji.find("_200d_") != std::string::npos) {
+            bool any = false;
+            for (const std::string& part : model::emoji::components(span.emoji)) {
+                if (cache->has(part)) {
+                    picture(span, part);
+                    any = true;
+                } else if (const std::string base = model::emoji::withoutModifiers(part); base != part && cache->has(base)) {
+                    picture(span, base);
+                    any = true;
+                }
+            }
+            if (any)
+                return;
+        }
+        if (const std::string base = model::emoji::withoutModifiers(span.emoji); base != span.emoji && cache->has(base)) {
+            picture(span, base);
+            return;
+        }
+        md::Span plain = span;
+        plain.style &= ~unsigned(md::Emoji);
+        text(plain);
+    }
+
+    void picture(const md::Span& span, const std::string& key)
+    {
+        const float box = std::floor(size_ * 1.2f);
+        const float advance = box + std::floor(size_ * 0.08f);
+        if (x_ > left_ && x_ + advance > right_ + 0.5f)
+            newline();
+        lineEmpty_ = false;
+        if (draw_) {
+            const float top = y_ + (lineH_ - box) * 0.5f;
+            if (ImTextureData* tex = st_.emoji->texture(key))
+                dl_->AddImage(tex->GetTexRef(), ImVec2(x_, top), ImVec2(x_ + box, top + box));
+            if ((span.style & md::Link) && links_)
+                links_->push_back({ImVec2(x_, y_), ImVec2(x_ + advance, y_ + lineH_), span.url});
+        }
+        x_ += advance;
+    }
+
     void text(const md::Span& span)
     {
+        if (span.style & md::Emoji) {
+            emoji(span);
+            return;
+        }
+        if (span.style & md::Image) {
+            image(span);
+            return;
+        }
+        if (span.style & md::Math) {
+            math(span);
+            return;
+        }
+        if (lineEmpty_ && !span.text.empty())
+            lineEmpty_ = false;
         const bool code = (span.style & md::Code) != 0;
         ImFont* font = code ? st_.mono : st_.ui;
         const float size = code ? size_ * 0.92f : size_;
@@ -301,6 +475,26 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         height = flow.bottom() - at.y;
         break;
     }
+    case md::BlockKind::Math: {
+        // Display math: centred, a little larger, limits above and below the big operators.
+        const model::math::Node& node = st.formula(block.code);
+        MathStyle ms;
+        ms.font = st.ui;
+        ms.size = st.size * 1.1f;
+        ms.scale = st.s;
+        ms.color = textColor;
+        ms.display = true;
+        MathBox box = measureMath(node, ms);
+        if (box.width > right - left && box.width > 0.0f) {
+            ms.size *= (right - left) / box.width;
+            box = measureMath(node, ms);
+        }
+        const float pad = 6.0f * st.s;
+        height = box.height() + pad * 2.0f;
+        if (draw)
+            drawMath(dl, node, ImVec2(left + (right - left - box.width) * 0.5f, at.y + pad + box.ascent), ms);
+        break;
+    }
     case md::BlockKind::Rule:
         height = lineH * 0.6f;
         if (draw)
@@ -491,11 +685,15 @@ void MarkdownView::render(const std::string& text, float width, const Fonts& fon
     st.codeBg = IM_COL32(128, 128, 128, 34);
     st.quoteBar = (palette.accent & 0x00FFFFFFu) | 0x90000000u;
     st.tableHeaderBg = IM_COL32(128, 128, 128, 26);
+    st.images = &onImage;
+    st.emoji = emoji;
+    st.math = &math_;
     width = std::max(width, 40.0f * uiScale);
 
     if (text != text_) {
         text_ = text;
         blocks_ = md::parse(text_);
+        math_.clear();
         width_ = -1.0f;
     }
     // Measure every block when the layout changed (text, width or size).

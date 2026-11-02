@@ -1,4 +1,6 @@
 #include "enp/view/EditorView.h"
+#include "enp/os/Fs.h"
+#include "enp/os/Memory.h"
 
 #include "enp/view/PanelFrame.h"
 
@@ -140,7 +142,9 @@ void squiggle(ImDrawList* dl, float x0, float x1, float y, ImU32 color, float sc
 } // namespace
 
 EditorView::EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
-    : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale), layers_(vm, fonts, palette, uiScale)
+    : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale), layers_(vm, fonts, palette, uiScale),
+      data_(vm, fonts, palette, uiScale),
+      library_(vm, palette, uiScale)
 {
     subscriptions_.push_back(vm_.caretRevealRequested.subscribe([this]() { revealCaret_ = true; }));
     subscriptions_.push_back(vm_.focusFindRequested.subscribe([this]() { focusFind_ = true; }));
@@ -158,12 +162,215 @@ EditorView::EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, cons
 // The rendered Markdown (parsed blocks, measured layout, a copy of the text) and the scroll are
 // kept per document. Without this, every closed document's state stayed for as long as the app
 // ran: each opened folder shows its README, so opening and closing folders leaked.
+void EditorView::releaseImages(RenderedMarkdown& md)
+{
+    // md.images is keyed by the source as written; the cache's key is the same for data URLs and
+    // remote URLs and the resolved path for files, so release what acquire() took.
+    for (const auto& [source, held] : md.images)
+        images_.release(held.key);
+    os::mem::release(md.images);
+}
+
+namespace {
+
+// data:image/png;base64,....  ->  the bytes (empty when it is not one)
+std::string decodeDataUrl(const std::string& url)
+{
+    const size_t comma = url.find(',');
+    if (url.rfind("data:", 0) != 0 || comma == std::string::npos || url.find(";base64", 0) == std::string::npos || url.find(";base64") > comma)
+        return {};
+    std::string out;
+    out.reserve((url.size() - comma) * 3 / 4);
+    unsigned buffer = 0;
+    int bits = 0;
+    for (size_t i = comma + 1; i < url.size(); ++i) {
+        const char c = url[i];
+        int v;
+        if (c >= 'A' && c <= 'Z')
+            v = c - 'A';
+        else if (c >= 'a' && c <= 'z')
+            v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9')
+            v = c - '0' + 52;
+        else if (c == '+' || c == '-')
+            v = 62;
+        else if (c == '/' || c == '_')
+            v = 63;
+        else
+            continue; // '=' padding, whitespace
+        buffer = (buffer << 6) | unsigned(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += char((buffer >> bits) & 0xFF);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+const MarkdownImage* EditorView::loadImage(RenderedMarkdown& md, const model::Document& doc, const std::string& source)
+{
+    std::string src = source.substr(0, source.find_first_of("?#"));
+    if (src.empty())
+        return nullptr;
+    if (auto it = md.images.find(source); it != md.images.end())
+        return it->second.image;
+    const MarkdownImage* image = nullptr;
+    std::string key = source;
+    if (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0) {
+        image = images_.acquireUnavailable(source, "remote image, not fetched"); // nothing comes from the network
+    } else if (src.rfind("data:", 0) == 0) {
+        image = images_.acquire(source, decodeDataUrl(source));
+    } else {
+        if (src.rfind("file://", 0) == 0)
+            src = src.substr(7);
+        const bool absolute = src[0] == '/' || (src.size() > 1 && src[1] == ':');
+        const std::string folder = os::fs::path::parent(doc.path);
+        key = os::fs::path::normalize(absolute || folder.empty() ? src : os::fs::path::join(folder, src));
+        os::mem::Scope scope("images");
+        if (vm_.workspaceRoot().empty() && !absolute) {
+            image = images_.acquireUnavailable(key, "no folder open");
+        } else if (const std::string full = vm_.absolutePath(key); !os::fs::exists(full)) {
+            image = images_.acquireUnavailable(key, "not found");
+        } else if (os::fs::stat(full).isDirectory) {
+            image = images_.acquireUnavailable(key, "a folder, not an image");
+        } else {
+            image = images_.acquire(key, vm_.readWorkspaceFile(key));
+        }
+    }
+    md.images.emplace(source, RenderedMarkdown::HeldImage{key, image});
+    return image;
+}
+
+void EditorView::renderFileView(model::Document& doc, ImVec2 size)
+{
+    panel::beginChild("##fileView", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoNav);
+    const float pad = 16.0f * s_;
+    const int index = vm_.documentIndexById(doc.id);
+    auto openAsTextButton = [&](const char* label) {
+        if (ImGui::Button(label))
+            vm_.openAsText(index);
+        registerLastItem("open-as-text", "button", "Open as text anyway", [this, index]() { vm_.openAsText(index); });
+    };
+    auto sizeText = [&]() {
+        const double bytes = double(doc.diskSize);
+        char text[32];
+        if (bytes >= 1024.0 * 1024.0)
+            std::snprintf(text, sizeof(text), "%.1f MB", bytes / (1024.0 * 1024.0));
+        else if (bytes >= 1024.0)
+            std::snprintf(text, sizeof(text), "%.1f KB", bytes / 1024.0);
+        else
+            std::snprintf(text, sizeof(text), "%.0f bytes", bytes);
+        return std::string(text);
+    };
+
+    const MarkdownImage* image = nullptr;
+    if (doc.kind == model::FileKind::Image) {
+        auto held = fileImages_.find(doc.id);
+        if (held == fileImages_.end()) {
+            os::mem::Scope scope("images");
+            const std::string key = os::fs::path::normalize(vm_.absolutePath(doc.path));
+            const MarkdownImage* acquired = images_.acquire(key, vm_.readWorkspaceFile(doc.path));
+            held = fileImages_.emplace(doc.id, RenderedMarkdown::HeldImage{key, acquired}).first;
+        }
+        image = held->second.image;
+    }
+
+    if (image && image->texture) {
+        // Toolbar: format, size, zoom, and the text view.
+        ImGui::SetCursorPos(ImVec2(pad, pad * 0.5f));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s  %s  %d × %d px  ·  %s", ICON_FA_FILE_IMAGE, image->format.c_str(), image->sourceWidth, image->sourceHeight,
+                            sizeText().c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(imageFit_ ? ICON_FA_EXPAND "  Actual size" : ICON_FA_COMPRESS "  Fit"))
+            imageFit_ = !imageFit_;
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_FILE_LINES "  Open as text"))
+            vm_.openAsText(index);
+        registerLastItem("open-as-text", "button", "Open as text anyway", [this, index]() { vm_.openAsText(index); });
+        // The image, centred; fitted to the window unless it is smaller, or at its pixel size.
+        const ImVec2 avail(std::max(1.0f, ImGui::GetContentRegionAvail().x - pad * 2.0f), std::max(1.0f, size.y - ImGui::GetCursorPosY() - pad * 2.0f));
+        const float sourceW = float(image->sourceWidth) * s_, sourceH = float(image->sourceHeight) * s_;
+        float scale = 1.0f;
+        if (imageFit_)
+            scale = std::min({1.0f, avail.x / std::max(1.0f, sourceW), avail.y / std::max(1.0f, sourceH)});
+        const ImVec2 shown(sourceW * scale, sourceH * scale);
+        const ImVec2 cursor = ImGui::GetCursorPos();
+        ImGui::SetCursorPos(ImVec2(pad + std::max(0.0f, (avail.x - shown.x) * 0.5f), cursor.y + pad * 0.5f));
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        // A checkerboard under it shows transparency.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float cell = 8.0f * s_;
+        const ImVec2 clipMin = dl->GetClipRectMin(), clipMax = dl->GetClipRectMax();
+        dl->PushClipRect(ImMax(at, clipMin), ImMin(ImVec2(at.x + shown.x, at.y + shown.y), clipMax), true);
+        for (float y = std::max(at.y, clipMin.y - cell); y < std::min(at.y + shown.y, clipMax.y); y += cell)
+            for (float x = std::max(at.x, clipMin.x - cell); x < std::min(at.x + shown.x, clipMax.x); x += cell) {
+                const bool dark = (int((x - at.x) / cell) + int((y - at.y) / cell)) % 2 == 0;
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + cell, y + cell), dark ? IM_COL32(128, 128, 128, 60) : IM_COL32(128, 128, 128, 25));
+            }
+        dl->PopClipRect();
+        ImGui::Image(image->texture->GetTexRef(), shown);
+        ImGui::Dummy(ImVec2(1.0f, pad));
+    } else {
+        // A binary file, or an image that cannot be shown: say so, and offer the text.
+        const bool isImage = doc.kind == model::FileKind::Image;
+        const float column = std::min(size.x - pad * 2.0f, 560.0f * s_);
+        ImGui::SetCursorPos(ImVec2(std::max(pad, (size.x - column) * 0.5f), std::max(pad, size.y * 0.25f)));
+        ImGui::BeginGroup();
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * 2.0f);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(isImage ? palette_.textDim : palette_.iconOrange),
+                           isImage ? ICON_FA_FILE_IMAGE : ICON_FA_FILE_CIRCLE_EXCLAMATION);
+        ImGui::PopFont();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + column);
+        if (isImage) {
+            ImGui::Text("%s cannot be shown", doc.title.c_str());
+            ImGui::TextDisabled("%s image, %s: %s.", doc.format.c_str(), sizeText().c_str(),
+                                image && !image->note.empty() ? image->note.c_str() : "it could not be decoded");
+        } else {
+            ImGui::Text("%s is a binary file", doc.title.c_str());
+            ImGui::TextDisabled("%s, %s. It was not opened as text: it would show as unreadable characters, and saving it "
+                                "from the text view would rewrite the file.", doc.format.c_str(), sizeText().c_str());
+        }
+        ImGui::TextDisabled("A hex viewer for binary files is planned.");
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        openAsTextButton(ICON_FA_FILE_LINES "  Open as text anyway");
+        ImGui::EndGroup();
+    }
+    ImGui::EndChild();
+}
+
 void EditorView::pruneClosed()
 {
-    for (auto it = markdown_.begin(); it != markdown_.end();)
-        it = vm_.documentIndexById(it->first) < 0 ? markdown_.erase(it) : std::next(it);
+    data_.releaseClosed(); // a closed document's table or tree goes with it
+    library_.releaseClosed();
+    // The line layout of the text view is sized by the longest document it has shown: rebuilt for
+    // the active one next frame, it should not keep a closed document's size (docs/MEMORY.md 5).
+    os::mem::release(rows_);
+    os::mem::release(firstRowOfLine_);
+    os::mem::release(conflicts_);
+    os::mem::release(conflictLines_);
+    for (auto it = markdown_.begin(); it != markdown_.end();) {
+        if (vm_.documentIndexById(it->first) < 0) {
+            releaseImages(it->second);
+            it = markdown_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     for (auto it = scroll_.begin(); it != scroll_.end();)
         it = vm_.documentIndexById(it->first) < 0 ? scroll_.erase(it) : std::next(it);
+    for (auto it = fileImages_.begin(); it != fileImages_.end();) {
+        if (vm_.documentIndexById(it->first) < 0) {
+            images_.release(it->second.key);
+            it = fileImages_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ---- Layout -------------------------------------------------------------------------------------
@@ -285,6 +492,7 @@ TextPos EditorView::hitTest(const model::Document& doc, ImVec2 mouse, const Metr
 
 void EditorView::render(ImVec2 size)
 {
+    images_.collect(); // textures the backend destroyed since last frame
     model::Document* doc = vm_.activeDocument();
     if (!doc) {
         renderEmptyState(size);
@@ -307,14 +515,53 @@ void EditorView::render(ImVec2 size)
         renderFindBar();
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
+    if (doc->kind != model::FileKind::Text) {
+        if (fileImages_.size() > vm_.documents().size() || markdown_.size() > vm_.documents().size() ||
+            library_.entryCount() > vm_.documents().size())
+            pruneClosed();
+        if (doc->kind == model::FileKind::Binary) { // a library or program: what it contains
+            ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+            const bool shown = library_.render(*doc, size);
+            ImGui::PopFont();
+            if (shown)
+                return;
+        }
+        renderFileView(*doc, size);
+        return;
+    }
+    if (library_.holds(doc->id))
+        library_.release(doc->id); // opened as text: what it contained is freed now
+    if (auto held = fileImages_.find(doc->id); held != fileImages_.end()) { // opened as text since
+        images_.release(held->second.key);
+        fileImages_.erase(held);
+    }
     const bool markdownDoc = doc->language == model::Language::Markdown;
     if (markdownDoc && doc->rendered) {
         renderMarkdown(*doc, size);
         return;
     }
+    // CSV as a table; JSON and YAML as a tree or an accordion.
+    {
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        bool shown = true;
+        if (doc->language == model::Language::Csv && doc->rendered)
+            data_.renderTable(*doc, size);
+        else if ((doc->language == model::Language::Json || doc->language == model::Language::Yaml) && doc->dataView == model::DataView::Tree)
+            data_.renderTree(*doc, size);
+        else if ((doc->language == model::Language::Json || doc->language == model::Language::Yaml) && doc->dataView == model::DataView::Accordion)
+            data_.renderAccordion(*doc, size);
+        else
+            shown = false;
+        ImGui::PopFont();
+        if (shown)
+            return;
+    }
+    if (data_.holds(doc->id))
+        data_.release(doc->id); // back to the text: the table or tree is freed now, not kept for later
     if (markdownDoc)
         markdown_[doc->id].shown = false;
-    if (markdown_.size() > vm_.documents().size() || scroll_.size() > vm_.documents().size())
+    if (markdown_.size() > vm_.documents().size() || scroll_.size() > vm_.documents().size() || fileImages_.size() > vm_.documents().size() ||
+        data_.entryCount() > vm_.documents().size() || library_.entryCount() > vm_.documents().size())
         pruneClosed(); // documents closed without an active-index change
 
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * vm_.zoom.get());
@@ -368,8 +615,10 @@ void EditorView::render(ImVec2 size)
 
     buildRows(*doc, wrapColumns);
     const ImVec2 switchAt(m.viewMax.x - 8.0f * s_, winPos.y + 6.0f * s_);
+    const bool dataSwitch = DataViews::hasSwitch(*doc);
     const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
-                         !(markdownDoc && markdownSwitchRect(switchAt, s_).Contains(ImGui::GetMousePos()));
+                         !(markdownDoc && markdownSwitchRect(switchAt, s_).Contains(ImGui::GetMousePos())) &&
+                         !(dataSwitch && data_.switchRect(*doc, switchAt).Contains(ImGui::GetMousePos()));
     handleMouse(*doc, m, hovered);
     if (focused_)
         handleKeyboard(*doc, m);
@@ -406,9 +655,12 @@ void EditorView::render(ImVec2 size)
         jumpToConflict(*doc, ImGui::GetIO().KeyShift ? -1 : 1);
     if (hovered && !dragging_)
         drawHoverTooltip(*doc, m);
-    if (markdownDoc) {
+    if (markdownDoc || dataSwitch) {
         ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-        markdownSwitch(*doc, switchAt);
+        if (markdownDoc)
+            markdownSwitch(*doc, switchAt);
+        else
+            data_.viewSwitch(*doc, switchAt);
         ImGui::PopFont();
     }
 
@@ -451,10 +703,12 @@ void EditorView::markdownSwitch(model::Document& doc, ImVec2 topRight)
 
 void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
 {
+    os::mem::Scope scope("markdown");
     RenderedMarkdown& md = markdown_[doc.id];
     if (md.revision != doc.revision || md.text.empty()) {
         md.text = doc.buffer.text();
         md.revision = doc.revision;
+        releaseImages(md); // the text changed: its images are looked up again
     }
     if (!md.view.onLink)
         md.view.onLink = [this](const std::string& url) {
@@ -463,6 +717,9 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
             else if (!url.empty() && url[0] != '#') // a file next to this one
                 vm_.openFile(url.substr(0, url.find('#')));
         };
+    // `md` is a map node: its address holds until the document closes and pruneClosed() erases it.
+    md.view.onImage = [this, &md, &doc](const std::string& source) { return loadImage(md, doc, source); };
+    md.view.emoji = emoji_;
 
     const bool sideBar = vm_.showLayersMap.get() && !compact_;
     if (sideBarWidth_ <= 0.0f)

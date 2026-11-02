@@ -25,7 +25,12 @@ public:
     // Runs on the main thread; throw-free; return {"error": "..."} to report a failure.
     using Handler = std::function<model::Json(const std::string& method, const model::Json& params)>;
 
-    explicit AutomationServer(Handler handler);
+    // A request answered later on the main thread (e.g. after the next frame is drawn): returns true
+    // when it took the request, and then calls `reply` exactly once (an {"error": ...} reports a failure).
+    using Reply = std::function<void(model::Json result)>;
+    using DeferredHandler = std::function<bool(const std::string& method, const model::Json& params, Reply reply)>;
+
+    explicit AutomationServer(Handler handler, DeferredHandler deferred = nullptr);
     ~AutomationServer();
     AutomationServer(const AutomationServer&) = delete;
     AutomationServer& operator=(const AutomationServer&) = delete;
@@ -44,6 +49,7 @@ private:
     void serve(std::shared_ptr<os::net::Socket> connection);
 
     Handler handler_;
+    DeferredHandler deferred_;
     std::unique_ptr<os::net::Socket> listener_;
     std::thread acceptThread_;
     std::mutex connectionsMutex_;

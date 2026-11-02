@@ -11,6 +11,11 @@ std::optional<std::string> FileService::read(const std::string& path, std::strin
     return os::fs::readFile(path, error);
 }
 
+std::optional<std::string> FileService::readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    return os::fs::readFileRange(path, offset, size, total);
+}
+
 bool FileService::write(const std::string& path, std::string_view data, std::string* error)
 {
     return os::fs::writeFile(path, data, error);
@@ -25,7 +30,7 @@ std::vector<interfaces::DirectoryEntry> FileService::list(const std::string& pat
 {
     std::vector<interfaces::DirectoryEntry> out;
     for (const os::fs::DirEntry& e : os::fs::listDirectory(path, limit, more))
-        out.push_back({e.name, e.isDirectory});
+        out.push_back({e.name, e.isDirectory, e.hidden});
     return out;
 }
 

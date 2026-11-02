@@ -119,6 +119,18 @@ std::vector<std::string> rootDirectories()
 #endif
 }
 
+std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    const std::string exe = executableDirectory();
+    for (const std::string& base : {path::join(exe, "resources"), path::join(exe, "../resources"),
+                                    path::join(exe, "../Resources/resources"), path::join(exe, "../share/easynotepad/resources"),
+                                    path::join(currentDirectory(), "resources")}) {
+        if (auto data = readFileRange(path::join(base, relativePath), offset, size, total))
+            return data;
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> readAsset(const std::string& relativePath)
 {
     const std::string exe = executableDirectory();

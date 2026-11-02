@@ -40,7 +40,10 @@ model::Json errorReply(const model::Json& id, const std::string& message)
 
 } // namespace
 
-AutomationServer::AutomationServer(Handler handler) : handler_(std::move(handler)), token_(randomToken()) {}
+AutomationServer::AutomationServer(Handler handler, DeferredHandler deferred)
+    : handler_(std::move(handler)), deferred_(std::move(deferred)), token_(randomToken())
+{
+}
 
 AutomationServer::~AutomationServer()
 {
@@ -176,7 +179,11 @@ void AutomationServer::serve(std::shared_ptr<os::net::Socket> connection)
             // Run on the UI thread, where the view-models and the UI registry live.
             auto promise = std::make_shared<std::promise<model::Json>>();
             std::future<model::Json> future = promise->get_future();
-            os::dispatch::postToMain([this, promise, method, params]() { promise->set_value(handler_(method, params)); });
+            os::dispatch::postToMain([this, promise, method, params]() {
+                Reply reply = [promise](model::Json result) { promise->set_value(std::move(result)); };
+                if (!deferred_ || !deferred_(method, params, reply))
+                    reply(handler_(method, params));
+            });
             int waited = 0;
             while (future.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready && !stopping_ &&
                    (waited += 50) < kRequestTimeoutMs) {

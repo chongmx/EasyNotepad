@@ -6,6 +6,7 @@
 //   - Dear ImGui reports any other usage error (e.g. "SetCursorPos() to extend window boundaries"), or
 //   - a title-bar drag region covers an interactive item (on Windows the OS would swallow clicks).
 // ID conflicts are only detected for hovered items, which is why the mouse visits the whole window.
+#include "enp/os/Fs.h"
 #include "enp/os/Os.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
@@ -15,11 +16,13 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include "FakeTerminalService.h"
+#include "enp/interfaces/IFileService.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
 
 #include <cctype>
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -58,6 +61,21 @@ struct Failure {
     std::string what;
     std::string where;
     ImVec2 mouse;
+};
+
+// Reads real files (the library view's fixtures) and nothing else: no folder is listed or written.
+class ReadOnlyFiles final : public interfaces::IFileService {
+public:
+    std::optional<std::string> read(const std::string& path, std::string* error) override { return os::fs::readFile(path, error); }
+    std::optional<std::string> readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total) override
+    {
+        return os::fs::readFileRange(path, offset, size, total);
+    }
+    bool write(const std::string&, std::string_view, std::string*) override { return false; }
+    std::vector<interfaces::DirectoryEntry> list(const std::string&) override { return {}; }
+    bool isDirectory(const std::string&) override { return false; }
+    std::string absolute(const std::string& path) override { return path; }
+    bool createDirectories(const std::string&) override { return false; }
 };
 
 class Harness {
@@ -180,7 +198,8 @@ private:
     }
 
     tests::FakeTerminalService terminalService_; // declared before vm_, which uses it
-    viewmodel::NotepadViewModel vm_{&terminalService_};
+    ReadOnlyFiles files_;
+    viewmodel::NotepadViewModel vm_{&terminalService_, &files_};
     view::Fonts fonts_;
     FakeFrame frame_;
     std::unique_ptr<view::MainView> view_;
@@ -378,8 +397,224 @@ int main(int argc, char** argv)
             const size_t held = h.view().editor().renderedMarkdownCount();
             if (held != 0)
                 std::printf("  FAILED rendered Markdown of %zu closed document(s) still held\n", held), layoutsWrong = true;
+
+            // Images, entities and formulas: drawn without ImGui errors, and the image textures
+            // (decoded here from a data URL, as a file's bytes would be) go with the document.
+            h.setContext("rendered Markdown with an image, entities and LaTeX");
+            h.vm().newDocument();
+            if (model::Document* doc = h.vm().activeDocument()) {
+                // A 2x2 PPM: "P6 2 2 255" and twelve bytes of pixels, base64.
+                const std::string ppmBase64 = "UDYKMiAyCjI1NQr/AAAA/wAAAP////8=";
+                doc->buffer.setText("# Title &amp; &copy;\n\nInline $e^{i\\pi} + 1 = 0$, $\\frac{a}{b}$ and \\(\\sqrt{x}\\) text &rarr; done.\n\n"
+                                    "$$\n\\sum_{i=0}^{n} i = \\frac{n(n+1)}{2} \\quad \\left( \\int_0^1 x\\,dx \\right)\n$$\n\n"
+                                    "![dot](data:image/x-portable-pixmap;base64," + ppmBase64 + ")\n\n"
+                                    "<img src=\"data:image/x-portable-pixmap;base64," + ppmBase64 + "\" alt=\"again\"> and ![missing](no/such.png)\n\n"
+                                    "| $\\alpha$ | &beta; |\n|--|--|\n| ![x](data:image/x-portable-pixmap;base64," + ppmBase64 + ") | $x^2$ |\n");
+                doc->language = model::Language::Markdown;
+                doc->rendered = true;
+            }
+            h.settle();
+            h.sweep(0.0f, 0.0f, kWidth, kHeight);
+            const size_t textures = h.view().editor().imageTextureCount();
+            if (textures == 0)
+                std::printf("  FAILED the Markdown image was not decoded into a texture\n"), layoutsWrong = true;
+            h.vm().closeDocument(h.vm().activeIndex.get());
+            h.settle();
+            const size_t left = h.view().editor().imageTextureCount();
+            if (left != 0)
+                std::printf("  FAILED %zu image texture(s) still held after the Markdown document closed\n", left), layoutsWrong = true;
+
+            // A binary file and an image that cannot be decoded: the notices with "Open as text".
+            h.setContext("binary and undecodable image documents");
+            for (const auto kind : {model::FileKind::Binary, model::FileKind::Image}) {
+                h.vm().newDocument();
+                if (model::Document* doc = h.vm().activeDocument()) {
+                    doc->kind = kind;
+                    doc->format = kind == model::FileKind::Binary ? "ELF executable" : "WebP";
+                    doc->path = kind == model::FileKind::Binary ? "bin/tool" : "img/photo.webp";
+                    doc->diskSize = 123456;
+                }
+                h.settle();
+                h.sweep(0.0f, 0.0f, kWidth, kHeight);
+            }
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settle();
+            if (h.view().editor().imageDocumentCount() != 0 || h.view().editor().imageTextureCount() != 0)
+                std::printf("  FAILED image documents still held after closing them\n"), layoutsWrong = true;
+
+            // Emoji: drawn from the pack, and every picture (and the pack's index) let go after the
+            // document closes and the app trims.
+            h.setContext("rendered Markdown with emoji");
+            h.vm().newDocument();
+            if (model::Document* doc = h.vm().activeDocument()) {
+                doc->buffer.setText("# Emoji \U0001F600\n\nArrow \u2B07\uFE0F, entity &#x2B07;&#xFE0F;, plain \u2B07, scientist "
+                                    "\U0001F469\u200D\U0001F52C, thumbs \U0001F44D\U0001F3FD, flag \U0001F1F2\U0001F1FE, keycap #\uFE0F\u20E3, "
+                                    "invented \U0001F600\u200D\U0001F680.\n\n| a | b |\n|--|--|\n| \u2764\uFE0F\u200D\U0001F525 | **\U0001F680** |\n");
+                doc->language = model::Language::Markdown;
+                doc->rendered = true;
+            }
+            h.settle();
+            h.sweep(0.0f, 0.0f, kWidth, kHeight);
+            if (h.view().emoji().textureCount() < 5)
+                std::printf("  FAILED emoji: %zu pictures drawn, expected at least 5\n", h.view().emoji().textureCount()), layoutsWrong = true;
+            h.vm().closeDocument(h.vm().activeIndex.get());
+            h.settle();
+            h.view().compactCaches(); // what the app's trim does after a close
+            h.settle();
+            if (h.view().emoji().textureCount() != 0 || h.view().emoji().indexLoaded())
+                std::printf("  FAILED emoji: %zu picture(s) or the index still held after the document closed\n",
+                            h.view().emoji().textureCount()),
+                    layoutsWrong = true;
+
             h.vm().openStartupDocuments({}); // the sample documents again for the states below
             h.settle();
+        }
+
+        // Data views: CSV table, JSON/YAML tree and accordion, a parse error; each document's parsed
+        // form must go when it goes back to text, and when it closes.
+        {
+            h.setContext("data views");
+            struct File { model::Language language; const char* text; };
+            std::string csv = "id,name,note\n";
+            for (int i = 0; i < 300; ++i)
+                csv += std::to_string(i) + ",row " + std::to_string(i) + (i % 7 == 0 ? ",\"two\nlines\"\n" : ",plain\n");
+            const std::string json = "{\"a\": [1, 2, {\"b\": \"x\"}], \"c\": {\"d\": null, \"e\": true}, \"long\": \"line one\\nline two\"}";
+            const std::string yaml = "name: demo\nlist:\n  - 1\n  - two\nmap: {x: 1}\ntext: |\n  a\n  b\n";
+            auto open = [&](model::Language language, const std::string& text) {
+                h.vm().newDocument();
+                model::Document* doc = h.vm().activeDocument();
+                doc->buffer.setText(text);
+                doc->language = language;
+                return doc;
+            };
+            const view::DataViews& data = h.view().editor().dataViews();
+            model::Document* doc = open(model::Language::Csv, csv);
+            doc->rendered = true;
+            h.settle();
+            h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+            for (const auto& [language, text] : {std::pair<model::Language, std::string>{model::Language::Json, json},
+                                                 {model::Language::Yaml, yaml},
+                                                 {model::Language::Json, std::string("{\n  \"a\": 1\n  \"b\": 2\n}")}}) {
+                doc = open(language, text);
+                for (const model::DataView view : {model::DataView::Tree, model::DataView::Accordion}) {
+                    h.vm().setDataView(view);
+                    h.settle();
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                }
+                const int id = doc->id;
+                h.vm().setDataView(model::DataView::Text);
+                h.settle();
+                if (data.holds(id))
+                    std::printf("  FAILED data views: a document back to text still holds its parsed form\n"), layoutsWrong = true;
+            }
+            if (data.entryCount() != 1) // the CSV table, still shown in its tab
+                std::printf("  FAILED data views: %zu entries held, expected 1\n", data.entryCount()), layoutsWrong = true;
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            if (data.entryCount() != 0)
+                std::printf("  FAILED data views: %zu entries held after every document closed\n", data.entryCount()), layoutsWrong = true;
+            h.vm().openStartupDocuments({});
+            h.settle();
+        }
+
+        // Libraries and programs: every list of each fixture drawn and swept, names shown both ways;
+        // what a file contained must go when it is opened as text, and when it closes.
+        {
+            h.setContext("library view");
+            const view::LibraryView& library = h.view().editor().libraryView();
+            const std::string dir = std::string(ENP_SOURCE_DIR) + "/tests/data/binary/";
+            for (const char* name : {"libfixture.so", "fixture.dll", "fixture.obj", "fixture.lib", "libfixture.a"}) {
+                h.vm().newDocument();
+                model::Document* doc = h.vm().activeDocument();
+                doc->kind = model::FileKind::Binary;
+                doc->path = dir + name;
+                doc->title = name;
+                doc->format = "library";
+                h.settle();
+                if (!library.holds(doc->id)) {
+                    std::printf("  FAILED library view: %s was not read\n", name);
+                    layoutsWrong = true;
+                    continue;
+                }
+                // Every node of its tree, as a click on it would.
+                std::vector<std::string> nodes;
+                for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                    if (e.id.rfind("library:list:", 0) == 0)
+                        nodes.push_back(e.id);
+                if (nodes.size() < 3)
+                    std::printf("  FAILED library view: %s shows %zu lists\n", name, nodes.size()), layoutsWrong = true;
+                for (const std::string& id : nodes) {
+                    const view::UiElement* e = view::UiAutomation::instance().find(id);
+                    if (!e || !e->activate)
+                        continue;
+                    const std::function<void()> action = e->activate;
+                    action();
+                    h.settle();
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    if (const view::UiElement* demangle = view::UiAutomation::instance().find("library:demangle"); demangle && demangle->activate) {
+                        const std::function<void()> toggle = demangle->activate;
+                        toggle(); // names as stored
+                        h.settle();
+                        h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                        toggle();
+                        h.settle();
+                    }
+                }
+            }
+            if (library.entryCount() != 5)
+                std::printf("  FAILED library view: %zu entries held, expected 5\n", library.entryCount()), layoutsWrong = true;
+            const int last = h.vm().activeDocument() ? h.vm().activeDocument()->id : -1;
+            h.vm().openAsText(h.vm().activeIndex.get());
+            h.settle();
+            if (library.holds(last))
+                std::printf("  FAILED library view: a file opened as text still holds what it contained\n"), layoutsWrong = true;
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settle();
+            if (library.entryCount() != 0)
+                std::printf("  FAILED library view: %zu entries held after every document closed\n", library.entryCount()), layoutsWrong = true;
+            h.vm().openStartupDocuments({});
+            h.settle();
+        }
+
+        // Customize Ribbon: every section drawn and swept, and the Tabs section driven the way a
+        // user would: hide a tab with its checkbox, move one, restore the defaults, close.
+        {
+            using viewmodel::WorkspaceMode;
+            h.vm().workspace.set(WorkspaceMode::Code);
+            auto activate = [&](const char* id) {
+                const view::UiElement* e = view::UiAutomation::instance().find(id);
+                if (!e || !e->activate) {
+                    std::printf("  FAILED Customize Ribbon: no control %s\n", id);
+                    layoutsWrong = true;
+                    return;
+                }
+                const std::function<void()> action = e->activate; // the registry is rebuilt next frame
+                action();
+                h.settle();
+            };
+            h.setContext("Customize Ribbon dialog");
+            h.vm().customizeRibbonRequested.emit();
+            h.settle();
+            for (const char* section : {"customize-ribbon:section:pinned", "customize-ribbon:section:actions", "customize-ribbon:section:tabs"}) {
+                activate(section);
+                h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+            }
+            activate("customize-ribbon:show:Read");
+            const auto& code = h.vm().ribbonTabs(WorkspaceMode::Code);
+            const bool readHidden = std::any_of(code.begin(), code.end(), [](const auto& t) { return t.name == "Read" && !t.visible; });
+            activate("customize-ribbon:down:Home");
+            const bool homeMoved = code.size() > 1 && code[0].name != "Home";
+            if (!readHidden || !homeMoved)
+                std::printf("  FAILED Customize Ribbon: hiding Read (%d) or moving Home (%d) did not apply\n", readHidden, homeMoved),
+                    layoutsWrong = true;
+            if (view::UiAutomation::instance().find("ribbon-tab:Read"))
+                std::printf("  FAILED Customize Ribbon: the hidden Read tab is still on the ribbon\n"), layoutsWrong = true;
+            activate("customize-ribbon:restore");
+            if (!h.vm().ribbonTabs(WorkspaceMode::Code).empty() || !view::UiAutomation::instance().find("ribbon-tab:Read"))
+                std::printf("  FAILED Customize Ribbon: Restore defaults did not bring the tabs back\n"), layoutsWrong = true;
+            activate("customize-ribbon:done");
         }
 
         // Layout states that add, remove or move items; each is swept in both workspaces.
@@ -388,6 +623,12 @@ int main(int argc, char** argv)
             std::function<void(viewmodel::NotepadViewModel&)> apply;
         };
         const State states[] = {
+            {"developer mode (resource readout in the status bar)", [](auto& vm) { vm.developerMode.set(true); }},
+            {"ribbon customized: Git first, Read and Review hidden",
+             [](auto& vm) {
+                 vm.setRibbonTabs(viewmodel::WorkspaceMode::Code, {{"Git", true}, {"Home", true}, {"Read", false}, {"Review", false}});
+                 vm.setRibbonTabs(viewmodel::WorkspaceMode::Agent, {{"Read", false}, {"Review", false}});
+             }},
             {"Overview detail (folded summaries)", [](auto& vm) { vm.detailLevel.set(2); }},
             {"Outline detail", [](auto& vm) { vm.detailLevel.set(3); }},
             {"layers: project scope, detailed, zoomed in", [](auto& vm) {

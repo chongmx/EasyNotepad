@@ -1,7 +1,10 @@
 #include "enp/model/Markdown.h"
 
+#include "enp/model/Emoji.h"
+
 #include <algorithm>
 #include <cctype>
+#include <string>
 
 namespace enp::model::markdown {
 
@@ -34,6 +37,126 @@ int indentOf(std::string_view line)
     return n;
 }
 
+// ---- Entities -----------------------------------------------------------------------------------
+
+struct Entity {
+    const char* name;
+    const char* utf8;
+};
+// The character references found in READMEs and notes: HTML 4's Latin-1 set and the common symbols.
+constexpr Entity kEntities[] = {
+    {"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""}, {"apos", "'"}, {"nbsp", "\xC2\xA0"}, {"ensp", "\xE2\x80\x82"},
+    {"emsp", "\xE2\x80\x83"}, {"thinsp", "\xE2\x80\x89"}, {"copy", "©"}, {"reg", "®"}, {"trade", "™"}, {"deg", "°"},
+    {"plusmn", "±"}, {"times", "×"}, {"divide", "÷"}, {"micro", "µ"}, {"para", "¶"}, {"sect", "§"}, {"middot", "·"},
+    {"bull", "•"}, {"hellip", "…"}, {"ndash", "–"}, {"mdash", "—"}, {"lsquo", "‘"}, {"rsquo", "’"}, {"ldquo", "“"},
+    {"rdquo", "”"}, {"sbquo", "‚"}, {"bdquo", "„"}, {"laquo", "«"}, {"raquo", "»"}, {"prime", "′"}, {"Prime", "″"},
+    {"larr", "←"}, {"uarr", "↑"}, {"rarr", "→"}, {"darr", "↓"}, {"harr", "↔"}, {"lArr", "⇐"}, {"rArr", "⇒"}, {"hArr", "⇔"},
+    {"crarr", "↵"}, {"forall", "∀"}, {"part", "∂"}, {"exist", "∃"}, {"empty", "∅"}, {"nabla", "∇"}, {"isin", "∈"},
+    {"notin", "∉"}, {"ni", "∋"}, {"prod", "∏"}, {"sum", "∑"}, {"minus", "−"}, {"lowast", "∗"}, {"radic", "√"}, {"prop", "∝"},
+    {"infin", "∞"}, {"ang", "∠"}, {"and", "∧"}, {"or", "∨"}, {"cap", "∩"}, {"cup", "∪"}, {"int", "∫"}, {"there4", "∴"},
+    {"sim", "∼"}, {"cong", "≅"}, {"asymp", "≈"}, {"ne", "≠"}, {"equiv", "≡"}, {"le", "≤"}, {"ge", "≥"}, {"sub", "⊂"},
+    {"sup", "⊃"}, {"nsub", "⊄"}, {"sube", "⊆"}, {"supe", "⊇"}, {"oplus", "⊕"}, {"otimes", "⊗"}, {"perp", "⊥"},
+    {"sdot", "⋅"}, {"lceil", "⌈"}, {"rceil", "⌉"}, {"lfloor", "⌊"}, {"rfloor", "⌋"}, {"lang", "⟨"}, {"rang", "⟩"},
+    {"loz", "◊"}, {"spades", "♠"}, {"clubs", "♣"}, {"hearts", "♥"}, {"diams", "♦"}, {"check", "✓"}, {"cross", "✗"},
+    {"alpha", "α"}, {"beta", "β"}, {"gamma", "γ"}, {"delta", "δ"}, {"epsilon", "ε"}, {"zeta", "ζ"}, {"eta", "η"},
+    {"theta", "θ"}, {"iota", "ι"}, {"kappa", "κ"}, {"lambda", "λ"}, {"mu", "μ"}, {"nu", "ν"}, {"xi", "ξ"}, {"omicron", "ο"},
+    {"pi", "π"}, {"rho", "ρ"}, {"sigma", "σ"}, {"sigmaf", "ς"}, {"tau", "τ"}, {"upsilon", "υ"}, {"phi", "φ"}, {"chi", "χ"},
+    {"psi", "ψ"}, {"omega", "ω"}, {"Alpha", "Α"}, {"Beta", "Β"}, {"Gamma", "Γ"}, {"Delta", "Δ"}, {"Theta", "Θ"},
+    {"Lambda", "Λ"}, {"Xi", "Ξ"}, {"Pi", "Π"}, {"Sigma", "Σ"}, {"Phi", "Φ"}, {"Psi", "Ψ"}, {"Omega", "Ω"},
+    {"euro", "€"}, {"pound", "£"}, {"yen", "¥"}, {"cent", "¢"}, {"curren", "¤"}, {"iexcl", "¡"}, {"iquest", "¿"},
+    {"frac12", "½"}, {"frac14", "¼"}, {"frac34", "¾"}, {"sup1", "¹"}, {"sup2", "²"}, {"sup3", "³"}, {"ordf", "ª"},
+    {"ordm", "º"}, {"shy", ""}, {"zwj", "\xE2\x80\x8D"}, {"zwnj", "\xE2\x80\x8C"},
+    {"Agrave", "À"}, {"Aacute", "Á"}, {"Acirc", "Â"}, {"Atilde", "Ã"}, {"Auml", "Ä"}, {"Aring", "Å"}, {"AElig", "Æ"},
+    {"Ccedil", "Ç"}, {"Egrave", "È"}, {"Eacute", "É"}, {"Ecirc", "Ê"}, {"Euml", "Ë"}, {"Igrave", "Ì"}, {"Iacute", "Í"},
+    {"Icirc", "Î"}, {"Iuml", "Ï"}, {"ETH", "Ð"}, {"Ntilde", "Ñ"}, {"Ograve", "Ò"}, {"Oacute", "Ó"}, {"Ocirc", "Ô"},
+    {"Otilde", "Õ"}, {"Ouml", "Ö"}, {"Oslash", "Ø"}, {"Ugrave", "Ù"}, {"Uacute", "Ú"}, {"Ucirc", "Û"}, {"Uuml", "Ü"},
+    {"Yacute", "Ý"}, {"THORN", "Þ"}, {"szlig", "ß"}, {"agrave", "à"}, {"aacute", "á"}, {"acirc", "â"}, {"atilde", "ã"},
+    {"auml", "ä"}, {"aring", "å"}, {"aelig", "æ"}, {"ccedil", "ç"}, {"egrave", "è"}, {"eacute", "é"}, {"ecirc", "ê"},
+    {"euml", "ë"}, {"igrave", "ì"}, {"iacute", "í"}, {"icirc", "î"}, {"iuml", "ï"}, {"eth", "ð"}, {"ntilde", "ñ"},
+    {"ograve", "ò"}, {"oacute", "ó"}, {"ocirc", "ô"}, {"otilde", "õ"}, {"ouml", "ö"}, {"oslash", "ø"}, {"ugrave", "ù"},
+    {"uacute", "ú"}, {"ucirc", "û"}, {"uuml", "ü"}, {"yacute", "ý"}, {"thorn", "þ"}, {"yuml", "ÿ"}, {"OElig", "Œ"},
+    {"oelig", "œ"}, {"Scaron", "Š"}, {"scaron", "š"}, {"Yuml", "Ÿ"}, {"fnof", "ƒ"}, {"circ", "ˆ"}, {"tilde", "˜"},
+    {"dagger", "†"}, {"Dagger", "‡"}, {"permil", "‰"}, {"lsaquo", "‹"}, {"rsaquo", "›"}, {"oline", "‾"}, {"frasl", "⁄"},
+    {"weierp", "℘"}, {"image", "ℑ"}, {"real", "ℜ"}, {"alefsym", "ℵ"}, {"not", "¬"}, {"macr", "¯"}, {"acute", "´"},
+    {"cedil", "¸"}, {"uml", "¨"}, {"brvbar", "¦"},
+};
+
+void appendUtf8(std::string& out, unsigned cp)
+{
+    if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+        cp = 0xFFFD;
+    if (cp < 0x80) {
+        out += char(cp);
+    } else if (cp < 0x800) {
+        out += char(0xC0 | (cp >> 6));
+        out += char(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += char(0xE0 | (cp >> 12));
+        out += char(0x80 | ((cp >> 6) & 0x3F));
+        out += char(0x80 | (cp & 0x3F));
+    } else {
+        out += char(0xF0 | (cp >> 18));
+        out += char(0x80 | ((cp >> 12) & 0x3F));
+        out += char(0x80 | ((cp >> 6) & 0x3F));
+        out += char(0x80 | (cp & 0x3F));
+    }
+}
+
+// The reference starting at text[i] ('&'): appends its character and returns the index after it,
+// or `i` when this is not one.
+size_t entity(std::string_view text, size_t i, std::string& out)
+{
+    const size_t semi = text.find(';', i + 1);
+    if (semi == std::string_view::npos || semi - i > 12 || semi == i + 1)
+        return i;
+    const std::string_view name = text.substr(i + 1, semi - i - 1);
+    if (name[0] == '#') {
+        unsigned cp = 0;
+        const bool hex = name.size() > 1 && (name[1] == 'x' || name[1] == 'X');
+        const std::string_view digits = name.substr(hex ? 2 : 1);
+        if (digits.empty())
+            return i;
+        for (char c : digits) {
+            const int d = hex ? (std::isxdigit(static_cast<unsigned char>(c)) ? (std::isdigit(static_cast<unsigned char>(c)) ? c - '0' : (std::tolower(c) - 'a' + 10)) : -1)
+                              : (std::isdigit(static_cast<unsigned char>(c)) ? c - '0' : -1);
+            if (d < 0)
+                return i;
+            cp = cp * (hex ? 16u : 10u) + unsigned(d);
+            if (cp > 0x10FFFF)
+                return i;
+        }
+        appendUtf8(out, cp);
+        return semi + 1;
+    }
+    for (const Entity& e : kEntities)
+        if (name == e.name) {
+            out += e.utf8;
+            return semi + 1;
+        }
+    return i;
+}
+
+// An inline math span starts at text[i] ('$'): $...$ with no space just inside the dollars and
+// not a price ("$5 and $6"). Returns the index after it and the source, or `i`.
+size_t inlineMath(std::string_view text, size_t i, std::string& source)
+{
+    if (i + 2 >= text.size() || text[i + 1] == '$' || isSpace(text[i + 1]))
+        return i;
+    for (size_t j = i + 1; j < text.size(); ++j) {
+        if (text[j] == '\\') {
+            ++j;
+            continue;
+        }
+        if (text[j] == '$') {
+            if (isSpace(text[j - 1]) || (j + 1 < text.size() && std::isdigit(static_cast<unsigned char>(text[j + 1]))))
+                return i;
+            source = std::string(text.substr(i + 1, j - i - 1));
+            return j + 1;
+        }
+    }
+    return i;
+}
+
 // ---- Inline -------------------------------------------------------------------------------------
 
 class InlineParser {
@@ -44,19 +167,39 @@ public:
     {
         for (size_t i = 0; i < text_.size();) {
             const char c = text_[i];
-            if (c == '\\' && i + 1 < text_.size() && isPunct(text_[i + 1])) {
+            if (c == '\\' && i + 1 < text_.size() && text_[i + 1] == '(' && text_.find("\\)", i + 2) != std::string_view::npos) {
+                const size_t end = text_.find("\\)", i + 2);
+                flush();
+                spans_.push_back({std::string(text_.substr(i + 2, end - i - 2)), style_ | Math, {}, {}});
+                i = end + 2;
+            } else if (c == '\\' && i + 1 < text_.size() && isPunct(text_[i + 1])) {
                 buffer_ += text_[i + 1];
                 i += 2;
             } else if (c == '`') {
                 i = codeSpan(i);
             } else if (c == '!' && i + 1 < text_.size() && text_[i + 1] == '[') {
-                const size_t next = link(i + 1);
-                i = next == i + 1 ? (buffer_ += c, i + 1) : next; // an image shows as a link to it
+                const size_t next = link(i + 1, true);
+                i = next == i + 1 ? (buffer_ += c, i + 1) : next;
             } else if (c == '[') {
-                const size_t next = link(i);
+                const size_t next = link(i, false);
                 i = next == i ? (buffer_ += c, i + 1) : next;
             } else if (c == '<') {
-                i = autolink(i);
+                i = tag(i);
+            } else if (c == '&') {
+                const size_t next = entity(text_, i, buffer_);
+                i = next == i ? (buffer_ += c, i + 1) : next;
+            } else if (c == '$') {
+                std::string source;
+                const size_t next = inlineMath(text_, i, source);
+                if (next == i) {
+                    buffer_ += c;
+                    ++i;
+                } else {
+                    flush();
+                    spans_.push_back({source, style_ | Math, {}, {}});
+                    i = next;
+                }
+
             } else if ((c == 'h' || c == 'w') && (i == 0 || !isAlnum(text_[i - 1]))) {
                 i = bareUrl(i);
             } else if (c == '*' || c == '_' || (c == '~' && i + 1 < text_.size() && text_[i + 1] == '~')) {
@@ -83,7 +226,7 @@ private:
         if (!spans_.empty() && spans_.back().style == style_ && spans_.back().url.empty())
             spans_.back().text += buffer_;
         else
-            spans_.push_back({buffer_, style_, {}});
+            spans_.push_back({buffer_, style_, {}, {}});
         buffer_.clear();
     }
 
@@ -105,7 +248,7 @@ private:
                 if (code.size() >= 2 && code.front() == ' ' && code.back() == ' ')
                     code = code.substr(1, code.size() - 2);
                 flush();
-                spans_.push_back({code, style_ | Code, {}});
+                spans_.push_back({code, style_ | Code, {}, {}});
                 return j + m;
             }
             j += m;
@@ -114,8 +257,8 @@ private:
         return i + n;
     }
 
-    // [text](url "title"); returns `i` when it is not a link.
-    size_t link(size_t i)
+    // [text](url "title"), or ![alt](src) for an image; returns `i` when it is not one.
+    size_t link(size_t i, bool image)
     {
         int depth = 0;
         size_t close = std::string_view::npos;
@@ -142,15 +285,70 @@ private:
         if (target.size() >= 2 && target.front() == '<' && target.back() == '>')
             target = target.substr(1, target.size() - 2);
         flush();
+        if (image) {
+            spans_.push_back({plainText(InlineParser(text_.substr(i + 1, close - i - 1)).run()), style_ | Image, std::string(target), {}});
+            return end + 1;
+        }
         Spans inner = InlineParser(text_.substr(i + 1, close - i - 1)).run();
         if (inner.empty())
-            inner.push_back({std::string(target), Plain, {}});
+            inner.push_back({std::string(target), Plain, {}, {}});
         for (Span& span : inner) {
             span.style |= style_ | Link;
             span.url = std::string(target);
             spans_.push_back(std::move(span));
         }
         return end + 1;
+    }
+
+    // <https://...> autolinks, <img src="..." alt="..."> and <br>; other tags stay text.
+    size_t tag(size_t i)
+    {
+        const size_t end = text_.find('>', i);
+        if (end == std::string_view::npos)
+            return autolink(i);
+        const std::string_view inside = text_.substr(i + 1, end - i - 1);
+        auto lowerStarts = [&](const char* word) {
+            const size_t n = std::char_traits<char>::length(word);
+            if (inside.size() < n)
+                return false;
+            for (size_t k = 0; k < n; ++k)
+                if (std::tolower(static_cast<unsigned char>(inside[k])) != word[k])
+                    return false;
+            return inside.size() == n || isSpace(inside[n]) || inside[n] == '/';
+        };
+        if (lowerStarts("br")) {
+            buffer_ += '\n';
+            return end + 1;
+        }
+        if (lowerStarts("img")) {
+            auto attribute = [&](const char* name) -> std::string {
+                const std::string key = std::string(name) + "=";
+                for (size_t p = inside.find(key); p != std::string_view::npos; p = inside.find(key, p + 1)) {
+                    if (p > 0 && isAlnum(inside[p - 1]))
+                        continue;
+                    size_t v = p + key.size();
+                    if (v >= inside.size())
+                        return {};
+                    const char quote = inside[v] == '"' || inside[v] == '\'' ? inside[v] : 0;
+                    if (quote) {
+                        const size_t close = inside.find(quote, v + 1);
+                        return std::string(inside.substr(v + 1, close == std::string_view::npos ? std::string_view::npos : close - v - 1));
+                    }
+                    size_t e = v;
+                    while (e < inside.size() && !isSpace(inside[e]) && inside[e] != '/' && inside[e] != '>')
+                        ++e;
+                    return std::string(inside.substr(v, e - v));
+                }
+                return {};
+            };
+            const std::string src = attribute("src");
+            if (!src.empty()) {
+                flush();
+                spans_.push_back({attribute("alt"), style_ | Image, src, {}});
+                return end + 1;
+            }
+        }
+        return autolink(i);
     }
 
     size_t autolink(size_t i)
@@ -161,7 +359,7 @@ private:
             if (inside.find(' ') == std::string_view::npos &&
                 (inside.rfind("http://", 0) == 0 || inside.rfind("https://", 0) == 0 || inside.rfind("mailto:", 0) == 0)) {
                 flush();
-                spans_.push_back({std::string(inside), style_ | Link, std::string(inside)});
+                spans_.push_back({std::string(inside), style_ | Link, std::string(inside), {}});
                 return end + 1;
             }
         }
@@ -183,7 +381,7 @@ private:
             --end; // sentence punctuation is not part of it
         const std::string url(text_.substr(i, end - i));
         flush();
-        spans_.push_back({url, style_ | Link, url.rfind("www.", 0) == 0 ? "https://" + url : url});
+        spans_.push_back({url, style_ | Link, url.rfind("www.", 0) == 0 ? "https://" + url : url, {}});
         return end;
     }
 
@@ -390,6 +588,8 @@ public:
             size_t fenceLength = 0;
             if (indentOf(line) < 4 && isFence(t, &fenceChar, &fenceLength))
                 code(fenceChar, fenceLength, indentOf(line));
+            else if (isDisplayMathOpener(t))
+                displayMath();
             else if (t[0] == '>')
                 quote();
             else if (const int level = headingLevel(t); level > 0 && indentOf(line) < 4)
@@ -435,7 +635,38 @@ private:
         char c = 0;
         size_t n = 0;
         return t.empty() || t[0] == '>' || headingLevel(t) > 0 || isRule(t) || isFence(t, &c, &n) || listMarker(line, nullptr) ||
+               isDisplayMathOpener(t) ||
                (index + 1 < lines_.size() && line.find('|') != std::string_view::npos && isTableSeparator(lines_[index + 1], nullptr));
+    }
+
+    // "$$" or "\\[" at the start of a line opens display math ($$ x $$ on one line included).
+    static bool isDisplayMathOpener(std::string_view t) { return t.substr(0, 2) == "$$" || t.substr(0, 2) == "\\["; }
+
+    void displayMath()
+    {
+        Block& b = add(BlockKind::Math, i_);
+        std::string_view t = trim(lines_[i_]);
+        const bool dollars = t[0] == '$';
+        const std::string_view closer = dollars ? "$$" : "\\]";
+        t.remove_prefix(2);
+        ++i_;
+        if (const size_t close = t.find(closer); close != std::string_view::npos) { // one line
+            b.code = std::string(trim(t.substr(0, close)));
+            return;
+        }
+        b.code = std::string(trim(t));
+        while (i_ < lines_.size()) {
+            const std::string_view line = trim(lines_[i_++]);
+            const size_t close = line.find(closer);
+            const std::string_view part = close == std::string_view::npos ? line : trim(line.substr(0, close));
+            if (!part.empty()) {
+                if (!b.code.empty())
+                    b.code += '\n';
+                b.code.append(part);
+            }
+            if (close != std::string_view::npos)
+                break;
+        }
     }
 
     // Joins lines into inline text: a line ending in two spaces or a backslash breaks the line.
@@ -604,9 +835,63 @@ private:
 
 } // namespace
 
+namespace {
+
+// Emoji sequences become spans of their own (whatever wrote them: the characters, &#x2B07;&#xFE0F;,
+// ...), and code points that never show alone (variation selectors, stray joiners) are dropped so
+// they cannot be drawn as a box. Math and image spans are left as they are.
+Spans splitEmoji(Spans in)
+{
+    Spans out;
+    out.reserve(in.size());
+    for (Span& span : in) {
+        if (span.style & (Math | Image)) {
+            out.push_back(std::move(span));
+            continue;
+        }
+        const std::string& t = span.text;
+        std::string plain;
+        bool split = false;
+        auto flushPlain = [&]() {
+            if (!plain.empty()) {
+                out.push_back({std::move(plain), span.style, span.url, {}});
+                plain.clear();
+            }
+        };
+        for (size_t i = 0; i < t.size();) {
+            const unsigned char c = static_cast<unsigned char>(t[i]);
+            // Only bytes that can start an emoji are looked at: non-ASCII, and [0-9#*] for keycaps.
+            if (c >= 0x80 || (c >= '0' && c <= '9') || c == '#' || c == '*') {
+                std::string key;
+                if (const size_t n = emoji::match(t, i, &key)) {
+                    flushPlain();
+                    out.push_back({t.substr(i, n), span.style | Emoji, span.url, std::move(key)});
+                    i += n;
+                    split = true;
+                    continue;
+                }
+                if (const size_t n = emoji::invisible(t, i)) {
+                    i += n;
+                    split = true;
+                    continue;
+                }
+            }
+            plain += t[i++];
+        }
+        if (!split) {
+            out.push_back(std::move(span));
+            continue;
+        }
+        flushPlain();
+    }
+    return out;
+}
+
+} // namespace
+
 Spans parseInline(std::string_view text)
 {
-    return InlineParser(text).run();
+    return splitEmoji(InlineParser(text).run());
 }
 
 std::vector<Block> parse(std::string_view text)
@@ -632,6 +917,23 @@ std::string plainText(const Spans& spans)
     for (const Span& span : spans)
         text += span.text;
     return text;
+}
+
+std::string decodeEntities(std::string_view text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        if (text[i] == '&') {
+            const size_t next = entity(text, i, out);
+            if (next != i) {
+                i = next;
+                continue;
+            }
+        }
+        out += text[i++];
+    }
+    return out;
 }
 
 } // namespace enp::model::markdown

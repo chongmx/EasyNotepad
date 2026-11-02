@@ -45,7 +45,13 @@ std::unique_ptr<interfaces::ITerminalSession> TerminalService::start(const inter
 
     os::pty::Options options;
     options.command = shell.command;
-    options.workingDirectory = workingDirectory.empty() ? os::fs::currentDirectory() : workingDirectory;
+    // The requested folder (the open workspace); if there is none, or it has gone, the home
+    // directory; the app's own directory only when even that is missing.
+    options.workingDirectory = workingDirectory;
+    if (options.workingDirectory.empty() || !os::fs::isDirectory(options.workingDirectory))
+        options.workingDirectory = os::fs::homeDirectory();
+    if (options.workingDirectory.empty() || !os::fs::isDirectory(options.workingDirectory))
+        options.workingDirectory = os::fs::currentDirectory();
     options.columns = columns;
     options.rows = rows;
     session->process = os::pty::spawn(

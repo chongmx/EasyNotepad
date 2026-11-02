@@ -1,5 +1,6 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
+#include "enp/model/BinaryInfo.h"
 #include "enp/model/Json.h"
 #include "enp/viewmodel/DummyData.h"
 
@@ -8,6 +9,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include "enp/os/Memory.h"
+
 #include <deque>
 
 namespace enp::viewmodel {
@@ -44,6 +47,7 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
       findInFiles_(*this, fileService), settings_(fileService)
 {
     agentCli_ = agentCli;
+    terminal_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string()); // no folder yet: home
     processes_ = processService;
     git_.setServices(processService, fileService, agentCli);
     initCommands();
@@ -53,6 +57,7 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
     subscriptions_.push_back(review_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(engineLab_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
+    subscriptions_.push_back(showHiddenFiles.subscribe([this](const bool&) { refreshExplorer(); }));
     subscriptions_.push_back(engineLab_.changed.subscribe([this]() { settings_.markDirty(); }));
     // The local agent uses the Engine Lab's model files and settings.
     agent_.setLocal(
@@ -140,6 +145,7 @@ const model::Document* NotepadViewModel::activeDocument() const
 
 model::Document& NotepadViewModel::addDocument(std::string title, std::string path, const std::string& text)
 {
+    os::mem::Scope scope("documents");
     auto doc = std::make_unique<model::Document>();
     doc->id = nextDocumentId_++;
     doc->title = std::move(title);
@@ -147,7 +153,9 @@ model::Document& NotepadViewModel::addDocument(std::string title, std::string pa
     doc->buffer.setText(text);
     doc->savedText = doc->buffer.text();
     doc->language = model::languageFromPath(doc->path.empty() ? doc->title : doc->path);
-    doc->rendered = doc->language == model::Language::Markdown && !doc->path.empty(); // opened files: read first
+    // Opened files are read first: Markdown formatted, CSV as a table (JSON and YAML open as text,
+    // usually to be edited; their tree and accordion are a click away).
+    doc->rendered = (doc->language == model::Language::Markdown || doc->language == model::Language::Csv) && !doc->path.empty();
     if (model::languageSpec(doc->language).lfByDefault)
         doc->eol = model::EolMode::Lf;
     applyDetectedIndent(*doc);
@@ -278,13 +286,26 @@ void NotepadViewModel::closeFolder()
         doc->modified = false; // answered already: closing discards
     while (!documents_.empty())
         closeDocument(0);
-    workspaceRoot_.clear();
+    os::mem::release(workspaceRoot_);
+    terminal_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string()); // no folder: home
+    os::mem::release(explorer_.children);
+    os::mem::release(explorer_.name);
+    os::mem::release(explorer_.path);
     explorer_ = ExplorerItem{"", "", true, {}}; // empty: "No folder open", not the samples
     findInFiles_.folder.clear();
     findInFiles_.clear(); // the hits (and their lines) were the closed folder's
     layers_.workspaceChanged();
+    logicalMap_.workspaceChanged();
     git_.workspaceChanged();
     statusText.set(closed.empty() ? "No folder open" : "Closed the folder " + closed);
+    memoryTrimRequested_ = true;
+}
+
+bool NotepadViewModel::takeMemoryTrimRequest()
+{
+    const bool requested = memoryTrimRequested_;
+    memoryTrimRequested_ = false;
+    return requested;
 }
 
 void NotepadViewModel::closeWhere(const std::function<bool(int index, const model::Document&)>& close)
@@ -297,6 +318,8 @@ void NotepadViewModel::closeWhere(const std::function<bool(int index, const mode
         std::unique_ptr<model::Document>& doc = documents_[size_t(i)];
         if (close(i, *doc) && !doc->modified) {
             history_.forget(doc->id);
+            if (doc->kind != model::FileKind::Text)
+                memoryTrimRequested_ = true; // its view held a decoded image or a library's contents
             continue;
         }
         if (close(i, *doc))
@@ -306,6 +329,8 @@ void NotepadViewModel::closeWhere(const std::function<bool(int index, const mode
         kept.push_back(std::move(doc));
     }
     documents_ = std::move(kept);
+    if (documents_.empty())
+        memoryTrimRequested_ = true;
     if (unsaved > 0)
         statusText.set("Kept " + std::to_string(unsaved) + " document(s) open: unsaved changes");
     activeIndex.set(-1); // force notification
@@ -397,7 +422,11 @@ void NotepadViewModel::closeDocument(int index)
     if (index < 0 || index >= int(documents_.size()))
         return;
     history_.forget(documents_[size_t(index)]->id);
+    // An image or a library: what its view decoded is large, so the pages go back to the system now.
+    const bool large = documents_[size_t(index)]->kind != model::FileKind::Text;
     documents_.erase(documents_.begin() + index);
+    if (documents_.empty() || large)
+        memoryTrimRequested_ = true;
     int active = activeIndex.get();
     if (index < active || active >= int(documents_.size()))
         --active;
@@ -430,9 +459,27 @@ void NotepadViewModel::openFile(const std::string& path)
         return;
     }
     std::string error;
+    os::mem::Scope scope("documents");
     std::optional<std::string> text = files_->read(absolutePath(path), &error);
     if (!text) {
         statusText.set("Cannot open " + path + ": " + error);
+        return;
+    }
+    // Images are shown, binary files are not poured into a text buffer: both get a document
+    // whose buffer stays empty (the editor shows the image, or a notice with "Open as text").
+    if (const model::FileType type = model::detectFileType(path, *text); type.kind != model::FileKind::Text) {
+        const bool library = type.kind == model::FileKind::Binary && model::bin::recognises(*text);
+        os::mem::release(*text);
+        model::Document& doc = addDocument(fileName(path), path, {});
+        doc.kind = type.kind;
+        doc.format = type.format;
+        doc.rendered = false;
+        doc.onDisk = true;
+        recordDiskStamp(doc);
+        remember(recentFiles_, absolutePath(path), kMaxRecentFiles);
+        statusText.set(type.kind == model::FileKind::Image ? "Opened " + path + " (" + type.format + " image)"
+                       : library ? "Opened " + path + " (" + type.format + "): its functions, imports and sections are listed"
+                                 : path + " is a binary file (" + type.format + "): not opened as text");
         return;
     }
     // Keep the file's conventions: BOM and line endings are restored on save.
@@ -449,6 +496,46 @@ void NotepadViewModel::openFile(const std::string& path)
     statusText.set("Opened " + path);
 }
 
+void NotepadViewModel::setDataView(model::DataView view)
+{
+    model::Document* doc = activeDocument();
+    if (!doc || (doc->language != model::Language::Json && doc->language != model::Language::Yaml) || doc->dataView == view)
+        return;
+    doc->dataView = view;
+    if (view == model::DataView::Text)
+        revealLine(doc->caret.line);
+}
+
+bool NotepadViewModel::openAsText(int index)
+{
+    if (index < 0 || index >= int(documents_.size()) || !files_)
+        return false;
+    model::Document& doc = *documents_[size_t(index)];
+    if (doc.kind == model::FileKind::Text)
+        return true;
+    std::string error;
+    os::mem::Scope scope("documents");
+    std::optional<std::string> text = files_->read(absolutePath(doc.path), &error);
+    if (!text) {
+        statusText.set("Cannot open " + doc.path + ": " + error);
+        return false;
+    }
+    const bool bom = text->rfind("\xEF\xBB\xBF", 0) == 0;
+    if (bom)
+        text->erase(0, 3);
+    doc.eol = text->find("\r\n") != std::string::npos ? model::EolMode::CrLf : model::EolMode::Lf;
+    doc.encoding = bom ? model::Encoding::Utf8Bom : model::Encoding::Utf8;
+    doc.buffer.setText(*text);
+    doc.savedText = doc.buffer.text();
+    doc.kind = model::FileKind::Text;
+    doc.modified = false;
+    ++doc.revision;
+    applyDetectedIndent(doc);
+    recordDiskStamp(doc);
+    statusText.set("Opened " + doc.path + " as text (" + doc.format + "): saving would rewrite the file as text");
+    return true;
+}
+
 std::string NotepadViewModel::absolutePath(const std::string& path) const
 {
     const bool absolute = !path.empty() && (path[0] == '/' || (path.size() > 1 && path[1] == ':'));
@@ -457,6 +544,11 @@ std::string NotepadViewModel::absolutePath(const std::string& path) const
 
 bool NotepadViewModel::saveDocument(model::Document& doc)
 {
+    if (doc.kind != model::FileKind::Text) { // nothing was loaded: writing the empty buffer would destroy the file
+        statusText.set(doc.title + " is shown as " + (doc.kind == model::FileKind::Image ? "an image" : "a binary file") +
+                       ": there is nothing to save");
+        return false;
+    }
     if (!doc.onDisk || !files_) {
         doc.savedText = doc.buffer.text();
         doc.modified = false;
@@ -492,6 +584,7 @@ void NotepadViewModel::refreshExplorer()
 {
     if (workspaceRoot_.empty() || !files_)
         return;
+    os::mem::Scope scope("explorer");
     // Breadth-first, so that a big folder early in the order cannot crowd out the others (a
     // depth-first scan with a budget used to show a repository as a part of its first folder and
     // nothing else): every top-level entry shows, and the budget runs out in the depths, where
@@ -516,17 +609,18 @@ void NotepadViewModel::refreshExplorer()
 }
 
 // Reads one folder's entries, up to the per-folder limit. Version control, build output and other
-// bulk folders at the top level are left out, as are hidden entries.
+// bulk folders at the top level are left out; hidden entries unless showHiddenFiles.
 void NotepadViewModel::scanExplorerFolder(ExplorerItem& folder)
 {
-    static const std::vector<std::string> skipped = {"build", "bin", "out", "ref", "node_modules", "_deps"};
+    static const char* const skipped[] = {".git", "build", "bin", "out", "ref", "node_modules", "_deps"};
+    const bool hidden = showHiddenFiles.get();
     bool more = false;
     const std::string absolute = folder.path.empty() ? workspaceRoot_ : workspaceRoot_ + "/" + folder.path;
     folder.children.clear();
     for (const interfaces::DirectoryEntry& e : files_->list(absolute, size_t(std::max(1, explorerLimits_.perFolder)), &more)) {
-        if (e.name.empty() || e.name[0] == '.')
+        if (e.name.empty() || (e.hidden && !hidden))
             continue;
-        if (e.isDirectory && folder.path.empty() && std::find(skipped.begin(), skipped.end(), e.name) != skipped.end())
+        if (e.isDirectory && folder.path.empty() && std::find(std::begin(skipped), std::end(skipped), e.name) != std::end(skipped))
             continue;
         ExplorerItem item{e.name, folder.path.empty() ? e.name : folder.path + "/" + e.name, e.isDirectory, {}};
         item.scanned = !e.isDirectory; // folders: read later (breadth-first, or when expanded)
@@ -549,8 +643,10 @@ void NotepadViewModel::expandExplorer(const std::string& path)
         return nullptr;
     };
     ExplorerItem* folder = find(find, explorer_, path);
-    if (folder && folder->isDirectory && !folder->scanned)
+    if (folder && folder->isDirectory && !folder->scanned) {
+        os::mem::Scope scope("explorer");
         scanExplorerFolder(*folder);
+    }
 }
 
 void NotepadViewModel::remember(std::vector<std::string>& list, const std::string& path, size_t max)
@@ -756,6 +852,10 @@ std::string NotepadViewModel::workspaceRelative(const std::string& path) const
 
 bool NotepadViewModel::saveDocumentAs(model::Document& doc, const std::string& path)
 {
+    if (doc.kind != model::FileKind::Text) {
+        statusText.set(doc.title + " is not open as text: there is nothing to save");
+        return false;
+    }
     if (!files_)
         return false;
     const std::string previousPath = doc.path;
@@ -778,11 +878,18 @@ bool NotepadViewModel::saveDocumentAs(model::Document& doc, const std::string& p
 std::string NotepadViewModel::readWorkspaceFile(const std::string& path) const
 {
     for (const auto& doc : documents_)
-        if ((doc->path.empty() ? doc->title : doc->path) == path)
+        if (doc->kind == model::FileKind::Text && (doc->path.empty() ? doc->title : doc->path) == path)
             return doc->buffer.text();
     if (!workspaceRoot_.empty() && files_)
         return files_->read(absolutePath(path)).value_or(std::string());
     return dummy::fileContent(path);
+}
+
+std::optional<std::string> NotepadViewModel::readFileRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total) const
+{
+    if (!files_)
+        return std::nullopt;
+    return files_->readRange(absolutePath(path), offset, size, total);
 }
 
 bool NotepadViewModel::writeWorkspaceFile(const std::string& path, const std::string& text)
@@ -806,10 +913,12 @@ bool NotepadViewModel::openFolder(const std::string& path)
     while (root.size() > 1 && root.back() == '/')
         root.pop_back();
     workspaceRoot_ = root;
+    terminal_.setWorkingDirectory(root); // new terminals start in the open folder
     refreshExplorer();
     findInFiles_.folder.clear();
     findInFiles_.clear();
     layers_.workspaceChanged();
+    logicalMap_.workspaceChanged();
     remember(recentFolders_, root, kMaxRecentFolders);
     while (!documents_.empty())
         closeDocument(0);
@@ -1275,7 +1384,43 @@ void NotepadViewModel::setPinned(CommandId id, bool pinned)
         pinned_.push_back(id);
     else if (!pinned && it != pinned_.end())
         pinned_.erase(it);
+    ++ribbonRevision_;
     settings_.markDirty();
+}
+
+void NotepadViewModel::movePinned(CommandId id, int direction)
+{
+    const auto it = std::find(pinned_.begin(), pinned_.end(), id);
+    if (it == pinned_.end())
+        return;
+    const long from = long(it - pinned_.begin());
+    const long to = from + (direction < 0 ? -1 : 1);
+    if (to < 0 || to >= long(pinned_.size()))
+        return;
+    std::swap(pinned_[size_t(from)], pinned_[size_t(to)]);
+    ++ribbonRevision_;
+    settings_.markDirty();
+}
+
+void NotepadViewModel::setRibbonTabs(WorkspaceMode mode, std::vector<RibbonTabSetting> tabs)
+{
+    std::vector<RibbonTabSetting>& current = ribbonTabs_[mode == WorkspaceMode::Agent ? 1 : 0];
+    if (tabs == current)
+        return;
+    current = std::move(tabs);
+    ++ribbonRevision_;
+    settings_.markDirty();
+}
+
+void NotepadViewModel::restoreRibbonTabs(WorkspaceMode mode)
+{
+    std::vector<RibbonTabSetting>& current = ribbonTabs_[mode == WorkspaceMode::Agent ? 1 : 0];
+    if (current.empty())
+        return;
+    os::mem::release(current);
+    ++ribbonRevision_;
+    settings_.markDirty();
+    statusText.set("Ribbon tabs restored to the default");
 }
 
 void NotepadViewModel::addCustomAction(std::string name, std::string command)
@@ -1285,6 +1430,7 @@ void NotepadViewModel::addCustomAction(std::string name, std::string command)
     customActions_.push_back({std::move(name), std::move(command)});
     statusText.set("Added \"" + customActions_.back().name + "\" to My Tools");
     settings_.markDirty();
+    ++ribbonRevision_;
 }
 
 void NotepadViewModel::removeCustomAction(int index)
@@ -1292,6 +1438,7 @@ void NotepadViewModel::removeCustomAction(int index)
     if (index >= 0 && index < int(customActions_.size()))
         customActions_.erase(customActions_.begin() + index);
     settings_.markDirty();
+    ++ribbonRevision_;
 }
 
 void NotepadViewModel::runCustomAction(int index)
@@ -1768,6 +1915,7 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.showPanel", showPanel);
     settings_.bind("view.panelTab", panelTab);
     settings_.bind("view.showAgentPanel", showAgentPanel);
+    settings_.bind("explorer.showHiddenFiles", showHiddenFiles);
     settings_.bind("view.showSideBar", showLayersMap);
     settings_.bind("view.sideBar", sideBar);
     settings_.bind("view.detailLevel", detailLevel);
@@ -1876,7 +2024,8 @@ void NotepadViewModel::bindSettings()
                 .set("active", active);
         });
 
-    // {"ribbon": {"pinned": ["DetailOverview", ...], "customActions": [{"name": ..., "command": ...}]}}
+    // {"ribbon": {"pinned": ["DetailOverview", ...], "customActions": [{"name": ..., "command": ...}],
+    //             "tabs": {"code": [{"name": "Home", "visible": true}, ...], "agent": [...]}}}
     settings_.section(
         "ribbon",
         [this](const model::Json& j) {
@@ -1892,6 +2041,17 @@ void NotepadViewModel::bindSettings()
                     if (!a.getString("name").empty())
                         customActions_.push_back({a.getString("name"), a.getString("command")});
             }
+            if (const model::Json* tabs = j.find("tabs"); tabs && tabs->isObject()) {
+                const char* const keys[] = {"code", "agent"};
+                for (int m = 0; m < 2; ++m) {
+                    ribbonTabs_[m].clear();
+                    if (const model::Json* list = tabs->find(keys[m]); list && list->isArray())
+                        for (const model::Json& t : list->items())
+                            if (!t.getString("name").empty())
+                                ribbonTabs_[m].push_back({t.getString("name"), t.getBool("visible", true)});
+                }
+            }
+            ++ribbonRevision_;
         },
         [this]() {
             model::Json pinned = model::Json::array();
@@ -1900,7 +2060,19 @@ void NotepadViewModel::bindSettings()
             model::Json actions = model::Json::array();
             for (const CustomAction& a : customActions_)
                 actions.push(model::Json::object().set("name", a.name).set("command", a.command));
-            return model::Json::object().set("pinned", std::move(pinned)).set("customActions", std::move(actions));
+            model::Json result = model::Json::object().set("pinned", std::move(pinned)).set("customActions", std::move(actions));
+            if (!ribbonTabs_[0].empty() || !ribbonTabs_[1].empty()) { // only when the user changed something
+                model::Json tabs = model::Json::object();
+                const char* const keys[] = {"code", "agent"};
+                for (int m = 0; m < 2; ++m) {
+                    model::Json list = model::Json::array();
+                    for (const RibbonTabSetting& t : ribbonTabs_[m])
+                        list.push(model::Json::object().set("name", t.name).set("visible", t.visible));
+                    tabs.set(keys[m], std::move(list));
+                }
+                result.set("tabs", std::move(tabs));
+            }
+            return result;
         });
 }
 

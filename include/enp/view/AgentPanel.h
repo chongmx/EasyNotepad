@@ -15,6 +15,7 @@ namespace enp::view {
 class AgentPanel {
 public:
     AgentPanel(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale);
+    void setEmoji(EmojiCache* emoji) { emoji_ = emoji; } // pictures for emoji in the answers
 
     // `compact` is the Code-workspace side panel: narrower header, same features.
     void renderConversation(bool compact);
@@ -41,6 +42,7 @@ private:
     size_t lastMessageCount_ = 0;
     std::string commandEdit_; // the set-up card's command field while it is being edited
     bool editingCommand_ = false;
+    EmojiCache* emoji_ = nullptr; // owned by MainView
     std::deque<MarkdownView> markdown_; // per message (deque: views keep their address as it grows)
 };
 

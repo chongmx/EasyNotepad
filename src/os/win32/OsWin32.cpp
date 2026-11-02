@@ -125,6 +125,36 @@ void writeLogSink(log::Level level, const char* message)
 
 namespace fs {
 
+std::optional<std::string> readFileRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return std::nullopt;
+    LARGE_INTEGER length{};
+    GetFileSizeEx(h, &length);
+    if (total)
+        *total = std::uint64_t(length.QuadPart);
+    std::string data;
+    if (offset < std::uint64_t(length.QuadPart)) {
+        LARGE_INTEGER at{};
+        at.QuadPart = LONGLONG(offset);
+        if (SetFilePointerEx(h, at, nullptr, FILE_BEGIN)) {
+            data.resize(size_t(std::min<std::uint64_t>(size, std::uint64_t(length.QuadPart) - offset)));
+            size_t got = 0;
+            while (got < data.size()) {
+                DWORD read = 0;
+                if (!ReadFile(h, data.data() + got, DWORD(std::min<size_t>(data.size() - got, 1u << 30)), &read, nullptr) || read == 0)
+                    break;
+                got += read;
+            }
+            data.resize(got);
+        }
+    }
+    CloseHandle(h);
+    return data;
+}
+
 std::optional<std::string> readFile(const std::string& path, std::string* error)
 {
     HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -205,8 +235,6 @@ std::vector<DirEntry> listDirectory(const std::string& path, size_t limit, bool*
         std::wstring_view name = fd.cFileName;
         if (name == L"." || name == L"..")
             continue;
-        if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
-            continue;
         if (limit > 0 && entries.size() >= limit) {
             if (more)
                 *more = true;
@@ -215,6 +243,7 @@ std::vector<DirEntry> listDirectory(const std::string& path, size_t limit, bool*
         DirEntry e;
         e.name = narrow(name);
         e.isDirectory = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        e.hidden = name[0] == L'.' || (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0;
         e.size = (std::uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
         entries.push_back(std::move(e));
     } while (FindNextFileW(h, &fd));
@@ -255,8 +284,12 @@ std::string executableDirectory()
 
 std::string homeDirectory()
 {
-    if (auto home = getEnv("USERPROFILE"))
+    // C:\Users\<name>: the profile folder, as Explorer and PowerShell's ~ use.
+    if (auto home = getEnv("USERPROFILE"); home && !home->empty())
         return path::normalize(*home);
+    auto drive = getEnv("HOMEDRIVE"), dir = getEnv("HOMEPATH");
+    if (drive && dir && !drive->empty() && !dir->empty())
+        return path::normalize(*drive + *dir);
     return currentDirectory();
 }
 
@@ -314,6 +347,17 @@ std::vector<std::string> rootDirectories()
         if (mask & (1u << i))
             roots.push_back(std::string(1, char('A' + i)) + ":/");
     return roots;
+}
+
+std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    const std::string exe = executableDirectory();
+    for (const std::string& base : {path::join(exe, "resources"), path::join(exe, "../resources"),
+                                    path::join(currentDirectory(), "resources")}) {
+        if (auto data = readFileRange(path::join(base, relativePath), offset, size, total))
+            return data;
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> readAsset(const std::string& relativePath)

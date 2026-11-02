@@ -6,7 +6,11 @@
 #endif
 
 #include "enp/os/Dispatch.h"
+#include "enp/os/Memory.h"
+#include "enp/services/debug/MemoryTrace.h"
 #include "enp/os/Os.h"
+
+#include "FrameCapture.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -31,6 +35,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -96,7 +101,10 @@ void mainLoopStep(void* arg)
 #if !defined(__EMSCRIPTEN__)
     state->frame->update();
 #endif
-    if (glfwGetWindowAttrib(state->window, GLFW_ICONIFIED) != 0) {
+    // Minimized: nothing is drawn, but posted work (automation requests such as a screenshot) still
+    // gets a frame, which is built and, when asked for, captured off screen, not presented.
+    const bool minimized = glfwGetWindowAttrib(state->window, GLFW_ICONIFIED) != 0;
+    if (minimized && !enp::os::dispatch::hasPending()) {
         ImGui_ImplGlfw_Sleep(10);
         return;
     }
@@ -109,11 +117,24 @@ void mainLoopStep(void* arg)
 
     int width = 0, height = 0;
     glfwGetFramebufferSize(state->window, &width, &height);
-    glViewport(0, 0, width, height);
     const ImVec4 clear = state->app->clearColor();
-    glClearColor(clear.x, clear.y, clear.z, clear.w);
-    glClear(GL_COLOR_BUFFER_BIT);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (!minimized) {
+        glViewport(0, 0, width, height);
+        glClearColor(clear.x, clear.y, clear.z, clear.w);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
+    if (state->app->captureWanted()) { // a screenshot asked for through the automation endpoint
+        std::vector<unsigned char> rgba;
+        std::string failure;
+        const bool ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        state->app->deliverCapture(ok, width, height, rgba, failure);
+        glViewport(0, 0, width, height);
+    }
+    if (minimized) {
+        state->app->endFrame();
+        return;
+    }
 #if !defined(__EMSCRIPTEN__)
     if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
         GLFWwindow* context = glfwGetCurrentContext();
@@ -123,6 +144,7 @@ void mainLoopStep(void* arg)
     }
 #endif
     glfwSwapBuffers(state->window);
+    state->app->endFrame();
 #if !defined(__EMSCRIPTEN__)
     static int framesShown = 0;
     if (++framesShown == 2 && state->frame) // once, after the window has really been drawn
@@ -137,6 +159,7 @@ void mainLoopStep(void* arg)
 
 int main(int argc, char** argv)
 {
+    enp::services::debug::installMemoryTrace(); // no-op unless built with ENP_MEMORY_TRACE
     enp::os::InitParams params;
     params.argc = argc;
     params.argv = argv;
@@ -231,10 +254,23 @@ int main(int argc, char** argv)
 #endif
 
     IMGUI_CHECKVERSION();
+    ImGui::SetAllocatorFunctions(
+        [](size_t size, void*) -> void* {
+            enp::os::mem::Scope scope("imgui");
+            return ::operator new(size);
+        },
+        [](void* p, void*) { ::operator delete(p); });
     ImGui::CreateContext();
 #if !defined(__EMSCRIPTEN__)
     // Windows such as the popped-out terminal become real OS windows (multi-viewport).
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    // --no-viewports keeps everything in the main window (to rule the platform windows out when
+    // tracking a problem down).
+    bool viewports = true;
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--no-viewports") == 0)
+            viewports = false;
+    if (viewports)
+        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 #endif
     ImGui_ImplGlfw_InitForOpenGL(window, true);
 #if defined(__EMSCRIPTEN__)
@@ -242,8 +278,9 @@ int main(int argc, char** argv)
 #endif
     ImGui_ImplOpenGL3_Init(glslVersion);
 
-    // Heap-allocated so it survives main() returning under emscripten_set_main_loop.
-    auto* state = new AppState();
+    // Owned by a static so it survives main() returning under emscripten_set_main_loop.
+    static std::unique_ptr<AppState> stateOwner = std::make_unique<AppState>();
+    AppState* state = stateOwner.get();
     g_state = state;
     state->window = window;
     enp::view::IWindowFrame* frame = nullptr;
@@ -294,7 +331,7 @@ int main(int argc, char** argv)
     glfwDestroyWindow(window);
     glfwTerminate();
     g_state = nullptr;
-    delete state;
+    stateOwner.reset();
     enp::os::shutdown();
 #endif
     return 0;

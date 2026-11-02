@@ -1,34 +1,54 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
       "hidden": true,
       "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     },
     {
       "name": "windows-x64",
       "displayName": "Windows x64 (MSVC, newest installed Visual Studio)",
       "inherits": "base",
       "architecture": "x64",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "windows-arm64",
       "displayName": "Windows ARM64 (MSVC, newest installed Visual Studio)",
       "inherits": "base",
       "architecture": "ARM64",
-      "cacheVariables": { "ENP_BUILD_TESTS": "OFF" },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "cacheVariables": {
+        "ENP_BUILD_TESTS": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "windows-x86",
       "displayName": "Windows x86, 32-bit (MSVC, newest installed Visual Studio)",
       "inherits": "base",
       "architecture": "Win32",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "windows-mingw-x86",
@@ -36,22 +56,37 @@
       "inherits": "base",
       "generator": "Ninja",
       "toolchainFile": "${sourceDir}/cmake/toolchains/mingw-x86.cmake",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "windows-mingw",
       "displayName": "Windows (MinGW-w64 GCC, Ninja)",
       "inherits": "base",
       "generator": "Ninja",
-      "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++" },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "linux",
       "displayName": "Linux (native: x86_64 or aarch64)",
       "inherits": "base",
       "generator": "Ninja",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     },
     {
       "name": "linux-arm64-cross",
@@ -59,8 +94,15 @@
       "inherits": "base",
       "generator": "Ninja",
       "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
-      "cacheVariables": { "ENP_BUILD_TESTS": "OFF", "GLFW_BUILD_WAYLAND": "OFF" },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+      "cacheVariables": {
+        "ENP_BUILD_TESTS": "OFF",
+        "GLFW_BUILD_WAYLAND": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     },
     {
       "name": "macos-universal",
@@ -71,7 +113,11 @@
         "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
       },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
     },
     {
       "name": "web",
@@ -79,25 +125,107 @@
       "inherits": "base",
       "generator": "Ninja",
       "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux with AddressSanitizer (leak and use-after-free checks)",
+      "inherits": "linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENP_SANITIZE": "ON",
+        "ENP_LOCAL_ENGINE": "OFF"
+      }
+    },
+    {
+      "name": "linux-memtrace",
+      "displayName": "Linux with the allocation call-stack trace (services/debug)",
+      "inherits": "linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENP_MEMORY_TRACE": "ON",
+        "ENP_LOCAL_ENGINE": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows-x64", "configurePreset": "windows-x64", "configuration": "Release" },
-    { "name": "windows-arm64", "configurePreset": "windows-arm64", "configuration": "Release" },
-    { "name": "windows-x86", "configurePreset": "windows-x86", "configuration": "Release" },
-    { "name": "windows-mingw", "configurePreset": "windows-mingw" },
-    { "name": "windows-mingw-x86", "configurePreset": "windows-mingw-x86" },
-    { "name": "linux", "configurePreset": "linux" },
-    { "name": "linux-arm64-cross", "configurePreset": "linux-arm64-cross" },
-    { "name": "macos-universal", "configurePreset": "macos-universal" },
-    { "name": "web", "configurePreset": "web" }
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-arm64",
+      "configurePreset": "windows-arm64",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-x86",
+      "configurePreset": "windows-x86",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw"
+    },
+    {
+      "name": "windows-mingw-x86",
+      "configurePreset": "windows-mingw-x86"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
+    },
+    {
+      "name": "linux-arm64-cross",
+      "configurePreset": "linux-arm64-cross"
+    },
+    {
+      "name": "macos-universal",
+      "configurePreset": "macos-universal"
+    },
+    {
+      "name": "web",
+      "configurePreset": "web"
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan"
+    },
+    {
+      "name": "linux-memtrace",
+      "configurePreset": "linux-memtrace"
+    }
   ],
   "testPresets": [
-    { "name": "windows-x64", "configurePreset": "windows-x64", "configuration": "Release" },
-    { "name": "windows-x86", "configurePreset": "windows-x86", "configuration": "Release" },
-    { "name": "windows-mingw", "configurePreset": "windows-mingw" },
-    { "name": "windows-mingw-x86", "configurePreset": "windows-mingw-x86" },
-    { "name": "linux", "configurePreset": "linux" },
-    { "name": "macos-universal", "configurePreset": "macos-universal" }
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-x86",
+      "configurePreset": "windows-x86",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw"
+    },
+    {
+      "name": "windows-mingw-x86",
+      "configurePreset": "windows-mingw-x86"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
+    },
+    {
+      "name": "macos-universal",
+      "configurePreset": "macos-universal"
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan"
+    }
   ]
 }

@@ -111,6 +111,11 @@ std::optional<std::string> readAsset(const std::string& relativePath)
     return readFile(path::join(kAssetRoot, relativePath));
 }
 
+std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    return readFileRange(path::join(kAssetRoot, relativePath), offset, size, total);
+}
+
 } // namespace fs
 
 namespace dialog {

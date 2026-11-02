@@ -133,7 +133,7 @@ std::string AgentCliService::findClaude()
         const std::string extensions = os::fs::path::join(home, folder);
         for (const os::fs::DirEntry& entry : os::fs::listDirectory(extensions)) {
             const std::string prefix = "anthropic.claude-code-";
-            if (!entry.isDirectory || entry.name.compare(0, prefix.size(), prefix) != 0)
+            if (!entry.isDirectory || entry.hidden || entry.name.compare(0, prefix.size(), prefix) != 0)
                 continue;
             const std::string candidate = os::fs::path::join(
                 os::fs::path::join(extensions, entry.name), std::string("resources/native-binary/claude") + kExe);

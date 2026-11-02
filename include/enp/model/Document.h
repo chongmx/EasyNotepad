@@ -1,6 +1,7 @@
 // An open document: text, caret/selection and the file attributes shown in the status bar.
 #pragma once
 
+#include "enp/model/FileKind.h"
 #include "enp/model/Highlighter.h"
 #include "enp/model/Indent.h"
 #include "enp/model/Language.h"
@@ -20,6 +21,10 @@ const char* eolName(EolMode eol);       // "Windows (CR LF)"
 const char* eolShortName(EolMode eol);  // "CRLF"
 const char* encodingName(Encoding encoding);
 
+// JSON and YAML: shown as text (to edit), as a tree with the chosen value beside it, or as nested
+// sections that open and close. (Markdown and CSV use Document::rendered.)
+enum class DataView { Text, Tree, Accordion };
+
 struct Document {
     int id = 0;
     std::string title; // tab caption
@@ -31,7 +36,12 @@ struct Document {
     Encoding encoding = Encoding::Utf8;
     bool modified = false;
     bool onDisk = false; // loaded from (and saved to) a real file under the workspace
-    bool rendered = false; // Markdown shown formatted (read-only); off: the text, to edit
+    bool rendered = false; // Markdown shown formatted, CSV as a table (read-only); off: the text, to edit
+    DataView dataView = DataView::Text; // JSON and YAML
+    // What the file is: Text is loaded into `buffer`; an Image is shown, a Binary file is not
+    // loaded (the buffer stays empty) until the user asks to open it as text anyway.
+    FileKind kind = FileKind::Text;
+    std::string format; // the detected format for Image and Binary ("PNG", "ELF executable")
     IndentStyle indent;          // spaces or tabs, and the width (also the tab stop)
     bool indentDetected = false; // `indent` came from the file's content
     mutable HighlightCache highlightCache; // lexer state per line, for drawing

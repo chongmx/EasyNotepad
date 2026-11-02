@@ -201,12 +201,25 @@ void NotepadViewModel::initCommands()
     }, [this]() { return terminal_.supported(); });
     set(C::ToggleAgentPanel, [this]() { showAgentPanel.set(!showAgentPanel.get()); });
     set(C::ToggleWordWrap, [this]() { wordWrap.set(!wordWrap.get()); });
+    // Markdown and CSV: rendered or text. JSON and YAML: text, tree, accordion in turn.
     set(C::ToggleMarkdownView, [this]() {
         model::Document* doc = activeDocument();
+        if (doc->language == model::Language::Json || doc->language == model::Language::Yaml) {
+            setDataView(doc->dataView == model::DataView::Text   ? model::DataView::Tree
+                        : doc->dataView == model::DataView::Tree ? model::DataView::Accordion
+                                                                 : model::DataView::Text);
+            return;
+        }
         doc->rendered = !doc->rendered;
         if (!doc->rendered)
             revealLine(doc->caret.line);
-    }, [this]() { return activeDocument() && activeDocument()->language == model::Language::Markdown; });
+    }, [this]() {
+        const model::Document* doc = activeDocument();
+        if (!doc || doc->kind != model::FileKind::Text)
+            return false;
+        const model::Language l = doc->language;
+        return l == model::Language::Markdown || l == model::Language::Csv || l == model::Language::Json || l == model::Language::Yaml;
+    });
     set(C::ToggleWhitespace, [this]() { showWhitespace.set(!showWhitespace.get()); });
     set(C::ToggleLineNumbers, [this]() { showLineNumbers.set(!showLineNumbers.get()); });
     set(C::ToggleIndentGuides, [this]() { showIndentGuides.set(!showIndentGuides.get()); });
@@ -468,7 +481,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::ToggleSlimRibbon: return slimRibbon.get();
     case C::ToggleAgentPanel: return showAgentPanel.get();
     case C::ToggleWordWrap: return wordWrap.get();
-    case C::ToggleMarkdownView: return activeDocument() && activeDocument()->rendered;
+    case C::ToggleMarkdownView: return activeDocument() && (activeDocument()->rendered || activeDocument()->dataView != model::DataView::Text);
     case C::ToggleWhitespace: return showWhitespace.get();
     case C::ToggleLineNumbers: return showLineNumbers.get();
     case C::ToggleIndentGuides: return showIndentGuides.get();

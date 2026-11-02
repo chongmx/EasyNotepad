@@ -2,10 +2,14 @@
 #include "Application.h"
 
 #include "enp/os/Os.h"
+#include "enp/os/Memory.h"
+#include "enp/services/debug/MemoryTrace.h"
 
 #include "imgui.h"
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
+
+#include "FrameCapture.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -92,6 +96,12 @@ void initUi()
     eglMakeCurrent(g.display, g.surface, g.surface, g.context);
 
     IMGUI_CHECKVERSION();
+    ImGui::SetAllocatorFunctions(
+        [](size_t size, void*) -> void* {
+            enp::os::mem::Scope scope("imgui");
+            return ::operator new(size);
+        },
+        [](void* p, void*) { ::operator delete(p); });
     ImGui::CreateContext();
     ImGui_ImplAndroid_Init(g.app->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
@@ -200,7 +210,15 @@ void frame()
     glClearColor(clear.x, clear.y, clear.z, clear.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (g.application->captureWanted()) { // a screenshot asked for through the automation endpoint
+        std::vector<unsigned char> rgba;
+        std::string failure;
+        const int width = int(io.DisplaySize.x), height = int(io.DisplaySize.y);
+        const bool ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        g.application->deliverCapture(ok, width, height, rgba, failure);
+    }
     eglSwapBuffers(g.display, g.surface);
+    g.application->endFrame();
 }
 
 void onAppCommand(android_app*, int32_t command)
@@ -232,6 +250,7 @@ int32_t onInputEvent(android_app*, AInputEvent* event)
 
 void android_main(android_app* app)
 {
+    enp::services::debug::installMemoryTrace(); // no-op unless built with ENP_MEMORY_TRACE
     g.app = app;
     app->onAppCmd = onAppCommand;
     app->onInputEvent = onInputEvent;

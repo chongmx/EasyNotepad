@@ -55,7 +55,10 @@ public:
     void resize(int columns, int rows);
 
     // Directory new shells start in; empty means the application's working directory.
+    // Where new terminals start: the open folder, else the home directory (NotepadViewModel keeps
+    // it current). Terminals already running keep theirs.
     void setWorkingDirectory(std::string directory) { workingDirectory_ = std::move(directory); }
+    const std::string& workingDirectory() const { return workingDirectory_; }
 
 private:
     TerminalInstance* find(int id);

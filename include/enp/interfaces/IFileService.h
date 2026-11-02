@@ -1,6 +1,7 @@
 // Contract for reading and writing workspace files.
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,6 +21,7 @@ struct FileStamp {
 struct DirectoryEntry {
     std::string name;
     bool isDirectory = false;
+    bool hidden = false; // a dot name, or hidden by the platform (the Windows attribute)
 };
 
 class IFileService {
@@ -27,6 +29,13 @@ public:
     virtual ~IFileService() = default;
     virtual std::optional<std::string> read(const std::string& path, std::string* error = nullptr) = 0;
     virtual bool write(const std::string& path, std::string_view data, std::string* error = nullptr) = 0;
+    // Part of a file: up to `size` bytes from `offset` (fewer at the end), so a large file is read in
+    // pieces; `*total` gets the file's size. nullopt where it cannot be read (or the service cannot).
+    virtual std::optional<std::string> readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total = nullptr)
+    {
+        (void)path, (void)offset, (void)size, (void)total;
+        return std::nullopt;
+    }
     // Directories first, then files, each sorted by name.
     virtual std::vector<DirectoryEntry> list(const std::string& path) = 0;
     // At most `limit` entries (0: all; which ones is up to the file system, sorted all the same),

@@ -1,5 +1,7 @@
 #include "enp/view/UiAutomation.h"
 
+#include "enp/os/Memory.h"
+
 #include <algorithm>
 
 namespace enp::view {
@@ -18,6 +20,13 @@ void UiAutomation::beginFrame()
 void UiAutomation::endFrame()
 {
     current_.swap(building_);
+    // Both buffers keep the capacity of the busiest frame (a large explorer tree, a long git log):
+    // once the screen holds far fewer elements, the room goes back (docs/MEMORY.md rule 5).
+    const size_t n = current_.size();
+    if (current_.capacity() > 4 * n + 64)
+        current_.shrink_to_fit();
+    if (building_.capacity() > 4 * n + 64)
+        os::mem::release(building_);
 }
 
 void UiAutomation::add(UiElement element)

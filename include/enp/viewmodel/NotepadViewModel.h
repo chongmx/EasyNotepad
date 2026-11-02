@@ -51,6 +51,13 @@ struct CustomAction {
     std::string command;
 };
 
+// One ribbon tab as the user arranged it: its name (as the ribbon defines it) and whether it shows.
+struct RibbonTabSetting {
+    std::string name;
+    bool visible = true;
+    bool operator==(const RibbonTabSetting& o) const { return name == o.name && visible == o.visible; }
+};
+
 // The agent's on-screen cursor: it glides to a UI element (by automation id), optionally plays a
 // click, and shows a message. It never moves the user's mouse.
 struct AgentPointer {
@@ -97,6 +104,9 @@ public:
     Property<bool> showPanel{true};
     Property<bool> panelMaximized{false};
     Property<bool> showAgentPanel{true};
+    // Explorer: dot files and folders (.github, .gitignore) and, on Windows, entries with the
+    // hidden attribute. The .git folder itself never shows.
+    Property<bool> showHiddenFiles{true};
     Property<bool> wordWrap{false};
     Property<bool> showWhitespace{false};
     Property<bool> showLineNumbers{true};
@@ -156,6 +166,7 @@ public:
     Event<> engineLabRequested;
     Event<> localModelRequested; // the agent set-up card, local model part
     Event<> preferencesRequested;
+    Event<> customizeRibbonRequested; // opens the ribbon's Customize dialog
     Event<> syntaxColorsRequested;
     Event<> languagePickerRequested;
     Event<> gitTabRequested;       // the explorer's Git tab
@@ -178,6 +189,9 @@ public:
     void requestCloseFolder();
     void resolveCloseFolder(CloseChoice choice);
     void closeFolder(); // closes every document, unsaved or not
+    // True once after something large was released (a folder closed, the last document closed):
+    // the app then compacts ImGui's caches and returns freed heap memory to the OS (os::trimMemory).
+    bool takeMemoryTrimRequest();
     bool folderOpen() const { return !workspaceRoot_.empty(); }
     // No folder, after Close Folder (rather than the sample workspace shown at first start).
     bool noFolder() const { return workspaceRoot_.empty() && explorer_.children.empty(); }
@@ -219,6 +233,10 @@ public:
     std::string documentHint(int index) const;
     void newDocument();
     void openFile(const std::string& path);
+    // The active JSON or YAML document's view (text, tree, accordion); back to text shows the caret.
+    void setDataView(model::DataView view);
+    // An image or binary document: load the file's bytes as text after all (the user asked).
+    bool openAsText(int index);
     void openStartupDocuments(const std::vector<std::string>& arguments);
     // Opens `path` and moves the caret to the 0-based `line`.
     void navigateTo(const std::string& path, int line);
@@ -241,6 +259,8 @@ public:
     // Text of a workspace file: the open document's (unsaved edits included), the file on disk,
     // or the sample content.
     std::string readWorkspaceFile(const std::string& path) const;
+    // Part of a file on disk (the library view reads a large file in pieces); `*total`: its size.
+    std::optional<std::string> readFileRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total = nullptr) const;
     // Pulses whenever the explorer should reveal the active document (opening, switching).
     int revealSerial() const { return revealSerial_; }
     // Writes a file under the workspace (creating folders); false without a real folder.
@@ -328,11 +348,20 @@ public:
     bool hasSyntaxColors(bool dark, const std::string& languageKey) const;
     int syntaxColorsRevision() const { return syntaxColors_.revision(); }
 
-    // ---- Ribbon customization ("My Tools") ----------------------------------------------
-    // Not persisted yet: kept until the settings service exists.
+    // ---- Ribbon customization ----------------------------------------------------------
+    // The tabs per workspace as the user arranged them: order and visibility. Empty means the
+    // built-in layout; the ribbon merges this with the tabs it defines (tabs added later appear
+    // at the end, names it no longer has are ignored). Saved with the settings.
+    const std::vector<RibbonTabSetting>& ribbonTabs(WorkspaceMode mode) const { return ribbonTabs_[mode == WorkspaceMode::Agent ? 1 : 0]; }
+    void setRibbonTabs(WorkspaceMode mode, std::vector<RibbonTabSetting> tabs);
+    void restoreRibbonTabs(WorkspaceMode mode); // back to the built-in order, all shown
+    // Bumps whenever the tabs, pinned commands or custom actions change (the ribbon rebuilds then).
+    int ribbonRevision() const { return ribbonRevision_; }
+
     const std::vector<CommandId>& pinnedCommands() const { return pinned_; }
     bool isPinned(CommandId id) const;
     void setPinned(CommandId id, bool pinned);
+    void movePinned(CommandId id, int direction); // -1 earlier, +1 later in My Tools
     const std::vector<CustomAction>& customActions() const { return customActions_; }
     void addCustomAction(std::string name, std::string command);
     void removeCustomAction(int index);
@@ -465,6 +494,8 @@ private:
     mutable OutlineCache outline_;
 
     std::vector<CommandId> pinned_;
+    std::vector<RibbonTabSetting> ribbonTabs_[2]; // Code, Agent
+    int ribbonRevision_ = 0;
     std::vector<CustomAction> customActions_;
 
     std::vector<std::unique_ptr<model::Document>> documents_;
@@ -484,6 +515,7 @@ private:
     FindInFilesViewModel findInFiles_;
     int nextDocumentId_ = 1;
     int untitledCounter_ = 0;
+    bool memoryTrimRequested_ = false;
     std::vector<Subscription> subscriptions_;
     int revealSerial_ = 0;
     void closeWhere(const std::function<bool(int index, const model::Document&)>& close);

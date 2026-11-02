@@ -1,8 +1,10 @@
 #include "enp/view/MainView.h"
+#include "enp/os/Memory.h"
 #include "enp/view/Fit.h"
 
 #include "enp/view/PanelFrame.h"
 
+#include "enp/os/Os.h"
 #include "enp/os/Platform.h"
 #include "enp/view/TouchScroll.h"
 #include "enp/model/Highlighter.h"
@@ -64,6 +66,8 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
       explorerWidth_(230.0f * uiScale), agentSideWidth_(360.0f * uiScale), panelHeight_(240.0f * uiScale),
       planWidth_(270.0f * uiScale), conversationWidth_(430.0f * uiScale)
 {
+    editor_.setEmoji(&emoji_);
+    agentPanel_.setEmoji(&emoji_);
     // Ctrl+Tab cycles documents here, not ImGui's window list.
     ImGui::GetCurrentContext()->ConfigNavWindowingKeyNext = 0;
     ImGui::GetCurrentContext()->ConfigNavWindowingKeyPrev = 0;
@@ -172,6 +176,7 @@ MainView::~MainView()
 void MainView::render()
 {
     UiAutomation::instance().beginFrame();
+    emoji_.frame(ImGui::GetTime());
     touch::update(s_); // a finger drags content (before the UI: it may cancel the press)
     terminalView_.setBlinkCursor(vm_.blinkCaret.get());
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1347,7 +1352,8 @@ void MainView::handleCaptionMouse()
 
 // ---- Panels and splitters -----------------------------------------------------------------------
 
-bool MainView::beginPanel(const char* id, const char* title, ImVec2 size, const char* detail)
+bool MainView::beginPanel(const char* id, const char* title, ImVec2 size, const char* detail, std::function<void()> onClose,
+                          const char* closeTooltip)
 {
     // The border is drawn when the child begins, under its content: the 1px padding keeps the
     // content inside it, and panel::fill rounds content backgrounds that reach the corners.
@@ -1375,9 +1381,21 @@ bool MainView::beginPanel(const char* id, const char* title, ImVec2 size, const 
     dl->AddLine(ImVec2(p.x, p.y + h), ImVec2(p.x + w, p.y + h), palette_.border);
     const float textY = p.y + (h - ImGui::GetTextLineHeight()) * 0.5f;
     dl->AddText(ImVec2(p.x + 10.0f * s_, textY), palette_.text, title);
+    float right = p.x + w - 10.0f * s_; // where the detail text ends
+    if (onClose) {
+        // An X button at the header's right edge; the detail text moves left of it.
+        const float button = std::min(h - 4.0f * s_, ImGui::GetFrameHeight());
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w - button - 4.0f * s_, p.y + (h - button) * 0.5f));
+        const bool clicked = flatIconButton(ICON_FA_XMARK "##close", closeTooltip, button);
+        registerLastItem(std::string("panel-close:") + (id[0] == '#' && id[1] == '#' ? id + 2 : id), "button",
+                         closeTooltip ? closeTooltip : "Close", onClose);
+        if (clicked)
+            onClose();
+        right = p.x + w - button - 10.0f * s_;
+    }
     if (detail) {
         const float dw = ImGui::CalcTextSize(detail).x;
-        dl->AddText(ImVec2(p.x + w - dw - 10.0f * s_, textY), palette_.textFaint, detail);
+        dl->AddText(ImVec2(right - dw, textY), palette_.textFaint, detail);
     }
     ImGui::SetCursorPos(ImVec2(1.0f, h + 2.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * s_, 6.0f * s_));
@@ -1467,7 +1485,8 @@ void MainView::renderCodeWorkspace()
         verticalSplitter("##splitAgent", agentSideWidth_, -1.0f, topH, 260.0f * s_, avail.x * 0.5f);
         ImGui::SameLine(0.0f, 0.0f);
         const char* busy = vm_.agent().busy.get() ? "working..." : nullptr;
-        beginPanel("##agentSide", ICON_FA_ROBOT "  Agent", ImVec2(agentSideWidth_, topH), busy);
+        beginPanel("##agentSide", ICON_FA_ROBOT "  Agent", ImVec2(agentSideWidth_, topH), busy,
+                   [this]() { vm_.showAgentPanel.set(false); }, "Close the Agent panel (Ctrl+Shift+I)");
         agentPanel_.renderConversation(true);
         endPanel();
     }
@@ -1805,16 +1824,41 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
         int openInside = 0;
         for (const auto& d : vm_.documents())
             openInside += !d->path.empty() && (root || d->path.compare(0, prefix.size(), prefix) == 0);
+        // No disclosure arrow: the folder icon says it, closed or open (the icon of "Open a folder").
+        // The row is a leaf tree node, so the open state is kept here, in the window's storage.
+        ImGuiStorage* storage = ImGui::GetStateStorage();
+        const ImGuiID openKey = ImGui::GetID(("open:" + item.path).c_str());
+        bool open = storage->GetInt(openKey, root ? 1 : 0) != 0;
         if (!explorerFilter_.empty() || (reveal && holdsActive))
-            ImGui::SetNextItemOpen(true);
+            open = true;
         else if (explorerCollapse_ && !root)
-            ImGui::SetNextItemOpen(false);
-        const std::string label = std::string(ICON_FA_FOLDER "  ") + item.name + "##" + item.path;
-        ImGui::PushStyleColor(ImGuiCol_Text, col(palette_.text));
-        const bool open = ImGui::TreeNodeEx(label.c_str(), (root ? ImGuiTreeNodeFlags_DefaultOpen : 0) |
-                                                               ImGuiTreeNodeFlags_SpanAvailWidth);
-        ImGui::PopStyleColor();
-        registerLastItem("folder:" + item.path, "button", item.name, nullptr);
+            open = false;
+        // A label-less row; icon and name are drawn from its left edge (a tree node would keep an
+        // arrow-wide gap in front of them even without the arrow).
+        ImGui::TreeNodeEx(("##folder:" + item.path).c_str(), ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                                                  ImGuiTreeNodeFlags_SpanAvailWidth);
+        {
+            const ImVec2 rowMin = ImGui::GetItemRectMin(), rowMax = ImGui::GetItemRectMax();
+            const float textY = (rowMin.y + rowMax.y) * 0.5f - ImGui::GetTextLineHeight() * 0.5f;
+            const float iconX = rowMin.x + explorerRowPad();
+            dl->AddText(ImVec2(iconX, textY), palette_.textDim, open ? ICON_FA_FOLDER_OPEN : ICON_FA_FOLDER);
+            dl->AddText(ImVec2(iconX + explorerIconColumn(), textY), palette_.text, item.name.c_str());
+        }
+        // A click toggles it, as do Enter and the arrow keys when it has keyboard focus.
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left) || (!explorerToggle_.empty() && explorerToggle_ == item.path)) {
+            open = !open;
+            os::mem::release(explorerToggle_);
+        }
+        else if (ImGui::IsItemFocused()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))
+                open = !open;
+            else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+                open = true;
+            else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+                open = false;
+        }
+        storage->SetInt(openKey, open ? 1 : 0);
+        registerLastItem("folder:" + item.path, "button", item.name, [this, path = item.path]() { explorerToggle_ = path; });
         if (ImGui::BeginPopupContextItem(("##folderMenu" + item.path).c_str())) {
             explorerMenu(item, root);
             ImGui::EndPopup();
@@ -1838,6 +1882,7 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
         if (open) {
             if (!item.scanned)
                 vm_.expandExplorer(item.path); // deep folders are read when first shown
+            ImGui::TreePush(item.path.c_str()); // the children's indent and ID scope
             for (const viewmodel::ExplorerItem& child : item.children)
                 renderExplorerItem(child);
             if (item.truncated)
@@ -1892,9 +1937,9 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
                                (findings.empty() ? 0.0f : ImGui::CalcTextSize("00").x + 4.0f * s_);
         const char* icon = fileIcon(item.name);
         const float textY = yc - ImGui::GetTextLineHeight() * 0.5f;
-        const float iconX = rowMin.x + ImGui::GetTreeNodeToLabelSpacing() - ImGui::GetFontSize() * 0.5f;
+        const float iconX = rowMin.x + explorerRowPad();
         dl->AddText(ImVec2(iconX, textY), selected ? palette_.accent : openDoc ? palette_.textDim : palette_.textFaint, icon);
-        const float nameX = iconX + ImGui::CalcTextSize(icon).x + 7.0f * s_;
+        const float nameX = iconX + explorerIconColumn();
         const float limit = right - reserved - 2.0f * s_;
         std::string name = item.name;
         if (nameX + ImGui::CalcTextSize(name.c_str()).x > limit) {
@@ -2026,7 +2071,7 @@ void MainView::renderExplorer()
                 }
             }
         }
-        ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 14.0f * s_);
+        ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 12.0f * s_);
         if (!vm_.noFolder())
             renderExplorerItem(vm_.explorer());
         ImGui::PopStyleVar();
@@ -2088,6 +2133,11 @@ void MainView::explorerMenu(const viewmodel::ExplorerItem& item, bool root)
             vm_.findInFolder(path);
         if (ImGui::MenuItem(ICON_FA_TERMINAL "  Open Terminal Here", nullptr, false, vm_.canEditFiles() && vm_.terminal().supported()))
             vm_.openTerminalIn(path);
+    }
+    if (root) {
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_EYE "  Show Hidden Files", nullptr, vm_.showHiddenFiles.get()))
+            vm_.showHiddenFiles.set(!vm_.showHiddenFiles.get());
     }
     ImGui::Separator();
     if (ImGui::MenuItem(ICON_FA_COPY "  Copy Path"))
@@ -2317,68 +2367,157 @@ void MainView::renderStatusBar()
         messageX = dMax.x;
     }
 
-    // Right-hand segments, Notepad++ style.
+    // Right-hand segments, Notepad++ style: short (symbols and numbers), the full wording on hover.
+    // When the bar is too narrow the least important ones are left out rather than drawn over
+    // the branch and the message.
     struct Segment {
-        std::string text;
-        const char* popup;
+        std::string text;    // what the bar shows
+        std::string tooltip; // what hovering says
+        const char* id;      // ImGui id; also the popup for the clickable ones ("##eol"), else plain
+        int priority;        // higher stays longer when space runs out
+        bool popup = false;
+        CommandId click = CommandId::Count; // a command run on click, if any
     };
     std::vector<Segment> segments;
+    if (vm_.developerMode.get()) {
+        // What the process holds (refreshed once a second): a number that climbs while the app
+        // idles points at a leak (see os::ProcessStats, docs/MEMORY.md).
+        const double now = ImGui::GetTime();
+        if (now - resourceTextAt_ >= 1.0 || resourceText_.empty()) {
+            resourceTextAt_ = now;
+            const os::ProcessStats p = os::processStats();
+            const ImGuiContext& g = *GImGui;
+            const os::mem::Stats heap = os::mem::stats();
+            auto mb = [](unsigned long long bytes) {
+                char t[32];
+                std::snprintf(t, sizeof(t), bytes >= (100ull << 20) ? "%.0fM" : "%.1fM", double(bytes) / double(1 << 20));
+                return std::string(t);
+            };
+            resourceText_ = std::string(ICON_FA_MEMORY " ") + mb(p.privateBytes) + "  " ICON_FA_CUBES " " + mb(heap.liveBytes);
+            char tip[512];
+            std::snprintf(tip, sizeof(tip),
+                          "Process memory (developer mode, every second)\n\n"
+                          "Private memory: %llu KB\nResident: %llu KB\nC++ heap: %llu KB in %llu blocks\n"
+                          "Handles: %d\nGDI objects: %d\nUSER objects: %d\nThreads: %d\n"
+                          "ImGui: %d allocations, %d windows\n\n"
+                          "A number that climbs while the app is idle points at a leak.",
+                          static_cast<unsigned long long>(p.privateBytes >> 10), static_cast<unsigned long long>(p.residentBytes >> 10),
+                          static_cast<unsigned long long>(heap.liveBytes >> 10), static_cast<unsigned long long>(heap.liveBlocks),
+                          p.handles, p.gdiObjects, p.userObjects, p.threads,
+                          g.DebugAllocInfo.TotalAllocCount - g.DebugAllocInfo.TotalFreeCount, g.Windows.Size);
+            resourceTip_ = tip;
+        }
+        segments.push_back({resourceText_, resourceTip_, "##resources", 1});
+    }
     if (vm_.agent().busy.get())
-        segments.push_back({ICON_FA_CIRCLE_NOTCH " Agent working", nullptr});
+        segments.push_back({ICON_FA_CIRCLE_NOTCH, "The agent is working", "##agentBusy", 9});
     if (vm_.recording.get())
-        segments.push_back({ICON_FA_CIRCLE_DOT " REC", nullptr});
+        segments.push_back({ICON_FA_CIRCLE_DOT " REC", "Recording a macro", "##recording", 9});
     const model::Document* doc = vm_.activeDocument();
     if (doc) {
         const int eolLength = doc->eol == model::EolMode::CrLf ? 2 : 1;
         const std::string& line = doc->buffer.line(doc->caret.line);
         const int column = model::codePointCount(std::string_view(line).substr(0, size_t(doc->caret.column))) + 1;
-        const std::string selected = vm_.selectedText();
+        const int selChars = doc->hasSelection() ? int(model::codePointCount(vm_.selectedText())) : 0;
         const int selLines = doc->hasSelection() ? doc->selectionEnd().line - doc->selectionStart().line + 1 : 0;
-        segments.push_back({model::languageName(doc->language), "##language"});
-        segments.push_back({"length : " + std::to_string(doc->buffer.characterCount(eolLength)) +
-                                "    lines : " + std::to_string(doc->buffer.lineCount()),
-                            nullptr});
-        segments.push_back({"Ln : " + std::to_string(doc->caret.line + 1) + "    Col : " + std::to_string(column) +
-                                "    Sel : " + std::to_string(model::codePointCount(selected)) + " | " + std::to_string(selLines),
-                            nullptr});
-        segments.push_back({std::string(doc->indent.tabs ? "Tab Size: " : "Spaces: ") + std::to_string(doc->indent.width), "##indent"});
-        segments.push_back({model::eolName(doc->eol), "##eol"});
-        segments.push_back({model::encodingName(doc->encoding), "##encoding"});
+        std::string language = model::languageName(doc->language);
+        if (language.size() > 5 && language.compare(language.size() - 5, 5, " file") == 0)
+            language.resize(language.size() - 5); // "Markdown file" -> "Markdown"
+        segments.push_back({language, std::string(model::languageName(doc->language)) + "\nClick to choose the language",
+                            "##language", 7, true});
+        const int lines = doc->buffer.lineCount();
+        const int chars = int(doc->buffer.characterCount(eolLength));
+        segments.push_back({std::string(ICON_FA_FILE_LINES " ") + std::to_string(lines),
+                            std::to_string(lines) + " lines, " + std::to_string(chars) + " characters", "##length", 4});
+        std::string caret = std::to_string(doc->caret.line + 1) + ":" + std::to_string(column);
+        if (selChars > 0)
+            caret += " (" + std::to_string(selChars) + ")";
+        segments.push_back({caret,
+                            "Line " + std::to_string(doc->caret.line + 1) + ", column " + std::to_string(column) +
+                                (selChars > 0 ? "\n" + std::to_string(selChars) + " characters selected on " + std::to_string(selLines) +
+                                                    (selLines == 1 ? " line" : " lines")
+                                              : std::string()) +
+                                "\nClick to go to a line (" + commandInfo(CommandId::GoToLine).shortcut + ")",
+                            "##caret", 10, false, CommandId::GoToLine});
+        segments.push_back({std::string(doc->indent.tabs ? ICON_FA_ARROW_RIGHT_TO_BRACKET " " : ICON_FA_INDENT " ") + std::to_string(doc->indent.width),
+                            std::string(doc->indent.tabs ? "Indent with tabs, " : "Indent with spaces, ") + std::to_string(doc->indent.width) +
+                                " wide\nClick to change",
+                            "##indent", 5, true});
+        segments.push_back({model::eolShortName(doc->eol), std::string("Line endings: ") + model::eolName(doc->eol) + "\nClick to change",
+                            "##eol", 6, true});
+        segments.push_back({model::encodingName(doc->encoding), std::string("Encoding: ") + model::encodingName(doc->encoding) + "\nClick to change",
+                            "##encoding", 6, true});
     }
-    segments.push_back({std::to_string(int(std::lround(vm_.zoom.get() * 100.0f))) + "%", nullptr});
-    segments.push_back({"INS", nullptr});
+    const int zoom = int(std::lround(vm_.zoom.get() * 100.0f));
+    if (zoom != 100) // only when it is not the usual size
+        segments.push_back({std::to_string(zoom) + "%", "Editor zoom " + std::to_string(zoom) + "%\nCtrl+wheel to change", "##zoom", 3});
+    segments.push_back({"INS", "Insert mode: typing inserts text", "##ins", 2});
+
+    // Tooltips of the bar open above it (below the pointer they would leave the window), on the
+    // side of the pointer that has room.
+    auto statusTip = [&](const std::string& text) {
+        const float mouseX = ImGui::GetIO().MousePos.x;
+        const bool rightHalf = mouseX > origin.x + width * 0.5f;
+        ImGui::SetNextWindowPos(ImVec2(mouseX, origin.y - 4.0f * s_), ImGuiCond_Always, ImVec2(rightHalf ? 1.0f : 0.0f, 1.0f));
+        ImGui::SetTooltip("%s", text.c_str());
+    };
+
+    // Fit: drop the least important segments until the rest leave room for the badges and a
+    // little of the message.
+    const float pad = 10.0f * s_;
+    auto widthOf = [&](const Segment& s) { return ImGui::CalcTextSize(s.text.c_str()).x + pad * 2.0f; };
+    const float room = origin.x + width - 8.0f * s_ - (messageX + 60.0f * s_);
+    for (;;) {
+        float total = 0.0f;
+        for (const Segment& s : segments)
+            total += widthOf(s);
+        if (total <= room || segments.empty())
+            break;
+        auto least = std::min_element(segments.begin(), segments.end(), [](const Segment& a, const Segment& b) { return a.priority < b.priority; });
+        segments.erase(least);
+    }
 
     float x = origin.x + width - 8.0f * s_;
-    const float pad = 10.0f * s_;
     const char* openPopup = nullptr;
     ImVec2 popupPos;
     for (auto it = segments.rbegin(); it != segments.rend(); ++it) {
-        const float w = ImGui::CalcTextSize(it->text.c_str()).x;
-        x -= w + pad * 2.0f;
-        const ImVec2 min(x, origin.y + 1.0f), max(x + w + pad * 2.0f, origin.y + h);
-        bool hovered = false;
-        if (it->popup) {
-            ImGui::SetCursorScreenPos(min);
-            ImGui::PushID(it->popup);
-            if (ImGui::InvisibleButton("##segment", ImVec2(max.x - min.x, max.y - min.y))) {
-                openPopup = it->popup;
-                popupPos = ImVec2(min.x, origin.y);
-            }
-            hovered = ImGui::IsItemHovered();
-            ImGui::PopID();
-            if (hovered)
-                dl->AddRectFilled(min, max, palette_.hover);
+        const float w = widthOf(*it);
+        x -= w;
+        const ImVec2 min(x, origin.y + 1.0f), max(x + w, origin.y + h);
+        ImGui::SetCursorScreenPos(min);
+        ImGui::PushID(it->id);
+        const bool clicked = ImGui::InvisibleButton("##segment", ImVec2(max.x - min.x, max.y - min.y));
+        const bool hovered = ImGui::IsItemHovered();
+        const bool clickable = it->popup || it->click != CommandId::Count;
+        if (hovered && !it->tooltip.empty())
+            statusTip(it->tooltip);
+        ImGui::PopID();
+        if (clicked && it->popup) {
+            openPopup = it->id;
+            popupPos = ImVec2(min.x, origin.y);
+        } else if (clicked && it->click != CommandId::Count) {
+            vm_.execute(it->click);
         }
-        const bool agentSegment = it->text.rfind(ICON_FA_CIRCLE_NOTCH, 0) == 0;
+        if (hovered && clickable)
+            dl->AddRectFilled(min, max, palette_.hover);
+        const bool agentSegment = std::strcmp(it->id, "##agentBusy") == 0;
         dl->AddText(ImVec2(x + pad, textY), agentSegment ? palette_.modeAgent : hovered ? palette_.text : palette_.textDim,
                     it->text.c_str());
         dl->AddLine(ImVec2(x, origin.y + 5.0f * s_), ImVec2(x, origin.y + h - 5.0f * s_), palette_.border);
     }
 
     // Status message between the badge and the segments.
-    dl->PushClipRect(ImVec2(messageX + 8.0f * s_, origin.y), ImVec2(x - 4.0f * s_, origin.y + h), true);
-    dl->AddText(ImVec2(messageX + 10.0f * s_, textY), palette_.textDim, vm_.statusText.get().c_str());
-    dl->PopClipRect();
+    {
+        const ImVec2 mMin(messageX + 8.0f * s_, origin.y), mMax(x - 4.0f * s_, origin.y + h);
+        const std::string& message = vm_.statusText.get();
+        dl->PushClipRect(mMin, mMax, true);
+        dl->AddText(ImVec2(messageX + 10.0f * s_, textY), palette_.textDim, message.c_str());
+        dl->PopClipRect();
+        // The whole message on hover when it does not fit.
+        if (mMax.x > mMin.x && ImGui::IsMouseHoveringRect(mMin, mMax) && ImGui::IsWindowHovered() &&
+            ImGui::CalcTextSize(message.c_str()).x > mMax.x - mMin.x - 4.0f * s_)
+            statusTip(message);
+    }
     ImGui::PopFont();
 
     if (openPopup && std::strcmp(openPopup, "##language") == 0) {
@@ -2501,6 +2640,12 @@ void MainView::renderPreferencesPopup()
     toggle("Show whitespace", vm_.showWhitespace);
     toggle("Word wrap", vm_.wordWrap);
     toggle("Smart indent", vm_.smartIndent);
+    ImGui::Spacing();
+    ImGui::TextDisabled("EXPLORER");
+    toggle("Show hidden files and folders", vm_.showHiddenFiles);
+    ImGui::SetItemTooltip("%s", "Dot files and folders such as .github and .gitignore (and, on Windows, hidden ones). The .git folder never shows.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("INDENTATION");
     {
         // Default indentation for new and not-yet-indented files (indented files keep theirs).
         const auto& preferred = vm_.preferredIndent();

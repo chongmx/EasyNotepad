@@ -2,10 +2,14 @@
 
 #include "AutomationController.h"
 
+#include "enp/services/ImageEncoder.h"
 #include "enp/view/TouchScroll.h"
 
 #include "enp/os/Fs.h"
+#include "enp/os/Memory.h"
 #include "enp/os/Os.h"
+
+#include "imgui_internal.h"
 
 namespace enp::app {
 
@@ -22,7 +26,13 @@ Application::Application()
         enabled = enabled && arg != "--no-automation";
     if (enabled) {
         automation_ = std::make_unique<services::AutomationServer>(
-            [this](const std::string& method, const model::Json& params) { return handleAutomation(*viewModel_, method, params); });
+            [this](const std::string& method, const model::Json& params) { return handleAutomation(*viewModel_, method, params); },
+            [this](const std::string& method, const model::Json& params, services::AutomationServer::Reply reply) {
+                if (method != "screenshot")
+                    return false;
+                captures_.push_back(Capture{params.getString("path"), std::move(reply)}); // answered after this frame is drawn
+                return true;
+            });
         std::string error;
         if (!automation_->start(&error)) {
             ENP_LOG_WARN("automation endpoint unavailable: %s", error.c_str());
@@ -33,6 +43,9 @@ Application::Application()
 
 Application::~Application()
 {
+    for (Capture& c : captures_)
+        c.reply(model::Json::object().set("error", "the application is closing"));
+    os::mem::release(captures_);
     automation_.reset(); // no requests may reach the view-model while it is destroyed
     detachUi();
 }
@@ -135,8 +148,100 @@ void Application::frame()
 {
     os::dispatch::pump();
     viewModel_->tick(os::now());
-    if (view_)
+    if (view_) {
+        os::mem::Scope scope("views"); // view caches; nested scopes (markdown, images, imgui) keep theirs
         view_->render();
+    }
+}
+
+void Application::endFrame()
+{
+    const double now = os::now();
+    if (viewModel_->takeMemoryTrimRequest()) {
+        trimFrames_ = 4; // (re)start: textures released this frame are destroyed by the backend next frame, freed the one after
+        lateTrimAt_ = now + 1.5;
+    }
+    if (trimFrames_ > 0 && --trimFrames_ == 0) {
+        trimFrames_ = -1;
+        giveMemoryBack();
+    }
+    if (lateTrimAt_ > 0.0 && now >= lateTrimAt_) {
+        lateTrimAt_ = -1.0;
+        giveMemoryBack();
+    }
+}
+
+void Application::giveMemoryBack()
+{
+    if (view_)
+        view_->compactCaches(); // emoji pictures no longer on screen
+    // A folder or the last document closed. ImGui keeps every window's vertex buffers at the size
+    // they once needed and every glyph ever drawn: shrink them to what is in use now (they grow
+    // back on demand), then give the freed heap back to the OS so the release shows.
+    if (ImGuiContext* g = ImGui::GetCurrentContext()) {
+        for (ImGuiWindow* window : g->Windows)
+            ImGui::GcCompactTransientWindowBuffers(window);
+        // Tables: one not drawn in the last frame (a closed CSV's table) is freed whole; it is
+        // created again when next drawn. The ones on screen give back their spare buffers.
+        for (int i = 0; i < g->Tables.GetMapSize(); ++i)
+            if (ImGuiTable* table = g->Tables.TryGetMapData(i)) {
+                if (table->LastFrameActive < g->FrameCount - 1)
+                    ImGui::TableRemove(table);
+                else
+                    ImGui::TableGcCompactTransientBuffers(table);
+            }
+        for (ImGuiTableTempData& temp : g->TablesTempData)
+            ImGui::TableGcCompactTransientBuffers(&temp);
+        ImGui::GcCompactTransientMiscBuffers();
+        ImGui::GetIO().Fonts->CompactCache();
+    }
+    os::trimMemory();
+}
+
+namespace {
+
+std::string base64(std::string_view data)
+{
+    static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((data.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < data.size(); i += 3) {
+        const std::uint32_t n = std::uint32_t(static_cast<unsigned char>(data[i])) << 16 |
+                                (i + 1 < data.size() ? std::uint32_t(static_cast<unsigned char>(data[i + 1])) << 8 : 0u) |
+                                (i + 2 < data.size() ? std::uint32_t(static_cast<unsigned char>(data[i + 2])) : 0u);
+        out += digits[n >> 18 & 63];
+        out += digits[n >> 12 & 63];
+        out += i + 1 < data.size() ? digits[n >> 6 & 63] : '=';
+        out += i + 2 < data.size() ? digits[n & 63] : '=';
+    }
+    return out;
+}
+
+} // namespace
+
+void Application::deliverCapture(bool ok, int width, int height, std::vector<unsigned char>& rgba, const std::string& failure)
+{
+    std::vector<Capture> captures;
+    captures.swap(captures_);
+    std::string png = ok ? services::encodePng(rgba.data(), width, height) : std::string();
+    os::mem::release(rgba); // the pixels go before the answers are built
+    for (Capture& c : captures) {
+        if (png.empty()) {
+            c.reply(model::Json::object().set("error", ok ? std::string("the picture could not be encoded") : failure));
+            continue;
+        }
+        model::Json result = model::Json::object().set("width", width).set("height", height).set("bytes", double(png.size()));
+        if (!c.path.empty()) {
+            std::string error;
+            if (!os::fs::writeFile(c.path, png, &error)) {
+                c.reply(model::Json::object().set("error", "cannot write " + c.path + ": " + error));
+                continue;
+            }
+            result.set("path", c.path);
+        }
+        result.set("png_base64", base64(png));
+        c.reply(std::move(result));
+    }
 }
 
 ImVec4 Application::clearColor() const
@@ -154,7 +259,7 @@ bool Application::animating() const
 {
     const viewmodel::NotepadViewModel& vm = *viewModel_;
     return vm.agent().busy.get() || vm.tourRunning() || vm.agentPointer.get().visible || view::touch::gliding() ||
-           const_cast<viewmodel::NotepadViewModel&>(vm).logicalMap().analyzing.get();
+           const_cast<viewmodel::NotepadViewModel&>(vm).logicalMap().analyzing.get() || trimFrames_ > 0 || lateTrimAt_ > 0.0;
 }
 
 int Application::maxFramesPerSecond() const

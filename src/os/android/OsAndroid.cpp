@@ -2,6 +2,7 @@
 #include "../OsInternal.h"
 #include "JniEnv.h"
 
+#include <algorithm>
 #include <android/asset_manager.h>
 #include <android/log.h>
 
@@ -92,6 +93,30 @@ std::vector<std::string> rootDirectories()
     roots.emplace_back("/storage/emulated/0/Download");
     roots.emplace_back("/storage/emulated/0/Documents");
     return roots;
+}
+
+std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    AAsset* asset = AAssetManager_open(android::app()->activity->assetManager, relativePath.c_str(), AASSET_MODE_RANDOM);
+    if (!asset)
+        return std::nullopt;
+    const std::uint64_t length = std::uint64_t(AAsset_getLength64(asset));
+    if (total)
+        *total = length;
+    std::string data;
+    if (offset < length && AAsset_seek64(asset, off64_t(offset), SEEK_SET) >= 0) {
+        data.resize(size_t(std::min<std::uint64_t>(size, length - offset)));
+        size_t got = 0;
+        while (got < data.size()) {
+            const int n = AAsset_read(asset, data.data() + got, data.size() - got);
+            if (n <= 0)
+                break;
+            got += size_t(n);
+        }
+        data.resize(got);
+    }
+    AAsset_close(asset);
+    return data;
 }
 
 std::optional<std::string> readAsset(const std::string& relativePath)

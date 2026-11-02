@@ -1,9 +1,14 @@
 #include "AutomationController.h"
 
 #include "enp/model/Git.h"
+#include "enp/os/Memory.h"
+#include "enp/services/debug/MemoryTrace.h"
+#include "enp/os/Os.h"
 #include "enp/os/Process.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/DummyData.h"
+
+#include "imgui_internal.h"
 
 #include <algorithm>
 
@@ -81,6 +86,37 @@ Json getState(viewmodel::NotepadViewModel& vm)
                      .set("status", vm.statusText.get());
     if (const model::Document* doc = vm.activeDocument())
         state.set("activeDocument", documentInfo(*doc));
+    // What the process holds, for watching a leak from outside (see os::ProcessStats).
+    const os::ProcessStats p = os::processStats();
+    {
+        // Heap accounting by subsystem (os::mem): what each still holds.
+        const os::mem::Snapshot& heap = os::mem::snapshot();
+        Json scopes = Json::array();
+        for (int i = 0; i < heap.count; ++i) {
+            const os::mem::ScopeStats& sc = heap.scopes[i];
+            if (sc.liveBlocks > 0)
+                scopes.push(Json::object().set("name", sc.name).set("liveKB", int(sc.liveBytes / 1024)).set("blocks", int(sc.liveBlocks)));
+        }
+        state.set("memory", Json::object()
+                                .set("accounting", os::mem::enabled())
+                                .set("liveKB", int(heap.total.liveBytes / 1024))
+                                .set("blocks", int(heap.total.liveBlocks))
+                                .set("allocations", double(heap.total.totalAllocations))
+                                .set("poolKB", int(os::mem::pool::usage().used / 1024))
+                                .set("scopes", scopes));
+    }
+    state.set("process", Json::object()
+                             .set("residentKB", int(p.residentBytes / 1024))
+                             .set("privateKB", int(p.privateBytes / 1024))
+                             .set("handles", p.handles)
+                             .set("gdiObjects", p.gdiObjects)
+                             .set("userObjects", p.userObjects)
+                             .set("threads", p.threads));
+    if (ImGuiContext* g = ImGui::GetCurrentContext())
+        state.set("imgui", Json::object()
+                               .set("allocations", g->DebugAllocInfo.TotalAllocCount - g->DebugAllocInfo.TotalFreeCount)
+                               .set("windows", g->Windows.Size)
+                               .set("viewports", g->Viewports.Size));
     return state;
 }
 
@@ -175,6 +211,10 @@ const std::vector<AutomationTool>& automationTools()
          schema({{"id", "Element id"}, {"message", "What to tell the user"}}, {"id", "message"},
                 {{"seconds", "How long to show it (default 8; 0 keeps it until hide_pointer)"}})},
         {"hide_pointer", "Hides the agent cursor.", schema({})},
+        {"screenshot",
+         "A picture of the app window as it is drawn now (PNG), whatever covers it on the screen: the app draws its "
+         "frame again off screen and reads it back. Optionally also saved to `path`. Not while the window is minimized.",
+         schema({{"path", "Optional absolute path to save the PNG to"}})},
         {"list_commands", "All commands with their keys (for execute_command), labels, availability and toggle state.", schema({})},
         {"execute_command", "Runs a command by key, e.g. ToggleTerminal, DetailOverview, RunAllReviews, FoldAll.",
          schema({{"command", "Command key from list_commands"}}, {"command"})},
@@ -184,6 +224,10 @@ const std::vector<AutomationTool>& automationTools()
         {"read_agent_chat", "The app's agent conversation: messages (user, agent, tool steps), whether it is working and on what.",
          schema({})},
         {"open_file", "Opens a workspace file in the editor.", schema({{"path", "Workspace-relative path, e.g. src/main.cpp"}}, {"path"})},
+        {"open_folder", "Opens a folder as the workspace (closing the current one).", schema({{"path", "Absolute path of the folder"}}, {"path"})},
+        {"memory_trace", "Developer builds with ENP_MEMORY_TRACE: 'mark' forgets the traced blocks, 'dump' writes the call stacks "
+                         "of blocks allocated since the mark and still live to `file`.",
+         schema({{"action", "mark or dump"}, {"file", "Where 'dump' writes"}}, {"action"})},
         {"read_document", "Full text of a document (the active one when no path is given).",
          schema({{"path", "Workspace-relative path; optional"}})},
         {"read_outline", "Structure of the active document: regions with line ranges, fold state and their AI summaries.", schema({})},
@@ -554,7 +598,37 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
         if (path.empty())
             return error("'path' is required");
         vm.openFile(path);
+        if (!vm.activeDocument())
+            return error("cannot open " + path);
         return documentInfo(*vm.activeDocument());
+    }
+    if (method == "memory_trace") {
+        if (!services::debug::memoryTraceActive())
+            return error("memory tracing is not running: build with -DENP_MEMORY_TRACE=ON (preset linux-memtrace) "
+                         "and start the app with ENP_MEM_TRACE=<scope>");
+        const std::string action = params.getString("action");
+        if (action == "mark") {
+            services::debug::markMemoryTrace();
+            return Json::object().set("marked", true);
+        }
+        if (action == "dump") {
+            const std::string file = params.getString("file");
+            std::FILE* out = file.empty() ? nullptr : std::fopen(file.c_str(), "w");
+            if (!out)
+                return error("'file' must be a writable path");
+            services::debug::dumpLiveMemory(out);
+            std::fclose(out);
+            return Json::object().set("file", file);
+        }
+        return error("action must be mark or dump");
+    }
+    if (method == "open_folder") {
+        const std::string path = params.getString("path");
+        if (path.empty())
+            return error("'path' is required");
+        if (!vm.openFolder(path))
+            return error("cannot open the folder " + path);
+        return Json::object().set("folder", vm.workspaceRoot());
     }
     if (method == "read_document") {
         const std::string path = params.getString("path");

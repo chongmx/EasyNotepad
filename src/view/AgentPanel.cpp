@@ -156,6 +156,7 @@ void AgentPanel::bubble(const model::ChatMessage& message, size_t index, float w
         MarkdownView& view = markdown_[index];
         if (!view.onLink)
             view.onLink = [this](const std::string& url) { openLink(url); };
+        view.emoji = emoji_;
         view.render(message.text, bubbleW - pad * 2.0f, fonts_, palette_, Fonts::kUiSize, s_);
     } else {
         ImGui::PushTextWrapPos(start.x + bubbleW - pad - ImGui::GetWindowPos().x + ImGui::GetScrollX());

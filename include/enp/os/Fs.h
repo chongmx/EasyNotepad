@@ -19,6 +19,9 @@ struct FileInfo {
 struct DirEntry {
     std::string name;
     bool isDirectory = false;
+    // A dot name (everywhere), or the hidden or system attribute (Windows). Listed all the same:
+    // whether to show it is the caller's choice.
+    bool hidden = false;
     std::uint64_t size = 0;
 };
 
@@ -26,8 +29,8 @@ struct DirEntry {
 std::optional<std::string> readFile(const std::string& path, std::string* error = nullptr);
 bool writeFile(const std::string& path, std::string_view data, std::string* error = nullptr);
 FileInfo stat(const std::string& path);
-// Directories first, then files; both sorted case-insensitively. Excludes "." and ".." (and hidden
-// entries). `size` is 0 where the directory listing does not give it.
+// Directories first, then files; both sorted case-insensitively. Excludes "." and ".."; hidden
+// entries are included and flagged. `size` is 0 where the directory listing does not give it.
 std::vector<DirEntry> listDirectory(const std::string& path, std::string* error = nullptr);
 // Stops after `limit` entries (0: all), so a folder of a million files is not read whole; `*more`
 // reports whether the folder holds more. Which entries come first is up to the file system.
@@ -50,6 +53,12 @@ std::vector<std::string> rootDirectories();
 // Read-only resources bundled with the application (fonts, sample documents).
 // `relativePath` uses '/' separators, e.g. "fonts/Roboto-Medium.ttf".
 std::optional<std::string> readAsset(const std::string& relativePath);
+// Part of a file or of a bundled resource: up to `size` bytes from `offset` (fewer at the end),
+// so a large pack is never read whole; `*total` gets the whole size. On Android the asset must be
+// stored uncompressed in the APK (android/app/build.gradle: noCompress).
+std::optional<std::string> readFileRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total = nullptr);
+std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size,
+                                          std::uint64_t* total = nullptr);
 
 inline bool exists(const std::string& path) { return stat(path).exists; }
 inline bool isDirectory(const std::string& path) { return stat(path).isDirectory; }

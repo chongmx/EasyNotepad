@@ -73,6 +73,7 @@ Fonts Fonts::load()
     if (!fonts.ui)
         fonts.ui = atlas->AddFontDefaultVector();
     fonts.hasIcons = mergeIcons(kUiSize);
+    mergeSymbolFallback(kUiSize); // ∑ ∫ √ and other math glyphs Roboto lacks (rendered Markdown)
 
     fonts.mono = addFont("fonts/Cousine-Regular.ttf", kEditorSize, ImFontConfig());
     if (fonts.mono) {

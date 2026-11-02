@@ -48,6 +48,12 @@ void pump()
             task();
 }
 
+bool hasPending()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return !g_queue.empty();
+}
+
 void runAsync(Task work)
 {
 #if defined(ENP_HAS_THREADS)

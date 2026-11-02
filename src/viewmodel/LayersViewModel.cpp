@@ -1,4 +1,5 @@
 #include "enp/viewmodel/LayersViewModel.h"
+#include "enp/os/Memory.h"
 
 #include "enp/model/Outline.h"
 #include "enp/viewmodel/DummyData.h"
@@ -160,6 +161,7 @@ void LayersViewModel::rebuild()
     const std::string key = cacheKey();
     if (key == key_)
         return;
+    os::mem::Scope memScope("layers");
     key_ = key;
     nodes_.clear();
     if (scope.get() == LayerScope::Logic) {
@@ -372,11 +374,13 @@ void LayersViewModel::zoomIn(int index)
 
 void LayersViewModel::workspaceChanged()
 {
-    facts_.clear();
-    loadedFiles_.clear();
-    focusId_[int(LayerScope::Project)].clear();
-    key_.clear();
-    nodes_.clear();
+    // os::mem::release, not clear(): the storage goes with the folder (docs/MEMORY.md).
+    os::mem::release(facts_);
+    os::mem::release(loadedFiles_);
+    for (std::string& id : focusId_)
+        os::mem::release(id);
+    os::mem::release(key_);
+    os::mem::release(nodes_);
 }
 
 void LayersViewModel::zoomOut()

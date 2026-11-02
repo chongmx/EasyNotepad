@@ -7,6 +7,7 @@
 #include "enp/view/DocumentListView.h"
 #include "enp/view/EngineLabView.h"
 #include "enp/view/EditorView.h"
+#include "enp/view/EmojiCache.h"
 #include "enp/view/FileDialogView.h"
 #include "enp/view/GitView.h"
 #include "enp/view/SearchPanel.h"
@@ -51,6 +52,9 @@ public:
     static Layout chooseLayout(float widthDp, float heightDp);
     Layout layout() const { return layout_; }
     const EditorView& editor() const { return editor_; }
+    const EmojiCache& emoji() const { return emoji_; }
+    // After a close (Application's memory trim): caches let go of what is no longer on screen.
+    void compactCaches() { emoji_.releaseUnused(); }
 
 private:
     void handleShortcuts();
@@ -89,6 +93,10 @@ private:
     void explorerConfirm(std::string title, std::string text, std::string button, std::function<void()> action);
     void renderExplorerPrompt();
     bool explorerVisible(const viewmodel::ExplorerItem& item); // under the filter
+    // Explorer rows: icon and name start at the row's left edge plus this pad (no arrow gap), and
+    // names start one icon column further, so folder and file names line up.
+    float explorerRowPad() const { return 4.0f * s_; }
+    float explorerIconColumn() const { return ImGui::GetFontSize() * 1.2f + 4.0f * s_; }
     void renderPreview(ImVec2 size);
     void renderStatusBar();
     void renderGoToLinePopup();
@@ -97,7 +105,9 @@ private:
     void renderSyntaxColorsPopup();
     void renderAboutPopup();
 
-    bool beginPanel(const char* id, const char* title, ImVec2 size, const char* detail = nullptr);
+    // `onClose`: an X button in the header, which calls it.
+    bool beginPanel(const char* id, const char* title, ImVec2 size, const char* detail = nullptr,
+                    std::function<void()> onClose = nullptr, const char* closeTooltip = nullptr);
     void endPanel();
     void verticalSplitter(const char* id, float& value, float direction, float height, float minValue, float maxValue);
     void horizontalSplitter(const char* id, float& value, float width, float minValue, float maxValue);
@@ -111,6 +121,7 @@ private:
     IWindowFrame* frame_;
     std::vector<ScreenRect> dragRegions_;
     Palette palette_;
+    EmojiCache emoji_; // emoji pictures for rendered Markdown, shared by the editor and the agent chat
     RibbonView ribbon_;
     EditorView editor_;
     MapView map_;
@@ -140,6 +151,11 @@ private:
     std::string allTabsFilter_;
     bool openAllTabs_ = false; // requested by an agent
 
+    // Developer mode: the process's resource readout in the status bar, refreshed once a second.
+    std::string resourceText_; // compact, in the bar
+    std::string resourceTip_;  // the full readout, on hover
+    double resourceTextAt_ = -1.0;
+
     // Explorer: one tree; the open documents are marked in it.
     std::string explorerFilter_;
     std::string explorerFilterKey_; // explorerVisible_ was computed for this filter
@@ -148,6 +164,7 @@ private:
     int explorerTab_ = 0;         // 0 = Files, 1 = Open, 2 = Git
     int explorerTabRequest_ = -1; // switch on the next frame (agents, "Reveal in Files")
     bool explorerCollapse_ = false;
+    std::string explorerToggle_; // a folder an agent clicked: toggled on the next frame
     struct ExplorerPrompt {
         std::string title, hint, value, button;
         bool confirm = false; // a yes/no question (hint is its text), else a name to type

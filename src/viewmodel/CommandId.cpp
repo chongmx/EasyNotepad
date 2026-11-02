@@ -56,7 +56,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::ToggleSlimRibbon: return {"Slim Ribbon", "A slimmer ribbon: icons only, more room for your work", "Ctrl+F1"};
     case CommandId::ToggleAgentPanel: return {"Agent Panel", "Show or hide the agent side panel", "Ctrl+Shift+I"};
     case CommandId::ToggleWordWrap: return {"Word Wrap", "Wrap long lines", "Alt+Z"};
-    case CommandId::ToggleMarkdownView: return {"Rendered", "Show this Markdown file formatted, or as text to edit", "Ctrl+Shift+V"};
+    case CommandId::ToggleMarkdownView: return {"Rendered", "Markdown formatted, CSV as a table, JSON and YAML as a tree or an accordion; or the text to edit", "Ctrl+Shift+V"};
     case CommandId::ToggleWhitespace: return {"Whitespace", "Show spaces and tabs", ""};
     case CommandId::ToggleLineNumbers: return {"Line Numbers", "Show line numbers", ""};
     case CommandId::ToggleIndentGuides: return {"Guides", "Show indent guides", ""};

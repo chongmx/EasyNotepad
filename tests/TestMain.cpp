@@ -18,20 +18,32 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 #include "enp/model/Json.h"
 #include "enp/model/LogicalMap.h"
+#include "enp/model/BinaryInfo.h"
+#include "enp/model/Csv.h"
+#include "enp/model/DataTree.h"
+#include "enp/model/Emoji.h"
+#include "enp/model/FileKind.h"
 #include "enp/model/Markdown.h"
+#include "enp/model/Math.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/ILocalEngineService.h"
 #include "enp/os/Dispatch.h"
 #include "enp/os/Os.h"
+#include "enp/os/Memory.h"
 #include "enp/services/AutomationServer.h"
+#include "enp/services/EmojiPack.h"
 #include "enp/services/FileService.h"
+#include "enp/services/ImageDecoder.h"
+#include "enp/services/ImageEncoder.h"
 #include "enp/services/ProcessService.h"
 
 #include "AutomationController.h"
 #include "McpBridge.h"
 
 #include <atomic>
+#include <cstring>
 #include <map>
+#include <regex>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -1658,6 +1670,354 @@ TEST(markdown_inline_styles_and_links)
     CHECK(url.size() == 3 && url[1].style == md::Link && url[1].url == "https://example.com/a" && url[2].text == ".");
 }
 
+TEST(markdown_entities_images_and_math)
+{
+    namespace md = model::markdown;
+    // HTML character references become their characters; a lone '&' stays.
+    CHECK_EQ(md::decodeEntities("Fish &amp; Chips &copy; 2026 &rarr; &#169; &#xA9; A & B &bogus; &lt;b&gt;"),
+             std::string("Fish & Chips © 2026 → © © A & B &bogus; <b>"));
+    const md::Spans e = md::parseInline("caf&eacute; &mdash; 5&nbsp;km");
+    CHECK_EQ(md::plainText(e), std::string("café — 5\xC2\xA0km"));
+    // Images: ![alt](src) and <img>, with the alt text and the source.
+    const md::Spans img = md::parseInline("See ![a cat](pics/cat.png) and <img src=\"logo.svg\" alt=\"Logo\"> here");
+    CHECK_EQ(img.size(), size_t(5));
+    if (img.size() == 5) {
+        CHECK(img[1].style == md::Image && img[1].text == "a cat" && img[1].url == "pics/cat.png");
+        CHECK(img[3].style == md::Image && img[3].text == "Logo" && img[3].url == "logo.svg");
+        CHECK_EQ(img[4].text, std::string(" here"));
+    }
+    // Inline math: $...$ and \(...\); prices are not formulas.
+    const md::Spans m = md::parseInline("Euler: $e^{i\\pi} + 1 = 0$ costs $5 and $6, also \\(\\frac{a}{b}\\).");
+    int mathSpans = 0;
+    for (const md::Span& span : m)
+        if (span.style & md::Math) {
+            ++mathSpans;
+            CHECK(span.text == "e^{i\\pi} + 1 = 0" || span.text == "\\frac{a}{b}");
+        }
+    CHECK_EQ(mathSpans, 2);
+    CHECK(md::plainText(m).find("$5 and $6") != std::string::npos);
+    // <br> breaks the line; other tags stay text.
+    CHECK_EQ(md::plainText(md::parseInline("a<br>b <span>c</span>")), std::string("a\nb <span>c</span>"));
+    // Display math blocks: $$ on one line or several, and \[ \].
+    const std::vector<md::Block> b = md::parse("Text\n\n$$\n\\sum_{i=0}^{n} i = \\frac{n(n+1)}{2}\n$$\n\n$$ x^2 $$\n\\[ y \\]\nafter");
+    CHECK_EQ(b.size(), size_t(5));
+    if (b.size() == 5) {
+        CHECK(b[1].kind == md::BlockKind::Math && b[1].code == "\\sum_{i=0}^{n} i = \\frac{n(n+1)}{2}");
+        CHECK(b[2].kind == md::BlockKind::Math && b[2].code == "x^2");
+        CHECK(b[3].kind == md::BlockKind::Math && b[3].code == "y");
+        CHECK(b[4].kind == md::BlockKind::Paragraph && md::plainText(b[4].spans) == "after");
+    }
+}
+
+TEST(latex_formulas_parse_into_a_layout_tree)
+{
+    namespace mt = model::math;
+    using K = mt::Node::Kind;
+    const mt::Node f = mt::parse("\\frac{a+b}{2}");
+    CHECK(f.kind == K::Frac && f.children.size() == 2);
+    CHECK_EQ(mt::plainText(f), std::string("(a+b)/(2)"));
+    const mt::Node s = mt::parse("x^{2}_{i}");
+    CHECK(s.kind == K::Scripts && s.children.size() == 3 && s.children[0].text == "x");
+    CHECK_EQ(mt::plainText(s), std::string("x_{i}^{2}"));
+    const mt::Node sum = mt::parse("\\sum_{i=0}^{n} i");
+    CHECK(sum.kind == K::Row && sum.children.size() == 2 && sum.children[0].kind == K::Scripts);
+    CHECK(sum.children[0].children[0].kind == K::Op && sum.children[0].children[0].text == "∑" && sum.children[0].children[0].limitsAbove);
+    const mt::Node r = mt::parse("\\sqrt[3]{x} \\alpha \\le \\infty \\left( \\frac{1}{2} \\right) \\text{if } \\hat{y}");
+    CHECK_EQ(mt::plainText(r), std::string("√(x)α≤∞((1)/(2))if y^"));
+    CHECK(r.children.size() >= 6 && r.children[0].kind == K::Sqrt && r.children[0].children[1].text == "3");
+    const mt::Node fenced = mt::parse("\\left[ a \\right]");
+    CHECK(fenced.kind == K::Fenced && fenced.text == "[" && fenced.text2 == "]");
+    // Unknown commands and unbalanced braces do not break it.
+    CHECK_EQ(mt::plainText(mt::parse("\\unknown{x} + {y")), std::string("unknownx+y"));
+    CHECK_EQ(mt::plainText(mt::parse("\\int_0^1 f(x)\\,dx")), std::string("∫_{0}^{1}f(x) dx"));
+}
+
+TEST(file_types_are_detected_before_loading_and_images_decode)
+{
+    using model::FileKind;
+    const std::string png("\x89PNG\r\n\x1a\n\0\0\0\rIHDR", 16);
+    CHECK(model::detectFileType("a.png", png).kind == FileKind::Image && model::detectFileType("a.png", png).format == "PNG");
+    CHECK(model::detectFileType("noext", png).kind == FileKind::Image); // the content decides, not the name
+    CHECK(model::detectFileType("x.jpg", std::string("\xFF\xD8\xFF\xE0", 4)).format == "JPEG");
+    CHECK(model::detectFileType("x.webp", std::string("RIFF\0\0\0\0WEBPVP8 ", 16)).format == "WebP");
+    CHECK(model::detectFileType("x.wav", std::string("RIFF\0\0\0\0WAVEfmt ", 16)).kind == FileKind::Binary);
+    CHECK(model::detectFileType("prog", std::string("\x7F" "ELF\x02\x01\x01\0", 8)).format == "ELF executable");
+    CHECK(model::detectFileType("a.zip", std::string("PK\x03\x04", 4)).kind == FileKind::Binary);
+    CHECK(model::detectFileType("data.bin", std::string("abc\0def", 7)).kind == FileKind::Binary);  // a NUL byte
+    CHECK(model::detectFileType("notes.txt", "plain text\nwith lines\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("utf8.md", "caf\xC3\xA9 \xE2\x86\x92 \xCE\xB1\n").kind == FileKind::Text);    // UTF-8 is text
+    CHECK(model::detectFileType("pic.svg", "<?xml version=\"1.0\"?><svg></svg>").kind == FileKind::Text); // SVG: XML to edit
+    CHECK(model::detectFileType("x.ppm", "P6\n2 2\n255\n").kind == FileKind::Image);
+    CHECK(model::detectFileType("empty.txt", "").kind == FileKind::Text);
+
+    // Decoders: PNM (stb), QOI and ICO (our own), and a refusal with a reason.
+    services::DecodedImage img;
+    std::string note;
+    const std::string ppm = std::string("P6\n2 1\n255\n") + std::string("\xFF\x00\x00\x00\x00\xFF", 6);
+    CHECK(services::decodeImage(ppm, img, note));
+    CHECK(img.width == 2 && img.height == 1 && img.rgba.size() == 8 && img.rgba[0] == 255 && img.rgba[6] == 255 && img.rgba[3] == 255);
+    // QOI, 2x1: an RGBA pixel (red), then a run of 1, then the end marker.
+    std::string qoi("qoif\0\0\0\x02\0\0\0\x01\x04\x00", 14);
+    qoi += std::string("\xFF\xFF\x00\x00\x80", 5); // QOI_OP_RGBA red, alpha 128
+    qoi += std::string("\xC0", 1);                 // QOI_OP_RUN, 1 more
+    qoi += std::string("\0\0\0\0\0\0\0\x01", 8);
+    CHECK(services::decodeImage(qoi, img, note));
+    CHECK(img.width == 2 && img.height == 1 && img.format == "QOI" && img.rgba[0] == 255 && img.rgba[3] == 128 && img.rgba[4] == 255 && img.rgba[7] == 128);
+    // ICO with one PNG-less 1x1 32-bit DIB entry.
+    std::string dib(40, '\0');
+    dib[0] = 40;                  // header size
+    dib[4] = 1;                   // width
+    dib[8] = 2;                   // height (XOR + AND)
+    dib[12] = 1;                  // planes
+    dib[14] = 32;                 // bits per pixel
+    dib += std::string("\x00\xFF\x00\xFF", 4); // BGRA green
+    dib += std::string(4, '\0');               // AND mask row
+    std::string ico("\0\0\x01\0\x01\0", 6);
+    std::string entry(16, '\0');
+    entry[0] = 1;
+    entry[1] = 1;
+    const unsigned length = unsigned(dib.size()), offset = 22;
+    std::memcpy(&entry[8], &length, 4);
+    std::memcpy(&entry[12], &offset, 4);
+    ico += entry + dib;
+    CHECK(services::decodeImage(ico, img, note));
+    CHECK(img.width == 1 && img.height == 1 && img.rgba[1] == 255 && img.rgba[0] == 0);
+    CHECK(!services::decodeImage(std::string("RIFF\0\0\0\0WEBPVP8 ", 16), img, note) && note.find("WebP") != std::string::npos);
+    CHECK(!services::decodeImage("hello", img, note) && !note.empty());
+
+    // Opening: an image and a binary file get a document without text; saving it refuses
+    // (it would write the empty buffer over the file); "open as text" loads the bytes.
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-file-kinds";
+    os::fs::createDirectories(root);
+    files.write(root + "/pic.ppm", ppm, nullptr);
+    files.write(root + "/blob.bin", std::string("head\0\x01\x02tail", 11), nullptr);
+    files.write(root + "/notes.txt", "hello\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    vm.openFile("pic.ppm");
+    CHECK(vm.activeDocument() && vm.activeDocument()->kind == FileKind::Image && vm.activeDocument()->buffer.text().empty());
+    vm.openFile("blob.bin");
+    model::Document* blob = vm.activeDocument();
+    CHECK(blob && blob->kind == FileKind::Binary && blob->buffer.text().empty() && blob->format == "bin file");
+    vm.execute(viewmodel::CommandId::Save); // the active document: refused
+    CHECK_EQ(files.read(root + "/blob.bin")->size(), size_t(11)); // untouched
+    CHECK(vm.openAsText(vm.activeIndex.get()));
+    CHECK(blob->kind == FileKind::Text && blob->buffer.text().size() == 11);
+    vm.openFile("notes.txt");
+    CHECK(vm.activeDocument() && vm.activeDocument()->kind == FileKind::Text && vm.activeDocument()->buffer.text() == "hello\n");
+    // The workspace reader never hands out an image document's empty buffer for its file.
+    CHECK_EQ(vm.readWorkspaceFile("pic.ppm").size(), ppm.size());
+}
+
+TEST(emoji_sequences_follow_uts51)
+{
+    namespace e = model::emoji;
+    auto key = [](const std::string& text) {
+        std::string k;
+        const size_t n = e::match(text, 0, &k);
+        return n == text.size() ? k : (n == 0 ? std::string("-") : "partial:" + k);
+    };
+    // The screenshot's forms: a text-default arrow, its emoji form with FE0F.
+    CHECK_EQ(key("⬇"), std::string("-"));            // ⬇ alone stays text
+    CHECK_EQ(key("⬇️"), std::string("2b07"));   // ⬇️
+    CHECK_EQ(key("⬇︎"), std::string("-"));      // asked to be text
+    CHECK_EQ(e::invisible("︎", 0), size_t(3));
+    CHECK_EQ(key("\U0001F600"), std::string("1f600"));    // 😀 (above U+FFFF)
+    CHECK_EQ(key("©"), std::string("-"));            // © text
+    CHECK_EQ(key("©️"), std::string("00a9"));   // ©️
+    CHECK_EQ(key("#️⃣"), std::string("0023_20e3")); // keycaps, with or without FE0F
+    CHECK_EQ(key("7⃣"), std::string("0037_20e3"));
+    CHECK_EQ(key("7"), std::string("-"));
+    CHECK_EQ(key("\U0001F1F2\U0001F1FE"), std::string("1f1f2_1f1fe")); // flag MY
+    CHECK_EQ(key("\U0001F44D\U0001F3FD"), std::string("1f44d_1f3fd")); // skin tone
+    CHECK_EQ(key("\U0001F469‍\U0001F52C"), std::string("1f469_200d_1f52c")); // ZWJ
+    CHECK_EQ(key("❤️‍\U0001F525"), std::string("2764_200d_1f525")); // ❤️‍🔥
+    CHECK_EQ(key("\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F"),
+             std::string("1f3f4_e0067_e0062_e0065_e006e_e0067_e007f")); // England
+    CHECK_EQ(key("\U0001F469\U0001F3FD‍\U0001F52C"), std::string("1f469_1f3fd_200d_1f52c"));
+    std::string k;
+    CHECK_EQ(e::match("\U0001F600‍", 0, &k), size_t(4)); // a joiner with nothing after it is not part of it
+    CHECK(e::components("1f469_200d_1f52c") == std::vector<std::string>({"1f469", "1f52c"}));
+    CHECK_EQ(e::withoutModifiers("1f44d_1f3fd"), std::string("1f44d"));
+    CHECK_EQ(std::string(e::unicodeVersion()), std::string("18.0"));
+
+    // In Markdown: raw, hex and decimal entities all become the same emoji; the plain arrow stays text.
+    namespace md = model::markdown;
+    const md::Spans s = md::parseInline("Raw ⬇️, hex &#x2B07;&#xFE0F;, dec &#11015;&#65039;, plain ⬇ and \U0001F44D\U0001F3FD.");
+    int emojis = 0;
+    for (const md::Span& span : s)
+        if (span.style & md::Emoji) {
+            ++emojis;
+            CHECK(span.emoji == "2b07" || span.emoji == "1f44d_1f3fd");
+        }
+    CHECK_EQ(emojis, 4);
+    for (const md::Span& span : s) // no selector left in text drawn as text (it would show as a box)
+        if (!(span.style & md::Emoji))
+            CHECK(span.text.find("\xEF\xB8\x8F") == std::string::npos);
+    CHECK(md::plainText(s).find("plain ⬇") != std::string::npos);
+    // Emoji keep the style around them (a link's target, bold).
+    const md::Spans link = md::parseInline("[go \U0001F680](https://x.io) **\U0001F600**");
+    bool linked = false, bold = false;
+    for (const md::Span& span : link) {
+        linked |= (span.style & md::Emoji) && (span.style & md::Link) && span.url == "https://x.io" && span.emoji == "1f680";
+        bold |= (span.style & md::Emoji) && (span.style & md::Bold);
+    }
+    CHECK(linked && bold);
+}
+
+TEST(emoji_pack_reads_only_what_it_needs)
+{
+    // A small stored zip, built here: two pictures and a file that is not one.
+    auto le16 = [](std::string& b, unsigned v) { b += char(v & 0xFF); b += char((v >> 8) & 0xFF); };
+    auto le32 = [&](std::string& b, unsigned v) { le16(b, v & 0xFFFF); le16(b, v >> 16); };
+    struct File { std::string name, data; };
+    const std::vector<File> files = {{"2b07.png", "PNGDATA-ARROW"}, {"1f600.png", "PNGDATA-GRIN"}, {"notes.txt", "x"}};
+    std::string zip, cd;
+    for (const File& f : files) {
+        const unsigned offset = unsigned(zip.size());
+        le32(zip, 0x04034b50); le16(zip, 10); le16(zip, 0); le16(zip, 0); le16(zip, 0); le16(zip, 0);
+        le32(zip, 0); le32(zip, unsigned(f.data.size())); le32(zip, unsigned(f.data.size()));
+        le16(zip, unsigned(f.name.size())); le16(zip, 3); zip += f.name; zip += "abc"; zip += f.data; // with an extra field
+        le32(cd, 0x02014b50); le16(cd, 20); le16(cd, 10); le16(cd, 0); le16(cd, 0); le16(cd, 0); le16(cd, 0);
+        le32(cd, 0); le32(cd, unsigned(f.data.size())); le32(cd, unsigned(f.data.size()));
+        le16(cd, unsigned(f.name.size())); le16(cd, 0); le16(cd, 0); le16(cd, 0); le16(cd, 0); le32(cd, 0); le32(cd, offset);
+        cd += f.name;
+    }
+    const unsigned cdOffset = unsigned(zip.size());
+    zip += cd;
+    le32(zip, 0x06054b50); le16(zip, 0); le16(zip, 0); le16(zip, 3); le16(zip, 3); le32(zip, unsigned(cd.size())); le32(zip, cdOffset); le16(zip, 0);
+    services::FileService files_;
+    const std::string path = scratchDirectory() + "/enp-test-emoji-pack.zip";
+    files_.write(path, zip, nullptr);
+    services::EmojiPack pack(path, true);
+    CHECK(!pack.loaded());
+    CHECK(pack.contains("2b07") && pack.contains("1f600") && !pack.contains("notes") && !pack.contains("1f601"));
+    CHECK(pack.loaded() && pack.size() == 2);
+    CHECK(pack.read("2b07").value_or("") == "PNGDATA-ARROW");
+    pack.unload();
+    CHECK(!pack.loaded() && pack.size() == 0);
+    CHECK(pack.read("1f600").value_or("") == "PNGDATA-GRIN"); // the index comes back on demand
+    std::remove(path.c_str());
+    services::EmojiPack missing(scratchDirectory() + "/no-such-pack.zip", true);
+    CHECK(!missing.contains("2b07") && !missing.read("2b07"));
+
+    // The shipped pack: every kind of sequence has a picture, and pictures decode at 72 px.
+    services::EmojiPack real(std::string(ENP_SOURCE_DIR) + "/resources/emoji/noto-emoji-72.zip", true);
+    CHECK(real.contains("2b07") && real.contains("1f469_200d_1f52c") && real.contains("0023_20e3") && real.contains("1f1f2_1f1fe") &&
+          real.contains("1f44d_1f3fd") && real.contains("1f3f4_e0067_e0062_e0065_e006e_e0067_e007f"));
+    CHECK(real.size() >= 4000);
+    services::DecodedImage img;
+    std::string note;
+    CHECK(services::decodeImage(real.read("1f600").value_or(""), img, note) && img.width == 72 && img.height == 72);
+}
+
+TEST(csv_tables_follow_rfc4180)
+{
+    namespace csv = model::csv;
+    const std::string text = "name,age,note\r\n\"Smith, J\",42,\"said \"\"hi\"\"\"\nLee,7,\"two\nlines\"\nshort\n";
+    CHECK_EQ(csv::detectDelimiter(text), ',');
+    const csv::Table t = csv::parse(text, ',');
+    CHECK_EQ(t.rowCount(), size_t(4));
+    CHECK_EQ(t.columns, 3);
+    CHECK(t.cell(0, 0) == "name" && t.cell(1, 0) == "Smith, J" && t.cell(1, 2) == "said \"hi\"");
+    CHECK(t.cell(2, 2) == "two\nlines");             // a line break inside quotes
+    CHECK(t.cellCount(3) == 1 && t.cell(3, 1).empty()); // a short row
+    CHECK_EQ(csv::detectDelimiter("a;b;c\n1;2;3\n4;5;6\n"), ';');
+    CHECK_EQ(csv::detectDelimiter("a\tb\n1\t2\n"), '\t');
+    CHECK_EQ(csv::detectDelimiter("a,b\n", "data.tsv"), '\t');
+    CHECK_EQ(csv::parse("a,b,\n", ',').cellCount(0), 3); // a trailing delimiter: an empty last cell
+    CHECK_EQ(csv::parse("", ',').rowCount(), size_t(0));
+}
+
+TEST(json_and_yaml_read_into_one_tree)
+{
+    namespace d = model::data;
+    const d::Tree j = d::parseJson("{\n  \"name\": \"Ed\\u00e9n \\ud83d\\ude00\",\n  \"n\": -1.5e3,\n  \"ok\": true,\n  \"none\": null,\n"
+                                   "  \"list\": [1, {\"a\": [ ]}, \"x\"]\n}\n");
+    CHECK(j.ok());
+    const d::Node& root = j.nodes[0];
+    CHECK(root.kind == d::Kind::Object && root.childCount == 5);
+    const d::Node& name = j.nodes[root.firstChild];
+    CHECK(j.key(name) == "name" && j.value(name) == "Ed\xC3\xA9n \xF0\x9F\x98\x80" && name.line == 1);
+    std::uint32_t list = root.firstChild;
+    while (list != d::kNone && j.key(j.nodes[list]) != "list")
+        list = j.nodes[list].nextSibling;
+    CHECK(list != d::kNone && j.nodes[list].kind == d::Kind::Array && j.nodes[list].childCount == 3 && j.nodes[list].line == 5);
+    const std::uint32_t second = j.nodes[j.nodes[list].firstChild].nextSibling;
+    CHECK_EQ(j.path(j.nodes[second].firstChild), std::string("$.list[1].a"));
+    const d::Tree bad = d::parseJson("{\n  \"a\": 1\n  \"b\": 2\n}");
+    CHECK(!bad.ok() && bad.errorLine == 2 && bad.error.find("','") != std::string::npos);
+
+    const d::Tree y = d::parseYaml("# config\nname: demo   # trailing comment\nversion: 2\nempty:\nquoted: \"a: b # not a comment\"\n"
+                                   "servers:\n  - host: a.example\n    port: 80\n  - host: b.example\n    port: 8080\n"
+                                   "tags: [one, two, \"three, four\"]\nmap: {x: 1, y: [2, 3]}\nscript: |\n  echo hi\n  # kept\n"
+                                   "folded: >\n  one\n  two\nplain: a long\n  line\nlist:\n- p\n- q\n");
+    CHECK(y.ok());
+    const d::Node& yr = y.nodes[0];
+    CHECK(yr.kind == d::Kind::Object);
+    auto child = [&](std::uint32_t parent, std::string_view key) {
+        for (std::uint32_t c = y.nodes[parent].firstChild; c != d::kNone; c = y.nodes[c].nextSibling)
+            if (y.key(y.nodes[c]) == key)
+                return c;
+        return d::kNone;
+    };
+    CHECK(y.value(y.nodes[child(0, "name")]) == "demo");
+    CHECK(y.nodes[child(0, "version")].kind == d::Kind::Number);
+    CHECK(y.nodes[child(0, "empty")].kind == d::Kind::Null);
+    CHECK(y.value(y.nodes[child(0, "quoted")]) == "a: b # not a comment");
+    const std::uint32_t servers = child(0, "servers");
+    CHECK(servers != d::kNone && y.nodes[servers].kind == d::Kind::Array && y.nodes[servers].childCount == 2);
+    const std::uint32_t s2 = y.nodes[y.nodes[servers].firstChild].nextSibling;
+    CHECK(y.nodes[s2].kind == d::Kind::Object && y.value(y.nodes[child(s2, "port")]) == "8080" && y.nodes[child(s2, "port")].line == 9);
+    CHECK_EQ(y.path(child(s2, "host")), std::string("$.servers[1].host"));
+    const std::uint32_t tags = child(0, "tags");
+    CHECK(y.nodes[tags].childCount == 3 && y.value(y.nodes[y.nodes[y.nodes[y.nodes[tags].firstChild].nextSibling].nextSibling]) == "three, four");
+    const std::uint32_t map = child(0, "map");
+    CHECK(y.nodes[map].kind == d::Kind::Object && y.nodes[child(map, "y")].childCount == 2);
+    CHECK(y.value(y.nodes[child(0, "script")]) == "echo hi\n# kept");
+    CHECK(y.value(y.nodes[child(0, "folded")]) == "one two");
+    CHECK(y.value(y.nodes[child(0, "plain")]) == "a long line");
+    CHECK(y.nodes[child(0, "list")].childCount == 2); // "key:\n- a" at the same indent
+    const d::Tree docs = d::parseYaml("a: 1\n---\nb: 2\n");
+    CHECK(docs.ok() && docs.nodes[0].kind == d::Kind::Array && docs.nodes[0].childCount == 2);
+    CHECK(!d::parseYaml("a: 1\n  b: 2\n").ok());
+}
+
+TEST(data_files_switch_between_text_and_their_views)
+{
+    using model::DataView;
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-data-views";
+    os::fs::createDirectories(root);
+    files.write(root + "/t.csv", "a,b\n1,2\n", nullptr);
+    files.write(root + "/c.json", "{\"a\": 1}", nullptr);
+    files.write(root + "/c.yaml", "a: 1\n", nullptr);
+    files.write(root + "/n.txt", "x", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    vm.openFile("t.csv");
+    CHECK(vm.activeDocument()->rendered); // a table first, like Markdown
+    vm.execute(CommandId::ToggleMarkdownView);
+    CHECK(!vm.activeDocument()->rendered);
+    vm.openFile("c.json");
+    CHECK(vm.activeDocument()->dataView == DataView::Text); // configs open as text
+    vm.execute(CommandId::ToggleMarkdownView);
+    CHECK(vm.activeDocument()->dataView == DataView::Tree);
+    vm.execute(CommandId::ToggleMarkdownView);
+    CHECK(vm.activeDocument()->dataView == DataView::Accordion);
+    CHECK(vm.isChecked(CommandId::ToggleMarkdownView));
+    vm.execute(CommandId::ToggleMarkdownView);
+    CHECK(vm.activeDocument()->dataView == DataView::Text);
+    vm.openFile("c.yaml");
+    vm.setDataView(DataView::Accordion);
+    CHECK(vm.activeDocument()->dataView == DataView::Accordion);
+    vm.openFile("n.txt");
+    CHECK(!vm.command(CommandId::ToggleMarkdownView).canExecute());
+    vm.setDataView(DataView::Tree); // not a data file: nothing happens
+    CHECK(vm.activeDocument()->dataView == DataView::Text);
+}
+
 TEST(markdown_blocks)
 {
     namespace md = model::markdown;
@@ -2197,6 +2557,34 @@ TEST(mcp_session_speaks_json_rpc)
 
     auto unknown = session.handle(*model::Json::parse(R"({"jsonrpc":"2.0","id":5,"method":"resources/list"})"));
     CHECK(unknown && unknown->find("error")->getNumber("code") == -32601);
+}
+
+TEST(mcp_screenshot_comes_back_as_an_image)
+{
+    app::McpSession session(
+        [](const std::string& method, const model::Json&, std::string*) -> std::optional<model::Json> {
+            return model::Json::object().set("width", 2).set("height", 1).set("bytes", 4.0).set("png_base64", "iVBORw==");
+        },
+        "9.9");
+    auto shot = session.handle(*model::Json::parse(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot","arguments":{}}})"));
+    const model::Json* content = shot ? shot->find("result")->find("content") : nullptr;
+    CHECK(content && content->items().size() == 2);
+    CHECK(content && content->items()[0].getString("type") == "image" && content->items()[0].getString("mimeType") == "image/png" &&
+          content->items()[0].getString("data") == "iVBORw==");
+    CHECK(content && content->items()[1].getString("text").find("\"width\":2") != std::string::npos);
+}
+
+TEST(png_encoding_writes_a_valid_file)
+{
+    const unsigned char pixels[] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}; // 2 x 2
+    const std::string png = services::encodePng(pixels, 2, 2);
+    CHECK(png.size() > 8 && png.compare(0, 8, "\x89PNG\r\n\x1a\n") == 0);
+    services::DecodedImage back;
+    std::string note;
+    CHECK(services::decodeImage(png, back, note) && back.width == 2 && back.height == 2 && back.rgba.size() == 16 &&
+          std::equal(back.rgba.begin(), back.rgba.end(), pixels));
+    CHECK(services::encodePng(nullptr, 2, 2).empty());
 }
 
 TEST(automation_controller_drives_the_view_model)
@@ -3256,6 +3644,25 @@ TEST(opening_another_folder_forgets_the_previous_one)
     vm.closeFolder();
     CHECK(vm.findInFiles().results().empty());
     CHECK(vm.layers().nodes().size() <= 1); // the project node at most: nothing of the closed folder
+    // Closing asks the app to give memory back, once.
+    CHECK(vm.takeMemoryTrimRequest());
+    CHECK(!vm.takeMemoryTrimRequest());
+    vm.newDocument();
+    vm.closeDocument(0);
+    CHECK(vm.takeMemoryTrimRequest()); // the last document closed
+    os::trimMemory();                  // and this must be callable any time
+}
+
+TEST(process_stats_describe_this_process)
+{
+    const os::ProcessStats s = os::processStats();
+#if defined(__linux__) || defined(_WIN32)
+    CHECK(s.residentBytes > 1024 * 1024);
+    CHECK(s.threads >= 1);
+    CHECK(s.handles >= 3); // stdin, stdout, stderr at least
+#else
+    (void)s;
+#endif
 }
 
 TEST(explorer_scans_breadth_first_within_limits_and_reads_deep_folders_on_demand)
@@ -3266,20 +3673,34 @@ TEST(explorer_scans_breadth_first_within_limits_and_reads_deep_folders_on_demand
     const std::string root = scratchDirectory() + "/enp-test-explorer";
     for (const char* dir : {"/a", "/b", "/c/d/e"})
         os::fs::createDirectories(root + dir);
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 10; ++i)
         files.write(root + "/a/f" + std::to_string(i) + ".txt", "x", nullptr);
     files.write(root + "/b/one.txt", "x", nullptr);
     files.write(root + "/b/two.txt", "x", nullptr);
     files.write(root + "/c/d/e/deep.txt", "x", nullptr);
+    // Hidden entries: a dot folder, a dot file, and the .git folder (which never shows).
+    os::fs::createDirectories(root + "/.github/workflows");
+    os::fs::createDirectories(root + "/.git/objects");
+    files.write(root + "/.gitignore", "build/\n", nullptr);
+    files.write(root + "/.github/workflows/build.yml", "on: push\n", nullptr);
 
     bool more = false;
     CHECK_EQ(files.list(root + "/a", 3, &more).size(), size_t(3));
     CHECK(more);
     CHECK_EQ(files.list(root + "/b", 5, &more).size(), size_t(2));
     CHECK(!more);
+    {
+        // Listings include hidden entries, flagged, so that callers decide.
+        const std::vector<interfaces::DirectoryEntry> top = files.list(root);
+        int hidden = 0, shown = 0;
+        for (const interfaces::DirectoryEntry& e : top)
+            (e.hidden ? hidden : shown)++;
+        CHECK_EQ(hidden, 3); // .git, .github, .gitignore
+        CHECK_EQ(shown, 3);  // a, b, c
+    }
 
     viewmodel::NotepadViewModel vm(nullptr, &files);
-    vm.setExplorerLimits({5, 12, 2});
+    vm.setExplorerLimits({8, 40, 2}); // the top level (6 entries with the hidden ones) fits
     CHECK(vm.openFolder(root));
     auto find = [&](const std::string& path) -> const viewmodel::ExplorerItem* {
         auto walk = [&](auto&& self, const viewmodel::ExplorerItem& item) -> const viewmodel::ExplorerItem* {
@@ -3292,9 +3713,18 @@ TEST(explorer_scans_breadth_first_within_limits_and_reads_deep_folders_on_demand
         };
         return walk(walk, vm.explorer());
     };
+    // .github and .gitignore show by default (folders first), .git never; off, no dot entries.
+    CHECK_EQ(vm.explorer().children.size(), size_t(5)); // .github, a, b, c, .gitignore
+    CHECK(find(".github") && find(".github")->isDirectory && find(".gitignore") && !find(".git"));
+    CHECK(find(".github/workflows") != nullptr);
+    vm.showHiddenFiles.set(false);
     CHECK_EQ(vm.explorer().children.size(), size_t(3)); // a, b and c: all of the top level
+    CHECK(!find(".github") && !find(".gitignore"));
+    vm.showHiddenFiles.set(true);
+    CHECK(find(".github") != nullptr);
+    vm.showHiddenFiles.set(false);
     const viewmodel::ExplorerItem* a = find("a");
-    CHECK(a && a->children.size() == 5 && a->truncated);
+    CHECK(a && a->children.size() == 8 && a->truncated);
     const viewmodel::ExplorerItem* b = find("b");
     CHECK(b && b->children.size() == 2 && !b->truncated);
     const viewmodel::ExplorerItem* e = find("c/d/e");
@@ -3302,6 +3732,458 @@ TEST(explorer_scans_breadth_first_within_limits_and_reads_deep_folders_on_demand
     vm.expandExplorer("c/d/e");
     e = find("c/d/e");
     CHECK(e && e->scanned && e->children.size() == 1 && e->children[0].name == "deep.txt");
+}
+
+TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
+{
+    // docs/MEMORY.md: every subsystem's state is attributed to its scope, and opening and closing
+    // a workspace in a loop keeps nothing: the total is flat and each workspace scope is at zero.
+    if (!os::mem::enabled()) {
+        std::printf("    (built without ENP_MEMORY_ACCOUNTING: skipped)\n");
+        CHECK(true);
+        return;
+    }
+    {
+        os::mem::Scope scope("test-scope");
+        std::vector<char> block(100000);
+        CHECK(os::mem::liveBytes("test-scope") >= 100000);
+    }
+    CHECK_EQ(os::mem::liveBytes("test-scope"), std::uint64_t(0)); // freed outside the scope: still attributed to it
+
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-memory-cycles";
+    os::fs::createDirectories(root + "/src");
+    os::fs::createDirectories(root + "/docs");
+    std::string readme = "# Memory\n\nA project to open and close.\n\n";
+    for (int i = 0; i < 100; ++i)
+        readme += "Paragraph " + std::to_string(i) + " with **bold**, `code` and a [link](https://example.com).\n\n";
+    files.write(root + "/README.md", readme, nullptr);
+    files.write(root + "/docs/guide.md", "# Guide\n\n- one\n- two\n", nullptr);
+    for (int i = 0; i < 20; ++i) {
+        std::string text = "// file " + std::to_string(i) + "\n#include \"other.h\"\n";
+        for (int l = 0; l < 100; ++l)
+            text += "int value" + std::to_string(l) + " = " + std::to_string(l) + "; // comment\n";
+        files.write(root + "/src/f" + std::to_string(i) + ".cpp", text, nullptr);
+    }
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    auto cycle = [&]() {
+        CHECK(vm.openFolder(root));
+        vm.openFile("docs/guide.md");
+        vm.openFile("src/f3.cpp");
+        vm.openFile("src/f7.cpp");
+        vm.layers().scope.set(viewmodel::LayerScope::Project);
+        (void)vm.layers().nodes();
+        (void)vm.logicalMap().map();
+        vm.findInFiles().query = "value1";
+        vm.findInFiles().searchNow();
+        CHECK(vm.findInFiles().hitCount() > 0);
+        os::dispatch::pump();
+        vm.closeFolder();
+        os::dispatch::pump();
+    };
+    // Measuring must not move the needle: snapshots come from the accounting's static pool and
+    // are copied into plain records here; nothing on this path allocates.
+    using os::mem::Snapshot;
+    // A close gives everything back: after the second close and after the eighth, the total and
+    // every scope are byte-for-byte identical (the first cycle may fill process-lifetime tables).
+    cycle();
+    cycle();
+    const Snapshot after2 = os::mem::snapshot();
+    for (int i = 0; i < 6; ++i)
+        cycle();
+    const Snapshot after8 = os::mem::snapshot();
+    for (int i = 0; i < after8.count; ++i) {
+        const std::uint64_t before = i < after2.count ? after2.scopes[i].liveBytes : 0;
+        if (after8.scopes[i].liveBytes != before)
+            std::printf("    scope %s: %llu bytes after cycle 2, %llu after cycle 8\n", after8.scopes[i].name, (unsigned long long)before,
+                        (unsigned long long)after8.scopes[i].liveBytes);
+        CHECK(after8.scopes[i].liveBytes == before);
+    }
+    CHECK_EQ(after8.total.liveBytes, after2.total.liveBytes);
+    CHECK_EQ(after8.total.liveBlocks, after2.total.liveBlocks);
+}
+
+TEST(measurement_pool_is_a_fixed_first_fit_manager)
+{
+    // Measuring must not use the heap it measures: snapshots and traces live in a fixed pool with
+    // its own manager. Blocks come 16-byte aligned, free blocks merge, and exhaustion is a nullptr.
+    namespace pool = os::mem::pool;
+    const pool::Usage before = pool::usage();
+    CHECK(before.capacity >= (1u << 20));
+    void* a = pool::allocate(100);
+    void* b = pool::allocate(1000);
+    void* c = pool::allocate(10);
+    CHECK(a && b && c);
+    CHECK(reinterpret_cast<std::uintptr_t>(a) % 16 == 0 && reinterpret_cast<std::uintptr_t>(b) % 16 == 0);
+    CHECK_EQ(pool::usage().blocks, before.blocks + 3);
+    CHECK(pool::usage().used >= before.used + 1110);
+    std::memset(b, 0xAB, 1000); // ours to use
+    pool::release(b);
+    pool::release(a); // a and b merge: a block of at least 1100 bytes fits where they were
+    void* d = pool::allocate(1100);
+    CHECK(d == a);
+    pool::release(d);
+    pool::release(c);
+    CHECK_EQ(pool::usage().blocks, before.blocks);
+    CHECK_EQ(pool::usage().used, before.used);
+    CHECK(pool::allocate(before.capacity) == nullptr); // no heap fallback
+    pool::release(nullptr);                            // harmless
+    const os::mem::Snapshot& s1 = os::mem::snapshot(); // snapshots come from the pool, not the heap
+    const os::mem::Stats heapBefore = os::mem::stats();
+    for (int i = 0; i < 3 * os::mem::kSnapshotPool; ++i)
+        (void)os::mem::snapshot();
+    CHECK_EQ(os::mem::stats().liveBlocks, heapBefore.liveBlocks);
+    CHECK(s1.count >= 1);
+}
+
+TEST(closing_a_folder_stops_the_agent_dissection_of_it)
+{
+    // A late answer about a closed folder must not land in the next one (its map, its cache).
+    struct SlowAgent : interfaces::IAgentCliService {
+        std::function<void(bool, const std::string&)> pending;
+        int cancels = 0;
+        bool available() const override { return true; }
+        std::string command() const override { return "fake-agent"; }
+        void run(const std::string&, const std::string&, std::function<void(bool, const std::string&)> done) override { pending = std::move(done); }
+        void cancel() override { ++cancels; }
+    } agent;
+    services::FileService files;
+    const std::string a = scratchDirectory() + "/enp-test-dissect-a";
+    const std::string b = scratchDirectory() + "/enp-test-dissect-b";
+    os::fs::createDirectories(a + "/src");
+    os::fs::createDirectories(b + "/src");
+    files.write(a + "/src/x.cpp", "int a();\n", nullptr);
+    files.write(b + "/src/y.cpp", "int b();\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files, &agent);
+    CHECK(vm.openFolder(a));
+    vm.logicalMap().dissectWithAgent();
+    CHECK(vm.logicalMap().analyzing.get() && agent.pending);
+    CHECK(vm.openFolder(b));
+    CHECK(!vm.logicalMap().analyzing.get());
+    CHECK_EQ(agent.cancels, 1);
+    const size_t nodes = vm.logicalMap().map().nodes.size();
+    if (agent.pending)
+        agent.pending(true, "{\"features\": [{\"name\": \"Stale\", \"summary\": \"from folder a\"}]}");
+    CHECK_EQ(vm.logicalMap().map().nodes.size(), nodes); // ignored
+    CHECK(!os::fs::exists(b + "/.easynotepad/logical-map.json"));
+}
+
+TEST(refreshing_the_map_writes_nothing_into_a_folder_without_a_cache)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-refresh-map";
+    os::fs::deletePath(root); // a previous run leaves the cache of the second half behind
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/a.cpp", "int a();\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    vm.logicalMap().refresh();
+    CHECK(!os::fs::exists(root + "/.easynotepad"));
+    // With an agent's cache, the refresh clears it.
+    os::fs::createDirectories(root + "/.easynotepad");
+    files.write(root + "/.easynotepad/logical-map.json", "{\"source\": \"agent\"}", nullptr);
+    vm.logicalMap().refresh();
+    CHECK(files.read(root + "/.easynotepad/logical-map.json").value_or("x").empty());
+}
+
+TEST(new_terminals_start_in_the_open_folder_else_at_home)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-terminal-folder";
+    os::fs::createDirectories(root);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    const std::string home = files.homeDirectory();
+    CHECK(!home.empty());
+    CHECK_EQ(vm.terminal().workingDirectory(), home); // no folder yet
+    CHECK(vm.openFolder(root));
+    CHECK_EQ(vm.terminal().workingDirectory(), files.absolute(root));
+    vm.closeFolder();
+    CHECK_EQ(vm.terminal().workingDirectory(), home);
+}
+
+TEST(ribbon_tabs_are_arranged_per_workspace_saved_and_restored)
+{
+    using viewmodel::RibbonTabSetting;
+    using viewmodel::WorkspaceMode;
+    services::FileService files;
+    const std::string dir = scratchDirectory() + "/enp-test-ribbon";
+    const std::string path = dir + "/store.json";
+    os::fs::createDirectories(dir);
+    std::remove(path.c_str());
+    {
+        viewmodel::NotepadViewModel vm(nullptr, &files);
+        vm.setSettingsPath(path);
+        CHECK(vm.ribbonTabs(WorkspaceMode::Code).empty()); // the built-in layout
+        const int before = vm.ribbonRevision();
+        // Git first, Read and Review hidden, for the Code workspace only.
+        vm.setRibbonTabs(WorkspaceMode::Code, {{"Git", true}, {"Home", true}, {"Read", false}, {"Review", false}});
+        CHECK(vm.ribbonRevision() > before);
+        const int same = vm.ribbonRevision();
+        vm.setRibbonTabs(WorkspaceMode::Code, {{"Git", true}, {"Home", true}, {"Read", false}, {"Review", false}});
+        CHECK_EQ(vm.ribbonRevision(), same); // nothing changed: no rebuild
+        CHECK(vm.ribbonTabs(WorkspaceMode::Agent).empty());
+        // Pinned commands keep the order they are given (start from none: some are pinned by default).
+        const std::vector<CommandId> defaults = vm.pinnedCommands();
+        for (CommandId id : defaults)
+            vm.setPinned(id, false);
+        vm.setPinned(CommandId::FindInFiles, true);
+        vm.setPinned(CommandId::GoToLine, true);
+        vm.movePinned(CommandId::GoToLine, -1);
+        CHECK(vm.pinnedCommands().size() == 2 && vm.pinnedCommands()[0] == CommandId::GoToLine);
+        vm.tick(100.0);
+        vm.tick(101.0);
+        CHECK(files.read(path)->find("\"tabs\"") != std::string::npos);
+    }
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    vm.setSettingsPath(path);
+    const std::vector<RibbonTabSetting>& code = vm.ribbonTabs(WorkspaceMode::Code);
+    CHECK(code.size() == 4 && code[0].name == "Git" && !code[2].visible && code[3].name == "Review" && !code[3].visible);
+    CHECK(vm.pinnedCommands().size() == 2 && vm.pinnedCommands()[0] == CommandId::GoToLine);
+    vm.restoreRibbonTabs(WorkspaceMode::Code);
+    CHECK(vm.ribbonTabs(WorkspaceMode::Code).empty());
+    vm.tick(200.0);
+    vm.tick(201.0);
+    CHECK(files.read(path)->find("\"tabs\"") == std::string::npos); // the default is not written at all
+    std::remove(path.c_str());
+}
+
+namespace {
+model::bin::Image readBinaryFixture(const std::string& name, std::string* bytes = nullptr)
+{
+    const std::string path = std::string(ENP_SOURCE_DIR) + "/tests/data/binary/" + name;
+    const std::string data = os::fs::readFile(path).value_or(std::string());
+    if (bytes)
+        *bytes = data;
+    return model::bin::read(
+        [&data](std::uint64_t offset, size_t size, std::string& out) {
+            out = offset < data.size() ? data.substr(size_t(offset), size) : std::string();
+            return true;
+        },
+        data.size());
+}
+const model::bin::Symbol* findSymbol(const model::bin::Image& img, std::string_view shown)
+{
+    for (const model::bin::Symbol& s : img.symbols)
+        if (img.text(s.shown) == shown)
+            return &s;
+    return nullptr;
+}
+std::string overviewValue(const model::bin::Image& img, std::string_view key)
+{
+    for (const model::bin::Property& p : img.overview)
+        if (img.text(p.key) == key)
+            return std::string(img.text(p.value));
+    return {};
+}
+} // namespace
+
+TEST(names_are_demangled_and_marked_by_scheme)
+{
+    namespace bin = model::bin;
+    bin::Mangling m = bin::Mangling::None;
+    CHECK_EQ(bin::demangle("_ZN3foo3barEv", &m), std::string("foo::bar()"));
+    CHECK(m == bin::Mangling::Itanium);
+    CHECK_EQ(bin::demangle("__ZN3foo3barEv", &m), std::string("foo::bar()")); // the platform's extra underscore
+    CHECK_EQ(bin::demangle("_ZN3foo3barEv@@VERS_1", &m), std::string("foo::bar()@@VERS_1")); // an ELF version stays
+    CHECK_EQ(bin::demangle("?area@Widget@@QEBAHHH@Z", &m), std::string("public: int __cdecl Widget::area(int, int) const"));
+    CHECK(m == bin::Mangling::Microsoft);
+    CHECK_EQ(bin::demangle("__imp_?counter@@3HA", &m), std::string("__imp_ int counter"));
+    CHECK_EQ(bin::demangle("_RNvC7mycrate3foo", &m), std::string("mycrate::foo"));
+    CHECK(m == bin::Mangling::Rust);
+    CHECK(!bin::demangle("_ZN4core3fmt5write17h0123456789abcdefE", &m).empty() && m == bin::Mangling::Rust); // legacy Rust
+    // C names are not mangled, even when they look a little like it.
+    CHECK(bin::demangle("printf", &m).empty() && m == bin::Mangling::None);
+    CHECK(bin::demangle("_ZombifyActCtx@4", &m).empty() && m == bin::Mangling::None); // 32-bit Windows C name
+    CHECK(bin::demangle("_RTC_CheckEsp", &m).empty() && m == bin::Mangling::None);
+    // Mangled, but in a form the demangler does not know: marked, shown as stored.
+    CHECK(bin::demangle("_ZGTtdlPv", &m).empty() && m == bin::Mangling::Itanium);
+}
+
+TEST(libraries_list_functions_imports_sections_and_characteristics)
+{
+    namespace bin = model::bin;
+    using model::FileKind;
+    std::string bytes;
+    {   // Linux shared library
+        const bin::Image so = readBinaryFixture("libfixture.so", &bytes);
+        CHECK(so.error.empty());
+        CHECK(so.format == bin::Format::Elf && so.summary == "ELF 64-bit shared library, x86-64");
+        CHECK(model::detectFileType("libfixture.so", bytes).format == "ELF shared library");
+        CHECK_EQ(overviewValue(so, "SONAME"), std::string("libfixture.so.1"));
+        const bin::Symbol* area = findSymbol(so, "sample::Widget::area(int, int) const");
+        CHECK(area && area->side == bin::Side::Export && area->kind == bin::SymbolKind::Function && area->demangled &&
+              area->mangling == bin::Mangling::Itanium && area->size > 0 && area->offset != bin::kNone);
+        const bin::Symbol* counter = findSymbol(so, "sample::counter");
+        CHECK(counter && counter->kind == bin::SymbolKind::Data && counter->size == 4 && so.text(counter->section) == ".data");
+        const bin::Symbol* plain = findSymbol(so, "plain_add");
+        CHECK(plain && plain->mangling == bin::Mangling::None && !plain->demangled);
+        // The bytes at the offset are the function's (its file offset is inside .text).
+        bool inText = false;
+        for (const bin::Section& sec : so.sections)
+            if (so.text(sec.name) == ".text")
+                inText = plain && plain->offset >= sec.offset && plain->offset < sec.offset + sec.fileSize && sec.execute;
+        CHECK(inText);
+        const bin::Symbol* tick = findSymbol(so, "tick");
+        CHECK(tick && tick->side == bin::Side::Import);
+        bool functions = false;
+        for (const bin::ListNode& n : so.lists)
+            functions = functions || (so.text(n.title) == "Exported functions" && n.count == 3);
+        CHECK(functions);
+    }
+    {   // Windows DLL: exports by name and ordinal, a forwarder, imports and delay-loaded imports
+        const bin::Image dll = readBinaryFixture("fixture.dll", &bytes);
+        CHECK(dll.error.empty());
+        CHECK_EQ(dll.summary, std::string("PE32+ DLL, x86-64"));
+        CHECK(model::detectFileType("fixture.dll", bytes).format == "Windows DLL");
+        CHECK_EQ(overviewValue(dll, "Export name"), std::string("fixture.dll"));
+        const bin::Symbol* area = findSymbol(dll, "public: int __cdecl sample::Widget::area(int, int) const");
+        CHECK(area && area->mangling == bin::Mangling::Microsoft && dll.text(area->name) == "?area@Widget@sample@@QEBAHHH@Z" &&
+              area->ordinal != bin::kNoIndex && area->address != bin::kNone && area->offset != bin::kNone);
+        const bin::Symbol* counter = findSymbol(dll, "int sample::counter");
+        CHECK(counter && counter->kind == bin::SymbolKind::Data);
+        const bin::Symbol* forwarded = findSymbol(dll, "forwarded");
+        CHECK(forwarded && dll.text(forwarded->detail) == "→ NTDLL.RtlGetVersion" && forwarded->address == bin::kNone);
+        const bin::Symbol* byOrdinal = findSymbol(dll, "#40");
+        CHECK(byOrdinal && byOrdinal->ordinal == 40);
+        const bin::Symbol* plain = findSymbol(dll, "plain_add");
+        CHECK(plain && plain->size > 0); // from the x64 unwind table
+        const bin::Symbol* tick = findSymbol(dll, "GetTickCount");
+        CHECK(tick && tick->side == bin::Side::Import && dll.text(dll.libraries[tick->library].name) == "KERNEL32.dll" && !tick->delayed);
+        const bin::Symbol* beep = findSymbol(dll, "MessageBeep");
+        CHECK(beep && beep->delayed && dll.text(dll.libraries[beep->library].name) == "USER32.dll");
+        bool delayedNode = false;
+        for (const bin::ListNode& n : dll.lists)
+            delayedNode = delayedNode || (dll.text(n.title) == "USER32.dll (delay-loaded)" && n.count == 1);
+        CHECK(delayedNode);
+        CHECK_EQ(overviewValue(dll, "ASLR (dynamic base)"), std::string("Yes"));
+    }
+    {   // COFF object
+        const bin::Image obj = readBinaryFixture("fixture.obj", &bytes);
+        CHECK(obj.format == bin::Format::Coff && obj.error.empty());
+        CHECK(model::detectFileType("fixture.obj", bytes).format == "COFF object file");
+        const bin::Symbol* imp = findSymbol(obj, "__imp_GetTickCount");
+        CHECK(imp && imp->side == bin::Side::Import);
+        const bin::Symbol* area = findSymbol(obj, "public: int __cdecl sample::Widget::area(int, int) const");
+        CHECK(area && area->side == bin::Side::Export && area->kind == bin::SymbolKind::Function);
+    }
+    {   // Windows import library (short import entries)
+        const bin::Image lib = readBinaryFixture("fixture.lib", &bytes);
+        CHECK(lib.format == bin::Format::Archive && lib.summary == "Windows import library");
+        CHECK(model::detectFileType("fixture.lib", bytes).format == "static library");
+        const bin::Symbol* plain = findSymbol(lib, "plain_add");
+        CHECK(plain && lib.text(plain->detail) == "fixture.dll" && plain->member != bin::kNoIndex);
+        const bin::Symbol* byOrdinal = findSymbol(lib, "by_ordinal");
+        CHECK(byOrdinal && byOrdinal->ordinal == 40);
+        CHECK(lib.libraries.size() == 1 && lib.text(lib.libraries[0].name) == "fixture.dll");
+    }
+    {   // GNU static library
+        const bin::Image a = readBinaryFixture("libfixture.a");
+        CHECK(a.format == bin::Format::Archive && a.members.size() == 1 && a.text(a.members[0].name) == "fixture.o");
+        const bin::Symbol* area = findSymbol(a, "sample::Widget::area(int, int) const");
+        CHECK(area && area->member == 0 && area->side == bin::Side::Export);
+        bool memberNode = false;
+        for (const bin::ListNode& n : a.lists)
+            memberNode = memberNode || (n.member == 0 && n.count == a.members[0].symbols && n.count > 0);
+        CHECK(memberNode);
+    }
+}
+
+TEST(damaged_libraries_are_read_without_crashing)
+{
+    // Every prefix of each fixture, and copies with bytes overwritten: the reader stops at what
+    // is missing or wrong and never reads outside the file.
+    for (const char* name : {"libfixture.so", "fixture.dll", "fixture.obj", "fixture.lib", "libfixture.a"}) {
+        std::string bytes;
+        readBinaryFixture(name, &bytes);
+        CHECK(!bytes.empty());
+        auto readBytes = [](const std::string& data) {
+            return model::bin::read(
+                [&data](std::uint64_t offset, size_t size, std::string& out) {
+                    out = offset < data.size() ? data.substr(size_t(offset), size) : std::string();
+                    return true;
+                },
+                data.size());
+        };
+        for (size_t n = 0; n < bytes.size(); n += 37)
+            readBytes(bytes.substr(0, n));
+        std::uint32_t seed = 12345;
+        for (int round = 0; round < 300; ++round) {
+            std::string copy = bytes;
+            for (int k = 0; k < 8; ++k) {
+                seed = seed * 1103515245u + 12345u;
+                const size_t at = 4 + (seed >> 8) % (copy.size() - 4); // keep the magic, damage the rest
+                seed = seed * 1103515245u + 12345u;
+                copy[at] = char(seed >> 16);
+            }
+            readBytes(copy);
+        }
+    }
+}
+
+TEST(source_rules_no_raw_allocation_outside_the_os_layer)
+{
+    // docs/MEMORY.md rule 1: ownership is a value, a container or a smart pointer. Only src/os
+    // (the C API wrappers) may call new, delete, malloc or free.
+    std::vector<std::string> violations;
+    const std::regex pattern(R"((^|[^A-Za-z0-9_])(new|delete)\s+[A-Za-z_(\[]|(^|[^A-Za-z0-9_])(malloc|calloc|realloc|free)\s*\()");
+    auto scan = [&](auto&& self, const std::string& dir) -> void {
+        for (const os::fs::DirEntry& e : os::fs::listDirectory(dir)) {
+            const std::string path = dir + "/" + e.name;
+            if (e.isDirectory) {
+                if (e.name != "os")
+                    self(self, path);
+                continue;
+            }
+            const size_t dot = e.name.find_last_of('.');
+            const std::string ext = dot == std::string::npos ? "" : e.name.substr(dot);
+            if (ext != ".cpp" && ext != ".h")
+                continue;
+            const std::optional<std::string> text = os::fs::readFile(path);
+            if (!text)
+                continue;
+            size_t start = 0;
+            int lineNo = 0;
+            while (start < text->size()) {
+                size_t end = text->find('\n', start);
+                if (end == std::string::npos)
+                    end = text->size();
+                ++lineNo;
+                std::string line = text->substr(start, end - start);
+                start = end + 1;
+                // Drop string literals and line comments: the words matter only in code.
+                std::string code;
+                bool inString = false;
+                for (size_t i = 0; i < line.size(); ++i) {
+                    const char c = line[i];
+                    if (inString) {
+                        if (c == '\\')
+                            ++i;
+                        else if (c == '"')
+                            inString = false;
+                        continue;
+                    }
+                    if (c == '"') {
+                        inString = true;
+                        continue;
+                    }
+                    if (c == '/' && i + 1 < line.size() && line[i + 1] == '/')
+                        break;
+                    code += c;
+                }
+                const size_t first = code.find_first_not_of(" \t");
+                if (first != std::string::npos && (code[first] == '*' || code.compare(first, 2, "/*") == 0))
+                    continue; // a block comment's line
+                if (std::regex_search(code, pattern))
+                    violations.push_back(path + ":" + std::to_string(lineNo) + ": " + line);
+            }
+        }
+    };
+    const std::string source = ENP_SOURCE_DIR;
+    scan(scan, source + "/src");
+    scan(scan, source + "/include/enp");
+    for (const std::string& v : violations)
+        std::printf("    raw allocation: %s\n", v.c_str());
+    CHECK(violations.empty());
 }
 
 int main(int argc, char** argv)

@@ -39,6 +39,37 @@ bool lessCaseInsensitive(const std::string& a, const std::string& b)
 
 } // namespace
 
+std::optional<std::string> readFileRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total)
+{
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return std::nullopt;
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) {
+        ::close(fd);
+        return std::nullopt;
+    }
+    const std::uint64_t length = std::uint64_t(st.st_size);
+    if (total)
+        *total = length;
+    std::string data;
+    if (offset < length) {
+        data.resize(size_t(std::min<std::uint64_t>(size, length - offset)));
+        size_t got = 0;
+        while (got < data.size()) {
+            const ssize_t n = ::pread(fd, data.data() + got, data.size() - got, off_t(offset + got));
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n <= 0)
+                break;
+            got += size_t(n);
+        }
+        data.resize(got);
+    }
+    ::close(fd);
+    return data;
+}
+
 std::optional<std::string> readFile(const std::string& path, std::string* error)
 {
     int fd = ::open(path.c_str(), O_RDONLY);
@@ -126,7 +157,7 @@ std::vector<DirEntry> listDirectory(const std::string& p, size_t limit, bool* mo
     }
     while (dirent* d = ::readdir(dir)) {
         std::string name = d->d_name;
-        if (name == "." || name == ".." || name[0] == '.')
+        if (name == "." || name == "..")
             continue;
         if (limit > 0 && entries.size() >= limit) {
             if (more)
@@ -135,7 +166,7 @@ std::vector<DirEntry> listDirectory(const std::string& p, size_t limit, bool* mo
         }
         // The directory itself usually says what an entry is: a stat() per entry made listing a
         // large folder slow. Links and unknown types are still resolved (a dangling link is skipped).
-        DirEntry e{name, false, 0};
+        DirEntry e{name, false, name[0] == '.', 0};
 #if defined(DT_DIR) && defined(DT_REG)
         if (d->d_type == DT_DIR)
             e.isDirectory = true;

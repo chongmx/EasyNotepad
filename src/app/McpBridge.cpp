@@ -135,6 +135,16 @@ std::optional<Json> McpSession::handle(const Json& message)
         const std::optional<Json> result = forward_(name, arguments, &error);
         if (!result)
             return rpcResult(id, Json::object().set("content", textContent(error)).set("isError", true));
+        if (const Json* png = result->find("png_base64"); png && png->isString()) {
+            // A screenshot: the picture as an image, the rest (size, where it was saved) as text.
+            Json content = Json::array();
+            content.push(Json::object().set("type", "image").set("data", png->asString()).set("mimeType", "image/png"));
+            Json details = Json::object().set("width", result->getNumber("width")).set("height", result->getNumber("height"));
+            if (!result->getString("path").empty())
+                details.set("path", result->getString("path"));
+            content.push(Json::object().set("type", "text").set("text", details.dump()));
+            return rpcResult(id, Json::object().set("content", std::move(content)).set("isError", false));
+        }
         return rpcResult(id, Json::object().set("content", textContent(result->dump())).set("isError", false));
     }
     return rpcError(id, -32601, "method not found: " + method);

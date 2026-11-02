@@ -4,6 +4,10 @@ plugins {
 
 android {
     namespace 'com.easynotepad.app'
+    // The emoji pack is read in parts (AAsset_seek): it must be stored, not deflated, in the APK.
+    androidResources {
+        noCompress += ['zip']
+    }
     compileSdk 35
     // Another installed NDK release can be used with -PndkVersion=<its Pkg.Revision>.
     if (project.hasProperty('ndkVersion'))

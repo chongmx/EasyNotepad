@@ -6,6 +6,8 @@
 #include "enp/model/Git.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/LayersView.h"
+#include "enp/view/DataViews.h"
+#include "enp/view/LibraryView.h"
 #include "enp/view/MarkdownView.h"
 
 #include "imgui_internal.h" // ImRect
@@ -26,11 +28,17 @@ public:
     // Find bar (when visible) plus the text area, filling `size`.
     void render(ImVec2 size);
     void focus() { focusRequested_ = true; }
+    void setEmoji(EmojiCache* emoji) { emoji_ = emoji; } // pictures for emoji in rendered Markdown
+    const DataViews& dataViews() const { return data_; }
+    const LibraryView& libraryView() const { return library_; }
     // A phone layout: no side bar (layers, minimap); the text gets the whole width.
     void setCompact(bool compact) { compact_ = compact; }
     // Rendered-Markdown states held (one per open Markdown document; tests check that closed
     // documents release theirs).
     size_t renderedMarkdownCount() const { return markdown_.size(); }
+    // Image textures alive or awaiting the backend's destruction (0 once every Markdown document closed).
+    size_t imageTextureCount() const { return images_.liveCount() + images_.pendingCount(); }
+    size_t imageDocumentCount() const { return fileImages_.size(); }
 
 private:
     // One visual row: a whole line, a wrapped piece of it, or the summary of a folded region.
@@ -64,6 +72,8 @@ private:
     void renderEmptyState(ImVec2 size);
     // A Markdown document shown formatted (read-only); double-click or the Edit button for the text.
     void renderMarkdown(model::Document& doc, ImVec2 size);
+    // Image and binary documents: the image (fit or actual size), or a notice with "Open as text".
+    void renderFileView(model::Document& doc, ImVec2 size);
     // The Rendered / Edit switch at the top right of a Markdown document; returns its rectangle.
     void markdownSwitch(model::Document& doc, ImVec2 topRight);
     static ImRect markdownSwitchRect(ImVec2 topRight, float scale);
@@ -111,8 +121,22 @@ private:
         uint64_t revision = UINT64_MAX;
         std::string text;
         bool shown = false; // shown last frame (entering it scrolls to the caret's line)
+        // Images this document acquired from images_ (released when it closes or its text changes).
+        struct HeldImage {
+            std::string key; // the cache's key (a resolved path, or the URL)
+            const MarkdownImage* image = nullptr;
+        };
+        std::map<std::string, HeldImage> images; // by source as written
     };
     std::map<int, RenderedMarkdown> markdown_; // by document id (open documents only)
+    MarkdownImages images_;                     // shared by the documents, destroyed when unused
+    EmojiCache* emoji_ = nullptr;               // owned by MainView
+    DataViews data_;                            // CSV table, JSON/YAML tree and accordion
+    LibraryView library_;                       // what a .so, .dll, .a or .lib contains
+    std::map<int, RenderedMarkdown::HeldImage> fileImages_; // image documents' images, by document id
+    bool imageFit_ = true;                      // image documents: fit the window, else actual size
+    void releaseImages(RenderedMarkdown& md);
+    const MarkdownImage* loadImage(RenderedMarkdown& md, const model::Document& doc, const std::string& source);
     // The text and the rendered Markdown are drawn in one child window each, shared by all
     // documents (Dear ImGui never frees a window: one per document would accumulate for as long
     // as the app runs). A document's scroll is kept here and restored when it is shown again.
