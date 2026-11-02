@@ -55,6 +55,10 @@ enum class CommandId {
     ShowGitStatus,
     // Agent (appended)
     LocalModel,
+    // Editing (appended): multiple carets and VS Code's line commands
+    AddNextOccurrence, SelectAllOccurrences, AddCursorAbove, AddCursorBelow, CursorsAtLineEnds, CopyLineUp,
+    // File and panels (appended)
+    OpenRecent, FocusTerminal, OpenWorkspace,
     // IntelliSense (appended)
     TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex, NavigateBack, NavigateForward,
 

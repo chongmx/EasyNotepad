@@ -295,6 +295,10 @@ void IntellisenseViewModel::trigger()
         return;
     if (active_)
         dismiss();
+    if (doc->multiCursor()) { // each caret has its own word: one list cannot complete them all
+        status("Suggestions work with one caret (Esc goes back to one)");
+        return;
+    }
     start(true);
 }
 
@@ -303,7 +307,8 @@ void IntellisenseViewModel::typed(std::string_view text)
     if (active_ || !autoComplete.get() || text.empty())
         return;
     const model::Document* doc = owner_.activeDocument();
-    if (!doc || doc->kind != model::FileKind::Text || doc->hasSelection() || doc->language == model::Language::PlainText)
+    if (!doc || doc->kind != model::FileKind::Text || doc->hasSelection() || doc->multiCursor() ||
+        doc->language == model::Language::PlainText)
         return;
     if (model::languageSpec(doc->language).lexer != model::Lexer::Code)
         return;
@@ -389,7 +394,7 @@ void IntellisenseViewModel::sync()
     if (doc->revision == revision_ && doc->caret == caret_)
         return;
     const model::TextPos caret = doc->caret;
-    if (doc->hasSelection() || caret.line != anchor_.line || caret.column < anchor_.column || anchor_.line >= doc->buffer.lineCount()) {
+    if (doc->hasSelection() || doc->multiCursor() || caret.line != anchor_.line || caret.column < anchor_.column || anchor_.line >= doc->buffer.lineCount()) {
         dismiss();
         return;
     }

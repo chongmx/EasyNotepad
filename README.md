@@ -64,6 +64,15 @@ shell (PowerShell, cmd, Git Bash, WSL, bash, zsh) in a VS Code-style bottom pane
 terminal programs such as `top`, `htop` and `vim` work (xterm-compatible emulator, alternate
 screen, colours, mouse-free keys), and the terminal can **pop out** into its own window.
 
+**VS Code editing keys**: several carets at once (**Alt+click** adds one, **Ctrl+Alt+Up/Down** adds
+one above or below, **Shift+Alt+drag** or a middle-button drag selects a column), **Ctrl+D** adds the
+next occurrence of the selection, **Ctrl+Shift+L** selects every occurrence, **Shift+Alt+I** puts a
+caret at the end of each selected line; typing, Backspace, Delete, Enter, Tab, paste and the line
+commands act at every caret, and Escape goes back to one. **Alt+Up/Down** moves lines,
+**Shift+Alt+Up/Down** copies them, **Ctrl+Shift+K** deletes them. **Ctrl+R** switches to a recent
+folder or file, **Ctrl+E** jumps to the terminal (and back), **Ctrl+W** closes the file and
+**Ctrl+Tab** goes to the next tab.
+
 Markdown files open **rendered** (Ctrl+Shift+V or a double-click to edit the text): headings,
 emphasis, code with syntax colours, lists and task lists, quotes, tables, links, **images**
 (`![alt](path)`, `<img src>`, data URLs; PNG, JPEG, GIF, BMP, TGA, PSD, PNM), HTML character
@@ -178,6 +187,9 @@ endpoint protected by a per-session token. Start the app with `--no-automation` 
 
 `EasyNotepad <folder> [files...]` opens a folder as the workspace (dropping a folder on the window
 works too); files are read from and saved to disk. Without a folder, a small sample project is shown.
+
+**File > Open Workspace** imports a VS Code workspace (`.code-workspace`) or a Visual Studio solution
+(`.sln`, `.slnx`); they can be given on the command line too. See [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Building
 

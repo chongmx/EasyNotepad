@@ -78,6 +78,7 @@ private:
     void renderPanelActions(float left, float right, float y, float height);
     void renderTerminalWindow(); // the popped-out terminal
     void renderLanguagePicker();
+    void renderRecentPicker(); // Ctrl+R
     void renderHashResult();
     void renderSaveChangesPrompt();
     void renderQuitPrompt();
@@ -187,6 +188,10 @@ private:
     bool openSyntaxColors_ = false;
     bool openLanguagePicker_ = false;
     std::string languageFilter_;
+    bool openRecentPicker_ = false;
+    std::string recentFilter_;
+    int recentSelected_ = 0;
+    int recentStep_ = 0; // Ctrl+R pressed again while the picker is open
     int syntaxColorsLanguage_ = -1; // index into model::languages(); -1 = all languages
     bool openAbout_ = false;
     int versionTaps_ = 0; // About: seven taps on the version turn on developer mode

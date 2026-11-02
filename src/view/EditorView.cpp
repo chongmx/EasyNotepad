@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <ctime>
 #include <unordered_set>
+#include <utility>
 
 namespace enp::view {
 
@@ -52,6 +53,23 @@ int visualColumn(const std::string& s, int byteColumn)
             ++v;
     }
     return v;
+}
+
+// The byte column at visual column `visual` (tabs expanded); the line's end when it is shorter.
+int byteColumnAt(const std::string& s, int visual)
+{
+    int v = 0;
+    int i = 0;
+    while (i < int(s.size())) {
+        const int next = s[size_t(i)] == '\t' ? (v / tabStop + 1) * tabStop : v + 1;
+        if (next > visual)
+            break;
+        v = next;
+        ++i;
+        while (i < int(s.size()) && model::isUtf8Continuation(s[size_t(i)]))
+            ++i;
+    }
+    return i;
 }
 
 void appendUtf8(std::string& out, unsigned c)
@@ -949,9 +967,19 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
             click = !touch::moved();
         }
     }
+    // Middle-button drag: column (box) selection, as Shift+Alt+drag.
+    if (hovered && !finger && !inGutter && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+        columnAnchor_ = hitTest(doc, io.MousePos, m);
+        columnAnchorVcol_ = mouseVcol(doc, io.MousePos, m, columnAnchor_);
+        columnButton_ = ImGuiMouseButton_Middle;
+        dragging_ = false;
+        updateColumnSelection(doc, m);
+    }
     if (hovered && click) {
         lastActivity_ = ImGui::GetTime();
         preferredVcol_ = -1.0f;
+        preferredVcols_.clear();
+        dragKeepsCursors_ = false;
         const TextPos pos = hitTest(doc, io.MousePos, m);
         if (hoveredRow && hoveredRow->fold >= 0) { // a summary: expand it
             dragging_ = false;
@@ -994,10 +1022,26 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
         } else if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             dragging_ = false;
             vm_.setSelection(doc.buffer.wordStart(pos), doc.buffer.wordEnd(pos));
+        } else if (io.KeyAlt && io.KeyShift && !finger) { // column (box) selection
+            dragging_ = false;
+            columnAnchor_ = pos;
+            columnAnchorVcol_ = mouseVcol(doc, io.MousePos, m, pos);
+            columnButton_ = ImGuiMouseButton_Left;
+            updateColumnSelection(doc, m);
+        } else if (io.KeyAlt && !finger) { // another caret (dragging selects from it)
+            vm_.addCursor(pos);
+            dragKeepsCursors_ = true;
+            dragging_ = true;
         } else {
             vm_.setCaret(pos, io.KeyShift);
             dragging_ = !finger; // a finger's drag scrolls instead
         }
+    }
+    if (columnButton_ >= 0) {
+        if (!ImGui::IsMouseDown(columnButton_))
+            columnButton_ = -1;
+        else
+            updateColumnSelection(doc, m);
     }
     if (!dragging_)
         return;
@@ -1005,7 +1049,7 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
         dragging_ = false;
         return;
     }
-    vm_.setCaret(hitTest(doc, io.MousePos, m), true);
+    vm_.setCaret(hitTest(doc, io.MousePos, m), true, dragKeepsCursors_);
     // Auto-scroll while dragging past the edges.
     if (io.MousePos.y < m.viewMin.y)
         ImGui::SetScrollY(ImGui::GetScrollY() - m.lineH);
@@ -1017,8 +1061,70 @@ void EditorView::handleMouse(const model::Document& doc, const Metrics& m, bool 
         ImGui::SetScrollX(std::max(0.0f, ImGui::GetScrollX() - m.charW * 2.0f));
 }
 
+float EditorView::mouseVcol(const model::Document& doc, ImVec2 mouse, const Metrics& m, TextPos pos) const
+{
+    // Past the end of a line the box goes on (VS Code's column selection); with word wrap, the
+    // visual column of the place hit.
+    if (vm_.wordWrap.get())
+        return float(visualColumn(doc.buffer.line(pos.line), pos.column));
+    return std::max(0.0f, std::round((mouse.x - m.origin.x) / m.charW));
+}
+
+void EditorView::updateColumnSelection(const model::Document& doc, const Metrics& m)
+{
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const TextPos pos = hitTest(doc, mouse, m);
+    const int from = std::min(columnAnchor_.line, pos.line);
+    const int to = std::max(columnAnchor_.line, pos.line);
+    const int v0 = int(columnAnchorVcol_);
+    const int v1 = int(mouseVcol(doc, mouse, m, pos));
+    const int left = std::min(v0, v1);
+    std::vector<model::Selection> selections;
+    for (int line = from; line <= to; ++line) {
+        const std::string& s = doc.buffer.line(line);
+        if (line != pos.line && left > 0 && visualColumn(s, int(s.size())) < left)
+            continue; // a short line the box does not reach
+        const model::Selection sel{{line, byteColumnAt(s, v0)}, {line, byteColumnAt(s, v1)}};
+        if (line == pos.line)
+            selections.insert(selections.begin(), sel); // the primary caret follows the mouse
+        else
+            selections.push_back(sel);
+    }
+    if (!selections.empty())
+        vm_.setSelections(std::move(selections));
+    lastActivity_ = ImGui::GetTime();
+    // Auto-scroll at the edges, as a drag does.
+    if (mouse.y < m.viewMin.y)
+        ImGui::SetScrollY(ImGui::GetScrollY() - m.lineH);
+    else if (mouse.y > m.viewMax.y)
+        ImGui::SetScrollY(ImGui::GetScrollY() + m.lineH);
+}
+
 void EditorView::moveVertical(const model::Document& doc, int delta, bool extend)
 {
+    if (doc.multiCursor()) {
+        // Every caret moves by rows, each keeping its own visual column across short lines.
+        std::vector<model::Selection> all = doc.selections();
+        if (preferredVcols_.size() != all.size())
+            preferredVcols_.assign(all.size(), -1.0f);
+        for (size_t i = 0; i < all.size(); ++i) {
+            model::Selection& sel = all[i];
+            const TextPos c = doc.buffer.clamp(sel.caret);
+            const int r = rowOf(c);
+            const Row& row = rows_[size_t(r)];
+            const std::string& s = doc.buffer.line(row.line);
+            if (preferredVcols_[i] < 0.0f)
+                preferredVcols_[i] = float(visualColumn(s, c.column) - visualColumn(s, row.begin));
+            const Row& t = rows_[size_t(std::clamp(r + delta, 0, int(rows_.size()) - 1))];
+            sel.caret = {t.line, columnAtX(doc, t, preferredVcols_[i])};
+            if (!extend)
+                sel.anchor = sel.caret;
+        }
+        vm_.setSelections(std::move(all));
+        if (vm_.cursorCount() != int(preferredVcols_.size()))
+            preferredVcols_.clear(); // carets met and merged
+        return;
+    }
     const int r = rowOf(doc.caret);
     const Row& row = rows_[size_t(r)];
     const std::string& s = doc.buffer.line(row.line);
@@ -1073,16 +1179,23 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         return !arrow && key != ImGuiKey_Enter && key != ImGuiKey_KeypadEnter && key != ImGuiKey_Tab && key != ImGuiKey_Escape;
     };
 
-    const bool altArrows = io.KeyAlt && !ctrl; // Alt+Left / Alt+Right: back and forward (global shortcuts)
+    // Every caret moves (several carets: Alt+click, Ctrl+D, Ctrl+Alt+Up/Down). Alt+Left and
+    // Alt+Right are Back and Forward (shortcuts), not caret moves.
+    const bool altArrows = io.KeyAlt && !ctrl;
     if (!altArrows && pressed(ImGuiKey_LeftArrow)) {
-        vm_.setCaret(!shift && doc.hasSelection() ? doc.selectionStart() : ctrl ? wordLeft(buffer, caret) : buffer.prev(caret), shift);
+        vm_.moveCarets([&](const model::Selection& sel) {
+            return !shift && !sel.empty() ? sel.start() : ctrl ? wordLeft(buffer, sel.caret) : buffer.prev(sel.caret);
+        }, shift);
         acted = horizontal = true;
     }
     if (!altArrows && pressed(ImGuiKey_RightArrow)) {
-        vm_.setCaret(!shift && doc.hasSelection() ? doc.selectionEnd() : ctrl ? wordRight(buffer, caret) : buffer.next(caret), shift);
+        vm_.moveCarets([&](const model::Selection& sel) {
+            return !shift && !sel.empty() ? sel.end() : ctrl ? wordRight(buffer, sel.caret) : buffer.next(sel.caret);
+        }, shift);
         acted = horizontal = true;
     }
-    if (!(ctrl && shift)) { // Ctrl+Shift+Up/Down move lines (global shortcut)
+    // Ctrl+Shift+Up/Down and Alt(+Shift/Ctrl)+Up/Down move lines, copy them or add carets (shortcuts).
+    if (!(ctrl && shift) && !io.KeyAlt) {
         if (keyFree(ImGuiKey_UpArrow) && pressed(ImGuiKey_UpArrow)) {
             if (ctrl)
                 ImGui::SetScrollY(ImGui::GetScrollY() - m.lineH);
@@ -1110,16 +1223,21 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         if (ctrl) {
             vm_.setCaret({0, 0}, shift);
         } else { // smart home: first non-blank, then column 0
-            const std::string& l = buffer.line(caret.line);
-            int first = 0;
-            while (first < int(l.size()) && isBlank(l[size_t(first)]))
-                ++first;
-            vm_.setCaret({caret.line, caret.column == first ? 0 : first}, shift);
+            vm_.moveCarets([&](const model::Selection& sel) {
+                const std::string& l = buffer.line(sel.caret.line);
+                int first = 0;
+                while (first < int(l.size()) && isBlank(l[size_t(first)]))
+                    ++first;
+                return TextPos{sel.caret.line, sel.caret.column == first ? 0 : first};
+            }, shift);
         }
         acted = horizontal = true;
     }
     if (pressed(ImGuiKey_End)) {
-        vm_.setCaret(ctrl ? buffer.end() : TextPos{caret.line, int(buffer.line(caret.line).size())}, shift);
+        if (ctrl)
+            vm_.setCaret(buffer.end(), shift);
+        else
+            vm_.moveCarets([&](const model::Selection& sel) { return TextPos{sel.caret.line, int(buffer.line(sel.caret.line).size())}; }, shift);
         acted = horizontal = true;
     }
     if (keyFree(ImGuiKey_Enter) && (pressed(ImGuiKey_Enter) || pressed(ImGuiKey_KeypadEnter))) {
@@ -1127,14 +1245,14 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         acted = horizontal = true;
     }
     if (pressed(ImGuiKey_Backspace)) {
-        if (ctrl && !doc.hasSelection())
-            vm_.setSelection(caret, wordLeft(buffer, caret));
+        if (ctrl) // a word at each caret without a selection
+            vm_.moveCarets([&](const model::Selection& sel) { return sel.empty() ? wordLeft(buffer, sel.caret) : sel.caret; }, true);
         vm_.backspace();
         acted = horizontal = true;
     }
     if (pressed(ImGuiKey_Delete)) {
-        if (ctrl && !doc.hasSelection())
-            vm_.setSelection(caret, wordRight(buffer, caret));
+        if (ctrl)
+            vm_.moveCarets([&](const model::Selection& sel) { return sel.empty() ? wordRight(buffer, sel.caret) : sel.caret; }, true);
         vm_.deleteForward();
         acted = horizontal = true;
     }
@@ -1150,6 +1268,8 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
     if (keyFree(ImGuiKey_Escape) && pressed(ImGuiKey_Escape)) {
         if (vm_.findVisible.get())
             vm_.findVisible.set(false);
+        else if (doc.multiCursor())
+            vm_.clearExtraCursors(); // back to the primary caret, as in VS Code
         else if (doc.hasSelection())
             vm_.setCaret(caret, false);
     }
@@ -1171,8 +1291,10 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
     if (acted) {
         lastActivity_ = ImGui::GetTime();
         revealCaret_ = true;
-        if (horizontal)
+        if (horizontal) {
             preferredVcol_ = -1.0f;
+            preferredVcols_.clear();
+        }
     }
 }
 
@@ -1222,8 +1344,25 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
     const std::vector<const model::ReviewFinding*> findings = vm_.review().findingsForFile(doc.path);
     const auto& matches = vm_.findMatches();
     const int currentMatch = vm_.currentMatch.get();
-    const TextPos selStart = doc.selectionStart();
-    const TextPos selEnd = doc.selectionEnd();
+    // Every caret with its selection, in document order (several with multiple carets).
+    // Kept in a member (drawn every frame); its room goes back once far fewer carets are left.
+    std::vector<model::Selection>& sels = drawSelections_;
+    if (sels.capacity() > 4 * (doc.cursors.size() + 1) + 64)
+        os::mem::release(sels);
+    sels.clear();
+    sels.push_back({doc.buffer.clamp(doc.anchor), doc.buffer.clamp(doc.caret)});
+    for (const model::Selection& sel : doc.cursors)
+        sels.push_back({doc.buffer.clamp(sel.anchor), doc.buffer.clamp(sel.caret)});
+    std::sort(sels.begin(), sels.end(), [](const model::Selection& a, const model::Selection& b) { return a.start() < b.start(); });
+    // The selections touching `line`: they do not overlap, so they are a run of the sorted list.
+    auto selectionsOn = [&sels](int line) {
+        auto first = std::lower_bound(sels.begin(), sels.end(), line,
+                                      [](const model::Selection& s, int l) { return s.end().line < l; });
+        auto last = first;
+        while (last != sels.end() && last->start().line <= line)
+            ++last;
+        return std::make_pair(first, last);
+    };
     int lastLine = -1;
 
     for (int r = firstRow; r <= lastRow; ++r) {
@@ -1243,7 +1382,11 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
         }
         const bool lastRowOfLine = r + 1 >= int(rows_.size()) || rows_[size_t(r + 1)].line != row.line;
 
-        if (row.line == doc.caret.line)
+        const auto [selFirst, selLast] = selectionsOn(row.line);
+        bool caretLine = false;
+        for (auto it = selFirst; it != selLast; ++it)
+            caretLine = caretLine || it->caret.line == row.line;
+        if (caretLine)
             dl->AddRectFilled(ImVec2(textLeft, y), ImVec2(m.viewMax.x, y + m.lineH), palette_.currentLine);
 
         for (int i = 0; i < int(matches.size()); ++i) {
@@ -1256,7 +1399,11 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
                               i == currentMatch ? palette_.findMatchCurrent : palette_.findMatch, 2.0f * s_);
         }
 
-        if (doc.hasSelection() && row.line >= selStart.line && row.line <= selEnd.line) {
+        for (auto it = selFirst; it != selLast; ++it) {
+            if (it->empty())
+                continue;
+            const TextPos selStart = it->start();
+            const TextPos selEnd = it->end();
             const int b = row.line == selStart.line ? std::max(selStart.column, row.begin) : row.begin;
             const int e = row.line == selEnd.line ? std::min(selEnd.column, row.end) : row.end;
             const bool pastEol = row.line < selEnd.line && lastRowOfLine;
@@ -1331,10 +1478,16 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
     // Caret
     const bool blinkOn = !vm_.blinkCaret.get() || std::fmod(ImGui::GetTime() - lastActivity_, 1.0) < 0.6;
     if (focused_ && blinkOn) {
-        const int r = rowOf(doc.caret);
-        if (r >= firstRow && r <= lastRow) {
+        const int firstLineShown = rows_[size_t(firstRow)].line;
+        const int lastLineShown = rows_[size_t(lastRow)].line;
+        for (const model::Selection& sel : sels) {
+            if (sel.caret.line < firstLineShown || sel.caret.line > lastLineShown)
+                continue;
+            const int r = rowOf(sel.caret);
+            if (r < firstRow || r > lastRow)
+                continue;
             const Row& caretRow = rows_[size_t(r)];
-            const float x = caretRow.fold >= 0 ? m.origin.x : std::floor(rowX(doc, caretRow, doc.caret.column, m));
+            const float x = caretRow.fold >= 0 ? m.origin.x : std::floor(rowX(doc, caretRow, sel.caret.column, m));
             const float y = m.origin.y + float(r) * m.lineH;
             dl->AddRectFilled(ImVec2(x, y + 2.0f * s_), ImVec2(x + std::max(1.5f, 2.0f * s_), y + m.lineH - 2.0f * s_), palette_.caret);
         }

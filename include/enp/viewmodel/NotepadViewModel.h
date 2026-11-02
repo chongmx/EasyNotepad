@@ -178,6 +178,8 @@ public:
     Event<std::string> gitShowCommitRequested; // a commit hash (blame): show it in History
     Event<std::string> gitFileHistoryRequested; // a repository path: its history in History
     Event<> quitRequested; // safe to quit now (nothing unsaved, or the user decided)
+    Event<> recentPickerRequested;  // Ctrl+R: the recent folders and files, to switch to one
+    Event<> terminalFocusRequested; // Ctrl+E: into the terminal (or back to the editor from it)
 
     // ---- Unsaved changes ---------------------------------------------------------------------
     // Closing a modified document or quitting with modified documents asks first. The view shows
@@ -257,6 +259,13 @@ public:
     void expandExplorer(const std::string& path); // reads the entries of a folder not scanned yet
     // Opens a real folder as the workspace (needs the file service); closes the sample documents.
     bool openFolder(const std::string& path);
+    // Imports a VS Code workspace (.code-workspace) or a Visual Studio solution (.sln, .slnx): opens
+    // its folder (a solution: the folder holding it and its projects), takes the workspace's
+    // indentation (editor.tabSize, editor.insertSpaces) for new and unindented files while the
+    // folder is open, and lists the other folders of a multi-root workspace under recent folders
+    // (Ctrl+R switches to them).
+    bool openWorkspaceFile(const std::string& path);
+    static bool isWorkspaceFile(const std::string& path);
     // Absolute root of the opened folder; empty while showing the sample workspace.
     const std::string& workspaceRoot() const { return workspaceRoot_; }
     // Text of a workspace file: the open document's (unsaved edits included), the file on disk,
@@ -270,11 +279,17 @@ public:
     bool writeWorkspaceFile(const std::string& path, const std::string& text);
 
     // ---- Editing (active document) -----------------------------------------------------
-    void setCaret(model::TextPos pos, bool extendSelection);
-    void setSelection(model::TextPos anchor, model::TextPos caret);
+    // Places the caret (one caret: other carets go, unless `keepCursors`).
+    void setCaret(model::TextPos pos, bool extendSelection, bool keepCursors = false);
+    void setSelection(model::TextPos anchor, model::TextPos caret); // one caret
     void selectAll();
+    // The selected text; with several carets, every non-empty selection in document order, one per line.
     std::string selectedText() const;
+    bool anySelection() const; // some caret has a selection
+    // Typing, Enter, Tab, Backspace, Delete and the line commands act at every caret.
     void insertText(std::string_view text); // replaces the selection
+    // Clipboard text: with as many carets as the text has lines, each caret gets one line (VS Code).
+    void paste(std::string_view text);
     void newline();                          // smart indent (or keeps the current line's indent)
     void insertIndent();                     // Tab: one level (a tab, or spaces to the next stop)
     void backspace();                        // in leading spaces: back to the previous stop
@@ -282,6 +297,24 @@ public:
     void deleteForward();
     void deleteSelection();
     void goToLine(int line); // 0-based
+
+    // ---- Multiple carets (VS Code) ---------------------------------------------------------
+    // Alt+click: another caret at `pos` (it becomes the primary one); on an existing caret, removes it.
+    void addCursor(model::TextPos pos);
+    // Ctrl+Alt+Up / Down: a caret on the line above the topmost (below the bottommost) caret.
+    void addCursorVertical(int direction);
+    // Ctrl+D: selects the word at the caret, then adds the next occurrence of the selection.
+    void addNextOccurrence();
+    // Ctrl+Shift+L: every occurrence of the selection (or of the word at the caret).
+    void selectAllOccurrences();
+    // Shift+Alt+I: a caret at the end of every selected line.
+    void cursorsAtLineEnds();
+    // Replaces every caret: the first selection is the primary one (column selection, automation).
+    void setSelections(std::vector<model::Selection> selections);
+    void clearExtraCursors(); // Escape: back to the primary caret
+    // Moves every caret: `move` gets a caret with its selection and returns where the caret goes.
+    void moveCarets(const std::function<model::TextPos(const model::Selection&)>& move, bool extendSelection);
+    int cursorCount() const; // carets in the active document (1 without a document)
     bool canUndo() const;
     size_t historyBytes() const; // text held by the active document's undo and redo steps
     bool canRedo() const;
@@ -478,6 +511,23 @@ private:
     void duplicateLines();
     void deleteLines();
     void moveLines(int direction);
+    void copyLines(int direction); // Shift+Alt+Up / Down: duplicate above (caret stays up) or below
+    // Several carets: runs `edit` once per caret, bottom to top, as one undo step (each caret in turn
+    // is the document's caret while it runs; `index` counts in document order). False with one caret:
+    // the caller then edits as usual.
+    bool forEachCursor(EditKind kind, const std::function<void(size_t index)>& edit);
+    // Several carets: runs a whole-line operation once per block of lines holding carets, bottom to
+    // top, as one undo step. Carets keep their place in their lines (all go to where the operation
+    // leaves the caret with `collapse`).
+    bool forEachLineBlock(const std::function<void()>& op, bool collapse = false);
+    // Ctrl+D: whole words only when the search started from a caret without a selection.
+    struct OccurrenceSearch {
+        int documentId = -1;
+        model::Selection word; // the word Ctrl+D selected
+    };
+    OccurrenceSearch occurrence_;
+    // Indentation a workspace file asked for: this folder only (not saved).
+    std::optional<model::IndentStyle> workspaceIndent_;
     void toggleComment();
     void trimTrailing();
     void toggleBookmark();

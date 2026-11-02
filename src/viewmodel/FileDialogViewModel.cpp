@@ -85,6 +85,9 @@ void FileDialogViewModel::load()
     for (const interfaces::DirectoryEntry& e : files_->list(folder_)) {
         if (e.hidden || (mode_ == FileDialogMode::OpenFolder && !e.isDirectory))
             continue;
+        if (mode_ == FileDialogMode::OpenWorkspace && !e.isDirectory && !NotepadViewModel::isWorkspaceFile(e.name))
+            continue; // only workspace files
+
         entries_.push_back({e.name, e.isDirectory});
     }
     std::stable_sort(entries_.begin(), entries_.end(), [](const Entry& a, const Entry& b) {
@@ -164,7 +167,7 @@ void FileDialogViewModel::choose(const Entry& entry, bool confirmNow)
 {
     if (entry.isDirectory) {
         goTo(entry.name);
-        if (mode_ == FileDialogMode::Open)
+        if (mode_ == FileDialogMode::Open || mode_ == FileDialogMode::OpenWorkspace)
             fileName.clear();
         return;
     }
@@ -195,6 +198,18 @@ bool FileDialogViewModel::confirm()
         goTo(path); // a typed folder: go there
         fileName.clear();
         return false;
+    }
+    if (mode_ == FileDialogMode::OpenWorkspace) {
+        if (!NotepadViewModel::isWorkspaceFile(path)) {
+            error.set("Choose a .code-workspace, .sln or .slnx file");
+            return false;
+        }
+        if (!owner_.openWorkspaceFile(path)) {
+            error.set(owner_.statusText.get());
+            return false;
+        }
+        visible.set(false);
+        return true;
     }
     if (mode_ == FileDialogMode::Open) {
         const std::optional<interfaces::FileStamp> stamp = files_ ? files_->stamp(path) : std::nullopt;

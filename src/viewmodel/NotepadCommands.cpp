@@ -38,7 +38,7 @@ void NotepadViewModel::initCommands()
 {
     using C = CommandId;
     auto hasDoc = [this]() { return activeDocument() != nullptr; };
-    auto hasSelection = [this]() { return activeDocument() && activeDocument()->hasSelection(); };
+    auto hasSelection = [this]() { return anySelection(); };
 
     set(C::NewFile, [this]() { newDocument(); });
     // The dialog starts in the active document's folder, else the workspace, else home.
@@ -51,6 +51,9 @@ void NotepadViewModel::initCommands()
     set(C::OpenFile, [this, startFolder]() { fileDialog_.show(FileDialogMode::Open, startFolder()); },
         [this]() { return files_ != nullptr; });
     set(C::CloseFolder, [this]() { requestCloseFolder(); }, [this]() { return !workspaceRoot_.empty(); });
+    set(C::OpenWorkspace, [this]() {
+        fileDialog_.show(FileDialogMode::OpenWorkspace, workspaceRoot_.empty() ? homeDirectory() : workspaceRoot_);
+    }, [this]() { return files_ != nullptr; });
     set(C::OpenFolder, [this]() {
         fileDialog_.show(FileDialogMode::OpenFolder, workspaceRoot_.empty() ? homeDirectory() : FileDialogViewModel::parent(workspaceRoot_));
     }, [this]() { return files_ != nullptr; });
@@ -94,6 +97,15 @@ void NotepadViewModel::initCommands()
     set(C::DeleteLine, [this]() { deleteLines(); }, hasDoc);
     set(C::MoveLineUp, [this]() { moveLines(-1); }, hasDoc);
     set(C::MoveLineDown, [this]() { moveLines(+1); }, hasDoc);
+    set(C::CopyLineUp, [this]() { copyLines(-1); }, hasDoc);
+    set(C::AddNextOccurrence, [this]() { addNextOccurrence(); }, hasDoc);
+    set(C::SelectAllOccurrences, [this]() { selectAllOccurrences(); }, hasDoc);
+    set(C::AddCursorAbove, [this]() { addCursorVertical(-1); }, hasDoc);
+    set(C::AddCursorBelow, [this]() { addCursorVertical(+1); }, hasDoc);
+    set(C::CursorsAtLineEnds, [this]() { cursorsAtLineEnds(); }, hasDoc);
+    set(C::OpenRecent, [this]() { recentPickerRequested.emit(); },
+        [this]() { return !recentFolders_.empty() || !recentFiles_.empty(); });
+    set(C::FocusTerminal, [this]() { terminalFocusRequested.emit(); });
     set(C::SortLines, [this]() {
         transformLines([](std::vector<std::string>& lines) { std::sort(lines.begin(), lines.end()); });
     }, hasDoc);

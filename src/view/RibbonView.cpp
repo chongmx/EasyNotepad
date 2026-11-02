@@ -133,7 +133,7 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
     static const std::vector<Tab> codeTabs = {
         {"Home",
          {
-             {"File", {C::NewFile, C::OpenFile, C::Save, C::CloseFile}, {C::SaveAs, C::SaveAll, C::OpenFolder}},
+             {"File", {C::NewFile, C::OpenFile, C::Save, C::CloseFile}, {C::SaveAs, C::SaveAll, C::OpenFolder, C::OpenWorkspace}},
              {"Clipboard", {C::Paste, C::Cut, C::Copy}, {C::SelectAll}},
              {"History", {C::Undo, C::Redo}, {}},
              {"Find", {C::Find, C::Replace, C::GoToLine}, {C::FindNext, C::FindPrevious, C::FindInFiles}},
@@ -142,7 +142,8 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
         {"Read", {std::begin(read), std::end(read)}},
         {"Edit",
          {
-             {"Lines", {C::DuplicateLine, C::DeleteLine, C::MoveLineUp, C::MoveLineDown}, {C::SortLines}},
+             {"Lines", {C::DuplicateLine, C::DeleteLine, C::MoveLineUp, C::MoveLineDown}, {C::CopyLineUp, C::SortLines}},
+             {"Carets", {C::AddNextOccurrence, C::SelectAllOccurrences, C::AddCursorAbove, C::AddCursorBelow}, {C::CursorsAtLineEnds}},
              {"Case", {C::UpperCase, C::LowerCase}, {}},
              {"Code", {C::ToggleComment, C::Indent, C::Outdent}, {C::TrimTrailing}},
              {"IntelliSense", {C::TriggerCompletion, C::GoToDefinition, C::ToggleAutoComplete},
@@ -181,7 +182,7 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
         {"Git", {std::begin(git), std::end(git)}},
         {"Files",
          {
-             {"File", {C::NewFile, C::OpenFile, C::Save}, {C::SaveAs, C::SaveAll, C::OpenFolder, C::CloseFile}},
+             {"File", {C::NewFile, C::OpenFile, C::Save}, {C::SaveAs, C::SaveAll, C::OpenFolder, C::OpenWorkspace, C::CloseFile}},
              {"History", {C::Undo, C::Redo}, {}},
              {"Find", {C::Find, C::GoToLine}, {C::Replace, C::FindInFiles}},
          }},

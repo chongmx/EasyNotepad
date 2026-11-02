@@ -86,6 +86,9 @@ private:
     void handleMouse(const model::Document& doc, const Metrics& m, bool hovered);
     void handleKeyboard(const model::Document& doc, const Metrics& m);
     void moveVertical(const model::Document& doc, int rows, bool extend);
+    // Column (box) selection: Shift+Alt+drag or a middle-button drag; one caret per line.
+    void updateColumnSelection(const model::Document& doc, const Metrics& m);
+    float mouseVcol(const model::Document& doc, ImVec2 mouse, const Metrics& m, model::TextPos pos) const;
     void drawRows(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
     void drawGutter(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
     void drawHoverTooltip(const model::Document& doc, const Metrics& m);
@@ -171,6 +174,12 @@ private:
     bool focusFind_ = false;
     bool dragging_ = false;
     float preferredVcol_ = -1.0f; // kept across vertical moves
+    std::vector<float> preferredVcols_; // the same for every caret, with several
+    std::vector<model::Selection> drawSelections_; // drawRows' carets, reused frame to frame
+    bool dragKeepsCursors_ = false;     // a drag after Alt+click extends the new caret only
+    int columnButton_ = -1;             // the mouse button of a column selection in progress
+    model::TextPos columnAnchor_;
+    float columnAnchorVcol_ = 0.0f;
     double lastActivity_ = 0.0;   // resets the caret blink
     std::string findBuffer_;
     std::string replaceBuffer_;
