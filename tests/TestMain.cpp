@@ -2945,6 +2945,55 @@ TEST(automation_endpoint_end_to_end)
     CHECK(!stoppedError.empty());
 }
 
+TEST(process_stats_read_this_process_and_a_trim_gives_freed_memory_back)
+{
+    // os::processStats() is what the status bar and the test bench read on a user's machine; on
+    // macOS it read 0 until it had its own branch. Every desktop platform CI tests must read this
+    // process, and on Linux and macOS a trim must give freed heap pages back to the system. The
+    // readings are printed so each CI job's log shows its platform's numbers.
+    auto show = [](const char* when, const os::ProcessStats& p) {
+        std::printf("    %-22s private %7llu KB  shared %6llu KB  resident %7llu KB  malloc %7llu/%7llu KB"
+                    "  graphics %6llu KB  compressed %6llu KB  threads %d  handles %d\n",
+                    when, (unsigned long long)(p.privateBytes >> 10), (unsigned long long)(p.sharedBytes >> 10),
+                    (unsigned long long)(p.residentBytes >> 10), (unsigned long long)(p.mallocInUseBytes >> 10),
+                    (unsigned long long)(p.mallocHeldBytes >> 10), (unsigned long long)(p.graphicsBytes >> 10),
+                    (unsigned long long)(p.compressedBytes >> 10), p.threads, p.handles);
+    };
+    const os::ProcessStats start = os::processStats();
+    show("start", start);
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+    CHECK(start.privateBytes > 0);
+    CHECK(start.residentBytes > 0);
+    CHECK(start.threads >= 1);
+    CHECK(start.handles >= 1);
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+    std::printf("    (AddressSanitizer: its allocator keeps freed blocks in quarantine; trim not checked)\n");
+#elif (defined(__linux__) && defined(__GLIBC__)) || defined(__APPLE__)
+    CHECK(start.mallocInUseBytes > 0);
+    CHECK(start.mallocHeldBytes >= start.mallocInUseBytes);
+    // 64 MB in 2 KB blocks (allocator regions, not blocks mapped on their own), every page written.
+    constexpr size_t kBlocks = 32768, kSize = 2048;
+    std::vector<std::vector<char>> blocks;
+    blocks.reserve(kBlocks);
+    for (size_t i = 0; i < kBlocks; ++i)
+        blocks.emplace_back(kSize, char(i));
+    const os::ProcessStats full = os::processStats();
+    show("64 MB in 2 KB blocks", full);
+    CHECK(full.mallocInUseBytes >= start.mallocInUseBytes + 60 * 1024 * 1024);
+    CHECK(full.privateBytes >= start.privateBytes + 48 * 1024 * 1024);
+    os::mem::release(blocks);
+    const os::ProcessStats freed = os::processStats();
+    show("freed", freed);
+    os::trimMemory();
+    const os::ProcessStats trimmed = os::processStats();
+    show("trimmed", trimmed);
+    CHECK(trimmed.mallocInUseBytes < full.mallocInUseBytes - 60 * 1024 * 1024);
+    // Given back: at most 16 MB of the 64 MB still counted against the process.
+    CHECK(trimmed.privateBytes < start.privateBytes + 16 * 1024 * 1024);
+#endif
+}
+
 TEST(automation_connector_holds_nothing_per_request)
 {
     // A test bench polls the app once per request, for hours (scripts/memory_cycle.py). The app's

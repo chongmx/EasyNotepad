@@ -27,6 +27,19 @@
 #   include <mach/mach.h>
 #   include <malloc/malloc.h>
 #endif
+#include <cstddef>
+
+// AddressSanitizer replaces the allocator: its statistics would describe ASan's, not the app's.
+#if defined(__SANITIZE_ADDRESS__)
+#   define ENP_UNDER_ASAN 1
+#elif defined(__has_feature)
+#   if __has_feature(address_sanitizer)
+#       define ENP_UNDER_ASAN 1
+#   endif
+#endif
+#ifndef ENP_UNDER_ASAN
+#   define ENP_UNDER_ASAN 0
+#endif
 
 namespace enp::os {
 
@@ -112,6 +125,13 @@ ProcessStats processStats()
         ::closedir(dir);
         --s.handles; // the directory handle itself
     }
+#   if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)) && !ENP_UNDER_ASAN
+    // Every arena (main and threads') and every block mapped on its own. Locks each arena briefly:
+    // fine once a second, not per allocation.
+    const struct mallinfo2 info = mallinfo2();
+    s.mallocInUseBytes = info.uordblks + info.hblkhd;
+    s.mallocHeldBytes = info.arena + info.hblkhd;
+#   endif
 #elif defined(__APPLE__)
     // Mach's own accounting: phys_footprint is what Activity Monitor shows as the app's memory
     // (dirty private pages, compressed ones included, plus IOKit/GPU memory the process owns),
@@ -121,7 +141,19 @@ ProcessStats processStats()
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) == KERN_SUCCESS) {
         s.residentBytes = vm.resident_size;
         s.privateBytes = vm.phys_footprint;
+        s.compressedBytes = vm.compressed;
+        // The graphics ledger came with a later revision of the structure (macOS 12): read only
+        // when the kernel filled that far.
+        if (size_t(count) * sizeof(natural_t) >= offsetof(task_vm_info_data_t, ledger_tag_graphics_footprint) + sizeof(vm.ledger_tag_graphics_footprint))
+            s.graphicsBytes = vm.ledger_tag_graphics_footprint;
     }
+#   if !ENP_UNDER_ASAN
+    // Every malloc zone (the default one, and any a library made): in use and held.
+    malloc_statistics_t zones{};
+    malloc_zone_statistics(nullptr, &zones);
+    s.mallocInUseBytes = zones.size_in_use;
+    s.mallocHeldBytes = zones.size_allocated;
+#   endif
     // The thread list is a send right per thread in memory the kernel allocated for us: both are
     // given back before returning (one right or page kept per call would be a leak per frame).
     thread_act_array_t threads = nullptr;

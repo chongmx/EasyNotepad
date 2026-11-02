@@ -2522,16 +2522,19 @@ void MainView::renderStatusBar()
             };
             // Everything the process holds: its private memory and the shared memory it wrote.
             resourceText_ = std::string(ICON_FA_MEMORY " ") + mb(p.privateBytes + p.sharedBytes) + "  " ICON_FA_CUBES " " + mb(heap.liveBytes);
-            char tip[512];
+            char tip[768];
             std::snprintf(tip, sizeof(tip),
                           "Process memory (developer mode, every second)\n\n"
                           "Private memory: %llu KB\nShared memory: %llu KB\nResident: %llu KB\nC++ heap: %llu KB in %llu blocks\n"
+                          "malloc: %llu KB in use, %llu KB held\nGraphics: %llu KB\nCompressed: %llu KB\n"
                           "Handles: %d\nGDI objects: %d\nUSER objects: %d\nThreads: %d\n"
                           "ImGui: %d allocations, %d windows\n\n"
                           "A number that climbs while the app is idle points at a leak.",
                           static_cast<unsigned long long>(p.privateBytes >> 10), static_cast<unsigned long long>(p.sharedBytes >> 10),
                           static_cast<unsigned long long>(p.residentBytes >> 10),
                           static_cast<unsigned long long>(heap.liveBytes >> 10), static_cast<unsigned long long>(heap.liveBlocks),
+                          static_cast<unsigned long long>(p.mallocInUseBytes >> 10), static_cast<unsigned long long>(p.mallocHeldBytes >> 10),
+                          static_cast<unsigned long long>(p.graphicsBytes >> 10), static_cast<unsigned long long>(p.compressedBytes >> 10),
                           p.handles, p.gdiObjects, p.userObjects, p.threads,
                           g.DebugAllocInfo.TotalAllocCount - g.DebugAllocInfo.TotalFreeCount, g.Windows.Size);
             resourceTip_ = tip;

@@ -101,6 +101,12 @@ def snapshot(endpoint, settle):
         # footprint (Activity Monitor's figure), on Windows the committed private bytes.
         "privateKB": proc["privateKB"] + proc.get("sharedKB", 0),
         "sharedKB": proc.get("sharedKB", 0),
+        # Where it is, on every platform (glibc, macOS; 0 where unknown): the C allocator's held
+        # bytes, and on macOS the GPU memory charged to the app and the compressed pages.
+        "mallocHeldKB": proc.get("mallocHeldKB", 0),
+        "mallocInUseKB": proc.get("mallocInUseKB", 0),
+        "graphicsKB": proc.get("graphicsKB", 0),
+        "compressedKB": proc.get("compressedKB", 0),
         "residentKB": proc["residentKB"],
         "handles": proc.get("handles", 0),
         "gdi": proc.get("gdiObjects", 0),
@@ -117,7 +123,10 @@ def snapshot(endpoint, settle):
 def row(label, s):
     print(f"{label:<28} heap {s['heapKB']:>7} KB / {s['blocks']:>7} blocks   private {s['privateKB']:>7} KB   "
           f"rss {s['residentKB']:>7} KB   handles {s['handles']:>4}  gdi {s['gdi']:>4}  user {s['user']:>4}  "
-          f"threads {s['threads']:>3}  imgui windows {s['imguiWindows']}", flush=True)
+          f"threads {s['threads']:>3}  imgui windows {s['imguiWindows']}"
+          + (f"   malloc {s['mallocInUseKB']}/{s['mallocHeldKB']} KB" if s["mallocHeldKB"] else "")
+          + (f"   graphics {s['graphicsKB']} KB  compressed {s['compressedKB']} KB" if s["graphicsKB"] or s["compressedKB"] else ""),
+          flush=True)
 
 
 def main():
@@ -243,6 +252,11 @@ def main():
             half = later[len(later) // 2:]
             half_maps = [m for m in maps[base:][len(later) // 2:] if m]
             series = {"private": [c["privateKB"] for c in half], "heap blocks": [c["blocks"] for c in half]}
+            # Without /proc (macOS, Windows), the split comes from the app's own readings.
+            for key, name in (("mallocHeldKB", "malloc held"), ("mallocInUseKB", "malloc in use"),
+                              ("graphicsKB", "graphics"), ("compressedKB", "compressed")):
+                if any(c[key] for c in half):
+                    series[name] = [c[key] for c in half]
             if len(half_maps) == len(half):
                 series["malloc heap dirty"] = [m.get("heap", {}).get("dirty", 0) for m in half_maps]
                 series["anonymous dirty"] = [m.get("anon", {}).get("dirty", 0) for m in half_maps]
