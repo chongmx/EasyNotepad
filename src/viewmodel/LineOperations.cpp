@@ -49,6 +49,8 @@ void NotepadViewModel::selectedLines(int& first, int& last) const
 
 void NotepadViewModel::transformLines(const std::function<void(std::vector<std::string>&)>& transform, bool wholeDocument)
 {
+    if (!wholeDocument && forEachLineBlock([&]() { transformLines(transform, false); }))
+        return;
     model::Document* doc = activeDocument();
     int first = 0, last = 0;
     selectedLines(first, last);
@@ -89,6 +91,8 @@ void NotepadViewModel::transformLines(const std::function<void(std::vector<std::
 
 void NotepadViewModel::transformSelection(const std::function<std::string(const std::string&)>& transform)
 {
+    if (anySelection() && forEachCursor(EditKind::Other, [&](size_t) { transformSelection(transform); }))
+        return;
     model::Document* doc = activeDocument();
     if (!doc->hasSelection()) {
         transformLines([&](std::vector<std::string>& lines) {
@@ -107,20 +111,31 @@ void NotepadViewModel::transformSelection(const std::function<std::string(const 
 
 void NotepadViewModel::duplicateLines()
 {
+    copyLines(+1);
+}
+
+void NotepadViewModel::copyLines(int direction)
+{
+    if (forEachLineBlock([&]() { copyLines(direction); }))
+        return;
     model::Document* doc = activeDocument();
     int first = 0, last = 0;
     selectedLines(first, last);
     beginEdit(EditKind::Other);
     for (int l = last; l >= first; --l)
         doc->buffer.insertLine(last + 1, doc->buffer.line(l));
-    const int count = last - first + 1;
-    doc->caret.line += count;
-    doc->anchor.line += count;
+    if (direction > 0) { // the caret goes with the copy below
+        const int count = last - first + 1;
+        doc->caret.line += count;
+        doc->anchor.line += count;
+    }
     endEdit();
 }
 
 void NotepadViewModel::deleteLines()
 {
+    if (forEachLineBlock([&]() { deleteLines(); }, true))
+        return;
     model::Document* doc = activeDocument();
     int first = 0, last = 0;
     selectedLines(first, last);
@@ -134,6 +149,21 @@ void NotepadViewModel::deleteLines()
 void NotepadViewModel::moveLines(int direction)
 {
     model::Document* doc = activeDocument();
+    if (doc->multiCursor()) {
+        // Every block moves, or none does (one is already at the top or bottom).
+        int top = doc->buffer.lineCount(), bottom = -1;
+        for (const model::Selection& sel : doc->selections()) {
+            int last = sel.end().line;
+            if (last > sel.start().line && sel.end().column == 0)
+                --last;
+            top = std::min(top, sel.start().line);
+            bottom = std::max(bottom, last);
+        }
+        if ((direction < 0 && top == 0) || (direction > 0 && bottom + 1 >= doc->buffer.lineCount()))
+            return;
+        if (forEachLineBlock([&]() { moveLines(direction); }))
+            return;
+    }
     int first = 0, last = 0;
     selectedLines(first, last);
     if ((direction < 0 && first == 0) || (direction > 0 && last + 1 >= doc->buffer.lineCount()))

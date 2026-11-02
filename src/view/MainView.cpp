@@ -89,7 +89,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
             break;
         case viewmodel::ClipboardAction::Paste:
             if (const char* text = ImGui::GetClipboardText())
-                vm_.insertText(text);
+                vm_.paste(text); // one line per caret when the counts match
             break;
         }
     }));
@@ -121,6 +121,21 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
     subscriptions_.push_back(vm_.preferencesRequested.subscribe([this]() { openPreferences_ = true; }));
     subscriptions_.push_back(vm_.syntaxColorsRequested.subscribe([this]() { openSyntaxColors_ = true; }));
     subscriptions_.push_back(vm_.languagePickerRequested.subscribe([this]() { openLanguagePicker_ = true; }));
+    subscriptions_.push_back(vm_.recentPickerRequested.subscribe([this]() {
+        if (ImGui::IsPopupOpen("##recentPicker"))
+            recentStep_ = +1; // Ctrl+R again: the next entry, as in VS Code
+        else
+            openRecentPicker_ = true;
+    }));
+    // Ctrl+E: into the terminal; from the terminal, back to the editor.
+    subscriptions_.push_back(vm_.terminalFocusRequested.subscribe([this]() {
+        if (terminalView_.focused()) {
+            vm_.editorRequested.emit();
+            editor_.focus();
+        } else {
+            vm_.showPanelTab(viewmodel::PanelTab::Terminal); // starts a shell if there is none
+        }
+    }));
     subscriptions_.push_back(vm_.gitTabRequested.subscribe([this]() { explorerTabRequest_ = 2; }));
     documentList_.onReveal = [this](int index) {
         vm_.showExplorer.set(true);
@@ -229,6 +244,7 @@ void MainView::render()
     renderCommentPopup();
     renderTerminalWindow();
     renderLanguagePicker();
+    renderRecentPicker();
     renderHashResult();
     gitView_.renderPopups();
     renderExplorerPrompt();
@@ -256,7 +272,8 @@ void MainView::handleShortcuts()
     // Editing: only while neither a text field nor the terminal has focus.
     // Global: everywhere except the terminal, whose keys go to the shell (as in VS Code).
     // Always: also while the terminal has focus.
-    enum Scope { Editing, Global, Always };
+    // EditingRepeat: as Editing, repeating while the keys are held (moving lines, adding carets).
+    enum Scope { Editing, EditingRepeat, Global, Always };
     struct Binding {
         ImGuiKeyChord chord;
         CommandId id;
@@ -283,10 +300,21 @@ void MainView::handleShortcuts()
         {ImGuiMod_Ctrl | ImGuiKey_Y, C::Redo, Editing},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, C::Redo, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_A, C::SelectAll, Editing},
-        {ImGuiMod_Ctrl | ImGuiKey_D, C::DuplicateLine, Editing},
-        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_L, C::DeleteLine, Editing},
-        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_UpArrow, C::MoveLineUp, Editing},
-        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_DownArrow, C::MoveLineDown, Editing},
+        // VS Code's editing keys: carets, occurrences, line moves and copies.
+        {ImGuiMod_Ctrl | ImGuiKey_D, C::AddNextOccurrence, EditingRepeat},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_L, C::SelectAllOccurrences, Editing},
+        {ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_UpArrow, C::AddCursorAbove, EditingRepeat},
+        {ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_DownArrow, C::AddCursorBelow, EditingRepeat},
+        {ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_I, C::CursorsAtLineEnds, Editing},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_K, C::DeleteLine, EditingRepeat},
+        {ImGuiMod_Alt | ImGuiKey_UpArrow, C::MoveLineUp, EditingRepeat},
+        {ImGuiMod_Alt | ImGuiKey_DownArrow, C::MoveLineDown, EditingRepeat},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_UpArrow, C::MoveLineUp, EditingRepeat},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_DownArrow, C::MoveLineDown, EditingRepeat},
+        {ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_UpArrow, C::CopyLineUp, EditingRepeat},
+        {ImGuiMod_Shift | ImGuiMod_Alt | ImGuiKey_DownArrow, C::DuplicateLine, EditingRepeat},
+        {ImGuiMod_Ctrl | ImGuiKey_R, C::OpenRecent, Global},
+        {ImGuiMod_Ctrl | ImGuiKey_E, C::FocusTerminal, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_U, C::UpperCase, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_U, C::LowerCase, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_Q, C::ToggleComment, Editing},
@@ -323,7 +351,8 @@ void MainView::handleShortcuts()
     const bool typing = ImGui::GetIO().WantTextInput;
     const bool terminal = terminalView_.focused();
     for (const Binding& b : bindings) {
-        if ((b.scope == Editing && (typing || terminal)) || (b.scope == Global && terminal))
+        const bool editing = b.scope == Editing || b.scope == EditingRepeat;
+        if ((editing && (typing || terminal)) || (b.scope == Global && terminal))
             continue;
         if (ImGui::Shortcut(b.chord, ImGuiInputFlags_RouteGlobal | (b.scope == Editing ? 0 : ImGuiInputFlags_Repeat)))
             vm_.execute(b.id);
@@ -394,7 +423,8 @@ void MainView::renderTopBar()
         ImGui::OpenPopup("##fileMenu");
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, origin.y + h));
     if (ImGui::BeginPopup("##fileMenu")) {
-        const CommandId items[] = {CommandId::NewFile, CommandId::OpenFile, CommandId::OpenFolder, CommandId::Save,
+        const CommandId items[] = {CommandId::NewFile, CommandId::OpenFile, CommandId::OpenFolder, CommandId::OpenWorkspace,
+                                   CommandId::OpenRecent, CommandId::Save,
                                    CommandId::SaveAs, CommandId::SaveAll, CommandId::CloseFile, CommandId::CloseFolder};
         for (CommandId id : items) {
             const std::string label = std::string(commandIcon(id)) + "  " + commandInfo(id).tooltip;
@@ -1107,6 +1137,96 @@ void MainView::renderLanguagePicker()
     ImGui::Separator();
     if (ImGui::MenuItem(ICON_FA_PALETTE "  Customize colours..."))
         openSyntaxColors_ = true;
+    ImGui::EndPopup();
+}
+
+void MainView::renderRecentPicker()
+{
+    // Ctrl+R: recent folders (the open one left out, so the first entry is the previous folder),
+    // then recent files; filtered as you type; Up/Down (or Ctrl+R again) choose, Enter opens.
+    if (openRecentPicker_) {
+        ImGui::OpenPopup("##recentPicker");
+        openRecentPicker_ = false;
+        recentFilter_.clear();
+        recentSelected_ = 0;
+    }
+    const ImGuiViewport* main = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(main->Pos.x + main->Size.x * 0.5f, main->Pos.y + 80.0f * s_), ImGuiCond_Appearing, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(560.0f * s_, 0.0f)));
+    if (!ImGui::BeginPopup("##recentPicker"))
+        return;
+    if (ImGui::IsWindowAppearing())
+        ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(-1.0f);
+    const bool enter = ImGui::InputTextWithHint("##filter", ICON_FA_CLOCK_ROTATE_LEFT "  Open recent folder or file",
+                                                &recentFilter_, ImGuiInputTextFlags_EnterReturnsTrue);
+    if (ImGui::IsItemEdited())
+        recentSelected_ = 0;
+    registerLastItem("recent-picker:filter", "textbox", "Recent", nullptr);
+
+    std::string needle = recentFilter_;
+    for (char& c : needle)
+        c = char(std::tolower(static_cast<unsigned char>(c)));
+    auto matches = [&needle](const std::string& path) {
+        if (needle.empty())
+            return true;
+        std::string p = path;
+        for (char& c : p)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+        return p.find(needle) != std::string::npos;
+    };
+    struct Entry {
+        const std::string* path;
+        bool folder;
+    };
+    std::vector<Entry> entries;
+    for (const std::string& path : vm_.recentFolders())
+        if (path != vm_.workspaceRoot() && matches(path))
+            entries.push_back({&path, true});
+    for (const std::string& path : vm_.recentFiles())
+        if (matches(path))
+            entries.push_back({&path, false});
+
+    const int count = int(entries.size());
+    const int before = recentSelected_;
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+        ++recentSelected_;
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+        --recentSelected_;
+    recentSelected_ += recentStep_;
+    recentStep_ = 0;
+    if (count > 0)
+        recentSelected_ = (recentSelected_ % count + count) % count;
+    const bool moved = recentSelected_ != before;
+
+    std::string chosen;
+    const float rowH = ImGui::GetTextLineHeightWithSpacing();
+    ImGui::BeginChild("##recent", ImVec2(0.0f, std::min(440.0f * s_, float(std::max(1, count)) * rowH + 8.0f * s_)));
+    for (int i = 0; i < count; ++i) {
+        const Entry& e = entries[size_t(i)];
+        // A folder: its name first (long paths are cut at the right), then where it is.
+        const size_t slash = e.path->find_last_of('/');
+        const std::string shown = e.folder && slash != std::string::npos && slash + 1 < e.path->size()
+                                      ? e.path->substr(slash + 1) + "   " + e.path->substr(0, slash)
+                                      : vm_.workspaceRelative(*e.path);
+        const std::string label = std::string(e.folder ? ICON_FA_FOLDER "  " : ICON_FA_FILE "  ") + shown + "##recent" + std::to_string(i);
+        if (ImGui::Selectable(label.c_str(), i == recentSelected_))
+            chosen = *e.path;
+        if (i == recentSelected_ && moved)
+            ImGui::SetScrollHereY();
+        registerLastItem("recent-picker:" + std::to_string(i), "button", *e.path,
+                         [this, path = *e.path]() { vm_.openRecent(path); });
+    }
+    if (count == 0)
+        ImGui::TextDisabled(vm_.recentFolders().empty() && vm_.recentFiles().empty() ? "Nothing opened yet" : "Nothing matches");
+    ImGui::EndChild();
+    ImGui::TextDisabled("Enter: open   Up/Down or Ctrl+R: choose   Esc: cancel");
+    if (enter && count > 0)
+        chosen = *entries[size_t(recentSelected_)].path;
+    if (!chosen.empty()) {
+        ImGui::CloseCurrentPopup();
+        vm_.openRecent(chosen);
+    }
     ImGui::EndPopup();
 }
 
@@ -2418,8 +2538,18 @@ void MainView::renderStatusBar()
         const int eolLength = doc->eol == model::EolMode::CrLf ? 2 : 1;
         const std::string& line = doc->buffer.line(doc->caret.line);
         const int column = model::codePointCount(std::string_view(line).substr(0, size_t(doc->caret.column))) + 1;
-        const int selChars = doc->hasSelection() ? int(model::codePointCount(vm_.selectedText())) : 0;
-        const int selLines = doc->hasSelection() ? doc->selectionEnd().line - doc->selectionStart().line + 1 : 0;
+        // With several carets: every selection's characters (line breaks between them not counted).
+        int selChars = 0;
+        int selLines = 0;
+        auto count = [&](const model::Selection& sel) {
+            if (sel.empty())
+                return;
+            selChars += int(model::codePointCount(doc->buffer.text(sel.start(), sel.end())));
+            selLines += sel.end().line - sel.start().line + 1;
+        };
+        count(doc->primary());
+        for (const model::Selection& sel : doc->cursors)
+            count(sel);
         std::string language = model::languageName(doc->language);
         if (language.size() > 5 && language.compare(language.size() - 5, 5, " file") == 0)
             language.resize(language.size() - 5); // "Markdown file" -> "Markdown"
@@ -2432,11 +2562,14 @@ void MainView::renderStatusBar()
         std::string caret = std::to_string(doc->caret.line + 1) + ":" + std::to_string(column);
         if (selChars > 0)
             caret += " (" + std::to_string(selChars) + ")";
+        if (doc->multiCursor())
+            caret += " +" + std::to_string(doc->cursors.size()); // more carets (Escape: back to one)
         segments.push_back({caret,
                             "Line " + std::to_string(doc->caret.line + 1) + ", column " + std::to_string(column) +
                                 (selChars > 0 ? "\n" + std::to_string(selChars) + " characters selected on " + std::to_string(selLines) +
                                                     (selLines == 1 ? " line" : " lines")
                                               : std::string()) +
+                                (doc->multiCursor() ? "\n" + std::to_string(doc->cursors.size() + 1) + " carets (Escape: back to one)" : std::string()) +
                                 "\nClick to go to a line (" + commandInfo(CommandId::GoToLine).shortcut + ")",
                             "##caret", 10, false, CommandId::GoToLine});
         segments.push_back({std::string(doc->indent.tabs ? ICON_FA_ARROW_RIGHT_TO_BRACKET " " : ICON_FA_INDENT " ") + std::to_string(doc->indent.width),

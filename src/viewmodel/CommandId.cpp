@@ -27,10 +27,10 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::Redo: return {"Redo", "Redo the last undone edit", "Ctrl+Y"};
     case CommandId::SelectAll: return {"Select All", "Select the whole document", "Ctrl+A"};
 
-    case CommandId::DuplicateLine: return {"Duplicate", "Duplicate the current line(s)", "Ctrl+D"};
-    case CommandId::DeleteLine: return {"Delete Line", "Delete the current line(s)", "Ctrl+Shift+L"};
-    case CommandId::MoveLineUp: return {"Move Up", "Move the current line(s) up", "Ctrl+Shift+Up"};
-    case CommandId::MoveLineDown: return {"Move Down", "Move the current line(s) down", "Ctrl+Shift+Down"};
+    case CommandId::DuplicateLine: return {"Duplicate", "Copy the current line(s) down", "Shift+Alt+Down"};
+    case CommandId::DeleteLine: return {"Delete Line", "Delete the current line(s)", "Ctrl+Shift+K"};
+    case CommandId::MoveLineUp: return {"Move Up", "Move the current line(s) up", "Alt+Up"};
+    case CommandId::MoveLineDown: return {"Move Down", "Move the current line(s) down", "Alt+Down"};
     case CommandId::SortLines: return {"Sort", "Sort the selected lines ascending", ""};
     case CommandId::UpperCase: return {"UPPER", "Convert the selection to upper case", "Ctrl+Shift+U"};
     case CommandId::LowerCase: return {"lower", "Convert the selection to lower case", "Ctrl+U"};
@@ -165,6 +165,16 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::GitWriteMessage: return {"Message", "Let the agent write the commit message", ""};
     case CommandId::GitGuide: return {"Learn Git", "Step-by-step guide to git, using this app's Git tools", ""};
     case CommandId::CloseFolder: return {"Close Folder", "Close the folder and its documents", ""};
+
+    case CommandId::AddNextOccurrence: return {"Next Match", "Add the next occurrence of the selection as another caret", "Ctrl+D"};
+    case CommandId::SelectAllOccurrences: return {"All Matches", "Select every occurrence of the selection, a caret on each", "Ctrl+Shift+L"};
+    case CommandId::AddCursorAbove: return {"Caret Above", "Add a caret on the line above", "Ctrl+Alt+Up"};
+    case CommandId::AddCursorBelow: return {"Caret Below", "Add a caret on the line below", "Ctrl+Alt+Down"};
+    case CommandId::CursorsAtLineEnds: return {"Line Ends", "A caret at the end of every selected line", "Shift+Alt+I"};
+    case CommandId::CopyLineUp: return {"Copy Up", "Copy the current line(s) up", "Shift+Alt+Up"};
+    case CommandId::OpenRecent: return {"Recent", "Switch to a recent folder or file", "Ctrl+R"};
+    case CommandId::FocusTerminal: return {"Terminal Focus", "Jump to the terminal (again: back to the editor)", "Ctrl+E"};
+    case CommandId::OpenWorkspace: return {"Open Workspace", "Import a VS Code workspace or a Visual Studio solution", ""};
 
     case CommandId::Count: break;
     }
@@ -322,6 +332,15 @@ const char* commandKey(CommandId id)
     case CommandId::GitWriteMessage: return "GitWriteMessage";
     case CommandId::GitGuide: return "GitGuide";
     case CommandId::CloseFolder: return "CloseFolder";
+    case CommandId::AddNextOccurrence: return "AddNextOccurrence";
+    case CommandId::SelectAllOccurrences: return "SelectAllOccurrences";
+    case CommandId::AddCursorAbove: return "AddCursorAbove";
+    case CommandId::AddCursorBelow: return "AddCursorBelow";
+    case CommandId::CursorsAtLineEnds: return "CursorsAtLineEnds";
+    case CommandId::CopyLineUp: return "CopyLineUp";
+    case CommandId::OpenRecent: return "OpenRecent";
+    case CommandId::FocusTerminal: return "FocusTerminal";
+    case CommandId::OpenWorkspace: return "OpenWorkspace";
     case CommandId::Count: break;
     }
     return "";

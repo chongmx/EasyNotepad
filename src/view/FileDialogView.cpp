@@ -35,6 +35,7 @@ void FileDialogView::render()
 {
     const char* title = vm_.mode() == FileDialogMode::Open     ? "Open File###fileDialog"
                         : vm_.mode() == FileDialogMode::SaveAs ? "Save As###fileDialog"
+                        : vm_.mode() == FileDialogMode::OpenWorkspace ? "Open Workspace (.code-workspace, .sln, .slnx)###fileDialog"
                                                                : "Open Folder###fileDialog";
     const bool wanted = vm_.visible.get();
     if (wanted && !ImGui::IsPopupOpen("###fileDialog")) {
@@ -129,7 +130,7 @@ void FileDialogView::render()
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%s", nameLabel);
     ImGui::SameLine();
-    const char* action = vm_.mode() == FileDialogMode::Open ? ICON_FA_FOLDER_OPEN "  Open"
+    const char* action = vm_.mode() == FileDialogMode::Open || vm_.mode() == FileDialogMode::OpenWorkspace ? ICON_FA_FOLDER_OPEN "  Open"
                          : vm_.mode() == FileDialogMode::SaveAs ? (vm_.confirmOverwrite ? ICON_FA_TRIANGLE_EXCLAMATION "  Replace" : ICON_FA_FLOPPY_DISK "  Save")
                                                                 : ICON_FA_FOLDER_TREE "  Open Folder";
     const float buttonsW = 230.0f * s_;

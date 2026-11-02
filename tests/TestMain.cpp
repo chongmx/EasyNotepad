@@ -12,6 +12,7 @@
 #include "enp/model/Outline.h"
 #include "enp/model/TerminalScreen.h"
 #include "enp/model/TextBuffer.h"
+#include "enp/model/WorkspaceFile.h"
 #include "enp/os/Process.h"
 #include "enp/os/Pty.h"
 #include "enp/viewmodel/DummyData.h"
@@ -692,6 +693,263 @@ TEST(recent_files_and_session_restore)
     viewmodel::NotepadViewModel blank(nullptr, &files);
     CHECK(!blank.restoreSession());
     std::remove(path.c_str());
+}
+
+// ---- Multiple carets (VS Code) ------------------------------------------------------------------
+
+// Carets at the given places (the first is the primary one).
+void carets(viewmodel::NotepadViewModel& vm, std::vector<TextPos> at)
+{
+    std::vector<model::Selection> sels;
+    for (TextPos p : at)
+        sels.push_back({p, p});
+    vm.setSelections(sels);
+}
+
+TEST(multi_cursor_typing_is_one_undo_step)
+{
+    Fixture f("foo\nfoo\nfoo");
+    carets(f.vm, {{0, 0}, {1, 0}, {2, 0}});
+    CHECK_EQ(f.vm.cursorCount(), 3);
+    f.vm.insertText("x");
+    f.vm.insertText("y");
+    CHECK_EQ(f.text(), std::string("xyfoo\nxyfoo\nxyfoo"));
+    CHECK(f.vm.activeDocument()->caret == (TextPos{0, 2}));
+    f.vm.execute(CommandId::Undo);
+    CHECK_EQ(f.text(), std::string("foo\nfoo\nfoo"));
+    CHECK_EQ(f.vm.cursorCount(), 3); // the carets come back with the text
+    f.vm.execute(CommandId::Redo);
+    CHECK_EQ(f.text(), std::string("xyfoo\nxyfoo\nxyfoo"));
+    // Several carets on one line.
+    Fixture g("a b c");
+    carets(g.vm, {{0, 1}, {0, 3}, {0, 5}});
+    g.vm.insertText("!");
+    CHECK_EQ(g.text(), std::string("a! b! c!"));
+    g.vm.clearExtraCursors();
+    CHECK_EQ(g.vm.cursorCount(), 1);
+}
+
+TEST(multi_cursor_backspace_delete_and_newline)
+{
+    Fixture f("ab\ncd\nef");
+    carets(f.vm, {{1, 0}, {2, 0}});
+    f.vm.backspace(); // both line breaks: bottom first, the upper caret follows
+    CHECK_EQ(f.text(), std::string("abcdef"));
+    CHECK_EQ(f.vm.cursorCount(), 2);
+    f.vm.newline();
+    CHECK_EQ(f.text(), std::string("ab\ncd\nef"));
+    f.vm.deleteForward();
+    CHECK_EQ(f.text(), std::string("ab\nd\nf"));
+    // Selections are replaced at every caret; carets meeting in one place merge.
+    Fixture g("one two one");
+    g.vm.setSelections({{{0, 0}, {0, 3}}, {{0, 8}, {0, 11}}});
+    CHECK_EQ(g.vm.selectedText(), std::string("one\none"));
+    g.vm.insertText("1");
+    CHECK_EQ(g.text(), std::string("1 two 1"));
+    carets(g.vm, {{0, 1}, {0, 1}});
+    CHECK_EQ(g.vm.cursorCount(), 1);
+}
+
+TEST(multi_cursor_moves_and_adds_carets)
+{
+    Fixture f("abc\na\nabcdef");
+    f.vm.setCaret({0, 3}, false);
+    f.vm.addCursorVertical(+1);
+    f.vm.addCursorVertical(+1);
+    CHECK_EQ(f.vm.cursorCount(), 3);
+    const std::vector<model::Selection> all = f.vm.activeDocument()->selections();
+    CHECK(all[0].caret == (TextPos{2, 1})); // the newest caret is the primary one; column of the line above
+    f.vm.moveCarets([](const model::Selection& s) { return TextPos{s.caret.line, 0}; }, false);
+    f.vm.insertText("-");
+    CHECK_EQ(f.text(), std::string("-abc\n-a\n-abcdef"));
+    // Alt+click adds a caret, on a caret removes it.
+    f.vm.setCaret({0, 0}, false);
+    f.vm.addCursor({2, 2});
+    CHECK_EQ(f.vm.cursorCount(), 2);
+    f.vm.addCursor({0, 0});
+    CHECK_EQ(f.vm.cursorCount(), 1);
+    CHECK(f.vm.activeDocument()->caret == (TextPos{2, 2}));
+    // A caret at the end of every selected line.
+    f.vm.setSelection({0, 1}, {2, 2});
+    f.vm.execute(CommandId::CursorsAtLineEnds);
+    CHECK_EQ(f.vm.cursorCount(), 3);
+    f.vm.insertText(";");
+    CHECK_EQ(f.text(), std::string("-abc;\n-a;\n-abcdef;"));
+}
+
+TEST(add_next_occurrence_and_select_all)
+{
+    Fixture f("int a = a + ab;");
+    f.vm.setCaret({0, 4}, false);
+    f.vm.execute(CommandId::AddNextOccurrence); // the word at the caret
+    CHECK_EQ(f.vm.selectedText(), std::string("a"));
+    CHECK_EQ(f.vm.cursorCount(), 1);
+    f.vm.execute(CommandId::AddNextOccurrence); // the next whole word "a" (not the one in "ab")
+    CHECK_EQ(f.vm.cursorCount(), 2);
+    f.vm.execute(CommandId::AddNextOccurrence); // none left
+    CHECK_EQ(f.vm.cursorCount(), 2);
+    f.vm.insertText("b");
+    CHECK_EQ(f.text(), std::string("int b = b + ab;"));
+    // A selection made by hand matches inside words too.
+    f.vm.setSelection({0, 4}, {0, 5});
+    f.vm.execute(CommandId::AddNextOccurrence);
+    f.vm.execute(CommandId::AddNextOccurrence);
+    CHECK_EQ(f.vm.cursorCount(), 3);
+    // Every occurrence at once.
+    Fixture g("x1 x x2 x");
+    g.vm.setCaret({0, 3}, false);
+    g.vm.execute(CommandId::SelectAllOccurrences);
+    CHECK_EQ(g.vm.cursorCount(), 2);
+    CHECK(g.vm.activeDocument()->caret == (TextPos{0, 4})); // still on the one it was on
+    g.vm.insertText("y");
+    CHECK_EQ(g.text(), std::string("x1 y x2 y"));
+}
+
+TEST(multi_cursor_line_operations)
+{
+    Fixture f("1\n2\n3\n4\n5");
+    carets(f.vm, {{1, 0}, {3, 0}});
+    f.vm.execute(CommandId::MoveLineUp);
+    CHECK_EQ(f.text(), std::string("2\n1\n4\n3\n5"));
+    CHECK(f.vm.activeDocument()->caret == (TextPos{0, 0}));
+    f.vm.execute(CommandId::MoveLineUp); // one block is at the top: nothing moves
+    CHECK_EQ(f.text(), std::string("2\n1\n4\n3\n5"));
+    f.vm.execute(CommandId::MoveLineDown);
+    CHECK_EQ(f.text(), std::string("1\n2\n3\n4\n5"));
+    // Copy down puts the carets on the copies, copy up leaves them on the originals.
+    carets(f.vm, {{0, 0}, {3, 0}});
+    f.vm.execute(CommandId::DuplicateLine);
+    CHECK_EQ(f.text(), std::string("1\n1\n2\n3\n4\n4\n5"));
+    CHECK(f.vm.activeDocument()->caret == (TextPos{1, 0}));
+    f.vm.execute(CommandId::Undo);
+    CHECK_EQ(f.text(), std::string("1\n2\n3\n4\n5"));
+    carets(f.vm, {{0, 0}, {3, 0}});
+    f.vm.execute(CommandId::CopyLineUp);
+    CHECK_EQ(f.text(), std::string("1\n1\n2\n3\n4\n4\n5"));
+    CHECK(f.vm.activeDocument()->caret == (TextPos{0, 0}));
+    // Adjacent carets form one block: no line is deleted twice.
+    Fixture g("0\n1\n2\n3\n4\n5");
+    carets(g.vm, {{1, 0}, {2, 0}, {4, 0}});
+    g.vm.execute(CommandId::DeleteLine);
+    CHECK_EQ(g.text(), std::string("0\n3\n5"));
+    CHECK_EQ(g.vm.cursorCount(), 2);
+    // Comments and indentation per block; the carets keep their place in the text.
+    Fixture h("int a;\nint b;\nint c;");
+    h.vm.activeDocument()->language = model::Language::Cpp;
+    carets(h.vm, {{0, 4}, {2, 4}});
+    h.vm.execute(CommandId::ToggleComment);
+    CHECK_EQ(h.text(), std::string("// int a;\nint b;\n// int c;"));
+    CHECK(h.vm.activeDocument()->caret == (TextPos{0, 7}));
+    h.vm.execute(CommandId::ToggleComment);
+    CHECK_EQ(h.text(), std::string("int a;\nint b;\nint c;"));
+    h.vm.execute(CommandId::UpperCase);
+    CHECK_EQ(h.text(), std::string("INT A;\nint b;\nINT C;"));
+}
+
+TEST(multi_cursor_paste_spreads_lines)
+{
+    Fixture f("a\nb\nc");
+    carets(f.vm, {{0, 1}, {1, 1}, {2, 1}});
+    f.vm.paste("1\n2\n3");
+    CHECK_EQ(f.text(), std::string("a1\nb2\nc3"));
+    f.vm.paste("xy"); // one line for three carets: all of it at each
+    CHECK_EQ(f.text(), std::string("a1xy\nb2xy\nc3xy"));
+    f.vm.setSelections({{{0, 0}, {0, 1}}, {{1, 0}, {1, 1}}});
+    const std::string copied = f.vm.selectedText();
+    CHECK_EQ(copied, std::string("a\nb"));
+    f.vm.deleteSelection(); // Cut
+    carets(f.vm, {{0, 2}, {1, 2}});
+    f.vm.paste(copied + "\n"); // a trailing line break does not count as a line
+    CHECK_EQ(f.text(), std::string("1xay\n2xby\nc3xy"));
+}
+
+// ---- Workspace files ----------------------------------------------------------------------------
+
+TEST(workspace_files_are_parsed)
+{
+    CHECK(model::isWorkspaceFile("C:\\src\\App.SLN"));
+    CHECK(model::isWorkspaceFile("/a/b.code-workspace"));
+    CHECK(!model::isWorkspaceFile("/a/b.json"));
+    CHECK_EQ(model::normalizePath("C:\\a\\b\\..\\c\\.\\d"), std::string("C:/a/c/d"));
+    CHECK_EQ(model::normalizePath("/a/../../b/"), std::string("/b"));
+    CHECK_EQ(model::commonFolder({"/a/b/c", "/a/b/d/e", "/a/b"}), std::string("/a/b"));
+    CHECK_EQ(model::commonFolder({"/a/bc", "/a/b"}), std::string("/a"));
+    CHECK_EQ(model::stripJsonComments("{\"a\": \"//no\", // yes\n \"b\": [1, 2,], /* c */}"),
+             std::string("{\"a\": \"//no\", \n \"b\": [1, 2]  }")); // both trailing commas go
+
+    const std::string workspace = R"({
+        // VS Code writes comments and trailing commas
+        "folders": [
+            { "path": "." },
+            { "name": "lib", "path": "../shared/lib" },
+            { "uri": "vscode-remote://ssh-remote+box/home/me" },
+        ],
+        "settings": { "editor.tabSize": 2, "editor.insertSpaces": true, },
+    })";
+    std::string error;
+    const auto w = model::parseWorkspaceFile("/home/me/proj/proj.code-workspace", workspace, &error);
+    CHECK(w.has_value());
+    if (w) {
+        CHECK(w->kind == model::WorkspaceImport::Kind::CodeWorkspace);
+        CHECK_EQ(w->name, std::string("proj"));
+        CHECK_EQ(w->root, std::string("/home/me/proj"));
+        CHECK_EQ(w->folders.size(), size_t(2)); // the remote folder is left out
+        CHECK_EQ(w->folders[1], std::string("/home/me/shared/lib"));
+        CHECK(w->tabSize && *w->tabSize == 2);
+        CHECK(w->insertSpaces && *w->insertSpaces);
+    }
+    CHECK(!model::parseWorkspaceFile("/x/empty.code-workspace", "{\"folders\": []}", &error));
+    CHECK(!error.empty());
+
+    const std::string sln = "\xEF\xBB\xBF\r\nMicrosoft Visual Studio Solution File, Format Version 12.00\r\n"
+                            "Project(\"{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}\") = \"App\", \"App\\App.vcxproj\", \"{1}\"\r\nEndProject\r\n"
+                            "Project(\"{2150E333-8FDC-42A3-9474-1A3956D46DE8}\") = \"Libs\", \"Libs\", \"{2}\"\r\nEndProject\r\n"
+                            "Project(\"{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}\") = \"Core\", \"..\\core\\Core.vcxproj\", \"{3}\"\r\nEndProject\r\n";
+    const auto s = model::parseWorkspaceFile("C:\\work\\app\\App.sln", sln, &error);
+    CHECK(s.has_value());
+    if (s) {
+        CHECK(s->kind == model::WorkspaceImport::Kind::Solution);
+        CHECK_EQ(s->projects.size(), size_t(2)); // the solution folder "Libs" is not a project
+        CHECK_EQ(s->projects[1], std::string("C:/work/core/Core.vcxproj"));
+        CHECK_EQ(s->root, std::string("C:/work")); // holds the solution and both projects
+    }
+    const auto x = model::parseWorkspaceFile("/w/App.slnx", "<Solution>\n  <Folder Name=\"/src/\">\n"
+                                             "    <Project Path=\"src/App/App.csproj\" />\n  </Folder>\n</Solution>", &error);
+    CHECK(x.has_value() && x->projects.size() == 1 && x->root == "/w");
+    CHECK(!model::parseWorkspaceFile("/w/notes.sln", "hello", &error));
+}
+
+TEST(open_workspace_file_opens_its_folder)
+{
+    services::FileService files;
+    const std::string base = scratchDirectory() + "/enp-test-workspace";
+    os::fs::createDirectories(base + "/proj/src");
+    os::fs::createDirectories(base + "/other");
+    files.write(base + "/proj/src/a.txt", "x\n", nullptr);
+    files.write(base + "/proj/proj.code-workspace",
+                "{ \"folders\": [ {\"path\": \".\"}, {\"path\": \"../other\"} ], \"settings\": {\"editor.tabSize\": 3} }", nullptr);
+    files.write(base + "/proj/App.sln", "Microsoft Visual Studio Solution File, Format Version 12.00\n"
+                "Project(\"{X}\") = \"A\", \"src\\A.vcxproj\", \"{1}\"\nEndProject\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openWorkspaceFile(base + "/proj/proj.code-workspace"));
+    CHECK(vm.workspaceRoot().size() > 5 && vm.workspaceRoot().substr(vm.workspaceRoot().size() - 5) == "/proj");
+    CHECK(vm.recentFolders().size() >= 2);
+    CHECK(vm.recentFolders().size() >= 2 && vm.recentFolders()[1].find("/other") != std::string::npos); // Ctrl+R's first entry
+    CHECK_EQ(vm.indentFor(model::Language::Cpp).width, 3);
+    CHECK(vm.command(CommandId::OpenRecent).canExecute());
+    // Another folder forgets the workspace's indentation.
+    CHECK(vm.openFolder(base + "/other"));
+    CHECK(vm.indentFor(model::Language::Cpp).width != 3);
+    CHECK(vm.openWorkspaceFile(base + "/proj/App.sln"));
+    CHECK(vm.workspaceRoot().size() > 5 && vm.workspaceRoot().substr(vm.workspaceRoot().size() - 5) == "/proj");
+    CHECK(!vm.openWorkspaceFile(base + "/proj/src/a.txt"));
+    // The file dialog's workspace mode lists only workspace files.
+    vm.fileDialog().show(viewmodel::FileDialogMode::OpenWorkspace, base + "/proj");
+    bool onlyWorkspaces = true;
+    for (const auto& e : vm.fileDialog().visibleEntries())
+        onlyWorkspaces = onlyWorkspaces && (e.isDirectory || viewmodel::NotepadViewModel::isWorkspaceFile(e.name));
+    CHECK(onlyWorkspaces);
+    CHECK_EQ(vm.fileDialog().visibleEntries().size(), size_t(3)); // src, App.sln, proj.code-workspace
 }
 
 // The state at the start of every line by highlighting from the top (what the cache replaces).
@@ -3791,6 +4049,13 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
         vm.openFile("docs/guide.md");
         vm.openFile("src/f3.cpp");
         vm.openFile("src/f7.cpp");
+        // Several carets: every occurrence selected and edited (their undo steps hold carets too).
+        vm.setCaret({0, 0}, false);
+        vm.execute(CommandId::AddNextOccurrence);
+        vm.execute(CommandId::SelectAllOccurrences);
+        vm.insertText("z");
+        vm.execute(CommandId::AddCursorBelow);
+        vm.paste("a\nb");
         vm.layers().scope.set(viewmodel::LayerScope::Project);
         (void)vm.layers().nodes();
         (void)vm.logicalMap().map();
@@ -4253,7 +4518,11 @@ int main(int argc, char** argv)
     params.argc = argc;
     params.argv = argv;
     os::init(params);
+    // ENP_TEST_FILTER=text runs only the tests whose name contains it.
+    const char* filter = std::getenv("ENP_TEST_FILTER");
     for (auto& [name, fn] : registry()) {
+        if (filter && *filter && !std::strstr(name, filter))
+            continue;
         const int before = g_failures;
         g_currentTest = name;
         fn();

@@ -155,6 +155,15 @@ const char* commandIcon(CommandId id)
     case CommandId::GitWriteMessage: return ICON_FA_WAND_MAGIC_SPARKLES;
     case CommandId::GitGuide: return ICON_FA_GRADUATION_CAP;
     case CommandId::CloseFolder: return ICON_FA_FOLDER_CLOSED;
+    case CommandId::AddNextOccurrence: return ICON_FA_I_CURSOR;
+    case CommandId::SelectAllOccurrences: return ICON_FA_OBJECT_GROUP;
+    case CommandId::AddCursorAbove: return ICON_FA_ARROW_UP;
+    case CommandId::AddCursorBelow: return ICON_FA_ARROW_DOWN;
+    case CommandId::CursorsAtLineEnds: return ICON_FA_ALIGN_RIGHT;
+    case CommandId::CopyLineUp: return ICON_FA_CLONE;
+    case CommandId::OpenRecent: return ICON_FA_CLOCK_ROTATE_LEFT;
+    case CommandId::FocusTerminal: return ICON_FA_TERMINAL;
+    case CommandId::OpenWorkspace: return ICON_FA_FILE_IMPORT;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;
@@ -182,6 +191,12 @@ ImU32 commandTint(CommandId id, const Palette& p)
     case CommandId::Copy:
     case CommandId::Paste:
     case CommandId::DuplicateLine:
+    case CommandId::CopyLineUp:
+    case CommandId::AddNextOccurrence:
+    case CommandId::SelectAllOccurrences:
+    case CommandId::AddCursorAbove:
+    case CommandId::AddCursorBelow:
+    case CommandId::CursorsAtLineEnds:
     case CommandId::MoveLineUp:
     case CommandId::MoveLineDown:
     case CommandId::SortLines:
