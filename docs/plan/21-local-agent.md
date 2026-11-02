@@ -85,6 +85,12 @@ exhaustion. Nothing it does can freeze or crash the editor.
   It is single-line at first, multi-line later.
 - A new keystroke cancels the request in flight, so only the newest one ever runs.
 - Off by default per language until measured. On/off and the delay are in Preferences.
+- **Built on IntelliSense** (`IntellisenseViewModel`, see FEATURES.md › IntelliSense): the model is
+  a completion *provider*. It receives a `Request` (the text before and after the caret, the file and
+  language, and the context snippets IntelliSense chose: declarations matching the typed word, those
+  the nearby code uses, those of the file, ranked within a budget) and answers with `provide()`. A
+  newer keystroke or a closed list drops older answers by serial. What context a model sees is
+  decided in one place, `IntellisenseViewModel::contextFor()`; new kinds of snippets go there.
 
 **2. Agent management** (plugs into plan 20's task manager).
 - **Requests:** with "let the local agent decide simple ones" on, it classifies each

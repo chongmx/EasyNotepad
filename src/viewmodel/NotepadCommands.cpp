@@ -450,6 +450,16 @@ void NotepadViewModel::initCommands()
         agent_.showSetup.set(true);
         localModelRequested.emit();
     });
+    // IntelliSense.
+    auto textDocument = [this]() { return activeDocument() && activeDocument()->kind == model::FileKind::Text && !activeDocument()->rendered; };
+    set(C::TriggerCompletion, [this]() { intellisense_.trigger(); }, textDocument);
+    set(C::GoToDefinition, [this]() { intellisense_.goToDefinition(); }, textDocument);
+    set(C::ToggleAutoComplete, [this]() {
+        intellisense_.autoComplete.set(!intellisense_.autoComplete.get());
+        statusText.set(intellisense_.autoComplete.get() ? "Auto complete: names are suggested while typing code"
+                                                        : "Auto complete off: Ctrl+Space suggests names");
+    });
+    set(C::RebuildSymbolIndex, [this]() { intellisense_.rebuildIndex(); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
     set(C::EngineLab, [this]() { engineLabRequested.emit(); }, [this]() { return developerMode.get(); });
@@ -515,6 +525,8 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::EncodingAnsi: return doc && doc->encoding == model::Encoding::Ansi;
     case C::PopOutTerminal: return terminalPoppedOut.get();
     case C::ToggleSmartIndent: return smartIndent.get();
+    case C::ToggleAutoComplete: return intellisense_.autoComplete.get();
+    case C::RebuildSymbolIndex: return intellisense_.indexing.get();
     case C::IndentWithSpaces: return doc && !doc->indent.tabs;
     case C::IndentWithTabs: return doc && doc->indent.tabs;
     case C::IndentWidth2: return doc && doc->indent.width == 2;

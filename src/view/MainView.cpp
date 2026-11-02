@@ -296,6 +296,8 @@ void MainView::handleShortcuts()
         {ImGuiMod_Shift | ImGuiKey_F3, C::FindPrevious, Global},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F, C::FindInFiles, Global},
         {ImGuiMod_Ctrl | ImGuiKey_G, C::GoToLine, Global},
+        {ImGuiMod_Ctrl | ImGuiKey_Space, C::TriggerCompletion, Editing},
+        {ImGuiKey_F12, C::GoToDefinition, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_F2, C::ToggleBookmark, Global},
         {ImGuiKey_F2, C::NextBookmark, Global},
         {ImGuiMod_Shift | ImGuiKey_F2, C::PreviousBookmark, Global},

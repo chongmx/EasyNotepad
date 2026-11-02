@@ -120,7 +120,7 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
         {"Detail", {C::DetailFull, C::DetailBalanced, C::DetailOverview, C::DetailOutline}, {}},
         {"Folding", {C::FoldingSyntax, C::FoldingLogical, C::ToggleFold}, {C::FoldAll, C::UnfoldAll, C::SummarizeFile}},
         {"Side Bar", {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}, {}},
-        {"Navigate", {C::GoToLine, C::Find}, {C::ToggleBookmark}},
+        {"Navigate", {C::GoToLine, C::GoToDefinition, C::Find}, {C::ToggleBookmark}},
         {"Understand", {C::DissectProject, C::ExplainSelection, C::AskAgent}, {C::GenerateTests}},
     };
     static const Group view[] = {
@@ -145,6 +145,7 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
              {"Lines", {C::DuplicateLine, C::DeleteLine, C::MoveLineUp, C::MoveLineDown}, {C::SortLines}},
              {"Case", {C::UpperCase, C::LowerCase}, {}},
              {"Code", {C::ToggleComment, C::Indent, C::Outdent}, {C::TrimTrailing}},
+             {"IntelliSense", {C::TriggerCompletion, C::GoToDefinition, C::ToggleAutoComplete}, {C::RebuildSymbolIndex}},
              {"Bookmarks", {C::ToggleBookmark, C::PreviousBookmark, C::NextBookmark}, {C::ClearBookmarks}},
          }},
         {"Review", {std::begin(review), std::end(review)}},

@@ -35,6 +35,17 @@ bool init(const InitParams& params)
 {
     if (g_initialized)
         return true;
+#if defined(__GLIBC__)
+    // Fixed allocator thresholds instead of glibc's dynamic ones (docs/MEMORY.md rule 9). glibc
+    // raises both after every large free (up to 32 MB for mmap, 64 MB for trimming), and then:
+    // large blocks come from an arena instead of their own mapping, and the free top of a thread's
+    // arena (where background work, such as the IntelliSense index, allocates) is never given back
+    // - malloc_trim() does not release a thread arena's top, only free() past this threshold does.
+    // Fixed: a block of 128 KB or more is its own mapping, unmapped when freed, whichever thread
+    // made it; an arena gives back its free top beyond 1 MB as soon as it is freed.
+    mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+    mallopt(M_TRIM_THRESHOLD, 1024 * 1024);
+#endif
     g_arguments.clear();
     g_initialized = detail::platformInit(params, g_arguments);
     return g_initialized;

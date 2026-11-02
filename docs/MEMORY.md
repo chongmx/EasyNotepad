@@ -32,7 +32,7 @@ gives everything back. Concretely, all of these hold:
    across frames; keep its id.
 3. **Everything that belongs to a workspace is released by `workspaceChanged()`.** Opening or
    closing a folder calls it on every subsystem (`LayersViewModel`, `LogicalMapViewModel`,
-   `GitViewModel`, find-in-files). A new subsystem that keeps per-workspace state adds a
+   `GitViewModel`, `IntellisenseViewModel`, find-in-files). A new subsystem that keeps per-workspace state adds a
    `workspaceChanged()` and is called from `NotepadViewModel::openFolder()` and `closeFolder()`.
 4. **Background work holds a `weak_ptr` to its owner, and work about a workspace stops with it.**
    Work posted with `os::dispatch::runAsync` captures a `std::weak_ptr<bool> alive` and a
@@ -73,6 +73,13 @@ gives everything back. Concretely, all of these hold:
    set trim) twice: four frames later, once the textures released by the close are destroyed, and
    1.5 s later, once late results of background work are freed too. The app keeps drawing until
    both have run. A change that frees something large elsewhere sets the request too.
+   On glibc, `os::init()` also fixes the allocator's thresholds (`mallopt`: 128 KB mmap, 1 MB
+   trim) instead of glibc's dynamic ones, which rise after large frees (to 32 and 64 MB): a block
+   of 128 KB or more is then always its own mapping, unmapped when freed whichever thread made it,
+   and a thread's arena gives its free top back on `free()`. `malloc_trim()` never releases the
+   top of a thread's arena, so without this, memory built on a background thread (the
+   IntelliSense index) stayed private after its folder closed. Prefer a few large blocks to many
+   small ones for big state built off the main thread (`model::SymbolIndex` pools its text).
 
 ## 2. Heap accounting (`enp/os/Memory.h`)
 
@@ -101,6 +108,7 @@ frees it, so a scope's live bytes are exactly what that subsystem still holds. S
 | `git` | repository state, logs, diffs |
 | `layers`, `logical-map` | the Read ribbon's layers and map |
 | `find` | find-in-files results |
+| `intellisense` | the workspace's symbol index (one text pool and one entry array, `model::SymbolIndex`), open completion suggestions, context chosen for an AI provider (`IntellisenseViewModel`): released by `workspaceChanged()`; a background build is cancelled and its late result dropped |
 | `markdown` | rendered Markdown and parsed formulas |
 | `images` | decoding (the pixels themselves are in `imgui`) |
 | `emoji` | the emoji pack's index and reading pictures from it (`EmojiCache`, `services::EmojiPack`) |
@@ -176,6 +184,10 @@ Where to read it:
   first-cycle growth or anything the views hold: that is what the script is for.
 - `closing_a_folder_stops_the_agent_dissection_of_it` (`enp_tests`): a late agent answer about a
   closed folder is cancelled and ignored (rule 4).
+- `closing_a_folder_stops_the_symbol_index_build` (`enp_tests`): the IntelliSense index built on a
+  background thread is cancelled by a close, its late result is dropped, and the `intellisense`
+  scope is back to the byte afterwards, also when the view-model is destroyed mid-build. The cycle
+  test also requires that scope to be exactly 0 after every close.
 - `source_rules_no_raw_allocation_outside_the_os_layer` and `measurement_pool_is_a_fixed_first_fit_manager`.
 - `enp_ui_tests`: renders every layout state headless for hundreds of thousands of frames, fails
   on growth of ImGui's live allocations and windows in the steady state, and opens and closes
@@ -228,6 +240,8 @@ Kept so the same mistakes are recognised quickly. Each row is fixed and has a te
 | Task manager showed no drop at all | freed pages never returned to the OS | 9 |
 | 160 cycles on sdk-clean (11 files, map), 2026-11-02, passes: accounted heap 5,227 KB in 1,864 blocks, identical for 138 cycles, then one step of +1 KB and +3 blocks when ImGui created a 17th window (flat for the last 21 cycles); malloc heap pages oscillate (12,180 to 12,350 KB, no trend); the driver's dirty pages crept +76 KB in steps (16,380 to 16,456 KB) inside mappings whose sizes never changed, bounded by roughly 700 KB of room | the trend test in `scripts/memory_cycle.py` (`--cycles 160 --warmup 10 --csv`) |
 | About +100 KB private per cycle over the first cycles (investigated, not a leak) | the C++ heap was identical to the byte, and every `malloc` caller oscillated (net -416 B between cycles 3 and 9, traced); the one-way part was the NVIDIA driver writing new pages of its own command buffers: 21 mappings, 16.5 MB, sizes unchanged, two rings already full | section 3, items 4 and 5 |
+| 33 MB private kept per closed folder, anon arenas climbing about 1 MB a cycle, heap back to the byte | the IntelliSense index was built on a background thread: its blocks lived in that thread's malloc arena; freed, they merged into the arena's top, which `malloc_trim()` never returns, and glibc's dynamic trim threshold (raised by earlier large frees) kept `free()` from returning it too. Found with `malloc_stats()` under gdb: arenas of 33 MB and 12 MB with 3 KB in use | 9: fixed `mallopt` thresholds in `os::init()`; the index pools its text into a handful of large blocks (mapped on their own) instead of about 190,000 small ones |
+| (Prevented, IntelliSense) a scope would have kept bytes after close although its owner freed everything | code running inside `Scope("intellisense")` called into the main view-model (status text, opening a file, recent files): what those allocated outlives the folder and would be counted as IntelliSense's | 8: a scope covers only the subsystem's own state; calls into other owners happen outside it (`IntellisenseViewModel::status()` uses `Scope("other")`) |
 | **Open:** about 1.5 MB/s while idle with a large repo, Windows only | not reproduced on Linux (flat for minutes in every mode); Windows-only code audited without a finding | watch the developer readout on Windows: which counter climbs names it |
 
 ## 7. What "Rust-like" means here, and what it does not

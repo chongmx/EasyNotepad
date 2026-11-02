@@ -10,6 +10,7 @@
 #include "enp/model/Indent.h"
 #include "enp/model/Language.h"
 #include "enp/model/Outline.h"
+#include "enp/model/Symbols.h"
 #include "enp/model/TerminalScreen.h"
 #include "enp/model/TextBuffer.h"
 #include "enp/os/Process.h"
@@ -3797,9 +3798,20 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
         vm.findInFiles().query = "value1";
         vm.findInFiles().searchNow();
         CHECK(vm.findInFiles().hitCount() > 0);
+        // IntelliSense: the index, a list of suggestions, a context for a provider, a definition.
+        vm.intellisense().buildIndexNow();
+        CHECK(vm.intellisense().index().size() >= 2000);
+        vm.setCaret({2, 0}, false);
+        vm.insertText("val");
+        vm.intellisense().trigger();
+        CHECK(vm.intellisense().active() && !vm.intellisense().items().empty());
+        CHECK(!vm.intellisense().contextFor("value", "src/f7.cpp", "int x = value3;").empty());
+        vm.setCaret({3, 6}, false);
+        vm.intellisense().goToDefinition();
         os::dispatch::pump();
         vm.closeFolder();
         os::dispatch::pump();
+        CHECK_EQ(os::mem::liveBytes("intellisense"), std::uint64_t(0)); // every byte of it, every cycle
     };
     // Measuring must not move the needle: snapshots come from the accounting's static pool and
     // are copied into plain records here; nothing on this path allocates.
@@ -3821,6 +3833,491 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
     }
     CHECK_EQ(after8.total.liveBytes, after2.total.liveBytes);
     CHECK_EQ(after8.total.liveBlocks, after2.total.liveBlocks);
+}
+
+// ---- IntelliSense -------------------------------------------------------------------------------
+
+namespace {
+
+const model::Symbol* findSymbol(const std::vector<model::Symbol>& symbols, const std::string& name, model::SymbolKind kind)
+{
+    for (const model::Symbol& s : symbols)
+        if (s.name == name && s.kind == kind)
+            return &s;
+    return nullptr;
+}
+
+bool hasSymbol(const std::vector<model::Symbol>& symbols, const std::string& name)
+{
+    for (const model::Symbol& s : symbols)
+        if (s.name == name)
+            return true;
+    return false;
+}
+
+// Types `text` into the active document one character at a time, as the editor does.
+void typeText(viewmodel::NotepadViewModel& vm, const std::string& text)
+{
+    for (char c : text) {
+        const std::string one(1, c);
+        vm.insertText(one);
+        vm.intellisense().typed(one);
+        vm.intellisense().sync();
+    }
+}
+
+int itemIndex(const viewmodel::IntellisenseViewModel& is, const std::string& label)
+{
+    for (size_t i = 0; i < is.items().size(); ++i)
+        if (is.items()[i].label == label)
+            return int(i);
+    return -1;
+}
+
+// A small C++ project: a class declared in a header and defined in a source file.
+std::string writeIntellisenseProject(services::FileService& files, const std::string& name)
+{
+    const std::string root = scratchDirectory() + "/" + name;
+    os::fs::deletePath(root);
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/widget.h",
+                "#pragma once\n"
+                "namespace ui {\n"
+                "class Widget {\n"
+                "public:\n"
+                "    void resize(int width);\n"
+                "    int widthOf() const;\n"
+                "    static constexpr int kMaxWidth = 100;\n"
+                "};\n"
+                "} // namespace ui\n", nullptr);
+    files.write(root + "/src/widget.cpp",
+                "#include \"widget.h\"\n"
+                "void ui::Widget::resize(int width) { (void)width; }\n"
+                "int ui::Widget::widthOf() const { return 0; }\n", nullptr);
+    files.write(root + "/src/main.cpp",
+                "#include \"widget.h\"\n"
+                "int main()\n"
+                "{\n"
+                "    ui::Widget w;\n"
+                "    return 0;\n"
+                "}\n", nullptr);
+    return root;
+}
+
+} // namespace
+
+TEST(symbols_are_found_in_each_language)
+{
+    using K = model::SymbolKind;
+    std::vector<model::Symbol> cpp;
+    model::extractSymbols("#define LIMIT 4\n"
+                          "namespace app {\n"
+                          "// class Commented {};\n"
+                          "const char* text = \"struct InString {\";\n"
+                          "class ENP_API Widget final : public Base<int, char> {\n"
+                          "public:\n"
+                          "    explicit Widget(int size);\n"
+                          "    int size() const { return size_; }\n"
+                          "    static constexpr int kLimit = 4;\n"
+                          "private:\n"
+                          "    std::vector<int> items_, more_;\n"
+                          "};\n"
+                          "enum class Color : uint8_t { Red, Green = 2, Blue };\n"
+                          "template <typename T>\n"
+                          "T maxOf(T a, T b)\n"
+                          "{\n"
+                          "    int local = 3;\n"
+                          "    return a < b ? b : a;\n"
+                          "}\n"
+                          "void Widget::resize(int n) { items_.resize(n); }\n"
+                          "TEST(macro_call_is_not_a_function) {}\n"
+                          "typedef struct { int a; } Pair;\n"
+                          "using Name = std::string;\n"
+                          "class Forward;\n"
+                          "}\n",
+                          model::Language::Cpp, 7, cpp);
+    CHECK(findSymbol(cpp, "LIMIT", K::Macro));
+    CHECK(findSymbol(cpp, "app", K::Namespace));
+    const model::Symbol* widget = findSymbol(cpp, "Widget", K::Type);
+    CHECK(widget && widget->container == "app" && widget->line == 4 && widget->column == 14 && widget->file == 7);
+    CHECK(widget && widget->detail.rfind("class ENP_API Widget", 0) == 0);
+    const model::Symbol* size = findSymbol(cpp, "size", K::Function);
+    CHECK(size && size->container == "Widget" && size->definition);
+    CHECK(findSymbol(cpp, "kLimit", K::Constant));
+    CHECK(findSymbol(cpp, "items_", K::Variable) && findSymbol(cpp, "more_", K::Variable));
+    const model::Symbol* green = findSymbol(cpp, "Green", K::Constant);
+    CHECK(green && green->container == "Color");
+    CHECK(findSymbol(cpp, "maxOf", K::Function));
+    const model::Symbol* resize = findSymbol(cpp, "resize", K::Function);
+    CHECK(resize && resize->container == "Widget" && resize->definition);
+    CHECK(findSymbol(cpp, "Pair", K::Type) && findSymbol(cpp, "Name", K::Type));
+    // Not declarations: comments, strings, locals, macro calls, forward declarations.
+    CHECK(!hasSymbol(cpp, "Commented") && !hasSymbol(cpp, "InString") && !hasSymbol(cpp, "local"));
+    CHECK(!hasSymbol(cpp, "TEST") && !hasSymbol(cpp, "Forward"));
+
+    std::vector<model::Symbol> py;
+    model::extractSymbols("MAX = 3\n"
+                          "class Store(Base):\n"
+                          "    \"\"\"class Fake in a docstring\"\"\"\n"
+                          "    count: int = 0\n"
+                          "    def load(self, url,\n"
+                          "             retries):\n"
+                          "        inner = 1\n"
+                          "        def helper(): pass\n"
+                          "async def main():\n"
+                          "    pass\n",
+                          model::Language::Python, 0, py);
+    CHECK(findSymbol(py, "MAX", K::Constant) && findSymbol(py, "Store", K::Type));
+    const model::Symbol* load = findSymbol(py, "load", K::Function);
+    CHECK(load && load->container == "Store");
+    CHECK(findSymbol(py, "count", K::Variable) && findSymbol(py, "main", K::Function));
+    CHECK(!hasSymbol(py, "Fake") && !hasSymbol(py, "inner") && !hasSymbol(py, "helper") && !hasSymbol(py, "retries"));
+
+    std::vector<model::Symbol> ts;
+    model::extractSymbols("export const API_URL = \"x\";\n"
+                          "const add = (a, b) => a + b;\n"
+                          "export default class Store extends Base {\n"
+                          "  items = [];\n"
+                          "  async load(url) { const r = 1; }\n"
+                          "}\n"
+                          "function helper(a) { let z = 1; }\n"
+                          "interface Shape { area(): number; }\n"
+                          "type Id = string;\n",
+                          model::Language::TypeScript, 0, ts);
+    CHECK(findSymbol(ts, "API_URL", K::Constant) && findSymbol(ts, "add", K::Function));
+    CHECK(findSymbol(ts, "Store", K::Type) && findSymbol(ts, "items", K::Variable) && findSymbol(ts, "load", K::Function));
+    CHECK(findSymbol(ts, "helper", K::Function) && findSymbol(ts, "area", K::Function) && findSymbol(ts, "Id", K::Type));
+    CHECK(!hasSymbol(ts, "Base") && !hasSymbol(ts, "r") && !hasSymbol(ts, "z"));
+
+    std::vector<model::Symbol> rust;
+    model::extractSymbols("pub struct Point { x: f64 }\n"
+                          "impl Point {\n"
+                          "    pub fn new() -> Self { Point { x: 0.0 } }\n"
+                          "}\n"
+                          "pub(crate) enum Shape { Circle(f64), Square }\n"
+                          "const LIMIT: usize = 3;\n",
+                          model::Language::Rust, 0, rust);
+    const model::Symbol* make = findSymbol(rust, "new", K::Function);
+    CHECK(make && make->container == "Point");
+    CHECK(findSymbol(rust, "Shape", K::Type) && findSymbol(rust, "Square", K::Constant) && findSymbol(rust, "LIMIT", K::Constant));
+
+    std::vector<model::Symbol> go;
+    model::extractSymbols("package main\ntype Server struct {\n\taddr string\n}\nfunc (s *Server) Start() error {\n\treturn nil\n}\n",
+                          model::Language::Go, 0, go);
+    const model::Symbol* start = findSymbol(go, "Start", K::Function);
+    CHECK(findSymbol(go, "Server", K::Type) && start && start->container == "Server");
+
+    std::vector<model::Symbol> java;
+    model::extractSymbols("public class App {\n    public static void main(String[] args) {\n        run();\n    }\n}\n",
+                          model::Language::Java, 0, java);
+    CHECK(findSymbol(java, "App", K::Type) && findSymbol(java, "main", K::Function) && !hasSymbol(java, "run"));
+
+    std::vector<model::Symbol> lua;
+    model::extractSymbols("local M = {}\nfunction M.greet(name) return name end\n", model::Language::Lua, 0, lua);
+    const model::Symbol* greet = findSymbol(lua, "greet", K::Function);
+    CHECK(greet && greet->container == "M");
+
+    std::vector<model::Symbol> sh;
+    model::extractSymbols("NAME=x\nbuild() {\n  echo $#\n}\n", model::Language::Shell, 0, sh);
+    CHECK(findSymbol(sh, "build", K::Function) && findSymbol(sh, "NAME", K::Constant));
+
+    CHECK(!model::canExtractSymbols(model::Language::Markdown));
+}
+
+TEST(symbol_matching_prefers_prefixes_and_word_starts)
+{
+    CHECK(model::matchScore("get", "getWidth") > model::matchScore("Get", "getWidth")); // exact case first
+    CHECK(model::matchScore("Get", "getWidth") > model::matchScore("gw", "getWidth"));  // prefixes before humps
+    CHECK(model::matchScore("gw", "getWidth") > 0);
+    CHECK(model::matchScore("gw", "getWidth") > model::matchScore("gt", "getWidth")); // word starts before letters inside
+    CHECK_EQ(model::matchScore("xyz", "getWidth"), -1);
+    CHECK(model::matchScore("w", "getWidth") > 0);    // "W" starts a part of the name
+    CHECK_EQ(model::matchScore("i", "getWidth"), -1); // the first letter must start a part
+    CHECK(model::matchScore("rs", "resize_all") > 0);
+    CHECK(model::matchScore("get", "get") > model::matchScore("get", "getWidth")); // shorter first
+    CHECK_EQ(model::matchScore("", "anything"), 0);
+
+    const std::pair<int, int> around = model::identifierAround("  w.resize(3);", 8);
+    CHECK(around.first == 4 && around.second == 10);
+    const std::pair<int, int> atEnd = model::identifierAround("value", 5);
+    CHECK(atEnd.first == 0 && atEnd.second == 5);
+    const std::pair<int, int> number = model::identifierAround("x = 42", 6);
+    CHECK(number.first == number.second); // a number is not a name
+}
+
+TEST(symbol_index_finds_names_and_replaces_saved_files)
+{
+    model::SymbolIndex index;
+    std::vector<model::Symbol> symbols;
+    model::extractSymbols("void beta();\nvoid alpha();\n", model::Language::Cpp, int(index.fileCount()), symbols);
+    index.addFile("a.h");
+    index.add(symbols);
+    model::extractSymbols("void alpha() {}\n", model::Language::Cpp, int(index.fileCount()), symbols);
+    index.addFile("a.cpp");
+    index.add(symbols);
+    index.finish();
+    CHECK_EQ(index.size(), size_t(3));
+    CHECK(index.at(0).name == "alpha" && index.at(2).name == "beta");
+    CHECK(index.at(2).detail == "void beta();" && index.at(2).kind == model::SymbolKind::Function && !index.at(2).definition);
+    auto [first, last] = index.named("alpha");
+    CHECK_EQ(last - first, size_t(2));
+    CHECK(index.path(index.at(first).file) == "a.h");
+    CHECK(index.path(1) == "a.cpp" && index.path(2).empty() && index.fileIndex("a.cpp") == 1);
+    CHECK_EQ(index.named("gamma").first, index.named("gamma").second);
+
+    // Saving a file replaces its names; saving it many times keeps the index its size.
+    model::extractSymbols("void gamma() {}\n", model::Language::Cpp, -1, symbols);
+    index.replaceFile("a.cpp", symbols);
+    const size_t bytes = index.bytes();
+    for (int i = 0; i < 50; ++i) {
+        model::extractSymbols("void gamma() {}\n", model::Language::Cpp, -1, symbols);
+        index.replaceFile("a.cpp", symbols);
+    }
+    CHECK(index.bytes() <= bytes);
+    CHECK_EQ(index.named("alpha").second - index.named("alpha").first, size_t(1));
+    CHECK_EQ(index.named("gamma").second - index.named("gamma").first, size_t(1));
+    CHECK(index.path(index.at(index.named("gamma").first).file) == "a.cpp");
+    index.release();
+    CHECK(index.empty() && index.fileCount() == 0 && index.bytes() == 0);
+}
+
+TEST(intellisense_completes_names_of_the_workspace_document_and_language)
+{
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-complete");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+    CHECK(is.indexReady() && is.index().size() >= 6);
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 17}, false); // end of "    ui::Widget w;"
+    vm.newline();
+
+    // Members after ".": the declarations with a container, the typed part narrows them.
+    typeText(vm, "w.");
+    CHECK(is.active() && itemIndex(is, "resize") >= 0 && itemIndex(is, "widthOf") >= 0 && itemIndex(is, "Widget") < 0);
+    typeText(vm, "re");
+    CHECK(is.active() && !is.items().empty() && is.items()[0].label == "resize");
+    CHECK(is.items()[0].source == viewmodel::IntellisenseViewModel::Source::Workspace);
+    CHECK(is.items()[0].location.find("src/widget") == 0);
+    CHECK(is.accept());
+    CHECK(!is.active());
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.resize");
+    vm.execute(viewmodel::CommandId::Undo);
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.re"); // one undoable insertion
+
+    // Names by themselves after two letters: the workspace's, the language's and the document's.
+    vm.setCaret({4, int(vm.activeDocument()->buffer.line(4).size())}, false);
+    vm.newline();
+    typeText(vm, "W");
+    CHECK(!is.active()); // one letter is not enough
+    typeText(vm, "i");
+    CHECK(is.active() && !is.items().empty() && is.items()[0].label == "Widget");
+    CHECK(is.items()[0].kind == model::SymbolKind::Type);
+    is.dismiss();
+    CHECK(is.items().empty() && is.prefix().empty());
+    typeText(vm, ";\n    ret");
+    CHECK(is.active() && itemIndex(is, "return") >= 0);
+    CHECK(is.items()[size_t(itemIndex(is, "return"))].source == viewmodel::IntellisenseViewModel::Source::Language);
+    // The caret leaving the word closes the list.
+    vm.setCaret({0, 0}, false);
+    is.sync();
+    CHECK(!is.active());
+
+    // "ui::" lists what the namespace declares.
+    vm.setCaret({5, int(vm.activeDocument()->buffer.line(5).size())}, false);
+    vm.newline();
+    typeText(vm, "ui::");
+    CHECK(is.active() && itemIndex(is, "Widget") >= 0 && itemIndex(is, "return") < 0);
+    is.dismiss();
+
+    // Ctrl+Space shows suggestions without anything typed; a comment never opens them by itself.
+    vm.newline();
+    is.trigger();
+    CHECK(is.active() && is.items().size() > 5);
+    is.move(+2);
+    CHECK_EQ(is.selected(), 2);
+    is.move(-10);
+    CHECK_EQ(is.selected(), 0);
+    is.dismiss();
+    typeText(vm, "// wid");
+    CHECK(!is.active());
+    // Turned off: nothing appears while typing, Ctrl+Space still works.
+    vm.newline();
+    vm.execute(viewmodel::CommandId::ToggleAutoComplete);
+    CHECK(!is.autoComplete.get() && !vm.isChecked(viewmodel::CommandId::ToggleAutoComplete));
+    typeText(vm, "wid");
+    CHECK(!is.active());
+    vm.execute(viewmodel::CommandId::TriggerCompletion);
+    CHECK(is.active() && itemIndex(is, "widthOf") >= 0);
+    vm.execute(viewmodel::CommandId::ToggleAutoComplete);
+    CHECK(is.autoComplete.get());
+
+    // Closing the document closes its list; closing the folder drops the index.
+    vm.closeDocument(vm.activeIndex.get());
+    CHECK(!is.active());
+    vm.closeFolder();
+    CHECK(!is.indexReady() && is.index().empty());
+}
+
+TEST(intellisense_goes_to_definitions_in_the_file_and_the_workspace)
+{
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-definition");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    vm.intellisense().buildIndexNow();
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 9}, false); // on "Widget" in "    ui::Widget w;"
+    vm.execute(viewmodel::CommandId::GoToDefinition);
+    CHECK(vm.activeDocument()->path == "src/widget.h");
+    CHECK(vm.activeDocument()->caret.line == 2 && vm.activeDocument()->caret.column == 6);
+    // From the declaration in the header to the definition in the source file.
+    vm.setCaret({4, 11}, false); // on "resize"
+    CHECK(vm.intellisense().goToDefinition());
+    CHECK(vm.activeDocument()->path == "src/widget.cpp");
+    CHECK_EQ(vm.activeDocument()->caret.line, 1);
+    // A name declared further down the same document: found in its current (unsaved) text.
+    vm.setCaret({2, 0}, false);
+    vm.insertText("int later = helper();\nint helper() { return 1; }\n");
+    vm.setCaret({2, 14}, false); // on "helper"
+    CHECK(vm.intellisense().goToDefinition());
+    CHECK(vm.activeDocument()->path == "src/widget.cpp" && vm.activeDocument()->caret.line == 3);
+    vm.setCaret({2, 3}, false); // on "int": nothing to go to
+    CHECK(!vm.intellisense().goToDefinition());
+    // The hover tooltip's lookup: the definition before the declaration.
+    const std::optional<model::SymbolView> hovered = vm.intellisense().lookup("resize", "src/widget.h");
+    CHECK(hovered && hovered->definition && vm.intellisense().index().path(hovered->file) == "src/widget.cpp");
+    CHECK(!vm.intellisense().lookup("nothing", ""));
+    // A save updates the index.
+    model::Document* doc = vm.activeDocument();
+    doc->buffer.setText("int renamedFunction() { return 2; }\n");
+    doc->modified = true;
+    vm.execute(viewmodel::CommandId::Save);
+    CHECK(vm.intellisense().lookup("renamedFunction", "").has_value());
+    CHECK(vm.intellisense().lookup("widthOf", "").has_value()); // still declared in the header
+    vm.closeFolder();
+}
+
+TEST(intellisense_chooses_context_for_an_ai_provider_and_drops_late_answers)
+{
+    // AI completion plugs in as a provider: it is asked with the code around the caret and the
+    // declarations IntelliSense chose, answers later, and is shown first. A late answer to an
+    // older request, or after the list closed, is dropped.
+    using IS = viewmodel::IntellisenseViewModel;
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-provider");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    IS& is = vm.intellisense();
+    is.buildIndexNow();
+
+    // The context alone: what is typed, what the code nearby uses, what the file declares.
+    const std::vector<IS::ContextSnippet> context = is.contextFor("res", "src/widget.cpp", "ui::Widget w;\nw.");
+    auto reasonOf = [&](const std::string& name) {
+        for (const IS::ContextSnippet& c : context)
+            if (c.name == name)
+                return int(c.reason);
+        return -1;
+    };
+    CHECK(!context.empty() && context[0].name == "resize" && context[0].reason == IS::ContextReason::Typed);
+    CHECK_EQ(reasonOf("Widget"), int(IS::ContextReason::UsedNearby));
+    CHECK_EQ(reasonOf("widthOf"), int(IS::ContextReason::SameFile));
+    const std::string text = IS::formatContext(context);
+    CHECK(text.find("function resize in Widget (src/widget") != std::string::npos);
+    CHECK(text.find("used nearby") != std::string::npos);
+    IS::ContextBudget small;
+    small.maxSnippets = 2;
+    CHECK_EQ(is.contextFor("res", "src/widget.cpp", "ui::Widget w;", small).size(), size_t(2));
+
+    std::vector<IS::Request> requests;
+    is.setProvider([&](const IS::Request& r) { requests.push_back(r); });
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 17}, false);
+    vm.newline();
+    typeText(vm, "w.re");
+    CHECK(is.active() && !requests.empty());
+    const IS::Request& last = requests.back();
+    CHECK(last.serial == is.requestSerial() && last.prefix == "re" && last.path == "src/main.cpp");
+    CHECK(last.before.size() >= 4 && last.before.compare(last.before.size() - 4, 4, "w.re") == 0);
+    CHECK(last.after.find("return 0;") != std::string::npos);
+    CHECK(!last.context.empty() && last.context[0].name == "resize");
+
+    // An answer to an older request is dropped; the current one is shown first and inserted whole.
+    const int older = requests.front().serial;
+    is.provide(older, {IS::Item{"stale", "stale()", "", "", model::SymbolKind::Function, IS::Source::Provider, 0}});
+    CHECK(itemIndex(is, "stale") < 0);
+    IS::Item answer;
+    answer.insertText = "resize(800);\nw.widthOf();";
+    is.provide(last.serial, {answer});
+    CHECK(!is.items().empty() && is.items()[0].source == IS::Source::Provider && is.items()[0].label == "resize(800);");
+    CHECK(itemIndex(is, "resize") > 0); // the names stay below
+    CHECK(is.accept());
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.resize(800);" && vm.activeDocument()->buffer.line(5) == "w.widthOf();");
+    // After the list closed, an answer is dropped.
+    const int closed = is.requestSerial();
+    is.provide(closed, {answer});
+    CHECK(!is.active() && is.items().empty());
+    is.setProvider({});
+    CHECK(!is.hasProvider());
+    vm.closeFolder();
+}
+
+TEST(closing_a_folder_stops_the_symbol_index_build)
+{
+    // The index is built on a background thread: closing the folder cancels it, and its late
+    // result never lands (in the next folder or anywhere): every byte of it is freed.
+    if (!os::mem::enabled()) {
+        CHECK(true);
+        return;
+    }
+    services::FileService files;
+    const std::string a = scratchDirectory() + "/enp-test-index-a";
+    const std::string b = scratchDirectory() + "/enp-test-index-b";
+    os::fs::deletePath(a);
+    os::fs::deletePath(b);
+    os::fs::createDirectories(a + "/src");
+    os::fs::createDirectories(b + "/src");
+    for (int i = 0; i < 200; ++i) {
+        std::string text;
+        for (int l = 0; l < 50; ++l)
+            text += "int folderA_" + std::to_string(i) + "_" + std::to_string(l) + "(int x) { return x; }\n";
+        files.write(a + "/src/a" + std::to_string(i) + ".cpp", text, nullptr);
+    }
+    files.write(b + "/src/b.cpp", "int onlyInB() { return 1; }\n", nullptr);
+    auto waitForBuilds = []() {
+        for (int i = 0; i < 1000 && viewmodel::IntellisenseViewModel::runningBuilds() > 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // the finished thread lets go of its task
+        os::dispatch::pump();
+    };
+    waitForBuilds();
+    const std::uint64_t before = os::mem::liveBytes("intellisense");
+    {
+        viewmodel::NotepadViewModel vm(nullptr, &files);
+        CHECK(vm.openFolder(a));
+        vm.intellisense().ensureIndex();
+        CHECK(vm.intellisense().indexing.get());
+        CHECK(vm.openFolder(b)); // while it reads folder a
+        CHECK(!vm.intellisense().indexing.get());
+        waitForBuilds();
+        CHECK(!vm.intellisense().indexReady()); // folder a's late result was dropped
+        vm.intellisense().ensureIndex();
+        waitForBuilds();
+        CHECK(vm.intellisense().indexReady());
+        CHECK(vm.intellisense().lookup("onlyInB", "").has_value());
+        CHECK(!vm.intellisense().lookup("folderA_0_0", ""));
+        vm.closeFolder();
+        CHECK(!vm.intellisense().indexReady());
+        CHECK_EQ(os::mem::liveBytes("intellisense"), before);
+        // Destroyed while a build runs: the build stops and its result goes with its task.
+        CHECK(vm.openFolder(a));
+        vm.intellisense().ensureIndex();
+    }
+    waitForBuilds();
+    CHECK_EQ(os::mem::liveBytes("intellisense"), before);
+    CHECK_EQ(viewmodel::IntellisenseViewModel::runningBuilds(), 0);
 }
 
 TEST(measurement_pool_is_a_fixed_first_fit_manager)

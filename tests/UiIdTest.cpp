@@ -471,6 +471,95 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // IntelliSense: the suggestion list is one window whatever the document, chosen with the keys
+        // or the mouse; it gives the keyboard back to the text and nothing of it stays once its
+        // documents close.
+        {
+            h.setContext("IntelliSense suggestions");
+            h.vm().execute(viewmodel::CommandId::ShowCodeView);
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            viewmodel::IntellisenseViewModel& is = h.vm().intellisense();
+            is.buildIndexNow(); // the sample workspace
+            const ImVec2 away(-100.0f, -100.0f);
+            auto windowNamed = [](const char* name) -> ImGuiWindow* {
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    if (w->WasActive && std::strcmp(slash ? slash + 1 : w->Name, name) == 0)
+                        return w;
+                }
+                return nullptr;
+            };
+            auto windowsContaining = [](const char* part) {
+                int n = 0;
+                for (ImGuiWindow* w : GImGui->Windows)
+                    n += std::strstr(w->Name, part) ? 1 : 0;
+                return n;
+            };
+            auto key = [&h, away](ImGuiKey k) {
+                ImGui::GetIO().AddKeyEvent(k, true);
+                h.frame(away);
+                ImGui::GetIO().AddKeyEvent(k, false);
+                h.frame(away);
+            };
+            auto fail = [&layoutsWrong](const char* what, int round) {
+                std::printf("  FAILED IntelliSense (round %d): %s\n", round, what);
+                layoutsWrong = true;
+            };
+            for (int round = 0; round < 6; ++round) {
+                h.vm().newDocument();
+                h.vm().activeDocument()->language = model::Language::Cpp;
+                h.vm().insertText("int widthOfWindow = 3;\nint widthOfDoor = 2;\nint main()\n{\n    wid");
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Agent); // switching back focuses the editor
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+                h.settle();
+                h.vm().execute(viewmodel::CommandId::TriggerCompletion);
+                h.settle();
+                ImGuiWindow* popup = windowNamed("##completion");
+                if (!popup || !is.active() || is.items().size() < 2) {
+                    fail("the list did not show", round);
+                    continue;
+                }
+                const ImVec2 at = popup->Pos, size = popup->Size;
+                h.sweep(at.x, at.y, at.x + size.x, at.y + size.y, kCoarseStep); // hover every row
+                if (round % 2 == 0) { // the keys
+                    key(ImGuiKey_DownArrow);
+                    if (is.selected() != 1)
+                        fail("Down did not choose the next suggestion", round);
+                    const std::string chosen = is.items()[1].label;
+                    key(ImGuiKey_Enter);
+                    if (is.active() || h.vm().activeDocument()->buffer.line(4) != "    " + chosen)
+                        fail("Enter did not insert the chosen suggestion", round);
+                } else { // the mouse
+                    const std::string first = is.items()[0].label;
+                    h.click(ImVec2(at.x + 40.0f, at.y + 14.0f));
+                    h.settle();
+                    if (is.active() || h.vm().activeDocument()->buffer.line(4) != "    " + first)
+                        fail("a click did not insert the suggestion", round);
+                    if (!GImGui->NavWindow || !std::strstr(GImGui->NavWindow->Name, "##editorText"))
+                        fail("the keyboard did not go back to the text after a click", round);
+                }
+                // Escape closes a list; typing on afterwards works as before.
+                h.vm().execute(viewmodel::CommandId::TriggerCompletion);
+                h.settle();
+                key(ImGuiKey_Escape);
+                if (is.active())
+                    fail("Escape did not close the list", round);
+            }
+            if (windowsContaining("##completion") > 2) // the list and its scrolling child
+                std::printf("  FAILED IntelliSense: %d windows for the suggestion list\n", windowsContaining("##completion")), layoutsWrong = true;
+            h.vm().execute(viewmodel::CommandId::TriggerCompletion);
+            h.settle();
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settle();
+            if (is.active() || !is.items().empty())
+                std::printf("  FAILED IntelliSense: suggestions still held after their documents closed\n"), layoutsWrong = true;
+            is.workspaceChanged(); // the index of the sample workspace goes too
+            h.vm().openStartupDocuments({});
+            h.settle();
+        }
+
         // Data views: CSV table, JSON/YAML tree and accordion, a parse error; each document's parsed
         // form must go when it goes back to text, and when it closes.
         {

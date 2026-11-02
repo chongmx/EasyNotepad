@@ -13,6 +13,7 @@
 #include "enp/viewmodel/ExplorerItem.h"
 #include "enp/viewmodel/FileDialogViewModel.h"
 #include "enp/viewmodel/FindInFilesViewModel.h"
+#include "enp/viewmodel/IntellisenseViewModel.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/IProcessService.h"
 #include "enp/viewmodel/LayersViewModel.h"
@@ -192,6 +193,8 @@ public:
     // True once after something large was released (a folder closed, the last document closed):
     // the app then compacts ImGui's caches and returns freed heap memory to the OS (os::trimMemory).
     bool takeMemoryTrimRequest();
+    // Something large was freed outside the close path (an index rebuilt): trim like after a close.
+    void requestMemoryTrim() { memoryTrimRequested_ = true; }
     bool folderOpen() const { return !workspaceRoot_.empty(); }
     // No folder, after Close Folder (rather than the sample workspace shown at first start).
     bool noFolder() const { return workspaceRoot_.empty() && explorer_.children.empty(); }
@@ -428,6 +431,9 @@ public:
     static constexpr const char* kAgentSetupUrl = "https://code.claude.com/docs/en/setup";
     FileDialogViewModel& fileDialog() { return fileDialog_; }
     FindInFilesViewModel& findInFiles() { return findInFiles_; }
+    // Completion, Go to Definition and the workspace's symbol index.
+    IntellisenseViewModel& intellisense() { return intellisense_; }
+    const IntellisenseViewModel& intellisense() const { return intellisense_; }
     Event<> searchFocusRequested; // Find in Files: focus the query box
     std::string absolutePath(const std::string& path) const; // workspace-relative -> absolute
     // Replaces a document's whole text as one undoable edit (opening it if needed).
@@ -513,6 +519,7 @@ private:
     LogicalMapViewModel logicalMap_;
     FileDialogViewModel fileDialog_;
     FindInFilesViewModel findInFiles_;
+    IntellisenseViewModel intellisense_; // before settings_, which binds its autoComplete
     int nextDocumentId_ = 1;
     int untitledCounter_ = 0;
     bool memoryTrimRequested_ = false;

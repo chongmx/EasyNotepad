@@ -155,6 +155,10 @@ const char* commandIcon(CommandId id)
     case CommandId::GitWriteMessage: return ICON_FA_WAND_MAGIC_SPARKLES;
     case CommandId::GitGuide: return ICON_FA_GRADUATION_CAP;
     case CommandId::CloseFolder: return ICON_FA_FOLDER_CLOSED;
+    case CommandId::TriggerCompletion: return ICON_FA_WAND_MAGIC_SPARKLES;
+    case CommandId::GoToDefinition: return ICON_FA_LOCATION_CROSSHAIRS;
+    case CommandId::ToggleAutoComplete: return ICON_FA_KEYBOARD;
+    case CommandId::RebuildSymbolIndex: return ICON_FA_ROTATE;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;

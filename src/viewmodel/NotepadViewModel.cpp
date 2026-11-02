@@ -44,7 +44,7 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
     : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace()), files_(fileService), engineLab_(localEngine),
       terminal_(terminalService),
       logicalMap_(*this, agentCli), fileDialog_(*this, fileService),
-      findInFiles_(*this, fileService), settings_(fileService)
+      findInFiles_(*this, fileService), intellisense_(*this, fileService), settings_(fileService)
 {
     agentCli_ = agentCli;
     terminal_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string()); // no folder yet: home
@@ -296,6 +296,7 @@ void NotepadViewModel::closeFolder()
     findInFiles_.clear(); // the hits (and their lines) were the closed folder's
     layers_.workspaceChanged();
     logicalMap_.workspaceChanged();
+    intellisense_.workspaceChanged();
     git_.workspaceChanged();
     statusText.set(closed.empty() ? "No folder open" : "Closed the folder " + closed);
     memoryTrimRequested_ = true;
@@ -318,6 +319,8 @@ void NotepadViewModel::closeWhere(const std::function<bool(int index, const mode
         std::unique_ptr<model::Document>& doc = documents_[size_t(i)];
         if (close(i, *doc) && !doc->modified) {
             history_.forget(doc->id);
+            if (intellisense_.documentId() == doc->id)
+                intellisense_.dismiss();
             if (doc->kind != model::FileKind::Text)
                 memoryTrimRequested_ = true; // its view held a decoded image or a library's contents
             continue;
@@ -422,6 +425,8 @@ void NotepadViewModel::closeDocument(int index)
     if (index < 0 || index >= int(documents_.size()))
         return;
     history_.forget(documents_[size_t(index)]->id);
+    if (intellisense_.documentId() == documents_[size_t(index)]->id)
+        intellisense_.dismiss(); // its suggestions go with it
     // An image or a library: what its view decoded is large, so the pages go back to the system now.
     const bool large = documents_[size_t(index)]->kind != model::FileKind::Text;
     documents_.erase(documents_.begin() + index);
@@ -577,6 +582,7 @@ bool NotepadViewModel::saveDocument(model::Document& doc)
     recordDiskStamp(doc);
     statusText.set("Saved " + doc.path);
     git_.documentSaved(doc.path, doc.savedText);
+    intellisense_.documentSaved(doc);
     return true;
 }
 
@@ -919,6 +925,7 @@ bool NotepadViewModel::openFolder(const std::string& path)
     findInFiles_.clear();
     layers_.workspaceChanged();
     logicalMap_.workspaceChanged();
+    intellisense_.workspaceChanged();
     remember(recentFolders_, root, kMaxRecentFolders);
     while (!documents_.empty())
         closeDocument(0);
@@ -1565,6 +1572,7 @@ bool NotepadViewModel::renamePath(const std::string& path, const std::string& ne
     }
     refreshExplorer();
     statusText.set("Renamed " + path + " to " + newName);
+    intellisense_.invalidate(); // the index names the old path
     git_.requestRefresh();
     return true;
 }
@@ -1587,6 +1595,7 @@ bool NotepadViewModel::deletePath(const std::string& path)
     }
     refreshExplorer();
     statusText.set(recycled ? "Moved " + path + " to the Recycle Bin" : "Deleted " + path);
+    intellisense_.invalidate(); // the index names the deleted file
     git_.requestRefresh();
     return true;
 }
@@ -1932,6 +1941,7 @@ void NotepadViewModel::bindSettings()
     settings_.bind("editor.showLineNumbers", showLineNumbers);
     settings_.bind("editor.showIndentGuides", showIndentGuides);
     settings_.bind("editor.smartIndent", smartIndent);
+    settings_.bind("editor.autoComplete", intellisense_.autoComplete);
     settings_.bind("performance.maxFps", maxFramesPerSecond);
     settings_.bind("performance.blinkCaret", blinkCaret);
 

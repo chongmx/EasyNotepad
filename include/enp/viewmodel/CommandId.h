@@ -55,6 +55,8 @@ enum class CommandId {
     ShowGitStatus,
     // Agent (appended)
     LocalModel,
+    // IntelliSense (appended)
+    TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex,
 
     Count
 };

@@ -516,3 +516,43 @@ Creating, renaming and deleting need an opened folder; in the sample workspace t
 and its documents, asking first to save or discard unsaved changes. The Explorer then shows "No folder
 open" with **Open a folder** and the recent folders. An open file's right-click menu in the Explorer
 has **Close**. Every dialog's **×** closes it (agents can use it too, through the connector).
+
+## IntelliSense: completion, Go to Definition and declarations on hover
+
+**Suggestions while typing.** In code (C/C++, C#, Java, JavaScript, TypeScript, Python, Rust, Go,
+Lua, shell, PowerShell, CMake), after two letters of a name a list of suggestions opens at the
+caret: the names the workspace declares (types, functions, namespaces, macros, constants, members,
+variables at file and type level), the words of the document, and the language's keywords. After
+`.` or `->` it lists members; after `Name::` what `Name` declares. Matching is fuzzy: `gw` finds
+`getWidth`, exact-case prefixes come first, then word starts. Each row shows what the name is and
+the file declaring it; the chosen one shows its declaration below the list. **Up/Down**, **Page
+Up/Down** choose, **Enter** or **Tab** (or a click) insert it, **Esc** closes the list. It never opens
+by itself inside a comment or a string. **Ctrl+Space** (Edit › IntelliSense › Complete) opens it
+anywhere, also with nothing typed and in any language; **Auto Complete** turns the automatic list
+off (saved). Inserting a suggestion is one ordinary edit: Undo takes it back.
+
+**Go to Definition** (F12, also in Read › Navigate): jumps to where the name under the caret is
+declared. The current document is searched first in its current, unsaved text; then the workspace,
+definitions before declarations. On a declaration already (a prototype in a header), it goes to the
+other place (the body in the source file). While the workspace is still being read, it waits and
+jumps when it is ready.
+
+**On hover:** resting the mouse on a name for half a second shows its declaration and where it is.
+
+**The index.** The workspace's code is read in the background the first time IntelliSense is used
+in a folder (the project first, vendored folders after; build output, `node_modules` and files over
+2 MB are skipped; at most 5,000 files). Saving a file updates its entries; renaming or deleting files
+reads the workspace again on next use; **Rebuild Index** does so at once. Declarations are found by
+reading the text (no compiler): the names are exact, the types of expressions are not known, so
+members after `.` are those of any type.
+
+**For AI completion.** A model plugs in as a provider (plan 21): it is asked with the code around
+the caret and the context snippets IntelliSense chose for it, and its suggestions (which may span
+several lines) are shown first in the same list. IntelliSense decides what context a model gets
+(`contextFor()`: declarations matching the typed word, those the nearby code uses, those of the file,
+ranked within a byte budget).
+
+**Memory.** The index is the scope `intellisense` (docs/MEMORY.md); closing the folder or opening
+another releases it to the byte, cancels a build still running and drops its late result. The
+suggestion list is one window for every document.
+

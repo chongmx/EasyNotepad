@@ -37,6 +37,8 @@ Done without a plan item (see [../FEATURES.md](../FEATURES.md)):
 - Windows 7 and 32-bit builds.
 - The phone layouts.
 - The slim ribbon.
+- IntelliSense: completion, Go to Definition, declarations on hover, and the provider seam and
+  context snippets that AI completion (plan 21) builds on.
 
 **Reviewing items 14–19:** open Help (?) › Learn Git. Each lesson names its plan item, what was built
 and anything left for later, with an "I have checked this part" box; it runs on demo data that Reset

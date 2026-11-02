@@ -165,6 +165,10 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::GitWriteMessage: return {"Message", "Let the agent write the commit message", ""};
     case CommandId::GitGuide: return {"Learn Git", "Step-by-step guide to git, using this app's Git tools", ""};
     case CommandId::CloseFolder: return {"Close Folder", "Close the folder and its documents", ""};
+    case CommandId::TriggerCompletion: return {"Complete", "Suggest names for the word at the caret: from this file, the workspace and the language", "Ctrl+Space"};
+    case CommandId::GoToDefinition: return {"Definition", "Go to where the name under the caret is declared, in this file or the workspace", "F12"};
+    case CommandId::ToggleAutoComplete: return {"Auto Complete", "Suggest names while typing code", ""};
+    case CommandId::RebuildSymbolIndex: return {"Rebuild Index", "Read the workspace's code again for completion and Go to Definition", ""};
 
     case CommandId::Count: break;
     }
@@ -322,6 +326,10 @@ const char* commandKey(CommandId id)
     case CommandId::GitWriteMessage: return "GitWriteMessage";
     case CommandId::GitGuide: return "GitGuide";
     case CommandId::CloseFolder: return "CloseFolder";
+    case CommandId::TriggerCompletion: return "TriggerCompletion";
+    case CommandId::GoToDefinition: return "GoToDefinition";
+    case CommandId::ToggleAutoComplete: return "ToggleAutoComplete";
+    case CommandId::RebuildSymbolIndex: return "RebuildSymbolIndex";
     case CommandId::Count: break;
     }
     return "";

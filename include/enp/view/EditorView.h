@@ -89,6 +89,10 @@ private:
     void drawRows(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
     void drawGutter(const model::Document& doc, const Metrics& m, int firstRow, int lastRow);
     void drawHoverTooltip(const model::Document& doc, const Metrics& m);
+    // IntelliSense: the suggestion list at the caret (one window for every document), and the
+    // declaration of the name under the mouse.
+    void renderCompletion(const model::Document& doc, const Metrics& m);
+    void drawSymbolTooltip(const model::Document& doc, const Metrics& m);
     void revealCaret(const model::Document& doc, const Metrics& m);
     // Git: merge-conflict blocks (tints, accept buttons, a bar with next / previous), the change
     // peek opened from a change bar, and blame.
@@ -171,6 +175,11 @@ private:
     int peekLine_ = -1;
     bool openPeek_ = false;
     uint64_t blameRequested_ = ~0ull;
+    bool completionHovered_ = false; // the suggestion list, last frame
+    bool completionFocused_ = false;
+    int completionSerial_ = -1;      // the list's selection last scrolled into view
+    ImVec2 hoverPos_{-1.0f, -1.0f};  // the mouse resting for a symbol's tooltip
+    double hoverSince_ = 0.0;
 };
 
 } // namespace enp::view
