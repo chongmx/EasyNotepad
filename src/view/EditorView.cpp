@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <unordered_set>
 #include <utility>
@@ -612,6 +613,13 @@ void EditorView::render(ImVec2 size)
         ImGui::SetNextWindowScroll(scroll_[doc->id].text);
         shownTextDoc_ = doc->id;
     }
+    // A list opened by a command (the ribbon, an agent) rather than a key: the text takes the
+    // keyboard back, or the list would close at once for want of it.
+    if (vm_.intellisense().sessionSerial() != completionSession_) {
+        completionSession_ = vm_.intellisense().sessionSerial();
+        if (vm_.intellisense().active())
+            focusRequested_ = true;
+    }
     panel::beginChild("##editorText", size, palette_.editorBg, ImGuiChildFlags_None,
                       (wrap ? ImGuiWindowFlags_None : ImGuiWindowFlags_HorizontalScrollbar) | ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
@@ -1172,6 +1180,12 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
             intellisense.dismiss();
         keysTaken = true;
     }
+    // While a model writes the code of a comment, Escape stops it (typing on does too).
+    bool escapeTaken = false;
+    if (!completing && intellisense.active() && intellisense.awaiting() && intellisense.documentId() == doc.id && pressed(ImGuiKey_Escape)) {
+        intellisense.dismiss();
+        escapeTaken = true;
+    }
     auto keyFree = [keysTaken, shift](ImGuiKey key) { // a key the suggestion list did not take
         const bool arrow = key == ImGuiKey_UpArrow || key == ImGuiKey_DownArrow || key == ImGuiKey_PageUp || key == ImGuiKey_PageDown;
         if (!keysTaken || ((arrow || key == ImGuiKey_Tab) && shift)) // Shift+arrows select, Shift+Tab outdents
@@ -1242,6 +1256,7 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
     }
     if (keyFree(ImGuiKey_Enter) && (pressed(ImGuiKey_Enter) || pressed(ImGuiKey_KeypadEnter))) {
         vm_.newline();
+        intellisense.afterNewline(); // below a comment: code suggestions after a pause, when on
         acted = horizontal = true;
     }
     if (pressed(ImGuiKey_Backspace)) {
@@ -1265,7 +1280,7 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
             vm_.insertIndent();
         acted = horizontal = true;
     }
-    if (keyFree(ImGuiKey_Escape) && pressed(ImGuiKey_Escape)) {
+    if (!escapeTaken && keyFree(ImGuiKey_Escape) && pressed(ImGuiKey_Escape)) {
         if (vm_.findVisible.get())
             vm_.findVisible.set(false);
         else if (doc.multiCursor())
@@ -2177,7 +2192,8 @@ void EditorView::renderCompletion(const model::Document& doc, const Metrics& m)
 {
     viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
     const std::vector<viewmodel::IntellisenseViewModel::Item>& items = intellisense.items();
-    if (items.empty() || rows_.empty()) { // waiting for a provider's answer: nothing to show yet
+    const bool waiting = items.empty() && intellisense.awaiting();
+    if ((items.empty() && !waiting) || rows_.empty()) {
         completionHovered_ = completionFocused_ = false;
         return;
     }
@@ -2187,18 +2203,29 @@ void EditorView::renderCompletion(const model::Document& doc, const Metrics& m)
     const float lineTop = m.origin.y + float(r) * m.lineH;
     const float rowH = std::floor(m.lineH * 1.15f);
     const int count = int(items.size());
-    const int visible = std::min(count, 10);
+    const int visible = waiting ? 0 : std::min(count, 10);
     const float listH = float(visible) * rowH;
     ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
     const float detailLineH = ImGui::GetTextLineHeightWithSpacing();
     ImGui::PopFont();
     const float pad = 4.0f * s_;
-    const float detailH = 2.0f * detailLineH + pad;
+    // Below the list: the chosen suggestion's declaration, or a model's code (a preview of up to
+    // kPreviewLines lines), or while a model writes, what it is doing.
+    constexpr int kPreviewLines = 12;
+    const int selectedIndex = std::clamp(intellisense.selected(), 0, std::max(0, count - 1));
+    int previewLines = 0;
+    if (!waiting && items[size_t(selectedIndex)].source == viewmodel::IntellisenseViewModel::Source::Provider) {
+        previewLines = 1;
+        for (char c : items[size_t(selectedIndex)].insertText)
+            previewLines += c == '\n' ? 1 : 0;
+        previewLines = std::min(previewLines, kPreviewLines);
+    }
+    const float detailH = waiting ? detailLineH : (previewLines > 0 ? float(previewLines + 1) : 2.0f) * detailLineH + pad;
     const ImGuiViewport* viewport = ImGui::GetWindowViewport();
     const ImVec2 areaMin = viewport->WorkPos;
     const ImVec2 areaMax(viewport->WorkPos.x + viewport->WorkSize.x, viewport->WorkPos.y + viewport->WorkSize.y);
-    const float w = std::min(520.0f * s_, std::max(200.0f * s_, areaMax.x - areaMin.x - 16.0f * s_));
-    const float h = listH + detailH + 3.0f * pad;
+    const float w = std::min((previewLines > 0 ? 640.0f : 520.0f) * s_, std::max(200.0f * s_, areaMax.x - areaMin.x - 16.0f * s_));
+    const float h = listH + detailH + (waiting ? 2.0f : 3.0f) * pad;
     // Below the word, or above it when there is no room below; never off the screen.
     ImVec2 pos(rowX(doc, row, std::clamp(anchor.column, row.begin, row.end), m) - 26.0f * s_, lineTop + m.lineH);
     if (pos.y + h > areaMax.y && lineTop - h >= areaMin.y)
@@ -2228,6 +2255,18 @@ void EditorView::renderCompletion(const model::Document& doc, const Metrics& m)
     completionHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
     completionFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
 
+    if (waiting) { // a model is writing the code of a comment
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.accent), ICON_FA_WAND_MAGIC_SPARKLES);
+        ImGui::SameLine();
+        const std::string& status = intellisense.providerStatus();
+        ImGui::TextUnformatted(status.empty() ? "Writing the code for the comment" : status.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("  Esc stops");
+        ImGui::PopFont();
+        ImGui::End();
+        return;
+    }
     int clicked = -1;
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
     ImGui::BeginChild("##completionList", ImVec2(0.0f, listH), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
@@ -2282,19 +2321,37 @@ void EditorView::renderCompletion(const model::Document& doc, const Metrics& m)
     const viewmodel::IntellisenseViewModel::Item& chosen = items[size_t(std::clamp(selected, 0, count - 1))];
     ImGui::Dummy(ImVec2(0.0f, pad));
     ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-    const char* kindName = chosen.source == viewmodel::IntellisenseViewModel::Source::Provider ? "suggested" : model::symbolKindName(chosen.kind);
-    const std::string& detail = !chosen.detail.empty() ? chosen.detail : chosen.insertText;
+    const bool provided = chosen.source == viewmodel::IntellisenseViewModel::Source::Provider;
+    const char* kindName = provided ? "suggested" : model::symbolKindName(chosen.kind);
     ImGui::TextDisabled("%s", kindName);
-    if (!chosen.location.empty()) {
+    if (provided && !chosen.detail.empty()) { // which model, how fast
         ImGui::SameLine();
+        ImGui::TextDisabled("%s", chosen.detail.c_str());
+    } else if (!chosen.location.empty() && chosen.note.compare(0, chosen.location.size(), chosen.location) != 0) {
+        ImGui::SameLine(); // (a library name's note starts with its header already)
         ImGui::TextDisabled("%s", chosen.location.c_str());
     }
-    if (!detail.empty()) {
-        ImGui::PushFont(fonts_.mono, Fonts::kUiSize * 0.95f);
-        const char* end = detail.c_str() + std::min(detail.size(), detail.find('\n')); // one line
-        ImGui::TextUnformatted(detail.c_str(), end);
-        ImGui::PopFont();
+    if (!chosen.note.empty()) { // the header clue
+        ImGui::SameLine();
+        const bool needs = chosen.note.rfind("needs", 0) == 0;
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(needs ? palette_.severityWarning : palette_.textDim), "%s", chosen.note.c_str());
     }
+    ImGui::PushFont(fonts_.mono, Fonts::kUiSize * 0.95f);
+    if (provided) { // the code, as it will be inserted (the first lines)
+        const std::string& code = chosen.insertText.empty() ? chosen.label : chosen.insertText;
+        const char* p = code.c_str();
+        const char* end = p + code.size();
+        for (int line = 0; line < kPreviewLines && p < end; ++line) {
+            const char* eol = static_cast<const char*>(std::memchr(p, '\n', size_t(end - p)));
+            const char* stop = eol ? eol : end;
+            ImGui::TextUnformatted(p, stop);
+            p = eol ? eol + 1 : end;
+        }
+    } else if (!chosen.detail.empty()) {
+        const char* end = chosen.detail.c_str() + std::min(chosen.detail.size(), chosen.detail.find('\n')); // one line
+        ImGui::TextUnformatted(chosen.detail.c_str(), end);
+    }
+    ImGui::PopFont();
     ImGui::PopFont();
     ImGui::End();
 
@@ -2309,8 +2366,9 @@ void EditorView::renderCompletion(const model::Document& doc, const Metrics& m)
 
 void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
 {
-    const viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
-    if (!intellisense.indexReady() || intellisense.index().empty() || intellisense.active() || rows_.empty())
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    const bool cFamily = doc.language == model::Language::Cpp; // the standard library is known without the index
+    if ((!cFamily && (!intellisense.indexReady() || intellisense.index().empty())) || intellisense.active() || rows_.empty())
         return;
     // Only once the mouse rests: no tooltips flashing while it travels over the code.
     const ImVec2 mouse = ImGui::GetIO().MousePos;
@@ -2325,9 +2383,29 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
     if (!nameAt(doc, m, mouse, r, b, e))
         return;
     const std::string& text = doc.buffer.line(rows_[size_t(r)].line);
-    const std::optional<model::SymbolView> symbol = intellisense.lookup(std::string_view(text).substr(size_t(b), size_t(e - b)), doc.path);
-    if (!symbol)
+    const std::string_view name = std::string_view(text).substr(size_t(b), size_t(e - b));
+    const std::optional<model::SymbolView> symbol = intellisense.lookup(name, doc.path);
+    if (!symbol) {
+        // A name of the C or C++ standard library: its declaration, header and standard.
+        const model::LibraryName* library = intellisense.libraryLookup(name, doc);
+        if (!library)
+            return;
+        const bool c = model::isCSource(doc.path.empty() ? doc.title : doc.path);
+        const std::string_view header = model::libraryHeader(*library, c);
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        ImGui::BeginTooltip();
+        const bool member = library->scope[0] && std::strcmp(library->scope, "std") != 0;
+        ImGui::TextDisabled("%s %s%s%s", model::symbolKindName(library->kind), c ? "" : library->scope,
+                            (c || !library->scope[0]) ? "" : member ? "::" : "::", library->name);
+        ImGui::PushFont(fonts_.mono, Fonts::kUiSize);
+        ImGui::TextUnformatted(library->signature);
+        ImGui::PopFont();
+        ImGui::TextDisabled("#include <%.*s>  \u00b7  since %s", int(header.size()), header.data(),
+                            model::standardName(c ? library->cSince : library->cppSince, c));
+        ImGui::EndTooltip();
+        ImGui::PopFont();
         return;
+    }
     // Drawn from views into the index and fixed buffers: nothing allocated per frame.
     const std::string_view file = intellisense.index().path(symbol->file);
     char where[320];

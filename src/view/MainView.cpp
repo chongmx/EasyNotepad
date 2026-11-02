@@ -120,6 +120,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
     subscriptions_.push_back(vm_.addCommentRequested.subscribe([this]() { openComment_ = true; }));
     subscriptions_.push_back(vm_.preferencesRequested.subscribe([this]() { openPreferences_ = true; }));
     subscriptions_.push_back(vm_.syntaxColorsRequested.subscribe([this]() { openSyntaxColors_ = true; }));
+    subscriptions_.push_back(vm_.intellisenseSettingsRequested.subscribe([this]() { openIntellisenseSettings_ = true; }));
     subscriptions_.push_back(vm_.languagePickerRequested.subscribe([this]() { openLanguagePicker_ = true; }));
     subscriptions_.push_back(vm_.recentPickerRequested.subscribe([this]() {
         if (ImGui::IsPopupOpen("##recentPicker"))
@@ -255,6 +256,7 @@ void MainView::render()
     fileDialogView_.render();
     renderPreferencesPopup();
     renderSyntaxColorsPopup();
+    renderIntellisenseSettingsPopup();
     renderAboutPopup();
     engineLab_.render(layout_ != Layout::Desktop, pos, ImVec2(pos.x + size.x, pos.y + size.y));
     handleCaptionMouse();
@@ -325,6 +327,7 @@ void MainView::handleShortcuts()
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F, C::FindInFiles, Global},
         {ImGuiMod_Ctrl | ImGuiKey_G, C::GoToLine, Global},
         {ImGuiMod_Ctrl | ImGuiKey_Space, C::TriggerCompletion, Editing},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Space, C::ImplementComment, Editing},
         {ImGuiKey_F12, C::GoToDefinition, Editing},
         {ImGuiMod_Alt | ImGuiKey_LeftArrow, C::NavigateBack, Editing},
         {ImGuiMod_Alt | ImGuiKey_RightArrow, C::NavigateForward, Editing},
@@ -2825,9 +2828,150 @@ void MainView::renderPreferencesPopup()
         vm_.workspace.set(WorkspaceMode::Code);
     if (ImGui::Button(ICON_FA_PALETTE "  Syntax colours..."))
         openSyntaxColors_ = true;
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_SLIDERS "  IntelliSense..."))
+        openIntellisenseSettings_ = true;
+    ImGui::SetItemTooltip("Suggestions, the model that writes code from comments (local or online), C/C++ standards and include folders");
     ImGui::Spacing();
     ImGui::TextDisabled(vm_.settingsPath().empty() ? "Settings last for this session." : "Settings are saved automatically.");
     if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+void MainView::renderIntellisenseSettingsPopup()
+{
+    viewmodel::IntellisenseViewModel& is = vm_.intellisense();
+    viewmodel::CodeAssistant& assistant = vm_.codeAssistant();
+    if (openIntellisenseSettings_) {
+        ImGui::OpenPopup("IntelliSense Settings");
+        openIntellisenseSettings_ = false;
+        editClaudeModel_ = assistant.claudeModel.get();
+        editCommand_ = assistant.command.get();
+        editIncludeFolders_ = is.includeFolders.get();
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    bool open = true;
+    fit::constrainNextWindow();
+    if (!ImGui::BeginPopupModal("IntelliSense Settings", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!editCommand_.empty() || !editClaudeModel_.empty() || !editIncludeFolders_.empty()) { // closed: the fields go
+            os::mem::release(editClaudeModel_);
+            os::mem::release(editCommand_);
+            os::mem::release(editIncludeFolders_);
+        }
+        return;
+    }
+    bool close = registerWindowClose("dialog:intellisense:close", "Close IntelliSense Settings");
+    auto toggle = [](const char* label, viewmodel::Property<bool>& property) {
+        bool value = property.get();
+        if (ImGui::Checkbox(label, &value))
+            property.set(value);
+    };
+    const float fieldW = 300.0f * s_;
+    // Help text at a fixed width: in a window that sizes itself, TextWrapped would wrap at the
+    // window's own (narrow) width and make it very tall.
+    auto help = [this](const char* text) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(460.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 80.0f * s_));
+        ImGui::TextDisabled("%s", text);
+        ImGui::PopTextWrapPos();
+    };
+
+    ImGui::TextDisabled("SUGGESTIONS");
+    toggle("Suggest names while typing", is.autoComplete);
+    ImGui::SetItemTooltip("After two letters, \".\", \"->\" or \"::\". Ctrl+Space shows them anyway.");
+    toggle("Code suggestions from comments", is.aiSuggestions);
+    ImGui::SetItemTooltip("Write a comment saying what the code should do, then press Enter and wait a moment, or press "
+                          "Ctrl+Shift+Space. The model below writes the code; Enter or Tab inserts it, Esc stops it.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("THE MODEL THAT WRITES CODE");
+    {
+        const char* const labels[] = {viewmodel::CodeAssistant::sourceName(viewmodel::CodeAssistant::Source::Local),
+                                      viewmodel::CodeAssistant::sourceName(viewmodel::CodeAssistant::Source::Claude),
+                                      viewmodel::CodeAssistant::sourceName(viewmodel::CodeAssistant::Source::Command)};
+        int source = std::clamp(assistant.source.get(), 0, 2);
+        ImGui::SetNextItemWidth(fieldW);
+        if (ImGui::Combo("Model##codeModel", &source, labels, 3))
+            assistant.source.set(source);
+        switch (viewmodel::CodeAssistant::Source(source)) {
+        case viewmodel::CodeAssistant::Source::Local:
+            help("Runs on this device, offline. The same model as the agent's local answers.");
+            if (ImGui::Button(ICON_FA_MICROCHIP "  Local model set-up..."))
+                vm_.execute(CommandId::LocalModel);
+            break;
+        case viewmodel::CodeAssistant::Source::Claude:
+            ImGui::SetNextItemWidth(fieldW);
+            if (ImGui::InputTextWithHint("Claude model##claudeModel", "haiku, sonnet, opus (empty: Claude Code's own)", &editClaudeModel_))
+                assistant.claudeModel.set(editClaudeModel_);
+            help("Online, through Claude Code (set up in the Agent panel). The comment, the code around it and the "
+                                     "declarations it uses are sent with each request.");
+            break;
+        case viewmodel::CodeAssistant::Source::Command:
+            ImGui::SetNextItemWidth(fieldW);
+            if (ImGui::InputTextWithHint("Command##codeCommand", "ollama run qwen2.5-coder:7b", &editCommand_))
+                assistant.command.set(editCommand_);
+            help("Any program, local or online: it gets the prompt on its standard input and prints the code "
+                                     "(e.g. ollama run ..., llm -m ..., a script calling an API). It runs in the workspace folder.");
+            break;
+        }
+        std::string why;
+        const bool ready = assistant.ready(&why);
+        if (ready)
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconGreen), ICON_FA_CIRCLE_CHECK "  Ready");
+        else
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityWarning), ICON_FA_TRIANGLE_EXCLAMATION "  Not ready: %s", why.c_str());
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("C AND C++");
+    auto standardCombo = [&](const char* label, viewmodel::Property<int>& property, bool c) {
+        size_t count = 0;
+        const int* years = c ? model::cStandards(count) : model::cppStandards(count);
+        // "From the project (C++20, CMakeLists.txt)" while it is in use; plain when another is chosen.
+        char automatic[96];
+        if (property.get() == 0)
+            std::snprintf(automatic, sizeof(automatic), "From the project (%s, %s)",
+                          model::standardName(c ? is.cStandardInUse() : is.cppStandardInUse(), c), is.standardSource(c).c_str());
+        else
+            std::snprintf(automatic, sizeof(automatic), "From the project");
+        ImGui::SetNextItemWidth(fieldW);
+        if (ImGui::BeginCombo(label, property.get() ? model::standardName(property.get(), c) : automatic)) {
+            if (ImGui::Selectable(automatic, property.get() == 0))
+                property.set(0);
+            for (size_t i = 0; i < count; ++i)
+                if (ImGui::Selectable(model::standardName(years[i], c), property.get() == years[i]))
+                    property.set(years[i]);
+            ImGui::EndCombo();
+        }
+    };
+    standardCombo("C++ standard", is.cppStandard, false);
+    ImGui::SetItemTooltip("Which library names and keywords are suggested in C++ files. From the project: CMAKE_CXX_STANDARD, "
+                          "cxx_std_NN or -std=c++NN in CMakeLists.txt, meson.build or a Makefile; else C++17.");
+    standardCombo("C standard", is.cStandard, true);
+    ImGui::SetItemTooltip("The same for .c files (CMAKE_C_STANDARD, c_std_NN, -std=cNN; else C17).");
+    ImGui::SetNextItemWidth(fieldW);
+    if (ImGui::InputTextWithHint("Include folders", "include;src;third_party/lib/include", &editIncludeFolders_))
+        is.includeFolders.set(editIncludeFolders_);
+    ImGui::SetItemTooltip("Workspace folders, separated by ';', where #include looks for headers (after the file's own "
+                          "folder; include/ and src/ are always tried). The names of included headers are suggested first, "
+                          "and a name from a header that is not included says which #include it needs.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("INDEX");
+    if (is.indexing.get())
+        ImGui::TextUnformatted("Reading the workspace...");
+    else if (is.indexReady())
+        ImGui::Text("%zu names from %zu files", is.index().size(), is.index().fileCount());
+    else
+        ImGui::TextDisabled("Read on first use");
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_ROTATE "  Rebuild"))
+        vm_.execute(CommandId::RebuildSymbolIndex);
+
+    ImGui::Spacing();
+    if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        close = true;
+    if (close)
         ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }

@@ -194,6 +194,7 @@ private:
     bool completionHovered_ = false; // the suggestion list, last frame
     bool completionFocused_ = false;
     int completionSerial_ = -1;      // the list's selection last scrolled into view
+    int completionSession_ = 0;      // the last list seen opening (the editor takes the keyboard for it)
     ImVec2 hoverPos_{-1.0f, -1.0f};  // the mouse resting for a symbol's tooltip
     int linkRow_ = -1;               // Ctrl+hover: the name under the mouse, this frame
     int linkBegin_ = 0;

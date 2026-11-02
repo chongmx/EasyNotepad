@@ -473,6 +473,19 @@ void NotepadViewModel::initCommands()
     });
     set(C::RebuildSymbolIndex, [this]() { intellisense_.rebuildIndex(); });
     set(C::NavigateBack, [this]() { intellisense_.goBack(); }, [this]() { return intellisense_.canGoBack(); });
+    set(C::ImplementComment, [this]() { intellisense_.implementComment(true); }, textDocument);
+    set(C::ToggleCodeSuggestions, [this]() {
+        intellisense_.aiSuggestions.set(!intellisense_.aiSuggestions.get());
+        const std::string model = CodeAssistant::sourceName(CodeAssistant::Source(codeAssistant_.source.get()));
+        std::string why;
+        if (!intellisense_.aiSuggestions.get())
+            statusText.set("Code suggestions off");
+        else if (codeAssistant_.ready(&why))
+            statusText.set("Code suggestions on (" + model + "): write a comment, then press Enter or Ctrl+Shift+Space");
+        else
+            statusText.set("Code suggestions on, but " + model + " is not ready: " + why);
+    });
+    set(C::IntellisenseSettings, [this]() { intellisenseSettingsRequested.emit(); });
     set(C::NavigateForward, [this]() { intellisense_.goForward(); }, [this]() { return intellisense_.canGoForward(); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
@@ -540,6 +553,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::PopOutTerminal: return terminalPoppedOut.get();
     case C::ToggleSmartIndent: return smartIndent.get();
     case C::ToggleAutoComplete: return intellisense_.autoComplete.get();
+    case C::ToggleCodeSuggestions: return intellisense_.aiSuggestions.get();
     case C::RebuildSymbolIndex: return intellisense_.indexing.get();
     case C::IndentWithSpaces: return doc && !doc->indent.tabs;
     case C::IndentWithTabs: return doc && doc->indent.tabs;

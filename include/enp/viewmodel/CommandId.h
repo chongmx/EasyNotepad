@@ -61,6 +61,7 @@ enum class CommandId {
     OpenRecent, FocusTerminal, OpenWorkspace,
     // IntelliSense (appended)
     TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex, NavigateBack, NavigateForward,
+    ImplementComment, ToggleCodeSuggestions, IntellisenseSettings,
 
     Count
 };

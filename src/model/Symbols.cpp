@@ -1095,7 +1095,18 @@ void SymbolIndex::add(std::vector<Symbol>& symbols)
     symbols.clear(); // the caller reuses the vector for the next file: its capacity stays on purpose
 }
 
-void SymbolIndex::replaceFile(std::string_view path, std::vector<Symbol>& symbols)
+void SymbolIndex::addIncludes(int file, const std::vector<Include>& includes)
+{
+    for (const Include& include : includes) {
+        IncludeEntry e;
+        e.file = file;
+        e.name = store(include.name, e.length);
+        e.system = include.system;
+        includes_.push_back(e);
+    }
+}
+
+void SymbolIndex::replaceFile(std::string_view path, std::vector<Symbol>& symbols, const std::vector<Include>& includes)
 {
     int file = fileIndex(path);
     if (file < 0)
@@ -1116,9 +1127,18 @@ void SymbolIndex::replaceFile(std::string_view path, std::vector<Symbol>& symbol
         copy.detail = kept.store(std::string_view(text_).substr(e.detail, e.detailLength), copy.detailLength);
         kept.entries_.push_back(copy);
     }
+    kept.includes_.reserve(includes_.size() + includes.size());
+    for (const IncludeEntry& e : includes_) {
+        if (e.file == file)
+            continue;
+        IncludeEntry copy = e;
+        copy.name = kept.store(std::string_view(text_).substr(e.name, e.length), copy.length);
+        kept.includes_.push_back(copy);
+    }
     for (Symbol& s : symbols)
         s.file = file;
     kept.add(symbols);
+    kept.addIncludes(file, includes);
     kept.finish();
     std::swap(*this, kept); // the old storage goes with `kept`
 }
@@ -1132,9 +1152,11 @@ void SymbolIndex::finish()
             return a.file < b.file;
         return a.line < b.line;
     });
+    std::stable_sort(includes_.begin(), includes_.end(), [](const IncludeEntry& a, const IncludeEntry& b) { return a.file < b.file; });
     // Exactly what it holds: a large index was grown by doubling.
     text_.shrink_to_fit();
     entries_.shrink_to_fit();
+    includes_.shrink_to_fit();
     paths_.shrink_to_fit();
     pathEnds_.shrink_to_fit();
 }
@@ -1143,6 +1165,7 @@ void SymbolIndex::release()
 {
     std::string().swap(text_);
     std::vector<Entry>().swap(entries_);
+    std::vector<IncludeEntry>().swap(includes_);
     std::string().swap(paths_);
     std::vector<std::uint32_t>().swap(pathEnds_);
 }
@@ -1186,7 +1209,8 @@ size_t SymbolIndex::bytes() const
     // A string's built-in room (small-string buffer) is not storage of its own.
     const size_t inlineRoom = std::string().capacity();
     auto heap = [inlineRoom](const std::string& t) { return t.capacity() > inlineRoom ? t.capacity() : size_t(0); };
-    return heap(text_) + entries_.capacity() * sizeof(Entry) + heap(paths_) + pathEnds_.capacity() * sizeof(std::uint32_t);
+    return heap(text_) + entries_.capacity() * sizeof(Entry) + includes_.capacity() * sizeof(IncludeEntry) + heap(paths_) +
+           pathEnds_.capacity() * sizeof(std::uint32_t);
 }
 
 } // namespace enp::model

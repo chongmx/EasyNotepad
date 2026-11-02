@@ -286,6 +286,7 @@ add_library(enp_model STATIC
     src/model/TerminalScreen.cpp
     src/model/Outline.cpp
     src/model/Symbols.cpp
+    src/model/CLibrary.cpp
     src/model/Markdown.cpp
     src/model/Math.cpp
     src/model/FileKind.cpp
@@ -361,6 +362,7 @@ add_library(enp_viewmodel STATIC
     src/viewmodel/SyntaxColorSettings.cpp
     src/viewmodel/FindInFilesViewModel.cpp
     src/viewmodel/IntellisenseViewModel.cpp
+    src/viewmodel/CodeAssistant.cpp
     src/viewmodel/NotepadViewModel.cpp
     src/viewmodel/NotepadCommands.cpp
     src/viewmodel/LineOperations.cpp

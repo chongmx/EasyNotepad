@@ -171,6 +171,9 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::RebuildSymbolIndex: return {"Rebuild Index", "Read the workspace's code again for completion and Go to Definition", ""};
     case CommandId::NavigateBack: return {"Back", "Go back to where Go to Definition jumped from", "Alt+Left"};
     case CommandId::NavigateForward: return {"Forward", "Go forward again after going back", "Alt+Right"};
+    case CommandId::ImplementComment: return {"From Comment", "Write the code the comment at the caret describes (the model chosen in IntelliSense settings)", "Ctrl+Shift+Space"};
+    case CommandId::ToggleCodeSuggestions: return {"Code Suggestions", "Suggest code for comments with a model, local or online (choose it in IntelliSense settings)", ""};
+    case CommandId::IntellisenseSettings: return {"Settings", "IntelliSense settings: suggestions, the model, C/C++ standards and include folders", ""};
 
     case CommandId::AddNextOccurrence: return {"Next Match", "Add the next occurrence of the selection as another caret", "Ctrl+D"};
     case CommandId::SelectAllOccurrences: return {"All Matches", "Select every occurrence of the selection, a caret on each", "Ctrl+Shift+L"};
@@ -353,6 +356,9 @@ const char* commandKey(CommandId id)
     case CommandId::RebuildSymbolIndex: return "RebuildSymbolIndex";
     case CommandId::NavigateBack: return "NavigateBack";
     case CommandId::NavigateForward: return "NavigateForward";
+    case CommandId::ImplementComment: return "ImplementComment";
+    case CommandId::ToggleCodeSuggestions: return "ToggleCodeSuggestions";
+    case CommandId::IntellisenseSettings: return "IntellisenseSettings";
     case CommandId::Count: break;
     }
     return "";

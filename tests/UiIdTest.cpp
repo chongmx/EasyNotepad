@@ -588,6 +588,63 @@ int main(int argc, char** argv)
                 h.vm().closeDocument(h.vm().activeIndex.get());
                 h.settle();
             }
+            // Code from a comment: the "writing" row while a model works, then the code's preview;
+            // Enter inserts it, indented like the comment. (A provider stands in for the model.)
+            {
+                h.setContext("IntelliSense code from a comment");
+                std::vector<viewmodel::IntellisenseViewModel::Request> asked;
+                viewmodel::IntellisenseViewModel::Provider provider;
+                provider.request = [&asked](const viewmodel::IntellisenseViewModel::Request& r) { asked.push_back(r); };
+                provider.completes = false;
+                provider.implements = true;
+                is.setProvider(provider);
+                is.aiSuggestions.set(true);
+                h.vm().newDocument();
+                h.vm().activeDocument()->language = model::Language::Cpp;
+                h.vm().insertText("int main()\n{\n    // print the numbers 1 to 3\n    \n}\n");
+                h.vm().setCaret({3, 4}, false);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Agent);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+                h.settle();
+                h.vm().execute(viewmodel::CommandId::ImplementComment);
+                h.settle();
+                if (asked.empty() || !windowNamed("##completion"))
+                    fail("the comment was not sent, or the writing row did not show", 0);
+                if (const ImGuiWindow* row = windowNamed("##completion"))
+                    h.sweep(row->Pos.x, row->Pos.y, row->Pos.x + row->Size.x, row->Pos.y + row->Size.y, kCoarseStep);
+                viewmodel::IntellisenseViewModel::Item code;
+                code.insertText = "for (int i = 1; i <= 3; ++i)\n    std::printf(\"%d\\n\", i);";
+                if (!asked.empty())
+                    is.provide(asked.back().serial, {code});
+                h.settle();
+                if (const ImGuiWindow* list = windowNamed("##completion"))
+                    h.sweep(list->Pos.x, list->Pos.y, list->Pos.x + list->Size.x, list->Pos.y + list->Size.y, kCoarseStep);
+                key(ImGuiKey_Enter);
+                const model::Document* doc = h.vm().activeDocument();
+                if (!doc || doc->buffer.line(3) != "    for (int i = 1; i <= 3; ++i)" || doc->buffer.line(4) != "        std::printf(\"%d\\n\", i);")
+                    fail("Enter did not insert the code indented like the comment", 0);
+                is.setProvider({});
+                h.vm().codeAssistant().attach(); // the app's own assistant again
+                is.aiSuggestions.set(false);
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+            }
+            // The IntelliSense settings: every control drawn and hovered without ImGui errors.
+            {
+                h.setContext("IntelliSense settings");
+                for (int source = 0; source < 3; ++source) {
+                    h.vm().codeAssistant().source.set(source);
+                    h.vm().execute(viewmodel::CommandId::IntellisenseSettings);
+                    h.settle();
+                    if (const ImGuiWindow* dialog = windowNamed("IntelliSense Settings"))
+                        h.sweep(dialog->Pos.x, dialog->Pos.y, dialog->Pos.x + dialog->Size.x, dialog->Pos.y + dialog->Size.y, kCoarseStep);
+                    else
+                        fail("the IntelliSense settings did not open", source);
+                    key(ImGuiKey_Escape);
+                    h.settle();
+                }
+                h.vm().codeAssistant().source.set(0);
+            }
             if (windowsContaining("##completion") > 2) // the list and its scrolling child
                 std::printf("  FAILED IntelliSense: %d windows for the suggestion list\n", windowsContaining("##completion")), layoutsWrong = true;
             h.vm().execute(viewmodel::CommandId::TriggerCompletion);

@@ -104,6 +104,9 @@ private:
     void renderCommentPopup();
     void renderPreferencesPopup();
     void renderSyntaxColorsPopup();
+    // IntelliSense: suggestions, the model for code suggestions (local or online), the C and C++
+    // standards and include folders.
+    void renderIntellisenseSettingsPopup();
     void renderAboutPopup();
 
     // `onClose`: an X button in the header, which calls it.
@@ -186,6 +189,11 @@ private:
     bool openComment_ = false;
     bool openPreferences_ = false;
     bool openSyntaxColors_ = false;
+    bool openIntellisenseSettings_ = false;
+    // The IntelliSense dialog's text fields while it is open (released when it closes).
+    std::string editClaudeModel_;
+    std::string editCommand_;
+    std::string editIncludeFolders_;
     bool openLanguagePicker_ = false;
     std::string languageFilter_;
     bool openRecentPicker_ = false;

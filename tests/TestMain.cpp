@@ -11,6 +11,7 @@
 #include "enp/model/Language.h"
 #include "enp/model/Outline.h"
 #include "enp/model/Symbols.h"
+#include "enp/model/CLibrary.h"
 #include "enp/model/TerminalScreen.h"
 #include "enp/model/TextBuffer.h"
 #include "enp/model/WorkspaceFile.h"
@@ -4074,6 +4075,10 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
         vm.setCaret({3, 6}, false);
         vm.intellisense().goToDefinition();
         vm.intellisense().goBack();
+        vm.intellisense().aiSuggestions.set(true);
+        vm.insertText("\n// add one\n");
+        vm.intellisense().implementComment(true); // no model in this build of the test: says why
+        (void)vm.intellisense().includedHeaders(*vm.activeDocument());
         os::dispatch::pump();
         vm.closeFolder();
         os::dispatch::pump();
@@ -4333,11 +4338,11 @@ TEST(symbol_index_finds_names_and_replaces_saved_files)
 
     // Saving a file replaces its names; saving it many times keeps the index its size.
     model::extractSymbols("void gamma() {}\n", model::Language::Cpp, -1, symbols);
-    index.replaceFile("a.cpp", symbols);
+    index.replaceFile("a.cpp", symbols, {});
     const size_t bytes = index.bytes();
     for (int i = 0; i < 50; ++i) {
         model::extractSymbols("void gamma() {}\n", model::Language::Cpp, -1, symbols);
-        index.replaceFile("a.cpp", symbols);
+        index.replaceFile("a.cpp", symbols, {});
     }
     CHECK(index.bytes() <= bytes);
     CHECK_EQ(index.named("alpha").second - index.named("alpha").first, size_t(1));
@@ -4595,7 +4600,10 @@ TEST(intellisense_chooses_context_for_an_ai_provider_and_drops_late_answers)
     CHECK_EQ(is.contextFor("res", "src/widget.cpp", "ui::Widget w;", small).size(), size_t(2));
 
     std::vector<IS::Request> requests;
-    is.setProvider([&](const IS::Request& r) { requests.push_back(r); });
+    IS::Provider provider;
+    provider.request = [&](const IS::Request& r) { requests.push_back(r); };
+    provider.completes = true;
+    is.setProvider(provider);
     vm.openFile("src/main.cpp");
     vm.setCaret({3, 17}, false);
     vm.newline();
@@ -4609,7 +4617,7 @@ TEST(intellisense_chooses_context_for_an_ai_provider_and_drops_late_answers)
 
     // An answer to an older request is dropped; the current one is shown first and inserted whole.
     const int older = requests.front().serial;
-    is.provide(older, {IS::Item{"stale", "stale()", "", "", model::SymbolKind::Function, IS::Source::Provider, 0}});
+    is.provide(older, {IS::Item{"stale", "stale()", "", "", "", model::SymbolKind::Function, IS::Source::Provider, 0}});
     CHECK(itemIndex(is, "stale") < 0);
     IS::Item answer;
     answer.insertText = "resize(800);\nw.widthOf();";
@@ -4617,7 +4625,7 @@ TEST(intellisense_chooses_context_for_an_ai_provider_and_drops_late_answers)
     CHECK(!is.items().empty() && is.items()[0].source == IS::Source::Provider && is.items()[0].label == "resize(800);");
     CHECK(itemIndex(is, "resize") > 0); // the names stay below
     CHECK(is.accept());
-    CHECK(vm.activeDocument()->buffer.line(4) == "    w.resize(800);" && vm.activeDocument()->buffer.line(5) == "w.widthOf();");
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.resize(800);" && vm.activeDocument()->buffer.line(5) == "    w.widthOf();" /* indented like its line */);
     // After the list closed, an answer is dropped.
     const int closed = is.requestSerial();
     is.provide(closed, {answer});
@@ -4681,6 +4689,444 @@ TEST(closing_a_folder_stops_the_symbol_index_build)
     waitForBuilds();
     CHECK_EQ(os::mem::liveBytes("intellisense"), before);
     CHECK_EQ(viewmodel::IntellisenseViewModel::runningBuilds(), 0);
+}
+
+// ---- IntelliSense: C and C++, code from comments --------------------------------------------------
+
+TEST(c_library_catalog_standards_and_includes)
+{
+    CHECK_EQ(model::detectCppStandard("project(x)\nset(CMAKE_CXX_STANDARD 20)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n"), 2020);
+    CHECK_EQ(model::detectCppStandard("target_compile_features(app PRIVATE cxx_std_17)"), 2017);
+    CHECK_EQ(model::detectCppStandard("CXXFLAGS = -O2 -std=gnu++14 -Wall"), 2014);
+    CHECK_EQ(model::detectCppStandard("CFLAGS = -std=c11"), 0);
+    CHECK_EQ(model::detectCStandard("CFLAGS = -std=c11"), 2011);
+    CHECK_EQ(model::detectCStandard("set(CMAKE_C_STANDARD 99)"), 1999);
+    CHECK_EQ(model::detectCStandard("set(CMAKE_CXX_STANDARD 17)"), 0);
+    CHECK(std::string(model::standardName(2003, false)) == "C++03" && std::string(model::standardName(2023, true)) == "C23");
+    size_t count = 0;
+    CHECK(model::cppStandards(count) != nullptr && count == 8);
+
+    std::vector<model::Include> includes;
+    model::scanIncludes("#include <vector>\n  #  include \"app/widget.h\"\n// #include <nope>\nint x;\n", includes);
+    CHECK_EQ(includes.size(), size_t(2)); // the commented one is not an #include line
+    CHECK(includes[0].name == "vector" && includes[0].system && includes[0].line == 0);
+    CHECK(includes[1].name == "app/widget.h" && !includes[1].system && includes[1].line == 1);
+
+    const model::LibraryName* optional = model::findLibraryName("optional", false);
+    CHECK(optional && std::string(optional->header) == "optional");
+    CHECK(optional && model::libraryNameAvailable(*optional, false, 2017) && !model::libraryNameAvailable(*optional, false, 2014));
+    CHECK(optional && !model::libraryNameAvailable(*optional, true, 2023)); // not C
+    const model::LibraryName* printf = model::findLibraryName("printf", true);
+    CHECK(printf && model::libraryHeader(*printf, true) == "stdio.h" && model::libraryHeader(*printf, false) == "cstdio");
+    CHECK_EQ(model::keywordSince("nullptr", false), 2011);
+    CHECK_EQ(model::keywordSince("nullptr", true), 2023);
+    CHECK_EQ(model::keywordSince("class", true), -1);
+    CHECK(model::isCSource("src/a.c") && !model::isCSource("src/a.cpp") && !model::isCSource("a.h"));
+}
+
+TEST(intellisense_knows_the_headers_and_the_standard)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-intellisense-headers";
+    os::fs::deletePath(root);
+    os::fs::createDirectories(root + "/include/app");
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_C_STANDARD 99)\n", nullptr);
+    files.write(root + "/include/app/widget.h", "#pragma once\n#include <vector>\nclass Widget {\npublic:\n    void paint();\n};\n", nullptr);
+    files.write(root + "/include/app/app.h", "#pragma once\n#include \"app/widget.h\"\nclass App {};\n", nullptr);
+    files.write(root + "/include/app/other.h", "#pragma once\nclass OtherThing {};\n", nullptr);
+    files.write(root + "/src/main.cpp", "#include \"app/app.h\"\n#include <string>\nint main()\n{\n    return 0;\n}\n", nullptr);
+    files.write(root + "/src/plain.c", "#include <stdio.h>\nint main(void)\n{\n    return 0;\n}\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+    // The project's standards.
+    CHECK_EQ(is.cppStandardInUse(), 2014);
+    CHECK_EQ(is.cStandardInUse(), 1999);
+    CHECK(is.standardSource(false) == "CMakeLists.txt");
+    // What main.cpp includes: its lines, then through app.h: widget.h and <vector>.
+    vm.openFile("src/main.cpp");
+    const std::vector<std::string> headers = is.includedHeaders(*vm.activeDocument());
+    auto has = [&](const std::string& h) { return std::find(headers.begin(), headers.end(), h) != headers.end(); };
+    CHECK(has("\"app/app.h\"") && has("<string>") && has("\"app/widget.h\"") && has("<vector>"));
+    auto item = [&](const std::string& label) -> const viewmodel::IntellisenseViewModel::Item* {
+        for (const auto& i : is.items())
+            if (i.label == label)
+                return &i;
+        return nullptr;
+    };
+    vm.setCaret({4, 13}, false);
+    vm.newline();
+    // <vector> (through widget.h): the library's name, with its header; Widget without a clue.
+    typeText(vm, "vec");
+    CHECK(is.active() && item("vector") && item("vector")->note.find("<vector>") == 0);
+    is.dismiss();
+    typeText(vm, ";\nWid");
+    CHECK(item("Widget") && item("Widget")->note.empty());
+    is.dismiss();
+    // A header that is not included: suggested with the #include it needs.
+    typeText(vm, ";\nOtherT");
+    CHECK(item("OtherThing") && item("OtherThing")->note == "needs #include \"app/other.h\"");
+    is.dismiss();
+    typeText(vm, ";\nunique_");
+    CHECK(item("unique_ptr") && item("unique_ptr")->note == "needs #include <memory>");
+    is.dismiss();
+    // C++14: no std::optional; chosen C++17: optional, with the #include it needs.
+    typeText(vm, ";\noptiona");
+    CHECK(!item("optional"));
+    is.dismiss();
+    is.cppStandard.set(2017);
+    is.trigger();
+    CHECK(item("optional") && item("optional")->note == "needs #include <optional>");
+    is.dismiss();
+    // Members of included classes after ".": vector's push_back.
+    typeText(vm, ";\nv.push");
+    CHECK(item("push_back"));
+    is.dismiss();
+    // Keywords of the standard: nullptr since C++11, not in C99.
+    typeText(vm, ";\nnullp");
+    CHECK(item("nullptr"));
+    is.dismiss();
+    vm.openFile("src/plain.c");
+    vm.setCaret({3, 13}, false);
+    vm.newline();
+    typeText(vm, "nullp");
+    CHECK(!item("nullptr"));
+    is.dismiss();
+    typeText(vm, ";\nprin");
+    CHECK(item("printf") && item("printf")->note.find("<stdio.h>") == 0);
+    is.dismiss();
+    typeText(vm, ";\nclas");
+    CHECK(!item("class")); // not C
+    is.dismiss();
+    // The hover's catalog: available in this language and standard.
+    CHECK(is.libraryLookup("printf", *vm.activeDocument()) != nullptr);
+    CHECK(is.libraryLookup("unique_ptr", *vm.activeDocument()) == nullptr); // C++ only
+    vm.closeFolder();
+}
+
+TEST(intellisense_leaves_words_in_comments_and_strings_out)
+{
+    viewmodel::NotepadViewModel vm;
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("// the quick brown fox\n/* quietly\n   quoted */\nint quickSort = 0;\nconst char* s = \"quaint\";\n");
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    typeText(vm, "qu");
+    CHECK(is.active());
+    CHECK(itemIndex(is, "quickSort") >= 0);
+    CHECK(itemIndex(is, "quick") < 0 && itemIndex(is, "quietly") < 0 && itemIndex(is, "quoted") < 0 && itemIndex(is, "quaint") < 0);
+}
+
+TEST(intellisense_asks_for_the_code_a_comment_describes)
+{
+    using IS = viewmodel::IntellisenseViewModel;
+    viewmodel::NotepadViewModel vm;
+    IS& is = vm.intellisense();
+    std::vector<IS::Request> requests;
+    int cancels = 0;
+    IS::Provider provider;
+    provider.request = [&](const IS::Request& r) { requests.push_back(r); };
+    provider.cancel = [&]() { ++cancels; };
+    provider.completes = false;
+    provider.implements = true;
+    is.setProvider(provider);
+
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("#include <vector>\nint sum(const std::vector<int>& v)\n{\n    // add up the values\n    // and return the total\n    \n}\n");
+    vm.setCaret({5, 4}, false);
+    // The index arriving while the code is written (the first use in a folder) keeps the request.
+    is.aiSuggestions.set(true);
+    CHECK(is.implementComment(true));
+    for (int i = 0; i < 1000 && IS::runningBuilds() > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    os::dispatch::pump();
+    CHECK(is.indexReady());
+    is.sync();
+    CHECK(is.active() && is.awaiting());
+    is.dismiss();
+    requests.clear();
+    is.aiSuggestions.set(false);
+    // Off: nothing is asked (and Ctrl+Shift+Space says why).
+    CHECK(!is.implementComment(true));
+    CHECK(requests.empty() && vm.statusText.get().find("off") != std::string::npos);
+    is.aiSuggestions.set(true);
+    CHECK(is.implementComment(true));
+    CHECK(is.active() && is.block() && is.awaiting() && requests.size() == 1);
+    const IS::Request r = requests.back();
+    CHECK(r.purpose == IS::Request::Purpose::Implement);
+    CHECK(r.instruction == "add up the values\nand return the total");
+    CHECK(r.standard == "C++17" && r.headers.size() == 1 && r.headers[0] == "<vector>");
+    CHECK(r.before.find("// add up the values") != std::string::npos); // the comments stay in the context
+    // The answer: indented like the comment, replacing the empty line.
+    IS::Item answer;
+    answer.insertText = "int total = 0;\nfor (int x : v)\n    total += x;\nreturn total;";
+    is.provide(r.serial, {answer});
+    CHECK(!is.awaiting() && is.items().size() == 1 && is.items()[0].label == "int total = 0;");
+    CHECK(is.accept());
+    {
+        const model::TextBuffer& b = vm.activeDocument()->buffer;
+        CHECK(b.line(5) == "    int total = 0;" && b.line(6) == "    for (int x : v)" && b.line(7) == "        total += x;" &&
+              b.line(8) == "    return total;" && b.line(9) == "}");
+    }
+    vm.execute(viewmodel::CommandId::Undo);
+    CHECK(vm.activeDocument()->buffer.line(5) == "    "); // one undoable edit
+
+    // On the comment itself: the code goes below it.
+    vm.setCaret({3, 8}, false);
+    CHECK(is.implementComment(true));
+    is.provide(requests.back().serial, {answer});
+    CHECK(is.accept());
+    CHECK(vm.activeDocument()->buffer.line(4) == "    // and return the total" && vm.activeDocument()->buffer.line(5) == "    int total = 0;");
+    vm.execute(viewmodel::CommandId::Undo);
+
+    // Typing on while it writes stops it, and its late answer is dropped.
+    vm.setCaret({5, 4}, false);
+    CHECK(is.implementComment(true));
+    const int late = requests.back().serial;
+    vm.insertText("x");
+    is.sync();
+    CHECK(!is.active() && cancels >= 1);
+    is.provide(late, {answer});
+    CHECK(!is.active() && vm.activeDocument()->buffer.line(5) == "    x");
+    vm.execute(viewmodel::CommandId::Undo);
+
+    // Enter after a comment: asked once the caret has rested there.
+    const size_t asked = requests.size();
+    vm.setCaret({4, int(vm.activeDocument()->buffer.line(4).size())}, false);
+    vm.newline();
+    is.afterNewline();
+    is.tick(10.0);
+    is.tick(10.5);
+    CHECK_EQ(requests.size(), asked); // not yet
+    is.tick(10.9);
+    CHECK_EQ(requests.size(), asked + 1);
+    CHECK(is.awaiting());
+    is.dismiss();
+    // Enter then typing on (the comment goes on): nothing is asked.
+    vm.newline();
+    is.afterNewline();
+    is.tick(20.0);
+    vm.insertText("// more");
+    is.tick(21.0);
+    CHECK_EQ(requests.size(), asked + 1);
+    // Not on or below a comment: Ctrl+Shift+Space explains.
+    vm.setCaret({1, 3}, false);
+    CHECK(!is.implementComment(true));
+    CHECK(vm.statusText.get().find("comment") != std::string::npos);
+    is.setProvider({});
+}
+
+namespace {
+
+// A local engine that answers when the test says so.
+struct SlowEngine : interfaces::ILocalEngineService {
+    std::vector<interfaces::LocalChatRequest> chats;
+    std::function<void(const std::string&)> text;
+    std::function<void(const interfaces::LocalChatResult&)> done;
+    int cancels = 0;
+    bool busy = false; // the agent is using the model
+    interfaces::EngineInfo info() override { return {}; }
+    void run(const interfaces::EngineRunSettings&, std::function<void(const std::string&)>,
+             std::function<void(const interfaces::EngineRunResult&)>) override {}
+    void cancel() override
+    {
+        ++cancels;
+        if (done) { // the engine stops and reports it
+            interfaces::LocalChatResult r;
+            r.error = "stopped";
+            auto finish = std::move(done);
+            done = nullptr;
+            text = nullptr;
+            finish(r);
+        }
+    }
+    bool running() const override { return false; }
+    bool chatting() const override { return busy || bool(done); }
+    void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
+              std::function<void(const std::string&)> t, std::function<void(const interfaces::LocalChatResult&)> d) override
+    {
+        chats.push_back(request);
+        stage("Loading the local model");
+        text = std::move(t);
+        done = std::move(d);
+    }
+    void answer(const std::string& piece1, const std::string& piece2)
+    {
+        text(piece1);
+        text(piece2);
+        interfaces::LocalChatResult r;
+        r.ok = true;
+        r.generatedTokens = 12;
+        auto finish = std::move(done);
+        done = nullptr;
+        text = nullptr;
+        finish(r);
+    }
+    std::string modelsDirectory() override { return "/models"; }
+    uint64_t freeSpace(const std::string&) override { return 0; }
+    uint64_t fileSize(const std::string&) override { return 0; }
+    bool startDownload(const std::string&, const std::string&, bool, std::string*) override { return false; }
+    interfaces::DownloadStatus downloadStatus() override { return {}; }
+    void cancelDownload() override {}
+    bool meteredNetwork() override { return false; }
+    void hashFile(const std::string&, std::function<void(double)>, std::function<void(const std::string&)> d) override { d({}); }
+};
+
+// Runs programs when the test says so, and keeps what it was asked.
+struct RecordingProcesses : interfaces::IProcessService {
+    std::vector<interfaces::ProcessRequest> requests;
+    std::function<void(const interfaces::ProcessResult&)> pending;
+    void run(const std::string&, const std::string&, std::function<void(const interfaces::ProcessResult&)> done) override
+    {
+        done({});
+    }
+    void run(const interfaces::ProcessRequest& request, std::function<void(const interfaces::ProcessResult&)> done) override
+    {
+        requests.push_back(request);
+        pending = std::move(done);
+    }
+    std::optional<std::string> setting(const std::string&) const override { return std::nullopt; }
+    void finish(const std::string& output, int exitCode = 0)
+    {
+        auto done = std::move(pending);
+        pending = nullptr;
+        done({true, exitCode, output, {}, {}});
+    }
+};
+
+struct ClaudeCli : interfaces::IAgentCliService {
+    std::string command() const override { return "claude -p"; }
+    bool available() const override { return true; }
+    std::string executable() const override { return "/opt/bin/claude"; }
+    std::string prompt;
+    std::function<void(bool, const std::string&)> pending;
+    void run(const std::string& p, const std::string&, std::function<void(bool, const std::string&)> done) override
+    {
+        prompt = p;
+        pending = std::move(done);
+    }
+};
+
+} // namespace
+
+TEST(code_assistant_writes_code_with_the_chosen_model)
+{
+    using IS = viewmodel::IntellisenseViewModel;
+    using CA = viewmodel::CodeAssistant;
+    CHECK(CA::extractCode("Here you go:\n```cpp\nint y = x + 1;\n```\nThat adds one.", "add one") == "int y = x + 1;");
+    CHECK(CA::extractCode("// add one to x\nx += 1;\n", "add one to x") == "x += 1;");
+    CHECK(CA::shellArguments("ollama run m").size() == 3);
+
+    // Background index builds (of this or earlier tests) finish and their results are taken off
+    // the main thread's queue before each reading.
+    auto settle = []() {
+        for (int i = 0; i < 1000 && viewmodel::IntellisenseViewModel::runningBuilds() > 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        os::dispatch::pump();
+    };
+    settle();
+    const std::uint64_t memoryBefore = os::mem::liveBytes("intellisense");
+    SlowEngine engine;
+    RecordingProcesses processes;
+    ClaudeCli claude;
+    {
+        viewmodel::NotepadViewModel vm;
+        IS& is = vm.intellisense();
+        bool modelReady = true;
+        CA assistant(is, &engine,
+                     [&]() {
+                         viewmodel::AgentViewModel::LocalSetup s;
+                         s.ready = modelReady;
+                         s.why = "the model is not downloaded yet";
+                         s.modelPath = "/models/gemma.gguf";
+                         return s;
+                     },
+                     &claude, &processes);
+        assistant.attach();
+        is.aiSuggestions.set(true);
+        vm.newDocument();
+        vm.activeDocument()->language = model::Language::Cpp;
+        vm.insertText("#include <cstdio>\nvoid greet()\n{\n    // print hello\n    \n}\n");
+        vm.setCaret({4, 4}, false);
+
+        // The local model: the prompt has the comment, the language and the headers.
+        CHECK(is.implementComment(true));
+        CHECK_EQ(engine.chats.size(), size_t(1));
+        const std::string prompt = engine.chats[0].messages.back().text;
+        CHECK(engine.chats[0].messages.size() == 2 && engine.chats[0].modelPath == "/models/gemma.gguf");
+        CHECK(prompt.find("print hello") != std::string::npos && prompt.find("<cstdio>") != std::string::npos &&
+              prompt.find("C++17") != std::string::npos);
+        CHECK(is.providerStatus() == "Loading the local model");
+        engine.answer("```cpp\nstd::printf(\"hello\\n\");", "\n```");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "std::printf(\"hello\\n\");");
+        CHECK(is.accept());
+        CHECK(vm.activeDocument()->buffer.line(4) == "    std::printf(\"hello\\n\");");
+        vm.execute(viewmodel::CommandId::Undo);
+
+        // Closed while it writes: the engine is told to stop; nothing lands.
+        vm.setCaret({4, 4}, false);
+        CHECK(is.implementComment(true));
+        CHECK(engine.chatting());
+        is.dismiss();
+        CHECK(engine.cancels == 1 && !engine.chatting() && !assistant.busy());
+        CHECK(vm.statusText.get().find("could not") == std::string::npos); // stopped by the user: no error
+
+        // The agent has the model: the comment waits for its turn.
+        engine.busy = true;
+        CHECK(is.implementComment(true));
+        CHECK_EQ(engine.chats.size(), size_t(2));
+        CHECK(is.providerStatus().find("agent") != std::string::npos);
+        engine.busy = false;
+        assistant.tick();
+        CHECK_EQ(engine.chats.size(), size_t(3));
+        engine.answer("puts(\"hello\");", "");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "puts(\"hello\");");
+        is.dismiss();
+
+        // Not ready: says why.
+        modelReady = false;
+        CHECK(is.implementComment(true));
+        CHECK(!is.active() && vm.statusText.get().find("not downloaded") != std::string::npos);
+
+        // A command (any model): the shell runs it with the prompt on stdin.
+        assistant.source.set(int(CA::Source::Command));
+        CHECK(!assistant.ready());
+        assistant.command.set("mymodel --code");
+        CHECK(assistant.ready());
+        CHECK(is.implementComment(true));
+        CHECK_EQ(processes.requests.size(), size_t(1));
+        CHECK(processes.requests[0].arguments == CA::shellArguments("mymodel --code"));
+        CHECK(processes.requests[0].input.find("print hello") != std::string::npos);
+        processes.finish("std::puts(\"hello\");\n");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "std::puts(\"hello\");" && is.items()[0].detail == "command");
+        is.dismiss();
+        // A command that fails says so.
+        CHECK(is.implementComment(true));
+        processes.finish("model not found", 1);
+        CHECK(!is.active() && vm.statusText.get().find("could not answer") != std::string::npos);
+
+        // Claude, online: Claude Code's command line, or the chosen model.
+        assistant.source.set(int(CA::Source::Claude));
+        CHECK(is.implementComment(true));
+        CHECK(claude.prompt.find("print hello") != std::string::npos);
+        claude.pending(true, "```\nputs(\"hi\");\n```");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "puts(\"hi\");");
+        is.dismiss();
+        assistant.claudeModel.set("haiku");
+        CHECK(is.implementComment(true));
+        CHECK(processes.requests.back().arguments == std::vector<std::string>({"/opt/bin/claude", "-p", "--model", "haiku"}));
+        // Its answer comes after the list closed: dropped.
+        is.dismiss();
+        processes.finish("late();");
+        CHECK(!is.active());
+    }
+    settle();
+    CHECK_EQ(os::mem::liveBytes("intellisense"), memoryBefore); // every byte back
 }
 
 TEST(measurement_pool_is_a_fixed_first_fit_manager)

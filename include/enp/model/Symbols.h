@@ -7,6 +7,7 @@
 
 #include "enp/model/Language.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -56,6 +57,17 @@ void extractSymbols(std::string_view text, Language language, int file, std::vec
 // longer words lower. An empty pattern matches everything with 0.
 int matchScore(std::string_view pattern, std::string_view word);
 
+// An #include line of a C or C++ file.
+struct Include {
+    std::string name;    // as written: "widget.h", "vector"
+    bool system = false; // <...>
+    int line = 0;
+};
+struct IncludeView {
+    std::string_view name;
+    bool system = false;
+};
+
 // One declaration of the index, viewed in place: the text belongs to the index and stays valid
 // until it changes (use it within the frame, copy what is kept).
 struct SymbolView {
@@ -81,9 +93,12 @@ public:
     // Copies the symbols in (their `file` set by addFile) and empties `symbols` (its capacity
     // stays, to be reused for the next file).
     void add(std::vector<Symbol>& symbols);
-    // A file was saved: its symbols are replaced (the file is added when it is new), the text of
-    // the old ones is dropped from the pool, and the index is sorted again.
-    void replaceFile(std::string_view path, std::vector<Symbol>& symbols);
+    // The #include lines of a file (kept in the same pool), so headers can be followed through
+    // the workspace without reading the files again.
+    void addIncludes(int file, const std::vector<Include>& includes);
+    // A file was saved: its symbols and includes are replaced (the file is added when it is new),
+    // the text of the old ones is dropped from the pool, and the index is sorted again.
+    void replaceFile(std::string_view path, std::vector<Symbol>& symbols, const std::vector<Include>& includes);
     void finish(); // sorts by name, then file and line: after adding
     void release(); // empties it and frees the storage (docs/MEMORY.md rule 5)
 
@@ -96,6 +111,15 @@ public:
     // The positions of every symbol named exactly `name`: [first, second). Allocates nothing.
     std::pair<size_t, size_t> named(std::string_view name) const;
     size_t bytes() const; // storage held, for the status bar and tests
+    // The #include lines of `file`, in order: visit(IncludeView). Allocates nothing.
+    template <class F>
+    void forEachInclude(int file, F&& visit) const
+    {
+        auto it = std::lower_bound(includes_.begin(), includes_.end(), file,
+                                   [](const IncludeEntry& e, int f) { return e.file < f; });
+        for (; it != includes_.end() && it->file == file; ++it)
+            visit(IncludeView{std::string_view(text_).substr(it->name, it->length), it->system});
+    }
 
 private:
     struct Entry {
@@ -111,11 +135,18 @@ private:
         std::int32_t line = 0;
         std::int32_t column = 0;
     };
+    struct IncludeEntry {
+        std::int32_t file = -1;
+        std::uint32_t name = 0;
+        std::uint16_t length = 0;
+        bool system = false;
+    };
     std::string_view nameOf(const Entry& e) const { return std::string_view(text_).substr(e.name, e.nameLength); }
     std::uint32_t store(std::string_view text, std::uint16_t& length);
 
     std::string text_;                 // every name, container and declaring line
     std::vector<Entry> entries_;
+    std::vector<IncludeEntry> includes_; // sorted by file
     std::string paths_;                // every file's path, one after another
     std::vector<std::uint32_t> pathEnds_;
 };

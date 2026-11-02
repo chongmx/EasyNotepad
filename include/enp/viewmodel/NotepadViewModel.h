@@ -13,6 +13,7 @@
 #include "enp/viewmodel/ExplorerItem.h"
 #include "enp/viewmodel/FileDialogViewModel.h"
 #include "enp/viewmodel/FindInFilesViewModel.h"
+#include "enp/viewmodel/CodeAssistant.h"
 #include "enp/viewmodel/IntellisenseViewModel.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/IProcessService.h"
@@ -167,6 +168,7 @@ public:
     Event<> engineLabRequested;
     Event<> localModelRequested; // the agent set-up card, local model part
     Event<> preferencesRequested;
+    Event<> intellisenseSettingsRequested; // the IntelliSense settings dialog
     Event<> customizeRibbonRequested; // opens the ribbon's Customize dialog
     Event<> syntaxColorsRequested;
     Event<> languagePickerRequested;
@@ -467,6 +469,10 @@ public:
     // Completion, Go to Definition and the workspace's symbol index.
     IntellisenseViewModel& intellisense() { return intellisense_; }
     const IntellisenseViewModel& intellisense() const { return intellisense_; }
+    // Code suggestions from a model (local or online), IntelliSense's provider.
+    CodeAssistant& codeAssistant() { return codeAssistant_; }
+    // Whether the local model can answer (the agent and code suggestions use it).
+    AgentViewModel::LocalSetup localSetup();
     Event<> searchFocusRequested; // Find in Files: focus the query box
     std::string absolutePath(const std::string& path) const; // workspace-relative -> absolute
     // Replaces a document's whole text as one undoable edit (opening it if needed).
@@ -570,6 +576,7 @@ private:
     FileDialogViewModel fileDialog_;
     FindInFilesViewModel findInFiles_;
     IntellisenseViewModel intellisense_; // before settings_, which binds its autoComplete
+    CodeAssistant codeAssistant_;        // after intellisense_ (its provider), before settings_
     int nextDocumentId_ = 1;
     int untitledCounter_ = 0;
     bool memoryTrimRequested_ = false;

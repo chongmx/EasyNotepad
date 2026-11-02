@@ -85,6 +85,9 @@ exhaustion. Nothing it does can freeze or crash the editor.
   It is single-line at first, multi-line later.
 - A new keystroke cancels the request in flight, so only the newest one ever runs.
 - Off by default per language until measured. On/off and the delay are in Preferences.
+- **Code from comments is done** (FEATURES.md › IntelliSense › Code suggestions from comments):
+  `CodeAssistant` asks the local model (or Claude, or any command, as the user chooses) for the code a
+  comment describes. Inline completion while typing is still to do.
 - **Built on IntelliSense** (`IntellisenseViewModel`, see FEATURES.md › IntelliSense): the model is
   a completion *provider*. It receives a `Request` (the text before and after the caret, the file and
   language, and the context snippets IntelliSense chose: declarations matching the typed word, those

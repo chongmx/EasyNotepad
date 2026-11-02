@@ -170,6 +170,9 @@ const char* commandIcon(CommandId id)
     case CommandId::RebuildSymbolIndex: return ICON_FA_ROTATE;
     case CommandId::NavigateBack: return ICON_FA_ARROW_LEFT;
     case CommandId::NavigateForward: return ICON_FA_ARROW_RIGHT;
+    case CommandId::ImplementComment: return ICON_FA_WAND_MAGIC_SPARKLES;
+    case CommandId::ToggleCodeSuggestions: return ICON_FA_ROBOT;
+    case CommandId::IntellisenseSettings: return ICON_FA_SLIDERS;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;
