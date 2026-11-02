@@ -23,6 +23,14 @@ Everything here was measured with the programs in `tools/text-study/` on a 4,563
 The text of the files that are not open is never held: Find in Files and the index build read a
 file, use it and drop it.
 
+**It settles.** 25 rounds of work with the tree open (open six files, Find in Files plain and
+regex, completion, Go to Definition, Back, the map every fifth round, Close All), then 10 minutes
+idle: the C++ heap read 22,981 KB in 44,466 blocks after every round from 6 to 25 (+4 KB while a
+map refresh rebuilds), and 22,985 KB in 44,481 blocks at every idle minute. Private memory 65.9-66.6
+MB while working; idle, 66.5 MB rising 108 KB over the first 4 minutes (pages first written) and
+then 66,640 KB for the last 6. The values are set by what is open: the index (12.2 MB), ImGui
+(5.7 MB), the map once built (2.3 MB), the explorer (1.0 MB).
+
 ## Where the bytes go
 
 **Open documents** (`TextBuffer`: one `std::string` per line). A `std::string` is 32 bytes, and a
