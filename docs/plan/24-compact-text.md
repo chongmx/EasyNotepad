@@ -93,6 +93,42 @@ run over the vocabulary and, when it spans words, over decoded text. Decoding ru
 a 60-line screen in about 13 us, fine for drawing, but every edit and every frame would go
 through it.
 
+## Substring search: similarity baked in
+
+The vocabulary already knows which words contain a substring (a scan of it takes 3-5 ms; a
+trigram index of it 0.01-0.3 ms). What costs is finding those words in the codes. Three ways to
+skip codes, measured (`substring_bench.cpp`, blocks of about 1 KB of codes, same hits everywhere):
+
+| Substring | Text in place | Codes, every block | Block signatures (blocks read) | Per-word block lists (blocks read) |
+|---|---:|---:|---:|---:|
+| `emor` (379 words) | 39.3 ms | 80.5 ms | 59.0 ms (71%) | 7.9 ms (9%) |
+| `ndow` (1,253 words) | 34.0 ms | 72.9 ms | 42.6 ms (50%) | 11.3 ms (12.5%) |
+| `utf8` (66 words) | 23.6 ms | 64.7 ms | 43.0 ms (59%) | 0.7 ms (0.8%) |
+| `ollapsi` (17 words) | 30.9 ms | 65.8 ms | 26.9 ms (33%) | 0.5 ms (0.6%) |
+| `TreeNodeEx` (2 words) | 11.6 ms | 65.2 ms | 17.7 ms (22%) | 0.1 ms |
+| `Imgui`, `Breadcrumb` | 9-12 ms | 68 ms | 18-50 ms | 0.0 ms |
+
+- **Block signatures** (512-bit trigram bitmap per block, 6% of the codes): a block holds about
+  3 KB of text, enough trigrams to fill most bits, so most blocks still have to be decoded.
+- **Per-word block lists** (for each vocabulary word, the blocks it occurs in, as delta varints:
+  4.4 MB for the tree): 3x to over 100x faster than scanning the plain text, because only the
+  blocks holding a matching word are decoded. This is where the similarity pays: words sharing
+  the substring are grouped by the vocabulary, and the lists jump to them.
+- **Similar words, similar codes:** code length depends only on the frequency class, so within a
+  class codewords can be given in alphabetical order at no cost in size; a prefix then maps to a
+  few contiguous rank ranges (two comparisons instead of a bitmap). It does not skip codes: the
+  membership test was never the cost.
+- **Identifier pieces as words** ("TreeNodeEx" -> Tree Node Ex, so a substring on a camelCase or
+  `_` boundary is a sequence of codewords): the vocabulary halves (5.2 -> 2.6 MB) but the codes
+  grow (20.8 -> 26.9 MB): 55.1% of the text instead of 48.9% with the lists. Not worth it.
+
+What it costs: codes 20.8 + vocabulary 5.2 + lists 4.4 MB = 30.4 MB for the 62 MB tree (49%).
+Today the app holds none of the unopened files' text (Find in Files reads them from disk), so a
+searchable compressed copy of the workspace is new memory spent for speed, not a saving; Find in
+Files in place (below) scans in 9-40 ms plus about 290 ms to read the 62 MB from the disk cache.
+Compression saves memory
+where text is already held: the index's declaring lines (plan step 4) and open documents.
+
 ## Find in Files today
 
 `model::searchText` copies every line into a new `std::string` and uses `std::regex` (libstdc++'s
