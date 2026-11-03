@@ -1,5 +1,6 @@
 #include "enp/view/MapView.h"
 
+#include "enp/os/Memory.h"
 #include "enp/view/PanelFrame.h"
 
 #include "enp/view/UiAutomation.h"
@@ -108,8 +109,11 @@ void MapView::layout()
     boxes_.clear();
     arrows_.clear();
     const LogicalNode* f = map.find(focus);
-    if (!f)
+    if (!f) {
+        releaseLayout(); // nothing to lay out: no room kept for the last map either
+        layoutKey_ = key;
         return;
+    }
 
     std::vector<const LogicalNode*> children;
     for (const std::string& id : f->children)
@@ -244,6 +248,33 @@ void MapView::fit(ImVec2 canvas)
     zoom_ = std::clamp(std::min(canvas.x / w, canvas.y / h), 0.8f, 1.0f); // legible first; pan for the rest
     pan_ = ImVec2(std::max(margin * s_ * zoom_, (canvas.x - (hi.x - lo.x) * s_ * zoom_) * 0.5f) - lo.x * s_ * zoom_,
                   std::max(margin * s_ * zoom_, (canvas.y - (hi.y - lo.y) * s_ * zoom_) * 0.5f) - lo.y * s_ * zoom_);
+}
+
+void MapView::releaseLayout()
+{
+    os::mem::release(boxes_);
+    os::mem::release(arrows_);
+    os::mem::release(layoutKey_);
+    needsFit_ = true;
+}
+
+void MapView::releaseIfMapGone()
+{
+    if ((!boxes_.empty() || boxes_.capacity() || arrows_.capacity() || !layoutKey_.empty()) &&
+        !vm_.logicalMap().built()) // not map(): that would build one
+        releaseLayout();
+}
+
+size_t MapView::layoutBytes() const
+{
+    size_t n = boxes_.capacity() * sizeof(Box) + arrows_.capacity() * sizeof(Arrow);
+    const size_t inlineRoom = std::string().capacity();
+    auto heap = [inlineRoom](const std::string& t) { return t.capacity() > inlineRoom ? t.capacity() + 1 : size_t(0); };
+    for (const Box& b : boxes_)
+        n += heap(b.id);
+    for (const Arrow& a : arrows_)
+        n += heap(a.label);
+    return n + heap(layoutKey_);
 }
 
 // ---- Frame --------------------------------------------------------------------------------------

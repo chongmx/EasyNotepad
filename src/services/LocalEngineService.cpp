@@ -2,6 +2,7 @@
 
 #include "enp/model/Hash.h"
 #include "enp/os/Dispatch.h"
+#include "enp/os/Memory.h"
 #include "enp/os/Download.h"
 #include "enp/os/Fs.h"
 
@@ -233,6 +234,8 @@ bool cpuSupported(std::string& features, std::string& missing)
 void initBackend()
 {
     static const bool once = []() {
+        // llama.cpp's log ring and backend registry live for the process: counted as theirs.
+        os::mem::Scope scope("local-engine");
         // The lab shows what matters; nothing goes to stdout or stderr.
         llama_log_set([](ggml_log_level, const char*, void*) {}, nullptr);
         common_log_set_stdo(common_log_main(), false);

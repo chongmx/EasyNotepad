@@ -585,7 +585,13 @@ void EditorView::render(ImVec2 size)
 
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * vm_.zoom.get());
     Metrics m{};
-    m.charW = ImGui::CalcTextSize("M").x;
+    // The exact advance of a monospace cell, not CalcTextSize(): that rounds the width up to a
+    // whole pixel (ImCeilFast), and the caret, selection and token positions then drift right of
+    // the glyphs (drawn at the true advance) by the rounding times the column: a column at 120
+    // characters was a whole cell off.
+    m.charW = ImGui::GetFontBaked()->GetCharAdvance(ImWchar('M'));
+    cellWidth_ = m.charW;
+    cellFontSize_ = ImGui::GetFontSize();
     m.lineH = std::floor(ImGui::GetFontSize() * kLineSpacing);
     int digits = 1;
     for (int n = doc->buffer.lineCount(); n >= 10; n /= 10)

@@ -140,8 +140,8 @@ struct Registry {
     std::atomic<std::uint64_t> bytes[kMaxScopes];
     std::atomic<std::uint64_t> blocks[kMaxScopes];
     std::atomic<std::uint64_t> allocations{0};
-    const char* names[kMaxScopes] = {"other"};
-    std::atomic<int> count{1};
+    const char* names[kMaxScopes] = {"other", "static-init"};
+    std::atomic<int> count{2};
     std::mutex registration; // only when a scope is first seen
 };
 // Constant-initialised: usable from the very first allocation, before any constructor ran.
@@ -151,6 +151,8 @@ Registry& registry()
     return r;
 }
 thread_local int t_scope = 0;
+[[maybe_unused]] constexpr int kStaticInit = 1; // registry().names[1]
+std::atomic<bool> g_programStarted{false}; // constant-initialised: false before any constructor
 
 int intern(const char* name)
 {
@@ -175,6 +177,11 @@ std::atomic<AllocateHook> g_onAllocate{nullptr};
 std::atomic<ReleaseHook> g_onRelease{nullptr};
 
 } // namespace
+
+void programStarted()
+{
+    g_programStarted.store(true, std::memory_order_relaxed);
+}
 
 void setHooks(AllocateHook onAllocate, ReleaseHook onRelease)
 {
@@ -209,7 +216,9 @@ void* allocate(std::size_t size, std::size_t alignment)
         return nullptr;
     char* p = static_cast<char*>(raw) + front;
     Header* h = reinterpret_cast<Header*>(p - kHeader);
-    const int scope = t_scope;
+    int scope = t_scope;
+    if (scope == 0 && !g_programStarted.load(std::memory_order_relaxed))
+        scope = kStaticInit; // a static constructor, before main()
     h->size = size;
     h->scope = std::uint32_t(scope);
     h->magic = kMagic;

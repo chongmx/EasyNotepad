@@ -60,7 +60,9 @@ public:
     // The folder closed: the question about it is cancelled or its answer dropped.
     void workspaceChanged() { cancel(); }
     bool busy() const { return running_ >= 0 || hasWaiting_; }
-    void setWorkingDirectory(std::string directory) { workingDirectory_ = std::move(directory); }
+    // Swapped in, not assigned: assigning a short path into the string that held a long one keeps
+    // the long one's heap storage (docs/MEMORY.md rule 5), the closed folder's path among it.
+    void setWorkingDirectory(std::string directory) { workingDirectory_.swap(directory); }
 
     // The prompt for a request (public for tests): the rules, then the question.
     static std::string systemPrompt(const IntellisenseViewModel::Request& request);

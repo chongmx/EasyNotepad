@@ -554,6 +554,13 @@ private:
         std::map<int, std::string> summaries; // by start line
     };
     mutable OutlineCache outline_;
+    void releaseOutline() const;
+
+public:
+    // Whether the outline cache holds anything (tests: it goes with its document).
+    bool outlineHeld() const { return outline_.nodes.capacity() > 0 || !outline_.summaries.empty() || outline_.documentId >= 0; }
+
+private:
 
     std::vector<CommandId> pinned_;
     std::vector<RibbonTabSetting> ribbonTabs_[2]; // Code, Agent

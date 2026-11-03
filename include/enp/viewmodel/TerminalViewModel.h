@@ -57,7 +57,9 @@ public:
     // Directory new shells start in; empty means the application's working directory.
     // Where new terminals start: the open folder, else the home directory (NotepadViewModel keeps
     // it current). Terminals already running keep theirs.
-    void setWorkingDirectory(std::string directory) { workingDirectory_ = std::move(directory); }
+    // Swapped in, not assigned: assigning a short path into the string that held a long one keeps
+    // the long one's heap storage (docs/MEMORY.md rule 5), the closed folder's path among it.
+    void setWorkingDirectory(std::string directory) { workingDirectory_.swap(directory); }
     const std::string& workingDirectory() const { return workingDirectory_; }
 
 private:

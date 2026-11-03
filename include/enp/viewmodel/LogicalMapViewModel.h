@@ -27,6 +27,8 @@ public:
     Event<std::string> statusMessage;
 
     const model::LogicalMap& map();
+    // Whether a map is held now, without building one (map() builds it on first use).
+    bool built() const { return !map_.nodes.empty(); }
     bool hasFeatures();
     const char* sourceName(); // "local dissection" / "agent dissection"
 

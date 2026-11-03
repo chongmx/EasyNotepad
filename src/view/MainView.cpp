@@ -237,6 +237,7 @@ void MainView::render()
         renderAgentWorkspace();
     else
         renderCodeWorkspace();
+    map_.releaseIfMapGone(); // whichever view is shown: the closed folder's map layout goes with it
     ImGui::EndChild();
     renderStatusBar();
     }
@@ -1602,10 +1603,11 @@ void MainView::renderCodeWorkspace()
     const float sideW = side ? agentSideWidth_ + gap : 0.0f;
     const float editorW = std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - sideW);
     beginPanel("##editorPanel", nullptr, ImVec2(editorW, topH));
-    if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
+    if (vm_.editorMode.get() == viewmodel::EditorMode::Map) {
         map_.render(ImGui::GetContentRegionAvail());
-    else
+    } else {
         editor_.render(ImGui::GetContentRegionAvail());
+    }
     endPanel();
     if (side) {
         ImGui::SameLine(0.0f, 0.0f);

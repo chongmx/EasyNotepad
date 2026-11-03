@@ -48,6 +48,12 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
       findInFiles_(*this, fileService), intellisense_(*this, fileService),
       codeAssistant_(intellisense_, localEngine, [this]() { return localSetup(); }, agentCli, processService), settings_(fileService)
 {
+    {
+        // The languages' keyword tables are built on first use and kept for the process: built
+        // here, under their own name, not inside the first document's "documents" scope.
+        os::mem::Scope scope("language-tables");
+        model::languageSpec(model::Language::PlainText);
+    }
     agentCli_ = agentCli;
     terminal_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string()); // no folder yet: home
     processes_ = processService;
@@ -411,6 +417,8 @@ void NotepadViewModel::closeDocument(int index)
     history_.forget(documents_[size_t(index)]->id);
     if (intellisense_.documentId() == documents_[size_t(index)]->id)
         intellisense_.dismiss(); // its suggestions go with it
+    if (outline_.documentId == documents_[size_t(index)]->id)
+        releaseOutline(); // and its outline and region summaries
     // An image or a library: what its view decoded is large, so the pages go back to the system now.
     const bool large = documents_[size_t(index)]->kind != model::FileKind::Text;
     documents_.erase(documents_.begin() + index);
@@ -1838,8 +1846,10 @@ const std::vector<model::OutlineNode>& NotepadViewModel::outline() const
 {
     static const std::vector<model::OutlineNode> none;
     const model::Document* doc = activeDocument();
-    if (!doc)
+    if (!doc) {
+        releaseOutline(); // the last document's outline does not outlive it
         return none;
+    }
     if (outline_.documentId != doc->id || outline_.revision != doc->revision || outline_.language != doc->language ||
         outline_.mode != foldingMode.get()) {
         if (outline_.mode != foldingMode.get())
@@ -1854,6 +1864,16 @@ const std::vector<model::OutlineNode>& NotepadViewModel::outline() const
             outline_.summaries.clear();
     }
     return outline_.nodes;
+}
+
+void NotepadViewModel::releaseOutline() const
+{
+    if (outline_.documentId < 0 && outline_.nodes.capacity() == 0 && outline_.summaries.empty())
+        return;
+    os::mem::release(outline_.nodes);
+    os::mem::release(outline_.summaries);
+    outline_.documentId = -1;
+    outline_.revision = ~uint64_t(0);
 }
 
 const model::OutlineNode* NotepadViewModel::regionAt(int line) const

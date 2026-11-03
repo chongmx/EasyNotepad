@@ -52,6 +52,8 @@ public:
     static Layout chooseLayout(float widthDp, float heightDp);
     Layout layout() const { return layout_; }
     const EditorView& editor() const { return editor_; }
+    const MapView& map() const { return map_; }
+    const Fonts& fonts() const { return fonts_; }
     const EmojiCache& emoji() const { return emoji_; }
     // After a close (Application's memory trim): caches let go of what is no longer on screen.
     void compactCaches() { emoji_.releaseUnused(); }

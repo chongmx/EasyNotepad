@@ -4929,6 +4929,74 @@ TEST(intellisense_knows_the_headers_and_the_standard)
     vm.closeFolder();
 }
 
+TEST(closing_a_document_frees_its_outline)
+{
+    // Found with the scope trace: after the folder closed, with no document open, the "documents"
+    // scope still held the last active document's outline (84 KB for EditorView.cpp).
+    viewmodel::NotepadViewModel vm;
+    while (!vm.documents().empty())
+        vm.closeDocument(0);
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int a()\n{\n    return 1;\n}\nint b()\n{\n    return 2;\n}\n");
+    CHECK(!vm.outline().empty());
+    CHECK(vm.outlineHeld());
+    vm.closeDocument(vm.activeIndex.get());
+    CHECK(vm.documents().empty());
+    CHECK(!vm.outlineHeld());
+    CHECK(vm.outline().empty());
+    CHECK(!vm.outlineHeld());
+    // Another document closing leaves the active one's outline alone.
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int c()\n{\n    return 3;\n}\n");
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int d()\n{\n    return 4;\n}\n");
+    CHECK(!vm.outline().empty() && vm.outlineHeld());
+    vm.closeDocument(0);
+    CHECK(vm.outlineHeld());
+}
+
+TEST(intellisense_ranks_names_of_this_document_before_short_names_from_elsewhere)
+{
+    // Reported: typing "wid" under "int widthOfWindow = 3;" listed short names from other files
+    // of the workspace (width, widen, widgetData) first and the document's own name sixth.
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-intellisense-rank";
+    os::fs::deletePath(root);
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/other.cpp", "int width = 1;\nint widen(int a) { return a; }\nint widgetData = 0;\n", nullptr);
+    files.write(root + "/src/shapes.h", "#pragma once\nint widestShapeWidth();\n", nullptr);
+    files.write(root + "/src/main.cpp", "#include \"shapes.h\"\nint main()\n{\n    return 0;\n}\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+
+    // An unsaved document: its own name first, the shorter ones from elsewhere after it.
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int widthOfWindow = 3;\nint main()\n{\n    ");
+    typeText(vm, "wid");
+    CHECK(is.active() && !is.items().empty());
+    if (!is.items().empty())
+        CHECK_EQ(is.items()[0].label, std::string("widthOfWindow"));
+    CHECK(itemIndex(is, "width") > itemIndex(is, "widthOfWindow"));
+    is.dismiss();
+
+    // A file of the workspace: a name from the header it includes comes before a shorter one
+    // from a file it does not include.
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 4}, false);
+    typeText(vm, "wid");
+    CHECK(is.active() && itemIndex(is, "widestShapeWidth") >= 0 && itemIndex(is, "width") >= 0);
+    CHECK(itemIndex(is, "widestShapeWidth") < itemIndex(is, "width"));
+    is.dismiss();
+    vm.closeFolder();
+    os::fs::deletePath(root);
+}
+
 TEST(intellisense_leaves_words_in_comments_and_strings_out)
 {
     viewmodel::NotepadViewModel vm;

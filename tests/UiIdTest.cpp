@@ -24,6 +24,7 @@
 #include <cctype>
 #include <algorithm>
 #include <cstdio>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -811,6 +812,48 @@ int main(int argc, char** argv)
             if (!h.vm().ribbonTabs(WorkspaceMode::Code).empty() || !view::UiAutomation::instance().find("ribbon-tab:Read"))
                 std::printf("  FAILED Customize Ribbon: Restore defaults did not bring the tabs back\n"), ++checksFailed;
             activate("customize-ribbon:done");
+        }
+
+        // The caret, selections and columns use the width the glyphs are drawn with: 120 cells end
+        // where 120 drawn characters end (CalcTextSize rounds a width up to a whole pixel; a cell
+        // measured with it put the caret a whole character right of the text at column 120).
+        // Checked at every zoom the editor offers steps of.
+        for (const float zoom : {1.0f, 1.1f, 1.25f, 1.5f, 2.0f, 0.9f}) {
+            h.setContext("editor cell width");
+            h.vm().newDocument();
+            h.vm().zoom.set(zoom);
+            h.settle();
+            const float cell = h.view().editor().cellWidth();
+            // The glyphs' own advances added up, as drawing does (no rounding).
+            const std::string text(120, 'a');
+            const float drawn = h.view().fonts().mono->CalcTextSizeA(h.view().editor().cellFontSize(), FLT_MAX, 0.0f, text.c_str()).x;
+            if (cell <= 0.0f || std::fabs(cell * 120.0f - drawn) > 1.0f)
+                std::printf("  FAILED editor cell width at %.0f%%: 120 cells %.1f px, 120 characters drawn %.1f px\n", zoom * 100.0f,
+                            cell * 120.0f, drawn), ++checksFailed;
+            h.vm().closeDocument(h.vm().activeIndex.get());
+        }
+        h.vm().zoom.set(1.0f);
+        h.settle();
+
+        // The map view's layout belongs to the map: once the map is gone (a folder closed), the
+        // view frees it whichever view is shown, storage included; while the map exists it stays.
+        {
+            h.setContext("map view layout after the map is gone");
+            h.vm().execute(viewmodel::CommandId::ShowMapView);
+            h.settle();
+            const size_t built = h.view().map().layoutBytes();
+            h.vm().execute(viewmodel::CommandId::ShowCodeView);
+            h.settle();
+            const size_t kept = h.view().map().layoutBytes();
+            if (built == 0 || kept != built)
+                std::printf("  FAILED map view: layout %zu bytes when drawn, %zu after switching to code while the map exists\n", built, kept),
+                    ++checksFailed;
+            h.vm().logicalMap().workspaceChanged(); // what closing the folder does to the map
+            h.settle();
+            if (h.view().map().layoutBytes() != 0)
+                std::printf("  FAILED map view: %zu bytes of the closed map's layout still held\n", h.view().map().layoutBytes()), ++checksFailed;
+            h.vm().logicalMap().refresh(); // the demo map back for the layout states below
+            h.settle();
         }
 
         // Layout states that add, remove or move items; each is swept in both workspaces.

@@ -36,6 +36,9 @@ public:
     // Rendered-Markdown states held (one per open Markdown document; tests check that closed
     // documents release theirs).
     size_t renderedMarkdownCount() const { return markdown_.size(); }
+    // The text cell width the last frame used for the caret, selections and columns (tests).
+    float cellWidth() const { return cellWidth_; }
+    float cellFontSize() const { return cellFontSize_; } // the font size it was measured at
     // Image textures alive or awaiting the backend's destruction (0 once every Markdown document closed).
     size_t imageTextureCount() const { return images_.liveCount() + images_.pendingCount(); }
     size_t imageDocumentCount() const { return fileImages_.size(); }
@@ -119,6 +122,8 @@ private:
     const Fonts& fonts_;
     const Palette& palette_;
     float s_;
+    float cellWidth_ = 0.0f;
+    float cellFontSize_ = 0.0f;
 
     std::vector<Row> rows_;
     std::vector<int> firstRowOfLine_;

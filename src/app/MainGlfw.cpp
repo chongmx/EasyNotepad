@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -119,6 +120,7 @@ void mainLoopStep(void* arg)
     glfwGetFramebufferSize(state->window, &width, &height);
     const ImVec4 clear = state->app->clearColor();
     if (!minimized) {
+        enp::os::mem::Scope scope("gl-driver"); // a clear may compile a shader too
         glViewport(0, 0, width, height);
         glClearColor(clear.x, clear.y, clear.z, clear.w);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -127,7 +129,11 @@ void mainLoopStep(void* arg)
     if (state->app->captureWanted()) { // a screenshot asked for through the automation endpoint
         std::vector<unsigned char> rgba;
         std::string failure;
-        const bool ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        bool ok = false;
+        {
+            enp::os::mem::Scope scope("gl-driver"); // the driver's part; the pixels are released below
+            ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        }
         state->app->deliverCapture(ok, width, height, rgba, failure);
         glViewport(0, 0, width, height);
     }
@@ -138,12 +144,16 @@ void mainLoopStep(void* arg)
 #if !defined(__EMSCRIPTEN__)
     if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
         GLFWwindow* context = glfwGetCurrentContext();
+        enp::os::mem::Scope scope("gl-driver"); // windows of popped-out panels: their contexts and draws
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
         glfwMakeContextCurrent(context);
     }
 #endif
-    glfwSwapBuffers(state->window);
+    {
+        enp::os::mem::Scope scope("gl-driver");
+        glfwSwapBuffers(state->window);
+    }
     state->app->endFrame();
 #if !defined(__EMSCRIPTEN__)
     static int framesShown = 0;
@@ -236,6 +246,10 @@ int main(int argc, char** argv)
                 height = int(float(h) * scale);
             }
         }
+    // The GL driver's own C++ allocations (Mesa's LLVM registers itself when the driver library
+    // loads; shaders are compiled on first draws) are counted as "gl-driver", not "other"
+    // (docs/MEMORY.md section 2).
+    std::optional<enp::os::mem::Scope> driverScope(std::in_place, "gl-driver");
     GLFWwindow* window = glfwCreateWindow(width, height, "EasyNotepad", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
@@ -252,6 +266,7 @@ int main(int argc, char** argv)
     if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)))
         return 1;
 #endif
+    driverScope.reset();
 
     IMGUI_CHECKVERSION();
     ImGui::SetAllocatorFunctions(
@@ -276,7 +291,10 @@ int main(int argc, char** argv)
 #if defined(__EMSCRIPTEN__)
     ImGui_ImplGlfw_InstallEmscriptenCallbacks(window, "#canvas");
 #endif
-    ImGui_ImplOpenGL3_Init(glslVersion);
+    {
+        enp::os::mem::Scope scope("gl-driver");
+        ImGui_ImplOpenGL3_Init(glslVersion);
+    }
 
     // Owned by a static so it survives main() returning under emscripten_set_main_loop.
     static std::unique_ptr<AppState> stateOwner = std::make_unique<AppState>();
@@ -288,10 +306,18 @@ int main(int argc, char** argv)
     state->frame = std::make_unique<enp::app::GlfwWindowFrame>(window, customTitleBar);
     frame = state->frame.get();
 #endif
-    state->app = std::make_unique<enp::app::Application>();
+    {
+        // The view-model, its services, commands and settings: named, not "other" (subsystems
+        // that have their own scope keep it inside this one).
+        enp::os::mem::Scope scope("app");
+        state->app = std::make_unique<enp::app::Application>();
+    }
     const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
-    state->app->attachUi(scale, std::string(renderer ? renderer : "?") + " / " + (version ? version : "?"), frame);
+    {
+        enp::os::mem::Scope scope("views"); // the views are built here
+        state->app->attachUi(scale, std::string(renderer ? renderer : "?") + " / " + (version ? version : "?"), frame);
+    }
     state->app->openInitialDocuments();
     // --safe-area=left,top,right,bottom (in dp): pretend the system covers those edges, as a phone's
     // bars, notch and keyboard do.

@@ -620,6 +620,17 @@ void IntellisenseViewModel::refresh()
         ask(*doc, Request::Purpose::Complete, {}); // outside the scope: the provider's work is not IntelliSense's memory
 }
 
+namespace {
+// Where a name comes from outweighs its length: matchScore() takes a point per extra character
+// (at most 60), so without these a short name from any file of the workspace ("width") came before
+// the longer one the user declared in this document ("widthOfWindow"). Length still orders names
+// of the same origin.
+constexpr int kFromThisDocument = 100; // its words and declarations, and the language's keywords
+constexpr int kFromIncludedHeader = 60; // declared in a workspace header this file includes
+constexpr int kFromIncludedLibrary = 30; // the standard library, from a header this file includes
+constexpr int kFromOtherLibraryHeader = -400; // shown only when it matches well, saying what to include
+} // namespace
+
 void IntellisenseViewModel::refreshItems(const model::Document& document)
 {
     const model::Document* doc = &document;
@@ -652,14 +663,14 @@ void IntellisenseViewModel::refreshItems(const model::Document& document)
         if (cFamily) {
             model::forEachKeyword(cFile, standard, [&](std::string_view word) {
                 if (const int score = model::matchScore(prefix_, word); score >= 0)
-                    candidates.push_back({word, model::SymbolKind::Keyword, score, -1});
+                    candidates.push_back({word, model::SymbolKind::Keyword, score + kFromThisDocument, -1});
             });
         } else {
             const model::LanguageSpec& spec = model::languageSpec(doc->language);
             for (const auto* set : {&spec.keywords, &spec.types})
                 for (const std::string& word : *set)
                     if (const int score = model::matchScore(prefix_, word); score >= 0)
-                        candidates.push_back({word, model::SymbolKind::Keyword, score, -1});
+                        candidates.push_back({word, model::SymbolKind::Keyword, score + kFromThisDocument, -1});
         }
     }
     // The standard library: names of the headers it includes first; a strong match from another
@@ -682,7 +693,7 @@ void IntellisenseViewModel::refreshItems(const model::Document& document)
             int score = model::matchScore(prefix_, n.name);
             if (score < 0 || (!included && (member || (memberOf_.empty() && score < 1000))))
                 continue; // members only of included classes; other headers' names only when they match well
-            score += included ? 3 : -400;
+            score += included ? kFromIncludedLibrary : kFromOtherLibraryHeader;
             Candidate c{n.name, n.kind, score, -1};
             c.library = &n;
             c.reached = included;
@@ -723,7 +734,7 @@ void IntellisenseViewModel::refreshItems(const model::Document& document)
                 if (!typedHere && e - i >= 2 && (!member_ || afterMember) && memberOf_.empty()) {
                     const std::string_view word(text.data() + i, e - i);
                     if (const int score = model::matchScore(prefix_, word); score >= 0)
-                        candidates.push_back({word, model::SymbolKind::Word, score + 2, -1});
+                        candidates.push_back({word, model::SymbolKind::Word, score + kFromThisDocument + 2, -1});
                 }
                 i = e;
             }
@@ -738,11 +749,11 @@ void IntellisenseViewModel::refreshItems(const model::Document& document)
         if (member_ && (s.container.empty() || s.kind == model::SymbolKind::Type || s.kind == model::SymbolKind::Namespace))
             continue;
         if (const int score = model::matchScore(prefix_, s.name); score >= 0) {
-            Candidate c{s.name, s.kind, score + (s.file == ownFile ? 2 : 1), long(i)};
+            Candidate c{s.name, s.kind, score + (s.file == ownFile ? kFromThisDocument + 3 : 1), long(i)};
             if (cFamily && s.file != ownFile && s.file < int(reach.files.size())) {
                 c.reached = reach.files[size_t(s.file)] != 0;
                 if (c.reached)
-                    c.score += 2; // declared in a header this file includes
+                    c.score += kFromIncludedHeader; // declared in a header this file includes
                 else if (isHeaderPath(index_.path(s.file)))
                     c.score -= 1;
             }

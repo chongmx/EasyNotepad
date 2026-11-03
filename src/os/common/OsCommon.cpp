@@ -1,4 +1,5 @@
 #include "../OsInternal.h"
+#include "enp/os/Memory.h"
 
 #include <cctype>
 #include <chrono>
@@ -52,6 +53,7 @@ bool init(const InitParams& params)
 {
     if (g_initialized)
         return true;
+    mem::programStarted(); // from here, unscoped allocations are "other", not "static-init"
 #if defined(__GLIBC__)
     // Fixed allocator thresholds instead of glibc's dynamic ones (docs/MEMORY.md rule 9). glibc
     // raises both after every large free (up to 32 MB for mmap, 64 MB for trimming), and then:
