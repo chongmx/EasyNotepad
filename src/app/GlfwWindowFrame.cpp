@@ -345,4 +345,42 @@ void GlfwWindowFrame::update()
     }
 }
 
+bool GlfwWindowFrame::covered() const
+{
+#if defined(_WIN32)
+    HWND hwnd = glfwGetWin32Window(window_);
+    if (!hwnd || IsIconic(hwnd) || !IsWindowVisible(hwnd))
+        return false;
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&client), 2);
+    // What is left of the client area after taking away every window above it. Windows that may
+    // let it show through (layered, click-through, cloaked on another desktop) do not count.
+    HRGN left = CreateRectRgnIndirect(&client);
+    if (!left)
+        return false;
+    bool covered = false;
+    for (HWND w = GetWindow(hwnd, GW_HWNDPREV); w && !covered; w = GetWindow(w, GW_HWNDPREV)) {
+        if (!IsWindowVisible(w) || IsIconic(w))
+            continue;
+        if (GetWindowLongW(w, GWL_EXSTYLE) & (WS_EX_LAYERED | WS_EX_TRANSPARENT))
+            continue;
+        BOOL cloaked = FALSE;
+        if (SUCCEEDED(DwmGetWindowAttribute(w, 14 /* DWMWA_CLOAKED, Windows 8 */, &cloaked, sizeof(cloaked))) && cloaked)
+            continue;
+        RECT r{};
+        if (FAILED(DwmGetWindowAttribute(w, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS: without the invisible borders */, &r, sizeof(r))))
+            GetWindowRect(w, &r);
+        if (HRGN other = CreateRectRgnIndirect(&r)) {
+            covered = CombineRgn(left, left, other, RGN_DIFF) == NULLREGION;
+            DeleteObject(other);
+        }
+    }
+    DeleteObject(left);
+    return covered;
+#else
+    return false;
+#endif
+}
+
 } // namespace enp::app

@@ -28,6 +28,9 @@ struct ScopeStats {
 
 // Compiled in?
 bool enabled();
+// Allocations made before this is called (static constructors: ours and the libraries', which
+// run before main()) are counted as "static-init" instead of "other". os::init() calls it.
+void programStarted();
 Stats stats();
 std::uint64_t liveBytes(const char* scope);
 

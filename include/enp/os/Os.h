@@ -39,8 +39,21 @@ double now();
 // objects: windows, cursors, fonts; threads: work never joined). 0 where the platform cannot tell.
 struct ProcessStats {
     std::uint64_t residentBytes = 0; // working set (Windows) / resident set (POSIX)
-    std::uint64_t privateBytes = 0;  // committed private memory (Windows), anonymous memory (Linux)
-    int handles = 0;                 // kernel handles (Windows) / open descriptors (Linux, Android)
+    std::uint64_t privateBytes = 0;  // committed private memory (Windows), anonymous memory (Linux),
+                                     // physical footprint (macOS: Activity Monitor's "Memory")
+    std::uint64_t sharedBytes = 0;   // Linux: shared memory the process has written (RssShmem: the
+                                     // window's frames handed to the X server by MIT-SHM, memfd
+                                     // buffers); not in privateBytes, part of what the app holds
+    // Where the private memory is, for watching one part climb (the counterpart, outside Linux, of
+    // the per-mapping split scripts/memory_cycle.py reads from /proc/<pid>/smaps):
+    std::uint64_t mallocInUseBytes = 0; // C allocator's reported live bytes (glibc, macOS); the
+                                        // C++ heap (os::mem) is a part of it
+    std::uint64_t mallocHeldBytes = 0;  // glibc: arena + mapped bytes; macOS: allocator-reported
+                                        // zone size. Neither guarantees how much trim can return.
+    std::uint64_t graphicsBytes = 0;    // macOS: GPU memory charged to the app (IOSurfaces,
+                                        // textures, buffers; Mach's graphics ledger), in privateBytes
+    std::uint64_t compressedBytes = 0;  // macOS: the app's pages the system compressed, in privateBytes
+    int handles = 0;                 // kernel handles (Windows) / open descriptors (Linux, Android, macOS)
     int gdiObjects = 0;              // Windows only
     int userObjects = 0;             // Windows only
     int threads = 0;

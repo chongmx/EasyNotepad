@@ -34,7 +34,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::SortLines: return {"Sort", "Sort the selected lines ascending", ""};
     case CommandId::UpperCase: return {"UPPER", "Convert the selection to upper case", "Ctrl+Shift+U"};
     case CommandId::LowerCase: return {"lower", "Convert the selection to lower case", "Ctrl+U"};
-    case CommandId::ToggleComment: return {"Comment", "Toggle line comment", "Ctrl+Q"};
+    case CommandId::ToggleComment: return {"Comment", "Toggle line comment", "Ctrl+/"};
     case CommandId::Indent: return {"Indent", "Increase indentation", "Tab"};
     case CommandId::Outdent: return {"Outdent", "Decrease indentation", "Shift+Tab"};
     case CommandId::TrimTrailing: return {"Trim", "Trim trailing whitespace", ""};
@@ -52,7 +52,7 @@ CommandInfo makeInfo(CommandId id)
 
     case CommandId::ToggleExplorer: return {"Explorer", "Show or hide the workspace explorer", "Ctrl+Shift+E"};
     case CommandId::TogglePanel: return {"Panel", "Show or hide the bottom panel (review and terminal)", "Ctrl+J"};
-    case CommandId::ToggleMaximizePanel: return {"Maximize", "Maximize or restore the bottom panel", ""};
+    case CommandId::ToggleMaximizePanel: return {"Maximize", "Maximize or restore the bottom panel", "Ctrl+Shift+J"};
     case CommandId::ToggleSlimRibbon: return {"Slim Ribbon", "A slimmer ribbon: icons only, more room for your work", "Ctrl+F1"};
     case CommandId::ToggleAgentPanel: return {"Agent Panel", "Show or hide the agent side panel", "Ctrl+Shift+I"};
     case CommandId::ToggleWordWrap: return {"Word Wrap", "Wrap long lines", "Alt+Z"};
@@ -165,6 +165,15 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::GitWriteMessage: return {"Message", "Let the agent write the commit message", ""};
     case CommandId::GitGuide: return {"Learn Git", "Step-by-step guide to git, using this app's Git tools", ""};
     case CommandId::CloseFolder: return {"Close Folder", "Close the folder and its documents", ""};
+    case CommandId::TriggerCompletion: return {"Complete", "Suggest names for the word at the caret: from this file, the workspace and the language", "Ctrl+Space"};
+    case CommandId::GoToDefinition: return {"Definition", "Go to where the name under the caret is declared, in this file or the workspace", "F12"};
+    case CommandId::ToggleAutoComplete: return {"Auto Complete", "Suggest names while typing code", ""};
+    case CommandId::RebuildSymbolIndex: return {"Rebuild Index", "Read the workspace's code again for completion and Go to Definition", ""};
+    case CommandId::NavigateBack: return {"Back", "Go back to where Go to Definition jumped from", "Alt+Left"};
+    case CommandId::NavigateForward: return {"Forward", "Go forward again after going back", "Alt+Right"};
+    case CommandId::ImplementComment: return {"From Comment", "Write the code the comment at the caret describes (the model chosen in IntelliSense settings)", "Ctrl+Shift+Space"};
+    case CommandId::ToggleCodeSuggestions: return {"Code Suggestions", "Suggest code for comments with a model, local or online (choose it in IntelliSense settings)", ""};
+    case CommandId::IntellisenseSettings: return {"Settings", "IntelliSense settings: suggestions, the model, C/C++ standards and include folders", ""};
 
     case CommandId::AddNextOccurrence: return {"Next Match", "Add the next occurrence of the selection as another caret", "Ctrl+D"};
     case CommandId::SelectAllOccurrences: return {"All Matches", "Select every occurrence of the selection, a caret on each", "Ctrl+Shift+L"};
@@ -175,6 +184,9 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::OpenRecent: return {"Recent", "Switch to a recent folder or file", "Ctrl+R"};
     case CommandId::FocusTerminal: return {"Terminal Focus", "Jump to the terminal (again: back to the editor)", "Ctrl+E"};
     case CommandId::OpenWorkspace: return {"Open Workspace", "Import a VS Code workspace or a Visual Studio solution", ""};
+    case CommandId::ToggleSplitView: return {"Two Columns", "Show two documents side by side, or one", "Ctrl+\\"};
+    case CommandId::FocusOtherColumn: return {"Other Column", "Move to the other column (two columns)", "Ctrl+Alt+\\"};
+    case CommandId::KeyboardShortcuts: return {"Shortcuts", "Every shortcut key", "F1"};
 
     case CommandId::Count: break;
     }
@@ -341,6 +353,18 @@ const char* commandKey(CommandId id)
     case CommandId::OpenRecent: return "OpenRecent";
     case CommandId::FocusTerminal: return "FocusTerminal";
     case CommandId::OpenWorkspace: return "OpenWorkspace";
+    case CommandId::TriggerCompletion: return "TriggerCompletion";
+    case CommandId::GoToDefinition: return "GoToDefinition";
+    case CommandId::ToggleAutoComplete: return "ToggleAutoComplete";
+    case CommandId::RebuildSymbolIndex: return "RebuildSymbolIndex";
+    case CommandId::NavigateBack: return "NavigateBack";
+    case CommandId::NavigateForward: return "NavigateForward";
+    case CommandId::ImplementComment: return "ImplementComment";
+    case CommandId::ToggleCodeSuggestions: return "ToggleCodeSuggestions";
+    case CommandId::IntellisenseSettings: return "IntellisenseSettings";
+    case CommandId::ToggleSplitView: return "ToggleSplitView";
+    case CommandId::FocusOtherColumn: return "FocusOtherColumn";
+    case CommandId::KeyboardShortcuts: return "KeyboardShortcuts";
     case CommandId::Count: break;
     }
     return "";

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace {
@@ -78,6 +79,8 @@ void initUi()
         return;
     ANativeWindow_acquire(g.app->window);
 
+    // The GL driver's own C++ allocations are counted as "gl-driver" (docs/MEMORY.md section 2).
+    std::optional<enp::os::mem::Scope> driverScope(std::in_place, "gl-driver");
     g.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(g.display, nullptr, nullptr);
     const EGLint attributes[] = {EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_DEPTH_SIZE, 0,
@@ -94,6 +97,7 @@ void initUi()
     g.context = eglCreateContext(g.display, config, EGL_NO_CONTEXT, contextAttributes);
     g.surface = eglCreateWindowSurface(g.display, config, g.app->window, nullptr);
     eglMakeCurrent(g.display, g.surface, g.surface, g.context);
+    driverScope.reset();
 
     IMGUI_CHECKVERSION();
     ImGui::SetAllocatorFunctions(
@@ -104,10 +108,16 @@ void initUi()
         [](void* p, void*) { ::operator delete(p); });
     ImGui::CreateContext();
     ImGui_ImplAndroid_Init(g.app->window);
-    ImGui_ImplOpenGL3_Init("#version 300 es");
+    {
+        enp::os::mem::Scope scope("gl-driver");
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+    }
 
     const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
-    g.application->attachUi(displayScale(), renderer ? renderer : "OpenGL ES 3");
+    {
+        enp::os::mem::Scope scope("views"); // the views are built here
+        g.application->attachUi(displayScale(), renderer ? renderer : "OpenGL ES 3");
+    }
     g.uiReady = true;
 }
 
@@ -205,19 +215,29 @@ void frame()
     g.application->frame();
     ImGui::Render();
 
-    glViewport(0, 0, int(io.DisplaySize.x), int(io.DisplaySize.y));
     const ImVec4 clear = g.application->clearColor();
-    glClearColor(clear.x, clear.y, clear.z, clear.w);
-    glClear(GL_COLOR_BUFFER_BIT);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    {
+        enp::os::mem::Scope scope("gl-driver");
+        glViewport(0, 0, int(io.DisplaySize.x), int(io.DisplaySize.y));
+        glClearColor(clear.x, clear.y, clear.z, clear.w);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
     if (g.application->captureWanted()) { // a screenshot asked for through the automation endpoint
         std::vector<unsigned char> rgba;
         std::string failure;
         const int width = int(io.DisplaySize.x), height = int(io.DisplaySize.y);
-        const bool ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        bool ok = false;
+        {
+            enp::os::mem::Scope scope("gl-driver");
+            ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        }
         g.application->deliverCapture(ok, width, height, rgba, failure);
     }
-    eglSwapBuffers(g.display, g.surface);
+    {
+        enp::os::mem::Scope scope("gl-driver");
+        eglSwapBuffers(g.display, g.surface);
+    }
     g.application->endFrame();
 }
 
@@ -260,7 +280,10 @@ void android_main(android_app* app)
     enp::os::InitParams params;
     params.nativeHandle = app;
     enp::os::init(params);
-    g.application = std::make_unique<enp::app::Application>();
+    {
+        enp::os::mem::Scope scope("app");
+        g.application = std::make_unique<enp::app::Application>();
+    }
     g.application->openInitialDocuments();
 
     for (;;) {

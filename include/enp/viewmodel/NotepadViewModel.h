@@ -13,6 +13,8 @@
 #include "enp/viewmodel/ExplorerItem.h"
 #include "enp/viewmodel/FileDialogViewModel.h"
 #include "enp/viewmodel/FindInFilesViewModel.h"
+#include "enp/viewmodel/CodeAssistant.h"
+#include "enp/viewmodel/IntellisenseViewModel.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/IProcessService.h"
 #include "enp/viewmodel/LayersViewModel.h"
@@ -103,6 +105,8 @@ public:
     Property<bool> developerMode{false};
     Property<bool> showPanel{true};
     Property<bool> panelMaximized{false};
+    // The editor area in two columns: the active document in the focused one, another beside it.
+    Property<bool> splitView{false};
     Property<bool> showAgentPanel{true};
     // Explorer: dot files and folders (.github, .gitignore) and, on Windows, entries with the
     // hidden attribute. The .git folder itself never shows.
@@ -163,9 +167,12 @@ public:
     Event<> goToLineRequested;
     Event<> addCommentRequested;
     Event<> aboutRequested;
+    Event<> shortcutsRequested;  // the list of shortcut keys
+    Event<> otherColumnRequested; // two columns: the keyboard moves to the other one
     Event<> engineLabRequested;
     Event<> localModelRequested; // the agent set-up card, local model part
     Event<> preferencesRequested;
+    Event<> intellisenseSettingsRequested; // the IntelliSense settings dialog
     Event<> customizeRibbonRequested; // opens the ribbon's Customize dialog
     Event<> syntaxColorsRequested;
     Event<> languagePickerRequested;
@@ -194,6 +201,8 @@ public:
     // True once after something large was released (a folder closed, the last document closed):
     // the app then compacts ImGui's caches and returns freed heap memory to the OS (os::trimMemory).
     bool takeMemoryTrimRequest();
+    // Something large was freed outside the close path (an index rebuilt): trim like after a close.
+    void requestMemoryTrim() { memoryTrimRequested_ = true; }
     bool folderOpen() const { return !workspaceRoot_.empty(); }
     // No folder, after Close Folder (rather than the sample workspace shown at first start).
     bool noFolder() const { return workspaceRoot_.empty() && explorer_.children.empty(); }
@@ -461,6 +470,13 @@ public:
     static constexpr const char* kAgentSetupUrl = "https://code.claude.com/docs/en/setup";
     FileDialogViewModel& fileDialog() { return fileDialog_; }
     FindInFilesViewModel& findInFiles() { return findInFiles_; }
+    // Completion, Go to Definition and the workspace's symbol index.
+    IntellisenseViewModel& intellisense() { return intellisense_; }
+    const IntellisenseViewModel& intellisense() const { return intellisense_; }
+    // Code suggestions from a model (local or online), IntelliSense's provider.
+    CodeAssistant& codeAssistant() { return codeAssistant_; }
+    // Whether the local model can answer (the agent and code suggestions use it).
+    AgentViewModel::LocalSetup localSetup();
     Event<> searchFocusRequested; // Find in Files: focus the query box
     std::string absolutePath(const std::string& path) const; // workspace-relative -> absolute
     // Replaces a document's whole text as one undoable edit (opening it if needed).
@@ -542,6 +558,13 @@ private:
         std::map<int, std::string> summaries; // by start line
     };
     mutable OutlineCache outline_;
+    void releaseOutline() const;
+
+public:
+    // Whether the outline cache holds anything (tests: it goes with its document).
+    bool outlineHeld() const { return outline_.nodes.capacity() > 0 || !outline_.summaries.empty() || outline_.documentId >= 0; }
+
+private:
 
     std::vector<CommandId> pinned_;
     std::vector<RibbonTabSetting> ribbonTabs_[2]; // Code, Agent
@@ -563,6 +586,8 @@ private:
     LogicalMapViewModel logicalMap_;
     FileDialogViewModel fileDialog_;
     FindInFilesViewModel findInFiles_;
+    IntellisenseViewModel intellisense_; // before settings_, which binds its autoComplete
+    CodeAssistant codeAssistant_;        // after intellisense_ (its provider), before settings_
     int nextDocumentId_ = 1;
     int untitledCounter_ = 0;
     bool memoryTrimRequested_ = false;

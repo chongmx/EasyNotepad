@@ -30,6 +30,7 @@ it is described as a feature in [../FEATURES.md](../FEATURES.md), marked here, a
 | 21 | [A local agent on the device (Gemma 4 E2B)](21-local-agent.md) | Offline code completion, judging agent requests, small tasks locally, escalating big ones; a safety net for its faults | In progress: Claude / Local / Auto in the Agent panel, fallback, local answers (done); request judging, watching agents, inline completion (to do) |
 | 22 | [Drag-to-scroll inside Dear ImGui](22-imgui-drag-scroll.md) | Touch scrolling belongs in ImGui, not in an app-side workaround; and the ImGui version is not truly locked | Planned (not started) |
 | 23 | [Local inference engines: start on the CPU, climb to the fastest](23-local-inference-engines.md) | The local agent's speed depends on reaching the GPU/NPU; each vendor's path differs. Bootstrap on CPU, probe, build or download, verify, switch, drop back. Phase 1: ggml (CPU + Vulkan) and fixed TensorRT | In progress: 23.0 spike done on Linux; Windows, Android and R2 INT4 next |
+| 24 | [Compact text in memory](24-compact-text.md) | With a repository open the index holds 12 MB (2.7 MB of it reserved and unused), a document's lines cost 2.9x their text, Find in Files uses `std::regex` on per-line copies; measured: pooling, then byte-aligned compressed text that can be searched (ETDC) | Planned (measured, not started) |
 
 Done without a plan item (see [../FEATURES.md](../FEATURES.md)):
 - The in-app agent: Claude Code streaming, set-up, Stop, and Markdown answers.
@@ -37,6 +38,8 @@ Done without a plan item (see [../FEATURES.md](../FEATURES.md)):
 - Windows 7 and 32-bit builds.
 - The phone layouts.
 - The slim ribbon.
+- IntelliSense: completion, Go to Definition (F12 and Ctrl+click), Back and Forward, declarations
+  on hover, and the provider seam and context snippets that AI completion (plan 21) builds on.
 
 **Reviewing items 14–19:** open Help (?) › Learn Git. Each lesson names its plan item, what was built
 and anything left for later, with an "I have checked this part" box; it runs on demo data that Reset

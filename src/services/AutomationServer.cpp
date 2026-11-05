@@ -1,5 +1,6 @@
 #include "enp/services/AutomationServer.h"
 
+#include "enp/os/Memory.h"
 #include "enp/os/Os.h"
 #include "enp/os/Process.h"
 #include "enp/os/Socket.h"
@@ -95,9 +96,7 @@ void AutomationServer::stop()
         for (Connection& c : connections_)
             c.socket->shutdown();
     }
-    for (Connection& c : connections_)
-        if (c.thread.joinable())
-            c.thread.join();
+    serving_.wait();
     connections_.clear();
     listener_.reset();
     // Only remove the endpoint file if it is still ours (another instance may have taken over).
@@ -108,25 +107,28 @@ void AutomationServer::stop()
 
 void AutomationServer::acceptLoop()
 {
+    // The connector's own memory (docs/MEMORY.md): a connection's socket, thread and buffers are
+    // counted in "automation", so a test bench polling the app can be told apart from the app.
+    os::mem::Scope scope("automation");
     while (!stopping_) {
-        if (!listener_->waitReadable(200))
+        const bool pending = listener_->waitReadable(200);
+        std::lock_guard<std::mutex> lock(connectionsMutex_);
+        // Connections that ended are reaped at least every 200 ms (a test bench and the MCP bridge
+        // connect once per request), so the connector holds nothing for a connection once it has
+        // ended. Each is served on a pool thread, kept for the next: a thread per request cost
+        // memory in libraries that see every thread start (os::dispatch::runAsync).
+        for (auto it = connections_.begin(); it != connections_.end();)
+            it = it->finished->load() ? connections_.erase(it) : std::next(it);
+        if (connections_.empty())
+            os::mem::release(connections_); // idle: not even the list's room
+        if (!pending)
             continue;
         std::shared_ptr<os::net::Socket> connection = os::net::accept(*listener_);
         if (!connection)
             continue;
-        std::lock_guard<std::mutex> lock(connectionsMutex_);
-        // Connections that ended are reaped here (the MCP bridge connects once per agent prompt);
-        // an unjoined thread keeps its stack mapped, so they used to pile up until the server stopped.
-        for (auto it = connections_.begin(); it != connections_.end();) {
-            if (it->finished->load()) {
-                it->thread.join();
-                it = connections_.erase(it);
-            } else
-                ++it;
-        }
         auto finished = std::make_shared<std::atomic<bool>>(false);
-        connections_.push_back({connection, {}, finished});
-        connections_.back().thread = std::thread([this, connection, finished]() {
+        connections_.push_back({connection, finished});
+        serving_.run([this, connection, finished]() {
             serve(connection);
             *finished = true;
         });
@@ -161,6 +163,7 @@ model::Json runDeferred(const model::Json& spec)
 
 void AutomationServer::serve(std::shared_ptr<os::net::Socket> connection)
 {
+    os::mem::Scope scope("automation"); // this thread: the request, its reply and the queued call
     std::string line;
     while (!stopping_ && connection->readLine(line)) {
         if (line.empty())

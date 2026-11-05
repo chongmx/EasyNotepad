@@ -191,6 +191,8 @@ void NotepadViewModel::initCommands()
         showPanel.set(true);
         panelMaximized.set(!panelMaximized.get());
     });
+    set(C::ToggleSplitView, [this]() { splitView.set(!splitView.get()); });
+    set(C::FocusOtherColumn, [this]() { otherColumnRequested.emit(); }, [this]() { return splitView.get(); });
     set(C::ToggleTerminal, [this]() {
         if (showPanel.get() && panelTab.get() == PanelTab::Terminal) {
             showPanel.set(false);
@@ -462,8 +464,34 @@ void NotepadViewModel::initCommands()
         agent_.showSetup.set(true);
         localModelRequested.emit();
     });
+    // IntelliSense.
+    auto textDocument = [this]() { return activeDocument() && activeDocument()->kind == model::FileKind::Text && !activeDocument()->rendered; };
+    set(C::TriggerCompletion, [this]() { intellisense_.trigger(); }, textDocument);
+    set(C::GoToDefinition, [this]() { intellisense_.goToDefinition(); }, textDocument);
+    set(C::ToggleAutoComplete, [this]() {
+        intellisense_.autoComplete.set(!intellisense_.autoComplete.get());
+        statusText.set(intellisense_.autoComplete.get() ? "Auto complete: names are suggested while typing code"
+                                                        : "Auto complete off: Ctrl+Space suggests names");
+    });
+    set(C::RebuildSymbolIndex, [this]() { intellisense_.rebuildIndex(); });
+    set(C::NavigateBack, [this]() { intellisense_.goBack(); }, [this]() { return intellisense_.canGoBack(); });
+    set(C::ImplementComment, [this]() { intellisense_.implementComment(true); }, textDocument);
+    set(C::ToggleCodeSuggestions, [this]() {
+        intellisense_.aiSuggestions.set(!intellisense_.aiSuggestions.get());
+        const std::string model = CodeAssistant::sourceName(CodeAssistant::Source(codeAssistant_.source.get()));
+        std::string why;
+        if (!intellisense_.aiSuggestions.get())
+            statusText.set("Code suggestions off");
+        else if (codeAssistant_.ready(&why))
+            statusText.set("Code suggestions on (" + model + "): write a comment, then press Enter or Ctrl+Shift+Space");
+        else
+            statusText.set("Code suggestions on, but " + model + " is not ready: " + why);
+    });
+    set(C::IntellisenseSettings, [this]() { intellisenseSettingsRequested.emit(); });
+    set(C::NavigateForward, [this]() { intellisense_.goForward(); }, [this]() { return intellisense_.canGoForward(); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
+    set(C::KeyboardShortcuts, [this]() { shortcutsRequested.emit(); });
     set(C::EngineLab, [this]() { engineLabRequested.emit(); }, [this]() { return developerMode.get(); });
     set(C::Exit, [this]() { requestQuit(); });
 }
@@ -490,6 +518,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::TogglePanel: return showPanel.get();
     case C::ToggleTerminal: return showPanel.get() && panelTab.get() == PanelTab::Terminal;
     case C::ToggleMaximizePanel: return panelMaximized.get();
+    case C::ToggleSplitView: return splitView.get();
     case C::ToggleSlimRibbon: return slimRibbon.get();
     case C::ToggleAgentPanel: return showAgentPanel.get();
     case C::ToggleWordWrap: return wordWrap.get();
@@ -527,6 +556,9 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::EncodingAnsi: return doc && doc->encoding == model::Encoding::Ansi;
     case C::PopOutTerminal: return terminalPoppedOut.get();
     case C::ToggleSmartIndent: return smartIndent.get();
+    case C::ToggleAutoComplete: return intellisense_.autoComplete.get();
+    case C::ToggleCodeSuggestions: return intellisense_.aiSuggestions.get();
+    case C::RebuildSymbolIndex: return intellisense_.indexing.get();
     case C::IndentWithSpaces: return doc && !doc->indent.tabs;
     case C::IndentWithTabs: return doc && doc->indent.tabs;
     case C::IndentWidth2: return doc && doc->indent.width == 2;

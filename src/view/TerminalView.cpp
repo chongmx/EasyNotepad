@@ -182,7 +182,7 @@ bool TerminalView::selected(int line, int column) const
 void TerminalView::renderScreen(TerminalInstance& terminal, ImVec2 size, float zoom)
 {
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * zoom);
-    const float charW = ImGui::CalcTextSize("M").x;
+    const float charW = ImGui::GetFontBaked()->GetCharAdvance(ImWchar('M')); // exact: CalcTextSize rounds up
     const float lineH = std::floor(ImGui::GetFontSize() * kLineSpacing);
     const float pad = kPadding * s_;
 

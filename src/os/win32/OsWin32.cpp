@@ -155,6 +155,36 @@ std::optional<std::string> readFileRange(const std::string& path, std::uint64_t 
     return data;
 }
 
+bool readFileInto(const std::string& path, std::string& out, size_t maxBytes, std::string* error)
+{
+    HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (error)
+            *error = lastErrorMessage();
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || std::uint64_t(size.QuadPart) > maxBytes) {
+        if (error)
+            *error = "too large";
+        CloseHandle(h);
+        return false;
+    }
+    out.resize(size_t(size.QuadPart)); // within the buffer's reserved room: no allocation
+    size_t total = 0;
+    while (total < out.size()) {
+        DWORD chunk = DWORD(std::min<size_t>(out.size() - total, 1u << 30));
+        DWORD read = 0;
+        if (!ReadFile(h, &out[total], chunk, &read, nullptr) || read == 0)
+            break;
+        total += read;
+    }
+    CloseHandle(h);
+    out.resize(total);
+    return true;
+}
+
 std::optional<std::string> readFile(const std::string& path, std::string* error)
 {
     HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

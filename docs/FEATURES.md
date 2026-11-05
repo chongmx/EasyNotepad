@@ -100,6 +100,10 @@ The editor takes VS Code's multi-cursor and line keys:
 | Ctrl+R | Switch to a recent folder or file |
 | Ctrl+E | Jump to the terminal (it starts one if needed); again, back to the editor |
 | Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab | Close the file, next tab, previous tab |
+| Ctrl+Space | Suggestions for the word at the caret (IntelliSense, below) |
+| Ctrl+Shift+Space | Code for the comment at the caret, written by the chosen model (when Code Suggestions is on) |
+| F12, Ctrl+click | Go to the definition of the name (Ctrl+hover underlines it) |
+| Alt+Left / Alt+Right | Back to where the last jump to a definition started / forward again |
 
 With several carets, typing, Enter, Tab, Backspace, Delete (and their Ctrl word forms), the arrow keys,
 Home and End, Cut, Copy, Paste, upper/lower case, comment, indent and the line commands act at
@@ -567,3 +571,100 @@ Creating, renaming and deleting need an opened folder; in the sample workspace t
 and its documents, asking first to save or discard unsaved changes. The Explorer then shows "No folder
 open" with **Open a folder** and the recent folders. An open file's right-click menu in the Explorer
 has **Close**. Every dialog's **×** closes it (agents can use it too, through the connector).
+
+## IntelliSense: completion, Go to Definition, Ctrl+click, Back and Forward
+
+**Suggestions while typing.** In code (C/C++, C#, Java, JavaScript, TypeScript, Python, Rust, Go,
+Lua, shell, PowerShell, CMake), after two letters of a name a list of suggestions opens at the
+caret: the names the workspace declares (types, functions, namespaces, macros, constants, members,
+variables at file and type level), the words of the document (not those in its comments and
+strings: they are prose), and the language's keywords. After `.` or `->` it lists members; after
+`Name::` what `Name` declares. Matching is fuzzy: `gw` finds `getWidth`, exact-case prefixes come
+first, then word starts. Each row shows what the name is and the file declaring it; the chosen one
+shows its declaration below the list, and a clue about its header. **Up/Down**, **Page Up/Down**
+choose, **Enter** or **Tab** (or a click) insert it, **Esc** closes the list. It never opens by
+itself inside a comment or a string. **Ctrl+Space** (Edit › IntelliSense › Complete) opens it
+anywhere, also with nothing typed and in any language; **Auto Complete** turns the automatic list
+off (saved). Inserting a suggestion is one ordinary edit: Undo takes it back. Suggestions work with
+one caret: with several (Alt+click, Ctrl+D), they do not open by themselves and Ctrl+Space says to go
+back to one caret (Escape).
+
+**C and C++: the headers and the standard.** A C or C++ file's `#include` lines are followed through
+the workspace's headers (next to the file, then the include folders set in IntelliSense settings,
+then `include/` and `src/`; what those headers include counts too). Names from headers the file
+reaches come first. The standard library is known without the workspace: about 300 everyday names
+of the C and C++ libraries, each with its header and the standard that added it.
+- A name from an included header is suggested with its header and standard (`<vector> · C++98`);
+  after `.` the members of included classes (`push_back` with `<vector>`), after `std::` what std
+  declares.
+- A name from a header that is not included is still suggested when it matches well, saying which
+  `#include` it needs: `needs #include <memory>`, `needs #include "app/other.h"` (in orange).
+- Only what the standard in use has: no `std::optional` in C++14, no `nullptr` in C99, no `class`
+  in C; keywords say since when (`since C++20`). `.c` files are C, everything else C++.
+- The standard is the project's: `CMAKE_CXX_STANDARD`, `cxx_std_17` or `-std=c++20` in
+  CMakeLists.txt, meson.build or a Makefile (and the C forms); else C++17 and C17. IntelliSense
+  settings can choose another (C++98 to C++26, C89 to C23).
+- Hovering a library name shows its declaration, header and standard.
+
+**Code suggestions from comments.** Write a comment that says what the code should do, then press
+Enter and wait a moment (or press **Ctrl+Shift+Space**, Edit › IntelliSense › From Comment): a model
+writes the code. While it writes, a row under the comment says what it is doing (Esc stops it;
+typing on does too). Its code is shown in the list with a preview; **Enter** or **Tab** inserts it,
+indented like the comment, as one undoable edit (on the empty line below the comment, or below the
+comment when the caret was on it). The model gets the comment, the code around it with its comments,
+the headers the file includes, the C/C++ standard, and the workspace declarations IntelliSense
+chose (those the comment and the code above mention, those of the file). It is **off until turned
+on**: **Code Suggestions** in Edit › IntelliSense, or in IntelliSense settings.
+
+**The model that writes code** (IntelliSense settings):
+- **Local model (on this device):** offline, the same model as the agent's local answers (set up in
+  Tools › Local Model). It waits while the Agent panel is using it.
+- **Claude (online, through Claude Code):** the Agent panel's Claude Code set-up; a model name
+  (`haiku`, `sonnet`, `opus`) can be chosen, empty uses Claude Code's own. The comment and the code
+  around it are sent with each request.
+- **A command (any local or online model):** any program that reads the prompt on its standard input
+  and prints the code: `ollama run qwen2.5-coder:7b`, `llm -m gpt-4o-mini`, a script calling an API.
+  It runs in the workspace folder.
+The settings say whether the chosen model is ready, and why not.
+
+**IntelliSense settings** (Edit › IntelliSense › Settings, or Preferences › IntelliSense...): the
+suggestions while typing, code suggestions and their model, the C++ and C standards (or the
+project's), the include folders, and the index (with Rebuild).
+
+**Go to Definition** (F12, also in Read › Navigate): jumps to where the name under the caret is
+declared. The current document is searched first in its current, unsaved text; then the workspace,
+definitions before declarations. On a declaration already (a prototype in a header), it goes to the
+other place (the body in the source file). While the workspace is still being read, it waits and
+jumps when it is ready.
+
+**Ctrl+click** (Cmd+click on macOS): holding Ctrl over the code underlines the name under the mouse
+and shows a hand when the workspace declares it; clicking goes to its definition, as F12 does from
+there (also for names only this document declares, saved or not, which are not underlined). A
+Ctrl+click on anything that is not a name places the caret as usual.
+
+**Back and Forward** (Alt+Left and Alt+Right, also in Edit › IntelliSense and Read › Navigate): every
+jump of Go to Definition or Ctrl+click remembers where it started; Back returns there, Forward goes
+to the jump again. A document closed since is opened again from its file; an untitled one that
+closed is skipped. A new jump drops the way forward. The last 50 places are kept each way, and they
+are forgotten when the folder closes.
+
+**On hover:** resting the mouse on a name for half a second shows its declaration and where it is.
+
+**The index.** The workspace's code is read in the background the first time IntelliSense is used
+in a folder (a list of suggestions, F12, or Ctrl held over the code; the project first, vendored folders after; build output, `node_modules` and files over
+2 MB are skipped; at most 5,000 files). Saving a file updates its entries; renaming or deleting files
+reads the workspace again on next use; **Rebuild Index** does so at once. Declarations are found by
+reading the text (no compiler): the names are exact, the types of expressions are not known, so
+members after `.` are those of any type.
+
+**For AI completion.** A model plugs in as a provider (`CodeAssistant` is the one the app uses):
+it is asked with the code around the caret and the context snippets IntelliSense chose for it, and
+its suggestions (which may span several lines) are shown first in the same list. IntelliSense
+decides what context a model gets (`contextFor()`: declarations matching the typed word or named in
+the comment, those the nearby code uses, those of the file, ranked within a byte budget).
+
+**Memory.** The index is the scope `intellisense` (docs/MEMORY.md); closing the folder or opening
+another releases it to the byte, cancels a build still running and drops its late result, and stops
+a model writing code for it (a program's late answer is dropped). The standard library catalog is
+compiled-in constant data. The suggestion list is one window for every document.
+

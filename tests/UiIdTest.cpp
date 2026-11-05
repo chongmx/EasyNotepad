@@ -24,6 +24,7 @@
 #include <cctype>
 #include <algorithm>
 #include <cstdio>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -225,7 +226,7 @@ int main(int argc, char** argv)
     int result = 0;
     {
         Harness h;
-        bool layoutsWrong = false;
+        int checksFailed = 0; // behaviour checks (layout, touch, IntelliSense, ...) that failed
         h.frame(ImVec2(-100.0f, -100.0f)); // first frame lays everything out
         const float ribbonTop = 36.0f, ribbonBottom = 145.0f, tabRowY = ribbonTop + 15.0f;
 
@@ -262,7 +263,7 @@ int main(int argc, char** argv)
                           {800, 1280, L::Desktop}, {1280, 800, L::Desktop}, {1440, 900, L::Desktop}, {560, 520, L::Landscape}};
             for (const auto& s : shapes)
                 if (view::MainView::chooseLayout(s.w, s.h) != s.expected)
-                    std::printf("  FAILED layout for %.0fx%.0f dp\n", s.w, s.h), layoutsWrong = true;
+                    std::printf("  FAILED layout for %.0fx%.0f dp\n", s.w, s.h), ++checksFailed;
             h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
             struct Phone {
                 const char* name;
@@ -314,7 +315,7 @@ int main(int argc, char** argv)
             };
             auto check = [&](bool ok, const std::string& what) {
                 if (!ok)
-                    std::printf("  FAILED touch: %s\n", what.c_str()), layoutsWrong = true;
+                    std::printf("  FAILED touch: %s\n", what.c_str()), ++checksFailed;
             };
             ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
             h.vm().execute(viewmodel::CommandId::NewFile); // 300 lines: plenty to scroll
@@ -396,7 +397,40 @@ int main(int argc, char** argv)
             }
             const size_t held = h.view().editor().renderedMarkdownCount();
             if (held != 0)
-                std::printf("  FAILED rendered Markdown of %zu closed document(s) still held\n", held), layoutsWrong = true;
+                std::printf("  FAILED rendered Markdown of %zu closed document(s) still held\n", held), ++checksFailed;
+
+            // Two columns: drawn without ID conflicts, the keyboard moving between them; the
+            // second column's view drops a closed document's caches, and goes when they join.
+            h.setContext("two columns");
+            h.vm().openFile(viewmodel::dummy::kWelcomePath); // Markdown, rendered
+            h.vm().newDocument();                            // text, active
+            h.vm().splitView.set(true);
+            h.settle(); // the second column starts on the next document: the Markdown one
+            if (!h.view().secondColumn())
+                std::printf("  FAILED two columns: no second column\n"), ++checksFailed;
+            const model::Document* text = h.vm().activeDocument();
+            h.vm().execute(viewmodel::CommandId::FocusOtherColumn);
+            h.settle();
+            if (h.vm().activeDocument() == text)
+                std::printf("  FAILED two columns: the other column's document did not become active\n"), ++checksFailed;
+            h.vm().execute(viewmodel::CommandId::FocusOtherColumn);
+            h.settle();
+            if (h.vm().activeDocument() != text)
+                std::printf("  FAILED two columns: the keyboard did not come back\n"), ++checksFailed;
+            const size_t shownMarkdown = h.view().secondColumn() ? h.view().secondColumn()->renderedMarkdownCount() : 0;
+            if (shownMarkdown != 1)
+                std::printf("  FAILED two columns: the second column holds %zu rendered documents, not 1\n", shownMarkdown), ++checksFailed;
+            h.vm().closeDocument(h.vm().documentIndexById(text->id) == 0 ? 1 : 0); // the Markdown one
+            h.settle();
+            if (h.view().secondColumn() && h.view().secondColumn()->renderedMarkdownCount() != 0)
+                std::printf("  FAILED two columns: the second column kept a closed document's Markdown\n"), ++checksFailed;
+            h.vm().splitView.set(false);
+            h.settle();
+            if (h.view().secondColumn())
+                std::printf("  FAILED two columns: the second view was kept after joining\n"), ++checksFailed;
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settle();
 
             // Images, entities and formulas: drawn without ImGui errors, and the image textures
             // (decoded here from a data URL, as a file's bytes would be) go with the document.
@@ -417,12 +451,12 @@ int main(int argc, char** argv)
             h.sweep(0.0f, 0.0f, kWidth, kHeight);
             const size_t textures = h.view().editor().imageTextureCount();
             if (textures == 0)
-                std::printf("  FAILED the Markdown image was not decoded into a texture\n"), layoutsWrong = true;
+                std::printf("  FAILED the Markdown image was not decoded into a texture\n"), ++checksFailed;
             h.vm().closeDocument(h.vm().activeIndex.get());
             h.settle();
             const size_t left = h.view().editor().imageTextureCount();
             if (left != 0)
-                std::printf("  FAILED %zu image texture(s) still held after the Markdown document closed\n", left), layoutsWrong = true;
+                std::printf("  FAILED %zu image texture(s) still held after the Markdown document closed\n", left), ++checksFailed;
 
             // A binary file and an image that cannot be decoded: the notices with "Open as text".
             h.setContext("binary and undecodable image documents");
@@ -441,7 +475,7 @@ int main(int argc, char** argv)
                 h.vm().closeDocument(0);
             h.settle();
             if (h.view().editor().imageDocumentCount() != 0 || h.view().editor().imageTextureCount() != 0)
-                std::printf("  FAILED image documents still held after closing them\n"), layoutsWrong = true;
+                std::printf("  FAILED image documents still held after closing them\n"), ++checksFailed;
 
             // Emoji: drawn from the pack, and every picture (and the pack's index) let go after the
             // document closes and the app trims.
@@ -457,7 +491,7 @@ int main(int argc, char** argv)
             h.settle();
             h.sweep(0.0f, 0.0f, kWidth, kHeight);
             if (h.view().emoji().textureCount() < 5)
-                std::printf("  FAILED emoji: %zu pictures drawn, expected at least 5\n", h.view().emoji().textureCount()), layoutsWrong = true;
+                std::printf("  FAILED emoji: %zu pictures drawn, expected at least 5\n", h.view().emoji().textureCount()), ++checksFailed;
             h.vm().closeDocument(h.vm().activeIndex.get());
             h.settle();
             h.view().compactCaches(); // what the app's trim does after a close
@@ -465,9 +499,205 @@ int main(int argc, char** argv)
             if (h.view().emoji().textureCount() != 0 || h.view().emoji().indexLoaded())
                 std::printf("  FAILED emoji: %zu picture(s) or the index still held after the document closed\n",
                             h.view().emoji().textureCount()),
-                    layoutsWrong = true;
+                    ++checksFailed;
 
             h.vm().openStartupDocuments({}); // the sample documents again for the states below
+            h.settle();
+        }
+
+        // IntelliSense: the suggestion list is one window whatever the document, chosen with the keys
+        // or the mouse; it gives the keyboard back to the text and nothing of it stays once its
+        // documents close.
+        {
+            h.setContext("IntelliSense suggestions");
+            h.vm().execute(viewmodel::CommandId::ShowCodeView);
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            viewmodel::IntellisenseViewModel& is = h.vm().intellisense();
+            is.buildIndexNow(); // the sample workspace
+            const ImVec2 away(-100.0f, -100.0f);
+            auto windowNamed = [](const char* name) -> ImGuiWindow* {
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    if (w->WasActive && std::strcmp(slash ? slash + 1 : w->Name, name) == 0)
+                        return w;
+                }
+                return nullptr;
+            };
+            auto windowsContaining = [](const char* part) {
+                int n = 0;
+                for (ImGuiWindow* w : GImGui->Windows)
+                    n += std::strstr(w->Name, part) ? 1 : 0;
+                return n;
+            };
+            auto key = [&h, away](ImGuiKey k) {
+                ImGui::GetIO().AddKeyEvent(k, true);
+                h.frame(away);
+                ImGui::GetIO().AddKeyEvent(k, false);
+                h.frame(away);
+            };
+            auto fail = [&checksFailed](const char* what, int round) {
+                std::printf("  FAILED IntelliSense (round %d): %s\n", round, what);
+                ++checksFailed;
+            };
+            for (int round = 0; round < 6; ++round) {
+                h.vm().newDocument();
+                h.vm().activeDocument()->language = model::Language::Cpp;
+                h.vm().insertText("int widthOfWindow = 3;\nint widthOfDoor = 2;\nint main()\n{\n    wid");
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Agent); // switching back focuses the editor
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+                h.settle();
+                h.vm().execute(viewmodel::CommandId::TriggerCompletion);
+                h.settle();
+                ImGuiWindow* popup = windowNamed("##completion");
+                if (!popup || !is.active() || is.items().size() < 2) {
+                    fail("the list did not show", round);
+                    continue;
+                }
+                const ImVec2 at = popup->Pos, size = popup->Size;
+                h.sweep(at.x, at.y, at.x + size.x, at.y + size.y, kCoarseStep); // hover every row
+                if (round % 2 == 0) { // the keys
+                    key(ImGuiKey_DownArrow);
+                    if (is.selected() != 1)
+                        fail("Down did not choose the next suggestion", round);
+                    const std::string chosen = is.items()[1].label;
+                    key(ImGuiKey_Enter);
+                    if (is.active() || h.vm().activeDocument()->buffer.line(4) != "    " + chosen)
+                        fail("Enter did not insert the chosen suggestion", round);
+                } else { // the mouse
+                    const std::string first = is.items()[0].label;
+                    h.click(ImVec2(at.x + 40.0f, at.y + 14.0f));
+                    h.settle();
+                    if (is.active() || h.vm().activeDocument()->buffer.line(4) != "    " + first)
+                        fail("a click did not insert the suggestion", round);
+                    if (!GImGui->NavWindow || !std::strstr(GImGui->NavWindow->Name, "##editorText"))
+                        fail("the keyboard did not go back to the text after a click", round);
+                }
+                // Escape closes a list; typing on afterwards works as before.
+                h.vm().execute(viewmodel::CommandId::TriggerCompletion);
+                h.settle();
+                key(ImGuiKey_Escape);
+                if (is.active())
+                    fail("Escape did not close the list", round);
+            }
+            // Ctrl+click (Cmd+click on macOS) on a name goes to its definition; Alt+Left comes back
+            // to the click. Run with this platform's key mapping and with macOS's on every platform:
+            // with io.ConfigMacOSXBehaviors ImGui swaps the keys a backend reports (Cmd arrives as
+            // Ctrl, the Ctrl key as Super) and turns a click with the Ctrl key into a right click,
+            // so the test presses what a user presses there: Cmd (ImGuiMod_Super before the swap).
+            for (const bool mac : {ImGui::GetIO().ConfigMacOSXBehaviors, !ImGui::GetIO().ConfigMacOSXBehaviors}) {
+                h.setContext(mac ? "IntelliSense Cmd+click and Alt+Left (macOS keys)" : "IntelliSense Ctrl+click and Alt+Left");
+                ImGuiIO& io = ImGui::GetIO();
+                const bool platformMac = io.ConfigMacOSXBehaviors;
+                io.ConfigMacOSXBehaviors = mac;
+                const ImGuiKey command = mac ? ImGuiMod_Super : ImGuiMod_Ctrl; // the key the user presses
+                h.vm().newDocument();
+                h.vm().activeDocument()->language = model::Language::Cpp;
+                h.vm().insertText("int x = helperFunction();\n\n\nint helperFunction() { return 1; }\n");
+                h.vm().goToLine(0);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Agent);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+                h.settle();
+                const ImGuiWindow* text = nullptr; // a child window: its name is "<parent>/##editorText_<id>"
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    if (w->WasActive && std::strncmp(slash ? slash + 1 : w->Name, "##editorText", 12) == 0)
+                        text = w;
+                }
+                if (!text)
+                    fail("the text window was not found", 0);
+                bool jumped = false;
+                io.AddKeyEvent(command, true);
+                h.frame(away);
+                for (float y = text ? text->Pos.y + 4.0f : 0.0f; text && y < text->Pos.y + 30.0f && !jumped; y += 4.0f)
+                    for (float x = text->Pos.x + 30.0f; x < text->Pos.x + 420.0f && !jumped; x += 6.0f) {
+                        h.click(ImVec2(x, y));
+                        jumped = is.canGoBack();
+                    }
+                io.AddKeyEvent(command, false);
+                h.frame(away);
+                const model::Document* doc = h.vm().activeDocument();
+                if (!jumped || !doc || doc->caret.line != 3)
+                    fail("Ctrl+click did not go to the definition", 0);
+                io.AddKeyEvent(ImGuiMod_Alt, true);
+                key(ImGuiKey_LeftArrow);
+                io.AddKeyEvent(ImGuiMod_Alt, false);
+                h.frame(away);
+                doc = h.vm().activeDocument();
+                if (!doc || doc->caret.line != 0 || doc->caret.column != 8) // the start of the clicked name
+                    fail("Alt+Left did not come back to where Ctrl+click started", 0);
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+                io.ConfigMacOSXBehaviors = platformMac;
+            }
+            // Code from a comment: the "writing" row while a model works, then the code's preview;
+            // Enter inserts it, indented like the comment. (A provider stands in for the model.)
+            {
+                h.setContext("IntelliSense code from a comment");
+                std::vector<viewmodel::IntellisenseViewModel::Request> asked;
+                viewmodel::IntellisenseViewModel::Provider provider;
+                provider.request = [&asked](const viewmodel::IntellisenseViewModel::Request& r) { asked.push_back(r); };
+                provider.completes = false;
+                provider.implements = true;
+                is.setProvider(provider);
+                is.aiSuggestions.set(true);
+                h.vm().newDocument();
+                h.vm().activeDocument()->language = model::Language::Cpp;
+                h.vm().insertText("int main()\n{\n    // print the numbers 1 to 3\n    \n}\n");
+                h.vm().setCaret({3, 4}, false);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Agent);
+                h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+                h.settle();
+                h.vm().execute(viewmodel::CommandId::ImplementComment);
+                h.settle();
+                if (asked.empty() || !windowNamed("##completion"))
+                    fail("the comment was not sent, or the writing row did not show", 0);
+                if (const ImGuiWindow* row = windowNamed("##completion"))
+                    h.sweep(row->Pos.x, row->Pos.y, row->Pos.x + row->Size.x, row->Pos.y + row->Size.y, kCoarseStep);
+                viewmodel::IntellisenseViewModel::Item code;
+                code.insertText = "for (int i = 1; i <= 3; ++i)\n    std::printf(\"%d\\n\", i);";
+                if (!asked.empty())
+                    is.provide(asked.back().serial, {code});
+                h.settle();
+                if (const ImGuiWindow* list = windowNamed("##completion"))
+                    h.sweep(list->Pos.x, list->Pos.y, list->Pos.x + list->Size.x, list->Pos.y + list->Size.y, kCoarseStep);
+                key(ImGuiKey_Enter);
+                const model::Document* doc = h.vm().activeDocument();
+                if (!doc || doc->buffer.line(3) != "    for (int i = 1; i <= 3; ++i)" || doc->buffer.line(4) != "        std::printf(\"%d\\n\", i);")
+                    fail("Enter did not insert the code indented like the comment", 0);
+                is.setProvider({});
+                h.vm().codeAssistant().attach(); // the app's own assistant again
+                is.aiSuggestions.set(false);
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+            }
+            // The IntelliSense settings: every control drawn and hovered without ImGui errors.
+            {
+                h.setContext("IntelliSense settings");
+                for (int source = 0; source < 3; ++source) {
+                    h.vm().codeAssistant().source.set(source);
+                    h.vm().execute(viewmodel::CommandId::IntellisenseSettings);
+                    h.settle();
+                    if (const ImGuiWindow* dialog = windowNamed("IntelliSense Settings"))
+                        h.sweep(dialog->Pos.x, dialog->Pos.y, dialog->Pos.x + dialog->Size.x, dialog->Pos.y + dialog->Size.y, kCoarseStep);
+                    else
+                        fail("the IntelliSense settings did not open", source);
+                    key(ImGuiKey_Escape);
+                    h.settle();
+                }
+                h.vm().codeAssistant().source.set(0);
+            }
+            if (windowsContaining("##completion") > 2) // the list and its scrolling child
+                std::printf("  FAILED IntelliSense: %d windows for the suggestion list\n", windowsContaining("##completion")), ++checksFailed;
+            h.vm().execute(viewmodel::CommandId::TriggerCompletion);
+            h.settle();
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settle();
+            if (is.active() || !is.items().empty())
+                std::printf("  FAILED IntelliSense: suggestions still held after their documents closed\n"), ++checksFailed;
+            is.workspaceChanged(); // the index of the sample workspace goes too
+            h.vm().openStartupDocuments({});
             h.settle();
         }
 
@@ -506,14 +736,14 @@ int main(int argc, char** argv)
                 h.vm().setDataView(model::DataView::Text);
                 h.settle();
                 if (data.holds(id))
-                    std::printf("  FAILED data views: a document back to text still holds its parsed form\n"), layoutsWrong = true;
+                    std::printf("  FAILED data views: a document back to text still holds its parsed form\n"), ++checksFailed;
             }
             if (data.entryCount() != 1) // the CSV table, still shown in its tab
-                std::printf("  FAILED data views: %zu entries held, expected 1\n", data.entryCount()), layoutsWrong = true;
+                std::printf("  FAILED data views: %zu entries held, expected 1\n", data.entryCount()), ++checksFailed;
             while (!h.vm().documents().empty())
                 h.vm().closeDocument(0);
             if (data.entryCount() != 0)
-                std::printf("  FAILED data views: %zu entries held after every document closed\n", data.entryCount()), layoutsWrong = true;
+                std::printf("  FAILED data views: %zu entries held after every document closed\n", data.entryCount()), ++checksFailed;
             h.vm().openStartupDocuments({});
             h.settle();
         }
@@ -534,7 +764,7 @@ int main(int argc, char** argv)
                 h.settle();
                 if (!library.holds(doc->id)) {
                     std::printf("  FAILED library view: %s was not read\n", name);
-                    layoutsWrong = true;
+                    ++checksFailed;
                     continue;
                 }
                 // Every node of its tree, as a click on it would.
@@ -543,7 +773,7 @@ int main(int argc, char** argv)
                     if (e.id.rfind("library:list:", 0) == 0)
                         nodes.push_back(e.id);
                 if (nodes.size() < 3)
-                    std::printf("  FAILED library view: %s shows %zu lists\n", name, nodes.size()), layoutsWrong = true;
+                    std::printf("  FAILED library view: %s shows %zu lists\n", name, nodes.size()), ++checksFailed;
                 for (const std::string& id : nodes) {
                     const view::UiElement* e = view::UiAutomation::instance().find(id);
                     if (!e || !e->activate)
@@ -563,17 +793,17 @@ int main(int argc, char** argv)
                 }
             }
             if (library.entryCount() != 5)
-                std::printf("  FAILED library view: %zu entries held, expected 5\n", library.entryCount()), layoutsWrong = true;
+                std::printf("  FAILED library view: %zu entries held, expected 5\n", library.entryCount()), ++checksFailed;
             const int last = h.vm().activeDocument() ? h.vm().activeDocument()->id : -1;
             h.vm().openAsText(h.vm().activeIndex.get());
             h.settle();
             if (library.holds(last))
-                std::printf("  FAILED library view: a file opened as text still holds what it contained\n"), layoutsWrong = true;
+                std::printf("  FAILED library view: a file opened as text still holds what it contained\n"), ++checksFailed;
             while (!h.vm().documents().empty())
                 h.vm().closeDocument(0);
             h.settle();
             if (library.entryCount() != 0)
-                std::printf("  FAILED library view: %zu entries held after every document closed\n", library.entryCount()), layoutsWrong = true;
+                std::printf("  FAILED library view: %zu entries held after every document closed\n", library.entryCount()), ++checksFailed;
             h.vm().openStartupDocuments({});
             h.settle();
         }
@@ -587,7 +817,7 @@ int main(int argc, char** argv)
                 const view::UiElement* e = view::UiAutomation::instance().find(id);
                 if (!e || !e->activate) {
                     std::printf("  FAILED Customize Ribbon: no control %s\n", id);
-                    layoutsWrong = true;
+                    ++checksFailed;
                     return;
                 }
                 const std::function<void()> action = e->activate; // the registry is rebuilt next frame
@@ -608,13 +838,55 @@ int main(int argc, char** argv)
             const bool homeMoved = code.size() > 1 && code[0].name != "Home";
             if (!readHidden || !homeMoved)
                 std::printf("  FAILED Customize Ribbon: hiding Read (%d) or moving Home (%d) did not apply\n", readHidden, homeMoved),
-                    layoutsWrong = true;
+                    ++checksFailed;
             if (view::UiAutomation::instance().find("ribbon-tab:Read"))
-                std::printf("  FAILED Customize Ribbon: the hidden Read tab is still on the ribbon\n"), layoutsWrong = true;
+                std::printf("  FAILED Customize Ribbon: the hidden Read tab is still on the ribbon\n"), ++checksFailed;
             activate("customize-ribbon:restore");
             if (!h.vm().ribbonTabs(WorkspaceMode::Code).empty() || !view::UiAutomation::instance().find("ribbon-tab:Read"))
-                std::printf("  FAILED Customize Ribbon: Restore defaults did not bring the tabs back\n"), layoutsWrong = true;
+                std::printf("  FAILED Customize Ribbon: Restore defaults did not bring the tabs back\n"), ++checksFailed;
             activate("customize-ribbon:done");
+        }
+
+        // The caret, selections and columns use the width the glyphs are drawn with: 120 cells end
+        // where 120 drawn characters end (CalcTextSize rounds a width up to a whole pixel; a cell
+        // measured with it put the caret a whole character right of the text at column 120).
+        // Checked at every zoom the editor offers steps of.
+        for (const float zoom : {1.0f, 1.1f, 1.25f, 1.5f, 2.0f, 0.9f}) {
+            h.setContext("editor cell width");
+            h.vm().newDocument();
+            h.vm().zoom.set(zoom);
+            h.settle();
+            const float cell = h.view().editor().cellWidth();
+            // The glyphs' own advances added up, as drawing does (no rounding).
+            const std::string text(120, 'a');
+            const float drawn = h.view().fonts().mono->CalcTextSizeA(h.view().editor().cellFontSize(), FLT_MAX, 0.0f, text.c_str()).x;
+            if (cell <= 0.0f || std::fabs(cell * 120.0f - drawn) > 1.0f)
+                std::printf("  FAILED editor cell width at %.0f%%: 120 cells %.1f px, 120 characters drawn %.1f px\n", zoom * 100.0f,
+                            cell * 120.0f, drawn), ++checksFailed;
+            h.vm().closeDocument(h.vm().activeIndex.get());
+        }
+        h.vm().zoom.set(1.0f);
+        h.settle();
+
+        // The map view's layout belongs to the map: once the map is gone (a folder closed), the
+        // view frees it whichever view is shown, storage included; while the map exists it stays.
+        {
+            h.setContext("map view layout after the map is gone");
+            h.vm().execute(viewmodel::CommandId::ShowMapView);
+            h.settle();
+            const size_t built = h.view().map().layoutBytes();
+            h.vm().execute(viewmodel::CommandId::ShowCodeView);
+            h.settle();
+            const size_t kept = h.view().map().layoutBytes();
+            if (built == 0 || kept != built)
+                std::printf("  FAILED map view: layout %zu bytes when drawn, %zu after switching to code while the map exists\n", built, kept),
+                    ++checksFailed;
+            h.vm().logicalMap().workspaceChanged(); // what closing the folder does to the map
+            h.settle();
+            if (h.view().map().layoutBytes() != 0)
+                std::printf("  FAILED map view: %zu bytes of the closed map's layout still held\n", h.view().map().layoutBytes()), ++checksFailed;
+            h.vm().logicalMap().refresh(); // the demo map back for the layout states below
+            h.settle();
         }
 
         // Layout states that add, remove or move items; each is swept in both workspaces.
@@ -792,8 +1064,8 @@ int main(int argc, char** argv)
 
         for (const Failure& f : h.failures())
             std::printf("  FAILED %s at (%.0f, %.0f) in %s\n", f.what.c_str(), f.mouse.x, f.mouse.y, f.where.c_str());
-        std::printf("%d frames, %d failure(s)\n", h.frames(), int(h.failures().size()));
-        result = h.failures().empty() && !layoutsWrong ? 0 : 1;
+        std::printf("%d frames, %d ID failure(s), %d failed check(s)\n", h.frames(), int(h.failures().size()), checksFailed);
+        result = h.failures().empty() && checksFailed == 0 ? 0 : 1;
     }
     os::shutdown();
     return result;

@@ -25,3 +25,6 @@ android/build/
 
 # Packaged skills (upload artifacts)
 /.claude/skills/*.zip
+__pycache__/
+*.jks
+*.keystore

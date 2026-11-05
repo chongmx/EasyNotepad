@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <unordered_set>
 #include <utility>
@@ -508,10 +509,11 @@ TextPos EditorView::hitTest(const model::Document& doc, ImVec2 mouse, const Metr
 
 // ---- Frame --------------------------------------------------------------------------------------
 
-void EditorView::render(ImVec2 size)
+void EditorView::render(ImVec2 size, model::Document* shown)
 {
     images_.collect(); // textures the backend destroyed since last frame
-    model::Document* doc = vm_.activeDocument();
+    passive_ = shown != nullptr;
+    model::Document* doc = passive_ ? shown : vm_.activeDocument();
     if (!doc) {
         renderEmptyState(size);
         return;
@@ -528,7 +530,7 @@ void EditorView::render(ImVec2 size)
         renderConflictBar(*doc);
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
-    if (vm_.findVisible.get()) {
+    if (vm_.findVisible.get() && !passive_) { // the find bar belongs to the active document
         const float before = ImGui::GetCursorPosY();
         renderFindBar();
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
@@ -584,7 +586,13 @@ void EditorView::render(ImVec2 size)
 
     ImGui::PushFont(fonts_.mono, Fonts::kEditorSize * vm_.zoom.get());
     Metrics m{};
-    m.charW = ImGui::CalcTextSize("M").x;
+    // The exact advance of a monospace cell, not CalcTextSize(): that rounds the width up to a
+    // whole pixel (ImCeilFast), and the caret, selection and token positions then drift right of
+    // the glyphs (drawn at the true advance) by the rounding times the column: a column at 120
+    // characters was a whole cell off.
+    m.charW = ImGui::GetFontBaked()->GetCharAdvance(ImWchar('M'));
+    cellWidth_ = m.charW;
+    cellFontSize_ = ImGui::GetFontSize();
     m.lineH = std::floor(ImGui::GetFontSize() * kLineSpacing);
     int digits = 1;
     for (int n = doc->buffer.lineCount(); n >= 10; n /= 10)
@@ -598,7 +606,7 @@ void EditorView::render(ImVec2 size)
     m.blameW = gitFile && vm_.git().blameShown(doc->path) ? blameColumns_ * m.charW * 0.85f : 0.0f;
     m.gutterW = m.markerW + m.blameW + m.changeW + m.foldW +
                 (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 6.0f * s_ : 0.0f);
-    const bool sideBar = vm_.showLayersMap.get() && !compact_;
+    const bool sideBar = vm_.showLayersMap.get() && !compact_ && !passive_;
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
     sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
@@ -612,14 +620,21 @@ void EditorView::render(ImVec2 size)
         ImGui::SetNextWindowScroll(scroll_[doc->id].text);
         shownTextDoc_ = doc->id;
     }
+    // A list opened by a command (the ribbon, an agent) rather than a key: the text takes the
+    // keyboard back, or the list would close at once for want of it.
+    if (vm_.intellisense().sessionSerial() != completionSession_) {
+        completionSession_ = vm_.intellisense().sessionSerial();
+        if (vm_.intellisense().active())
+            focusRequested_ = true;
+    }
     panel::beginChild("##editorText", size, palette_.editorBg, ImGuiChildFlags_None,
                       (wrap ? ImGuiWindowFlags_None : ImGuiWindowFlags_HorizontalScrollbar) | ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
-    if (focusRequested_ && !vm_.findVisible.get()) {
+    if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
     }
-    focused_ = ImGui::IsWindowFocused();
+    focused_ = ImGui::IsWindowFocused() && !passive_;
 
     const ImGuiStyle& style = ImGui::GetStyle();
     const ImVec2 winPos = ImGui::GetWindowPos();
@@ -634,22 +649,31 @@ void EditorView::render(ImVec2 size)
     buildRows(*doc, wrapColumns);
     const ImVec2 switchAt(m.viewMax.x - 8.0f * s_, winPos.y + 6.0f * s_);
     const bool dataSwitch = DataViews::hasSwitch(*doc);
-    const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
+    const bool hovered = !passive_ && ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
                          !(markdownDoc && markdownSwitchRect(switchAt, s_).Contains(ImGui::GetMousePos())) &&
                          !(dataSwitch && data_.switchRect(*doc, switchAt).Contains(ImGui::GetMousePos()));
-    handleMouse(*doc, m, hovered);
-    if (focused_)
-        handleKeyboard(*doc, m);
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    if (!passive_) { // the other column only shows its document: a click there moves the keyboard (MainView)
+        if (!handleDefinitionLink(*doc, m, hovered)) // Ctrl+click on a name goes to its definition
+            handleMouse(*doc, m, hovered);
+        if (linkRow_ >= 0)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (focused_)
+            handleKeyboard(*doc, m);
+        intellisense.sync(); // follows the caret; closes when it leaves the word
+        if (intellisense.active() && !focused_ && !completionFocused_ && !completionHovered_)
+            intellisense.dismiss(); // the editor lost the keyboard
 
-    doc = vm_.activeDocument(); // input may have edited the text
-    buildRows(*doc, wrapColumns);
-    if (pendingScrollLine_ >= 0) { // from the minimap: centre that line
-        const float rowY = float(rowOf({pendingScrollLine_, 0})) * m.lineH;
-        ImGui::SetScrollY(std::max(0.0f, rowY - viewH * 0.5f));
-        pendingScrollLine_ = -1;
+        doc = vm_.activeDocument(); // input may have edited the text
+        buildRows(*doc, wrapColumns);
+        if (pendingScrollLine_ >= 0) { // from the minimap: centre that line
+            const float rowY = float(rowOf({pendingScrollLine_, 0})) * m.lineH;
+            ImGui::SetScrollY(std::max(0.0f, rowY - viewH * 0.5f));
+            pendingScrollLine_ = -1;
+        }
+        if (revealCaret_)
+            revealCaret(*doc, m);
     }
-    if (revealCaret_)
-        revealCaret(*doc, m);
 
     const int firstRow = std::clamp(int((ImGui::GetScrollY() - kTopPadding * s_) / m.lineH), 0, int(rows_.size()) - 1);
     const int lastRow = std::min(int(rows_.size()) - 1, firstRow + m.visibleRows + 1);
@@ -663,6 +687,7 @@ void EditorView::render(ImVec2 size)
     if (!conflicts_.empty() && !rows_.empty())
         drawConflictBackgrounds(m, firstRow, lastRow);
     drawRows(*doc, m, firstRow, lastRow);
+    drawDefinitionLink(*doc, m);
     dl->PopClipRect();
     drawGutter(*doc, m, firstRow, lastRow);
     if (m.blameW > 0.0f && !rows_.empty())
@@ -673,7 +698,11 @@ void EditorView::render(ImVec2 size)
         jumpToConflict(*doc, ImGui::GetIO().KeyShift ? -1 : 1);
     if (hovered && !dragging_)
         drawHoverTooltip(*doc, m);
-    if (markdownDoc || dataSwitch) {
+    if (intellisense.active() && intellisense.documentId() == doc->id && !passive_)
+        renderCompletion(*doc, m);
+    else
+        completionHovered_ = completionFocused_ = false;
+    if ((markdownDoc || dataSwitch) && !passive_) { // they switch the active document's view
         ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
         if (markdownDoc)
             markdownSwitch(*doc, switchAt);
@@ -689,6 +718,8 @@ void EditorView::render(ImVec2 size)
     scroll_[doc->id].text = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     ImGui::PopFont();
+    if (passive_)
+        return;
     renderChangePeek(*vm_.activeDocument());
     if (sideBar) {
         ImGui::SameLine(0.0f, 0.0f);
@@ -719,6 +750,60 @@ void EditorView::markdownSwitch(model::Document& doc, ImVec2 topRight)
                                        : "Show it formatted (Ctrl+Shift+V)");
 }
 
+// The rendered text's width, as a bar along the top that stays while the text scrolls: dragging
+// either end widens or narrows the column (it stays centred), a double-click restores the
+// standard width.
+void EditorView::markdownRuler(ImVec2 winPos, float viewW, float column, float widest)
+{
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = 12.0f * s_, grip = 5.0f * s_;
+    const float left = winPos.x + std::max(24.0f * s_, (viewW - column) * 0.5f), right = left + column;
+    const float mid = std::floor(winPos.y + h * 0.5f);
+    dl->AddRectFilled(winPos, ImVec2(winPos.x + viewW, winPos.y + h), palette_.editorBg); // text scrolls under it
+
+    bool hot = false, reset = false;
+    auto end = [&](const char* id, float x, float sign) {
+        ImGui::SetCursorScreenPos(ImVec2(x - grip, winPos.y));
+        ImGui::InvisibleButton(id, ImVec2(grip * 2.0f, h));
+        if (ImGui::IsItemActivated()) {
+            rulerDragStart_ = column;
+            rulerDragMouse_ = ImGui::GetIO().MousePos.x;
+        }
+        if (ImGui::IsItemActive()) // both sides move: the column stays centred
+            markdownColumn_ = std::clamp(rulerDragStart_ + sign * 2.0f * (ImGui::GetIO().MousePos.x - rulerDragMouse_),
+                                         std::min(widest, 240.0f * s_), widest);
+        if (ImGui::IsItemDeactivated())
+            vm_.settings().markDirty(); // remembered with the layout
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            hot = true;
+        }
+        reset = reset || (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
+    };
+    end("##rulerLeft", left, -1.0f);
+    end("##rulerRight", right, 1.0f);
+    ImGui::SetCursorScreenPos(ImVec2(left + grip, winPos.y));
+    ImGui::InvisibleButton("##rulerBar", ImVec2(std::max(1.0f, column - grip * 2.0f), h));
+    registerLastItem("markdown-ruler", "button", "Restore the standard text width", [this]() {
+        markdownColumn_ = 0.0f;
+        vm_.settings().markDirty();
+    });
+    hot = hot || ImGui::IsItemHovered();
+    reset = reset || (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Text width: drag either end; double-click for the standard width");
+    if (reset) {
+        markdownColumn_ = 0.0f;
+        vm_.settings().markDirty();
+    }
+    rulerHovered_ = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(winPos, ImVec2(winPos.x + viewW, winPos.y + h));
+
+    const ImU32 color = hot ? palette_.accent : palette_.border;
+    dl->AddLine(ImVec2(left, mid), ImVec2(right, mid), color, 1.0f * s_);
+    for (float x : {left, right})
+        dl->AddRectFilled(ImVec2(x - 2.0f * s_, winPos.y + 2.0f * s_), ImVec2(x + 2.0f * s_, winPos.y + h - 2.0f * s_), color, 2.0f * s_);
+}
+
 void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
 {
     os::mem::Scope scope("markdown");
@@ -730,6 +815,8 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     }
     if (!md.view.onLink)
         md.view.onLink = [this](const std::string& url) {
+            if (rulerHovered_ || passive_) // the click was on the ruler, or moves the keyboard to this column
+                return;
             if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0)
                 vm_.openLink(url);
             else if (!url.empty() && url[0] != '#') // a file next to this one
@@ -739,7 +826,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     md.view.onImage = [this, &md, &doc](const std::string& source) { return loadImage(md, doc, source); };
     md.view.emoji = emoji_;
 
-    const bool sideBar = vm_.showLayersMap.get() && !compact_;
+    const bool sideBar = vm_.showLayersMap.get() && !compact_ && !passive_;
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
     sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
@@ -752,27 +839,32 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
         shownMarkdownDoc_ = doc.id;
     }
     panel::beginChild("##markdownText", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
-    if (focusRequested_ && !vm_.findVisible.get()) {
+    if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
     }
-    focused_ = ImGui::IsWindowFocused();
+    focused_ = ImGui::IsWindowFocused() && !passive_;
     const ImVec2 winPos = ImGui::GetWindowPos();
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float zoom = vm_.zoom.get();
-    // A readable column: centred, at most ~90 characters wide.
+    // A readable column: centred, at most ~90 characters wide unless the ruler set another width.
     const float pad = 24.0f * s_;
-    const float column = std::min(viewW - pad * 2.0f, 820.0f * s_ * zoom);
+    const float widest = std::max(1.0f, viewW - pad * 2.0f);
+    const float column = markdownColumn_ > 0.0f ? std::min(widest, markdownColumn_) : std::min(widest, 820.0f * s_ * zoom);
     ImGui::SetCursorPos(ImVec2(std::max(pad, (viewW - column) * 0.5f), pad));
     md.view.render(md.text, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
     ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f)); // room to scroll the end up
+    rulerHovered_ = false;
+    if (!compact_ && !passive_)
+        markdownRuler(winPos, viewW, column, widest);
 
     if (!md.shown) { // just switched here: show where the caret was
         ImGui::SetScrollY(std::max(0.0f, md.view.offsetOfLine(doc.caret.line) - 8.0f * s_));
         md.shown = true;
     }
     // Double-click: edit the text there.
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && md.view.hoveredLine() >= 0) {
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && md.view.hoveredLine() >= 0 &&
+        !rulerHovered_ && !passive_) {
         const int line = md.view.hoveredLine();
         vm_.execute(viewmodel::CommandId::ToggleMarkdownView);
         vm_.goToLine(line);
@@ -780,8 +872,9 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     // Typing here does nothing: say how to edit.
     if (focused_ && ImGui::GetIO().InputQueueCharacters.Size > 0)
         vm_.statusText.set("This Markdown file is shown rendered: press Ctrl+Shift+V (or double-click) to edit it");
-    markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
-                               winPos.y + 6.0f * s_));
+    if (!passive_)
+        markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
+                                   winPos.y + (compact_ ? 6.0f : 18.0f) * s_)); // below the ruler
     scroll_[doc.id].markdown = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     if (sideBar) {
@@ -1136,14 +1229,53 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
     bool acted = false;
     bool horizontal = false;
 
-    // Every caret moves (several carets: Alt+click, Ctrl+D, Ctrl+Alt+Up/Down).
-    if (pressed(ImGuiKey_LeftArrow)) {
+    // While suggestions are shown, the arrows choose, Enter or Tab take one, Escape closes them.
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    intellisense.sync();
+    const bool completing = intellisense.active() && intellisense.documentId() == doc.id && !intellisense.items().empty();
+    bool keysTaken = false;
+    if (completing && !ctrl && !io.KeyAlt) {
+        if (!shift) {
+            if (pressed(ImGuiKey_UpArrow))
+                intellisense.move(-1);
+            if (pressed(ImGuiKey_DownArrow))
+                intellisense.move(+1);
+            if (pressed(ImGuiKey_PageUp))
+                intellisense.move(-8);
+            if (pressed(ImGuiKey_PageDown))
+                intellisense.move(+8);
+        }
+        if (pressed(ImGuiKey_Enter) || pressed(ImGuiKey_KeypadEnter) || (pressed(ImGuiKey_Tab) && !shift)) {
+            if (intellisense.accept())
+                acted = horizontal = true;
+        }
+        if (pressed(ImGuiKey_Escape))
+            intellisense.dismiss();
+        keysTaken = true;
+    }
+    // While a model writes the code of a comment, Escape stops it (typing on does too).
+    bool escapeTaken = false;
+    if (!completing && intellisense.active() && intellisense.awaiting() && intellisense.documentId() == doc.id && pressed(ImGuiKey_Escape)) {
+        intellisense.dismiss();
+        escapeTaken = true;
+    }
+    auto keyFree = [keysTaken, shift](ImGuiKey key) { // a key the suggestion list did not take
+        const bool arrow = key == ImGuiKey_UpArrow || key == ImGuiKey_DownArrow || key == ImGuiKey_PageUp || key == ImGuiKey_PageDown;
+        if (!keysTaken || ((arrow || key == ImGuiKey_Tab) && shift)) // Shift+arrows select, Shift+Tab outdents
+            return true;
+        return !arrow && key != ImGuiKey_Enter && key != ImGuiKey_KeypadEnter && key != ImGuiKey_Tab && key != ImGuiKey_Escape;
+    };
+
+    // Every caret moves (several carets: Alt+click, Ctrl+D, Ctrl+Alt+Up/Down). Alt+Left and
+    // Alt+Right are Back and Forward (shortcuts), not caret moves.
+    const bool altArrows = io.KeyAlt && !ctrl;
+    if (!altArrows && pressed(ImGuiKey_LeftArrow)) {
         vm_.moveCarets([&](const model::Selection& sel) {
             return !shift && !sel.empty() ? sel.start() : ctrl ? wordLeft(buffer, sel.caret) : buffer.prev(sel.caret);
         }, shift);
         acted = horizontal = true;
     }
-    if (pressed(ImGuiKey_RightArrow)) {
+    if (!altArrows && pressed(ImGuiKey_RightArrow)) {
         vm_.moveCarets([&](const model::Selection& sel) {
             return !shift && !sel.empty() ? sel.end() : ctrl ? wordRight(buffer, sel.caret) : buffer.next(sel.caret);
         }, shift);
@@ -1151,14 +1283,14 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
     }
     // Ctrl+Shift+Up/Down and Alt(+Shift/Ctrl)+Up/Down move lines, copy them or add carets (shortcuts).
     if (!(ctrl && shift) && !io.KeyAlt) {
-        if (pressed(ImGuiKey_UpArrow)) {
+        if (keyFree(ImGuiKey_UpArrow) && pressed(ImGuiKey_UpArrow)) {
             if (ctrl)
                 ImGui::SetScrollY(ImGui::GetScrollY() - m.lineH);
             else
                 moveVertical(doc, -1, shift);
             acted = true;
         }
-        if (pressed(ImGuiKey_DownArrow)) {
+        if (keyFree(ImGuiKey_DownArrow) && pressed(ImGuiKey_DownArrow)) {
             if (ctrl)
                 ImGui::SetScrollY(ImGui::GetScrollY() + m.lineH);
             else
@@ -1166,11 +1298,11 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
             acted = true;
         }
     }
-    if (pressed(ImGuiKey_PageUp)) {
+    if (keyFree(ImGuiKey_PageUp) && pressed(ImGuiKey_PageUp)) {
         moveVertical(doc, -m.visibleRows, shift);
         acted = true;
     }
-    if (pressed(ImGuiKey_PageDown)) {
+    if (keyFree(ImGuiKey_PageDown) && pressed(ImGuiKey_PageDown)) {
         moveVertical(doc, +m.visibleRows, shift);
         acted = true;
     }
@@ -1195,8 +1327,9 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
             vm_.moveCarets([&](const model::Selection& sel) { return TextPos{sel.caret.line, int(buffer.line(sel.caret.line).size())}; }, shift);
         acted = horizontal = true;
     }
-    if (pressed(ImGuiKey_Enter) || pressed(ImGuiKey_KeypadEnter)) {
+    if (keyFree(ImGuiKey_Enter) && (pressed(ImGuiKey_Enter) || pressed(ImGuiKey_KeypadEnter))) {
         vm_.newline();
+        intellisense.afterNewline(); // below a comment: code suggestions after a pause, when on
         acted = horizontal = true;
     }
     if (pressed(ImGuiKey_Backspace)) {
@@ -1211,7 +1344,7 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         vm_.deleteForward();
         acted = horizontal = true;
     }
-    if (pressed(ImGuiKey_Tab) && !ctrl) {
+    if (keyFree(ImGuiKey_Tab) && pressed(ImGuiKey_Tab) && !ctrl) {
         if (shift)
             vm_.execute(CommandId::Outdent);
         else if (doc.hasSelection() && doc.anchor.line != doc.caret.line)
@@ -1220,7 +1353,7 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
             vm_.insertIndent();
         acted = horizontal = true;
     }
-    if (pressed(ImGuiKey_Escape)) {
+    if (!escapeTaken && keyFree(ImGuiKey_Escape) && pressed(ImGuiKey_Escape)) {
         if (vm_.findVisible.get())
             vm_.findVisible.set(false);
         else if (doc.multiCursor())
@@ -1238,6 +1371,7 @@ void EditorView::handleKeyboard(const model::Document& doc, const Metrics& m)
         }
         if (!typed.empty()) {
             vm_.insertText(typed);
+            intellisense.typed(typed); // may open suggestions (auto complete)
             acted = horizontal = true;
         }
     }
@@ -1758,8 +1892,12 @@ void EditorView::renderMinimap(const model::Document& doc, ImVec2 size)
 
 void EditorView::drawHoverTooltip(const model::Document& doc, const Metrics& m)
 {
-    if (rows_.empty() || doc.path.empty())
+    if (rows_.empty())
         return;
+    if (doc.path.empty()) {
+        drawSymbolTooltip(doc, m);
+        return;
+    }
     const int line = hitTest(doc, ImGui::GetIO().MousePos, m).line;
     const std::vector<const model::ReviewFinding*> findings = vm_.review().findingsForFile(doc.path);
     std::vector<const model::ReviewFinding*> onLine;
@@ -1770,8 +1908,10 @@ void EditorView::drawHoverTooltip(const model::Document& doc, const Metrics& m)
     for (const model::ReviewComment& c : vm_.review().comments())
         if (!c.resolved && c.file == doc.path && c.line == line)
             notes.push_back(&c);
-    if (onLine.empty() && notes.empty())
+    if (onLine.empty() && notes.empty()) {
+        drawSymbolTooltip(doc, m);
         return;
+    }
     // Only show when hovering the gutter or the text of that line.
     ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
     if (ImGui::BeginTooltip()) {
@@ -2083,6 +2223,342 @@ void EditorView::drawBlame(const model::Document& doc, const Metrics& m, int fir
     ImGui::SetCursorScreenPos(cursor);
     dl->AddLine(ImVec2(edge - 1.0f, m.viewMin.y), ImVec2(edge - 1.0f, m.viewMax.y),
                 edgeActive || edgeHovered ? palette_.accent : palette_.border, edgeActive || edgeHovered ? 2.0f * s_ : 1.0f);
+}
+
+// ---- IntelliSense -------------------------------------------------------------------------------
+
+namespace {
+
+const char* kindIcon(model::SymbolKind kind)
+{
+    switch (kind) {
+    case model::SymbolKind::Keyword: return ICON_FA_KEY;
+    case model::SymbolKind::Word: return ICON_FA_FONT;
+    case model::SymbolKind::Namespace: return ICON_FA_BOX_ARCHIVE;
+    case model::SymbolKind::Type: return ICON_FA_CUBES;
+    case model::SymbolKind::Function: return ICON_FA_CUBE;
+    case model::SymbolKind::Variable: return ICON_FA_DIAMOND;
+    case model::SymbolKind::Constant: return ICON_FA_HASHTAG;
+    case model::SymbolKind::Macro: return ICON_FA_BOLT;
+    }
+    return ICON_FA_FONT;
+}
+
+model::Token kindToken(model::SymbolKind kind)
+{
+    switch (kind) {
+    case model::SymbolKind::Keyword: return model::Token::Keyword;
+    case model::SymbolKind::Namespace:
+    case model::SymbolKind::Type: return model::Token::Type;
+    case model::SymbolKind::Function: return model::Token::Function;
+    case model::SymbolKind::Variable: return model::Token::Variable;
+    case model::SymbolKind::Constant: return model::Token::Number;
+    case model::SymbolKind::Macro: return model::Token::Preprocessor;
+    case model::SymbolKind::Word: return model::Token::Text;
+    }
+    return model::Token::Text;
+}
+
+} // namespace
+
+void EditorView::renderCompletion(const model::Document& doc, const Metrics& m)
+{
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    const std::vector<viewmodel::IntellisenseViewModel::Item>& items = intellisense.items();
+    const bool waiting = items.empty() && intellisense.awaiting();
+    if ((items.empty() && !waiting) || rows_.empty()) {
+        completionHovered_ = completionFocused_ = false;
+        return;
+    }
+    const model::TextPos anchor = intellisense.anchor();
+    const int r = rowOf(anchor);
+    const Row& row = rows_[size_t(r)];
+    const float lineTop = m.origin.y + float(r) * m.lineH;
+    const float rowH = std::floor(m.lineH * 1.15f);
+    const int count = int(items.size());
+    const int visible = waiting ? 0 : std::min(count, 10);
+    const float listH = float(visible) * rowH;
+    ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+    const float detailLineH = ImGui::GetTextLineHeightWithSpacing();
+    ImGui::PopFont();
+    const float pad = 4.0f * s_;
+    // Below the list: the chosen suggestion's declaration, or a model's code (a preview of up to
+    // kPreviewLines lines), or while a model writes, what it is doing.
+    constexpr int kPreviewLines = 12;
+    const int selectedIndex = std::clamp(intellisense.selected(), 0, std::max(0, count - 1));
+    int previewLines = 0;
+    if (!waiting && items[size_t(selectedIndex)].source == viewmodel::IntellisenseViewModel::Source::Provider) {
+        previewLines = 1;
+        for (char c : items[size_t(selectedIndex)].insertText)
+            previewLines += c == '\n' ? 1 : 0;
+        previewLines = std::min(previewLines, kPreviewLines);
+    }
+    const float detailH = waiting ? detailLineH : (previewLines > 0 ? float(previewLines + 1) : 2.0f) * detailLineH + pad;
+    const ImGuiViewport* viewport = ImGui::GetWindowViewport();
+    const ImVec2 areaMin = viewport->WorkPos;
+    const ImVec2 areaMax(viewport->WorkPos.x + viewport->WorkSize.x, viewport->WorkPos.y + viewport->WorkSize.y);
+    const float w = std::min((previewLines > 0 ? 640.0f : 520.0f) * s_, std::max(200.0f * s_, areaMax.x - areaMin.x - 16.0f * s_));
+    const float h = listH + detailH + (waiting ? 2.0f : 3.0f) * pad;
+    // Below the word, or above it when there is no room below; never off the screen.
+    ImVec2 pos(rowX(doc, row, std::clamp(anchor.column, row.begin, row.end), m) - 26.0f * s_, lineTop + m.lineH);
+    if (pos.y + h > areaMax.y && lineTop - h >= areaMin.y)
+        pos.y = lineTop - h;
+    pos.x = std::clamp(pos.x, areaMin.x + 4.0f * s_, std::max(areaMin.x + 4.0f * s_, areaMax.x - w - 4.0f * s_));
+    pos.y = std::clamp(pos.y, areaMin.y, std::max(areaMin.y, areaMax.y - h));
+
+    const SyntaxColors colors = resolveSyntaxColors(palette_, vm_, doc.language);
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * s_);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImGui::ColorConvertU32ToFloat4(palette_.panelBg));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImGui::ColorConvertU32ToFloat4(palette_.border));
+    // One window for the list whatever the document (docs/MEMORY.md rule 8); it never takes the
+    // keyboard from the editor when it appears.
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                   ImGuiWindowFlags_NoDocking;
+    ImGui::Begin("##completion", nullptr, flags);
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+    completionHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+    completionFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+
+    if (waiting) { // a model is writing the code of a comment
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.accent), ICON_FA_WAND_MAGIC_SPARKLES);
+        ImGui::SameLine();
+        const std::string& status = intellisense.providerStatus();
+        ImGui::TextUnformatted(status.empty() ? "Writing the code for the comment" : status.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("  Esc stops");
+        ImGui::PopFont();
+        ImGui::End();
+        return;
+    }
+    int clicked = -1;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+    ImGui::BeginChild("##completionList", ImVec2(0.0f, listH), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    const int selected = intellisense.selected();
+    if (completionSerial_ != intellisense.selectionSerial()) { // keep the chosen one in view
+        completionSerial_ = intellisense.selectionSerial();
+        const float y = float(selected) * rowH;
+        if (y < ImGui::GetScrollY())
+            ImGui::SetScrollY(y);
+        else if (y + rowH > ImGui::GetScrollY() + listH)
+            ImGui::SetScrollY(y + rowH - listH);
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float fontSize = ImGui::GetFontSize();
+    const size_t typed = intellisense.prefix().size();
+    ImGuiListClipper clipper;
+    clipper.Begin(count, rowH);
+    while (clipper.Step()) {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+            const viewmodel::IntellisenseViewModel::Item& item = items[size_t(i)];
+            ImGui::PushID(i);
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##item", i == selected, ImGuiSelectableFlags_None, ImVec2(0.0f, rowH)))
+                clicked = i;
+            ImGui::PopID();
+            const float textY = at.y + (rowH - fontSize) * 0.5f;
+            const bool provided = item.source == viewmodel::IntellisenseViewModel::Source::Provider;
+            const ImU32 iconColor = provided ? palette_.accent : colors[size_t(kindToken(item.kind))];
+            dl->AddText(ImVec2(at.x + 4.0f * s_, textY), iconColor, provided ? ICON_FA_WAND_MAGIC_SPARKLES : kindIcon(item.kind));
+            const float labelX = at.x + 26.0f * s_;
+            // The typed part in the accent colour when the name starts with it.
+            const char* label = item.label.c_str();
+            const char* labelEnd = label + item.label.size();
+            const char* split = typed <= item.label.size() && item.label.compare(0, typed, intellisense.prefix()) == 0 ? label + typed : label;
+            dl->AddText(ImVec2(labelX, textY), palette_.accent, label, split);
+            dl->AddText(ImVec2(labelX + ImGui::CalcTextSize(label, split).x, textY), palette_.text, split, labelEnd);
+            if (!item.location.empty()) { // the file name, at the right
+                const char* file = item.location.c_str();
+                if (const size_t slash = item.location.find_last_of('/'); slash != std::string::npos)
+                    file += slash + 1;
+                const float fileW = ImGui::CalcTextSize(file).x;
+                const float right = at.x + ImGui::GetContentRegionAvail().x - 6.0f * s_;
+                const float labelW = ImGui::CalcTextSize(label, labelEnd).x;
+                if (right - fileW > labelX + labelW + 12.0f * s_)
+                    dl->AddText(ImVec2(right - fileW, textY), palette_.textDim, file);
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    // The chosen suggestion: its declaration and where it is.
+    const viewmodel::IntellisenseViewModel::Item& chosen = items[size_t(std::clamp(selected, 0, count - 1))];
+    ImGui::Dummy(ImVec2(0.0f, pad));
+    ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+    const bool provided = chosen.source == viewmodel::IntellisenseViewModel::Source::Provider;
+    const char* kindName = provided ? "suggested" : model::symbolKindName(chosen.kind);
+    ImGui::TextDisabled("%s", kindName);
+    if (provided && !chosen.detail.empty()) { // which model, how fast
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", chosen.detail.c_str());
+    } else if (!chosen.location.empty() && chosen.note.compare(0, chosen.location.size(), chosen.location) != 0) {
+        ImGui::SameLine(); // (a library name's note starts with its header already)
+        ImGui::TextDisabled("%s", chosen.location.c_str());
+    }
+    if (!chosen.note.empty()) { // the header clue
+        ImGui::SameLine();
+        const bool needs = chosen.note.rfind("needs", 0) == 0;
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(needs ? palette_.severityWarning : palette_.textDim), "%s", chosen.note.c_str());
+    }
+    ImGui::PushFont(fonts_.mono, Fonts::kUiSize * 0.95f);
+    if (provided) { // the code, as it will be inserted (the first lines)
+        const std::string& code = chosen.insertText.empty() ? chosen.label : chosen.insertText;
+        const char* p = code.c_str();
+        const char* end = p + code.size();
+        for (int line = 0; line < kPreviewLines && p < end; ++line) {
+            const char* eol = static_cast<const char*>(std::memchr(p, '\n', size_t(end - p)));
+            const char* stop = eol ? eol : end;
+            ImGui::TextUnformatted(p, stop);
+            p = eol ? eol + 1 : end;
+        }
+    } else if (!chosen.detail.empty()) {
+        const char* end = chosen.detail.c_str() + std::min(chosen.detail.size(), chosen.detail.find('\n')); // one line
+        ImGui::TextUnformatted(chosen.detail.c_str(), end);
+    }
+    ImGui::PopFont();
+    ImGui::PopFont();
+    ImGui::End();
+
+    if (clicked >= 0) { // a click takes it, and the keyboard goes back to the text
+        intellisense.select(clicked);
+        intellisense.accept();
+        focusRequested_ = true;
+        revealCaret_ = true;
+        lastActivity_ = ImGui::GetTime();
+    }
+}
+
+void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
+{
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    const bool cFamily = doc.language == model::Language::Cpp; // the standard library is known without the index
+    if ((!cFamily && (!intellisense.indexReady() || intellisense.index().empty())) || intellisense.active() || rows_.empty())
+        return;
+    // Only once the mouse rests: no tooltips flashing while it travels over the code.
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    if (std::fabs(mouse.x - hoverPos_.x) + std::fabs(mouse.y - hoverPos_.y) > 3.0f * s_) {
+        hoverPos_ = mouse;
+        hoverSince_ = ImGui::GetTime();
+        return;
+    }
+    if (ImGui::GetTime() - hoverSince_ < 0.5)
+        return;
+    int r = 0, b = 0, e = 0;
+    if (!nameAt(doc, m, mouse, r, b, e))
+        return;
+    const std::string& text = doc.buffer.line(rows_[size_t(r)].line);
+    const std::string_view name = std::string_view(text).substr(size_t(b), size_t(e - b));
+    const std::optional<model::SymbolView> symbol = intellisense.lookup(name, doc.path);
+    if (!symbol) {
+        // A name of the C or C++ standard library: its declaration, header and standard.
+        const model::LibraryName* library = intellisense.libraryLookup(name, doc);
+        if (!library)
+            return;
+        const bool c = model::isCSource(doc.path.empty() ? doc.title : doc.path);
+        const std::string_view header = model::libraryHeader(*library, c);
+        ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+        ImGui::BeginTooltip();
+        const bool member = library->scope[0] && std::strcmp(library->scope, "std") != 0;
+        ImGui::TextDisabled("%s %s%s%s", model::symbolKindName(library->kind), c ? "" : library->scope,
+                            (c || !library->scope[0]) ? "" : member ? "::" : "::", library->name);
+        ImGui::PushFont(fonts_.mono, Fonts::kUiSize);
+        ImGui::TextUnformatted(library->signature);
+        ImGui::PopFont();
+        ImGui::TextDisabled("#include <%.*s>  \u00b7  since %s", int(header.size()), header.data(),
+                            model::standardName(c ? library->cSince : library->cppSince, c));
+        ImGui::EndTooltip();
+        ImGui::PopFont();
+        return;
+    }
+    // Drawn from views into the index and fixed buffers: nothing allocated per frame.
+    const std::string_view file = intellisense.index().path(symbol->file);
+    char where[320];
+    std::snprintf(where, sizeof(where), "%.*s:%d%s", int(file.size()), file.data(), symbol->line + 1,
+                  symbol->definition ? "" : "  (declaration)");
+    ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
+    ImGui::BeginTooltip();
+    ImGui::TextDisabled("%s %.*s%s%.*s", model::symbolKindName(symbol->kind), int(symbol->container.size()), symbol->container.data(),
+                        symbol->container.empty() ? "" : "::", int(symbol->name.size()), symbol->name.data());
+    ImGui::PushFont(fonts_.mono, Fonts::kUiSize);
+    ImGui::TextUnformatted(symbol->detail.data(), symbol->detail.data() + symbol->detail.size());
+    ImGui::PopFont();
+    ImGui::TextDisabled("%s", where);
+    ImGui::TextDisabled("F12 or Ctrl+click: go to definition");
+    ImGui::EndTooltip();
+    ImGui::PopFont();
+}
+
+bool EditorView::nameAt(const model::Document& doc, const Metrics& m, ImVec2 mouse, int& row, int& begin, int& end) const
+{
+    if (rows_.empty() || mouse.x < m.viewMin.x + m.gutterW)
+        return false;
+    row = rowAt(mouse, m);
+    const Row& r = rows_[size_t(row)];
+    if (r.fold >= 0)
+        return false;
+    const std::string& text = doc.buffer.line(r.line);
+    // The character under the mouse (not the nearest gap between characters).
+    const int column = columnAtX(doc, r, (mouse.x - m.origin.x) / m.charW - 0.5f);
+    if (column < r.begin || column >= r.end || column >= int(text.size()) || !model::isIdentifierChar(text[size_t(column)]))
+        return false;
+    const auto [b, e] = model::identifierAround(text, column);
+    begin = b;
+    end = e;
+    return b < e;
+}
+
+bool EditorView::handleDefinitionLink(const model::Document& doc, const Metrics& m, bool hovered)
+{
+    linkRow_ = -1;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!hovered || !io.KeyCtrl || io.KeyShift || io.KeyAlt || dragging_ || touch::fingerDown())
+        return false;
+    int row = 0, begin = 0, end = 0;
+    if (!nameAt(doc, m, io.MousePos, row, begin, end))
+        return false;
+    viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        // Any name: Go to Definition also finds what this document declares (unsaved too), and
+        // says so in the status bar when nothing is found.
+        vm_.setCaret({rows_[size_t(row)].line, begin}, false);
+        intellisense.goToDefinition();
+        dragging_ = false;
+        revealCaret_ = true;
+        lastActivity_ = ImGui::GetTime();
+        return true;
+    }
+    // Underlined only for names the index knows (it is read on first use: holding Ctrl over the
+    // code starts it). A view into the line: nothing allocated per frame.
+    intellisense.ensureIndex();
+    const std::string& text = doc.buffer.line(rows_[size_t(row)].line);
+    if (intellisense.lookup(std::string_view(text).substr(size_t(begin), size_t(end - begin)), doc.path)) {
+        linkRow_ = row;
+        linkBegin_ = begin;
+        linkEnd_ = end;
+    }
+    return false;
+}
+
+void EditorView::drawDefinitionLink(const model::Document& doc, const Metrics& m)
+{
+    if (linkRow_ < 0 || linkRow_ >= int(rows_.size()))
+        return;
+    const Row& row = rows_[size_t(linkRow_)];
+    if (row.fold >= 0 || linkEnd_ > int(doc.buffer.line(row.line).size()))
+        return; // the text changed under it this frame
+    const float x0 = rowX(doc, row, std::clamp(linkBegin_, row.begin, row.end), m);
+    const float x1 = rowX(doc, row, std::clamp(linkEnd_, row.begin, row.end), m);
+    const float y = m.origin.y + float(linkRow_) * m.lineH + (m.lineH + ImGui::GetFontSize()) * 0.5f;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y), ImVec2(x1, y), palette_.accent, std::max(1.0f, s_));
 }
 
 } // namespace enp::view

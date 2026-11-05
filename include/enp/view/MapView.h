@@ -18,6 +18,11 @@ public:
     MapView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale);
 
     void render(ImVec2 size);
+    // Called every frame the map is not drawn: once the map is gone (the folder closed, or it was
+    // cleared), the layout of it is freed too, storage included (docs/MEMORY.md rules 3 and 5).
+    // While the map exists the layout is the open folder's and stays (pan and zoom kept).
+    void releaseIfMapGone();
+    size_t layoutBytes() const; // for tests: the layout's heap storage
 
 private:
     struct Box {
@@ -34,6 +39,7 @@ private:
 
     void renderHeader(float width);
     void layout(); // boxes_ / arrows_ for the current focus
+    void releaseLayout();
     void fit(ImVec2 canvas);
     void drawBox(const Box& box, ImVec2 origin, bool hovered, float alpha);
 

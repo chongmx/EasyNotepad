@@ -45,12 +45,21 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
     : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace()), files_(fileService), engineLab_(localEngine),
       terminal_(terminalService),
       logicalMap_(*this, agentCli), fileDialog_(*this, fileService),
-      findInFiles_(*this, fileService), settings_(fileService)
+      findInFiles_(*this, fileService), intellisense_(*this, fileService),
+      codeAssistant_(intellisense_, localEngine, [this]() { return localSetup(); }, agentCli, processService), settings_(fileService)
 {
+    {
+        // The languages' keyword tables are built on first use and kept for the process: built
+        // here, under their own name, not inside the first document's "documents" scope.
+        os::mem::Scope scope("language-tables");
+        model::languageSpec(model::Language::PlainText);
+    }
     agentCli_ = agentCli;
     terminal_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string()); // no folder yet: home
     processes_ = processService;
     git_.setServices(processService, fileService, agentCli);
+    codeAssistant_.attach();
+    codeAssistant_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string());
     initCommands();
     pinned_ = {CommandId::DetailOverview, CommandId::ToggleLayersMap, CommandId::RunAllReviews, CommandId::ToggleTerminal};
     bindSettings();
@@ -62,30 +71,7 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
     subscriptions_.push_back(engineLab_.changed.subscribe([this]() { settings_.markDirty(); }));
     // The local agent uses the Engine Lab's model files and settings.
     agent_.setLocal(
-        localEngine,
-        [this]() {
-            AgentViewModel::LocalSetup s;
-            using Which = EngineLabViewModel::Which;
-            if (!engineLab_.hasEngine()) {
-                s.why = "this build has no local model.";
-                return s;
-            }
-            if (const interfaces::EngineInfo& info = engineLab_.info(); !info.available) {
-                s.why = info.unavailableReason;
-                return s;
-            }
-            if (!engineLab_.fileUsable(Which::Model)) {
-                s.why = "the model is not downloaded yet (agent set-up, the gear).";
-                return s;
-            }
-            s.ready = true;
-            s.modelPath = engineLab_.pathFor(Which::Model);
-            if (engineLab_.fileUsable(Which::Drafter))
-                s.drafterPath = engineLab_.pathFor(Which::Drafter);
-            s.threads = engineLab_.threads.get();
-            s.gpu = engineLab_.useGpu.get();
-            return s;
-        },
+        localEngine, [this]() { return localSetup(); },
         [this]() { return agentContextText(); });
     subscriptions_.push_back(terminal_.statusMessage.subscribe([this](const std::string& s) { statusText.set(s); }));
     subscriptions_.push_back(agent_.replied.subscribe([this](const std::string& prompt) { pointer_.guideFor(prompt); }));
@@ -298,6 +284,9 @@ void NotepadViewModel::closeFolder()
     findInFiles_.clear(); // the hits (and their lines) were the closed folder's
     layers_.workspaceChanged();
     logicalMap_.workspaceChanged();
+    intellisense_.workspaceChanged();
+    codeAssistant_.workspaceChanged();
+    codeAssistant_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string());
     git_.workspaceChanged();
     statusText.set(closed.empty() ? "No folder open" : "Closed the folder " + closed);
     memoryTrimRequested_ = true;
@@ -320,6 +309,8 @@ void NotepadViewModel::closeWhere(const std::function<bool(int index, const mode
         std::unique_ptr<model::Document>& doc = documents_[size_t(i)];
         if (close(i, *doc) && !doc->modified) {
             history_.forget(doc->id);
+            if (intellisense_.documentId() == doc->id)
+                intellisense_.dismiss();
             if (doc->kind != model::FileKind::Text)
                 memoryTrimRequested_ = true; // its view held a decoded image or a library's contents
             continue;
@@ -424,6 +415,10 @@ void NotepadViewModel::closeDocument(int index)
     if (index < 0 || index >= int(documents_.size()))
         return;
     history_.forget(documents_[size_t(index)]->id);
+    if (intellisense_.documentId() == documents_[size_t(index)]->id)
+        intellisense_.dismiss(); // its suggestions go with it
+    if (outline_.documentId == documents_[size_t(index)]->id)
+        releaseOutline(); // and its outline and region summaries
     // An image or a library: what its view decoded is large, so the pages go back to the system now.
     const bool large = documents_[size_t(index)]->kind != model::FileKind::Text;
     documents_.erase(documents_.begin() + index);
@@ -579,6 +574,7 @@ bool NotepadViewModel::saveDocument(model::Document& doc)
     recordDiskStamp(doc);
     statusText.set("Saved " + doc.path);
     git_.documentSaved(doc.path, doc.savedText);
+    intellisense_.documentSaved(doc);
     return true;
 }
 
@@ -923,6 +919,9 @@ bool NotepadViewModel::openFolder(const std::string& path)
     findInFiles_.clear();
     layers_.workspaceChanged();
     logicalMap_.workspaceChanged();
+    intellisense_.workspaceChanged();
+    codeAssistant_.workspaceChanged();
+    codeAssistant_.setWorkingDirectory(root);
     remember(recentFolders_, root, kMaxRecentFolders);
     while (!documents_.empty())
         closeDocument(0);
@@ -1679,6 +1678,7 @@ bool NotepadViewModel::renamePath(const std::string& path, const std::string& ne
     }
     refreshExplorer();
     statusText.set("Renamed " + path + " to " + newName);
+    intellisense_.invalidate(); // the index names the old path
     git_.requestRefresh();
     return true;
 }
@@ -1701,8 +1701,36 @@ bool NotepadViewModel::deletePath(const std::string& path)
     }
     refreshExplorer();
     statusText.set(recycled ? "Moved " + path + " to the Recycle Bin" : "Deleted " + path);
+    intellisense_.invalidate(); // the index names the deleted file
     git_.requestRefresh();
     return true;
+}
+
+AgentViewModel::LocalSetup NotepadViewModel::localSetup()
+{
+    // The local agent and code suggestions use the Engine Lab's model files and settings.
+    AgentViewModel::LocalSetup s;
+    using Which = EngineLabViewModel::Which;
+    EngineLabViewModel& lab = engineLab_;
+    if (!lab.hasEngine()) {
+        s.why = "this build has no local model.";
+        return s;
+    }
+    if (const interfaces::EngineInfo& info = lab.info(); !info.available) {
+        s.why = info.unavailableReason;
+        return s;
+    }
+    if (!lab.fileUsable(Which::Model)) {
+        s.why = "the model is not downloaded yet (Tools \u203a Local Model).";
+        return s;
+    }
+    s.ready = true;
+    s.modelPath = lab.pathFor(Which::Model);
+    if (lab.fileUsable(Which::Drafter))
+        s.drafterPath = lab.pathFor(Which::Drafter);
+    s.threads = lab.threads.get();
+    s.gpu = lab.useGpu.get();
+    return s;
 }
 
 NotepadViewModel::AgentSetup NotepadViewModel::agentSetup() const
@@ -1818,8 +1846,10 @@ const std::vector<model::OutlineNode>& NotepadViewModel::outline() const
 {
     static const std::vector<model::OutlineNode> none;
     const model::Document* doc = activeDocument();
-    if (!doc)
+    if (!doc) {
+        releaseOutline(); // the last document's outline does not outlive it
         return none;
+    }
     if (outline_.documentId != doc->id || outline_.revision != doc->revision || outline_.language != doc->language ||
         outline_.mode != foldingMode.get()) {
         if (outline_.mode != foldingMode.get())
@@ -1834,6 +1864,16 @@ const std::vector<model::OutlineNode>& NotepadViewModel::outline() const
             outline_.summaries.clear();
     }
     return outline_.nodes;
+}
+
+void NotepadViewModel::releaseOutline() const
+{
+    if (outline_.documentId < 0 && outline_.nodes.capacity() == 0 && outline_.summaries.empty())
+        return;
+    os::mem::release(outline_.nodes);
+    os::mem::release(outline_.summaries);
+    outline_.documentId = -1;
+    outline_.revision = ~uint64_t(0);
 }
 
 const model::OutlineNode* NotepadViewModel::regionAt(int line) const
@@ -1995,6 +2035,8 @@ void NotepadViewModel::tick(double now)
     pointer_.tick(now);
     agent_.tick(now);
     git_.tick(now);
+    intellisense_.tick(now);
+    codeAssistant_.tick();
 }
 
 // ---- Settings -----------------------------------------------------------------------------------
@@ -2029,6 +2071,7 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.showPanel", showPanel);
     settings_.bind("view.panelTab", panelTab);
     settings_.bind("view.showAgentPanel", showAgentPanel);
+    settings_.bind("view.splitView", splitView);
     settings_.bind("explorer.showHiddenFiles", showHiddenFiles);
     settings_.bind("view.showSideBar", showLayersMap);
     settings_.bind("view.sideBar", sideBar);
@@ -2046,6 +2089,14 @@ void NotepadViewModel::bindSettings()
     settings_.bind("editor.showLineNumbers", showLineNumbers);
     settings_.bind("editor.showIndentGuides", showIndentGuides);
     settings_.bind("editor.smartIndent", smartIndent);
+    settings_.bind("editor.autoComplete", intellisense_.autoComplete);
+    settings_.bind("intellisense.codeSuggestions", intellisense_.aiSuggestions);
+    settings_.bind("intellisense.cppStandard", intellisense_.cppStandard);
+    settings_.bind("intellisense.cStandard", intellisense_.cStandard);
+    settings_.bind("intellisense.includeFolders", intellisense_.includeFolders);
+    settings_.bind("intellisense.model", codeAssistant_.source);
+    settings_.bind("intellisense.claudeModel", codeAssistant_.claudeModel);
+    settings_.bind("intellisense.command", codeAssistant_.command);
     settings_.bind("performance.maxFps", maxFramesPerSecond);
     settings_.bind("performance.blinkCaret", blinkCaret);
 

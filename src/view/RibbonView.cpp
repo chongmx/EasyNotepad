@@ -120,11 +120,12 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
         {"Detail", {C::DetailFull, C::DetailBalanced, C::DetailOverview, C::DetailOutline}, {}},
         {"Folding", {C::FoldingSyntax, C::FoldingLogical, C::ToggleFold}, {C::FoldAll, C::UnfoldAll, C::SummarizeFile}},
         {"Side Bar", {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}, {}},
-        {"Navigate", {C::GoToLine, C::Find}, {C::ToggleBookmark}},
+        {"Navigate", {C::GoToLine, C::GoToDefinition, C::Find}, {C::NavigateBack, C::NavigateForward, C::ToggleBookmark}},
         {"Understand", {C::DissectProject, C::ExplainSelection, C::AskAgent}, {C::GenerateTests}},
     };
     static const Group view[] = {
         {"Panels", {C::ToggleExplorer, C::TogglePanel, C::ToggleTerminal, C::ToggleAgentPanel}, {C::ToggleMaximizePanel, C::ToggleSlimRibbon}},
+        {"Columns", {C::ToggleSplitView}, {C::FocusOtherColumn}},
         {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap, C::ToggleMarkdownView},
          {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}},
         {"Zoom", {C::ZoomIn, C::ZoomOut, C::ZoomReset}, {}},
@@ -146,6 +147,8 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
              {"Carets", {C::AddNextOccurrence, C::SelectAllOccurrences, C::AddCursorAbove, C::AddCursorBelow}, {C::CursorsAtLineEnds}},
              {"Case", {C::UpperCase, C::LowerCase}, {}},
              {"Code", {C::ToggleComment, C::Indent, C::Outdent}, {C::TrimTrailing}},
+             {"IntelliSense", {C::TriggerCompletion, C::ImplementComment, C::GoToDefinition, C::ToggleAutoComplete, C::ToggleCodeSuggestions},
+              {C::IntellisenseSettings, C::NavigateBack, C::NavigateForward, C::RebuildSymbolIndex}},
              {"Bookmarks", {C::ToggleBookmark, C::PreviousBookmark, C::NextBookmark}, {C::ClearBookmarks}},
          }},
         {"Review", {std::begin(review), std::end(review)}},
@@ -618,6 +621,8 @@ void RibbonView::renderGroups(const Tab& tab)
                 ImGui::SetCursorScreenPos(ImVec2(x - 1.0f * s_, top));
                 if (ImGui::InvisibleButton("##moreCaret", ImVec2(13.0f * s_, kSlimButtonHeight * s_)))
                     ImGui::OpenPopup("##more");
+                registerLastItem(std::string("ribbon-more:") + group.name, "button", std::string("More: ") + group.name,
+                                 [this, name = group.name]() { openMore_ = name; });
                 const bool hovered = ImGui::IsItemHovered();
                 if (hovered)
                     dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 4.0f * s_);
@@ -625,12 +630,9 @@ void RibbonView::renderGroups(const Tab& tab)
                 drawText(dl, ImVec2(ImGui::GetItemRectMin().x + (13.0f * s_ - caretSize.x) * 0.5f, top + (kSlimButtonHeight * s_ - caretSize.y) * 0.5f),
                          hovered ? palette_.text : palette_.textFaint, ICON_FA_CARET_DOWN, kCaptionSize);
                 ImGui::SetItemTooltip("More: %s", group.name);
-                ImGui::SetNextWindowPos(ImVec2(x0, top + kSlimButtonHeight * s_ + 2.0f * s_));
-                if (ImGui::BeginPopup("##more")) {
-                    morePopup(group);
-                    ImGui::EndPopup();
-                }
-                x1 = ImGui::GetItemRectMax().x;
+                const float caretRight = ImGui::GetItemRectMax().x;
+                moreMenu(group, ImVec2(x0, top + kSlimButtonHeight * s_ + 2.0f * s_));
+                x1 = caretRight;
             }
         } else {
             const std::string caption = group.more.empty() ? std::string(group.name) : std::string(group.name) + " " ICON_FA_CARET_DOWN;
@@ -1076,6 +1078,24 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
     return clicked && enabled;
 }
 
+void RibbonView::moreMenu(const Group& group, ImVec2 at)
+{
+    if (openMore_ && std::strcmp(openMore_, group.name) == 0) {
+        ImGui::OpenPopup("##more");
+        openMore_ = nullptr;
+    }
+    ImGui::SetNextWindowPos(at);
+    // The groups' child window has no padding; a popup takes its padding when it begins, and
+    // without any its items ran to the edges (the first and last letters cut by the highlight).
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * s_, 8.0f * s_));
+    const bool open = ImGui::BeginPopup("##more");
+    ImGui::PopStyleVar();
+    if (!open)
+        return;
+    morePopup(group);
+    ImGui::EndPopup();
+}
+
 void RibbonView::morePopup(const Group& group)
 {
     for (CommandId id : group.more) {
@@ -1121,14 +1141,12 @@ void RibbonView::groupCaption(const Group& group, float x0, float x1, float y)
         ImGui::PushID("caption");
         if (ImGui::InvisibleButton("##caption", ImVec2(size.x + 8.0f * s_, size.y + 2.0f * s_)))
             ImGui::OpenPopup("##more");
+        registerLastItem(std::string("ribbon-more:") + group.name, "button", std::string("More: ") + group.name,
+                         [this, name = group.name]() { openMore_ = name; });
         hovered = ImGui::IsItemHovered();
         if (hovered)
             dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 3.0f * s_);
-        ImGui::SetNextWindowPos(ImVec2(x0, ImGui::GetItemRectMax().y + 2.0f * s_));
-        if (ImGui::BeginPopup("##more")) {
-            morePopup(group);
-            ImGui::EndPopup();
-        }
+        moreMenu(group, ImVec2(x0, ImGui::GetItemRectMax().y + 2.0f * s_));
         ImGui::PopID();
     }
     drawText(dl, pos, hovered ? palette_.text : palette_.textFaint, caption.c_str(), kCaptionSize);

@@ -21,6 +21,7 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,9 @@ public:
     static Layout chooseLayout(float widthDp, float heightDp);
     Layout layout() const { return layout_; }
     const EditorView& editor() const { return editor_; }
+    const EditorView* secondColumn() const { return editor2_.get(); } // null with one column (tests)
+    const MapView& map() const { return map_; }
+    const Fonts& fonts() const { return fonts_; }
     const EmojiCache& emoji() const { return emoji_; }
     // After a close (Application's memory trim): caches let go of what is no longer on screen.
     void compactCaches() { emoji_.releaseUnused(); }
@@ -104,7 +108,16 @@ private:
     void renderCommentPopup();
     void renderPreferencesPopup();
     void renderSyntaxColorsPopup();
+    // IntelliSense: suggestions, the model for code suggestions (local or online), the C and C++
+    // standards and include folders.
+    void renderIntellisenseSettingsPopup();
     void renderAboutPopup();
+    // Every shortcut key, from the table the keys are handled with; filtered as you type.
+    void renderShortcutsDialog();
+    // The editor area: one column, or two side by side (the second EditorView exists only then).
+    void renderEditors(ImVec2 size);
+    void focusColumn(int column); // the keyboard to that column: its document becomes the active one
+    void closeColumn(int column); // back to one column, showing the other column's document
 
     // `onClose`: an X button in the header, which calls it.
     bool beginPanel(const char* id, const char* title, ImVec2 size, const char* detail = nullptr,
@@ -125,6 +138,14 @@ private:
     EmojiCache emoji_; // emoji pictures for rendered Markdown, shared by the editor and the agent chat
     RibbonView ribbon_;
     EditorView editor_;
+    // Two columns: the second column's view (created when the editor area splits, destroyed when it
+    // joins: its caches go with it). The focused column shows the active document; the other one
+    // shows otherDocument_ (a document id) until it is clicked.
+    std::unique_ptr<EditorView> editor2_;
+    int focusedColumn_ = 0;
+    int otherDocument_ = -1;
+    float splitRatio_ = 0.5f; // the first column's share of the width (remembered with the layout)
+    EditorView& focusedEditor() { return focusedColumn_ == 1 && editor2_ ? *editor2_ : editor_; }
     MapView map_;
     FileDialogView fileDialogView_;
     SearchPanel searchPanel_;
@@ -186,6 +207,11 @@ private:
     bool openComment_ = false;
     bool openPreferences_ = false;
     bool openSyntaxColors_ = false;
+    bool openIntellisenseSettings_ = false;
+    // The IntelliSense dialog's text fields while it is open (released when it closes).
+    std::string editClaudeModel_;
+    std::string editCommand_;
+    std::string editIncludeFolders_;
     bool openLanguagePicker_ = false;
     std::string languageFilter_;
     bool openRecentPicker_ = false;
@@ -194,6 +220,17 @@ private:
     int recentStep_ = 0; // Ctrl+R pressed again while the picker is open
     int syntaxColorsLanguage_ = -1; // index into model::languages(); -1 = all languages
     bool openAbout_ = false;
+    bool openShortcuts_ = false;
+    // The Keyboard Shortcuts list while it is open (built when it opens, released when it closes).
+    struct ShortcutRow {
+        std::string keys;
+        std::string search; // keys, command and description in lower case, for the filter
+        const char* command;
+        const char* what;
+    };
+    std::vector<ShortcutRow> shortcutRows_;
+    std::string shortcutsFilter_;
+    std::string shortcutsNeedle_; // the filter in lower case
     int versionTaps_ = 0; // About: seven taps on the version turn on developer mode
     bool openHelpMenu_ = false; // requested by an agent
     bool quitRequested_ = false;

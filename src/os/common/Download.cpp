@@ -2,6 +2,7 @@
 // start() reports that it cannot download.
 #include "enp/os/Download.h"
 
+#include "enp/os/Dispatch.h"
 #include "enp/os/Fs.h"
 #include "enp/os/Process.h"
 
@@ -67,7 +68,7 @@ bool start(const std::string& url, const std::string& path, bool /*allowMetered*
     job->status.received = job->resumedFrom;
     current() = job;
 
-    std::thread([job, curl, url, path]() {
+    dispatch::runAsync([job, curl, url, path]() {
         process::Command command;
         // --continue-at - resumes; --fail turns HTTP errors into a failure. The caller knows the
         // total size from its catalogue.
@@ -87,7 +88,7 @@ bool start(const std::string& url, const std::string& path, bool /*allowMetered*
         } else {
             job->status.state = Status::State::Done;
         }
-    }).detach();
+    });
     return true;
 }
 

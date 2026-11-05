@@ -2,6 +2,7 @@
 
 #include "enp/model/Hash.h"
 #include "enp/os/Dispatch.h"
+#include "enp/os/Memory.h"
 #include "enp/os/Download.h"
 #include "enp/os/Fs.h"
 
@@ -233,6 +234,8 @@ bool cpuSupported(std::string& features, std::string& missing)
 void initBackend()
 {
     static const bool once = []() {
+        // llama.cpp's log ring and backend registry live for the process: counted as theirs.
+        os::mem::Scope scope("local-engine");
         // The lab shows what matters; nothing goes to stdout or stderr.
         llama_log_set([](ggml_log_level, const char*, void*) {}, nullptr);
         common_log_set_stdo(common_log_main(), false);
@@ -625,7 +628,7 @@ void LocalEngineService::run(const EngineRunSettings& settings, std::function<vo
         std::lock_guard<std::mutex> lock(chat_->mutex);
         chat_->unload();
     }
-    std::thread([settings, report, finish, cancel]() {
+    os::dispatch::runAsync([settings, report, finish, cancel]() {
         EngineRunResult r;
         r.drafter = !settings.drafterPath.empty();
         try {
@@ -705,7 +708,7 @@ void LocalEngineService::run(const EngineRunSettings& settings, std::function<vo
             r.error = std::string("engine error: ") + e.what();
         }
         finish(r);
-    }).detach();
+    });
 #endif
 }
 
@@ -749,7 +752,7 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
                 to(what);
         });
     };
-    std::thread([request, stage, text, finish, cancel, model, post]() {
+    os::dispatch::runAsync([request, stage, text, finish, cancel, model, post]() {
         interfaces::LocalChatResult r;
         try {
             std::lock_guard<std::mutex> lock(model->mutex);
@@ -803,7 +806,7 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
             r.error = std::string("engine error: ") + e.what();
         }
         finish(r);
-    }).detach();
+    });
 #endif
 }
 
@@ -863,7 +866,7 @@ void LocalEngineService::hashFile(const std::string& path, std::function<void(do
                                   std::function<void(const std::string& sha256)> done)
 {
     auto alive = alive_;
-    std::thread([alive, path, progress, done]() {
+    os::dispatch::runAsync([alive, path, progress, done]() {
         std::ifstream in(std::filesystem::u8path(path), std::ios::binary);
         std::string digest;
         if (in) {
@@ -893,7 +896,7 @@ void LocalEngineService::hashFile(const std::string& path, std::function<void(do
             if (alive->load() && done)
                 done(digest);
         });
-    }).detach();
+    });
 }
 
 } // namespace enp::services

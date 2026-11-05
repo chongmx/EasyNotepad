@@ -284,20 +284,24 @@ private:
     void word(const char* b, const char* e, size_t spaces, ImFont* font, float size, const md::Span& span)
     {
         const bool bold = bold_ || (span.style & md::Bold) != 0;
-        const float extra = bold ? std::max(0.6f, size / 22.0f) : 0.0f;
+        // Bold is the text drawn twice, the second copy whole pixels to the right: ImGui starts text
+        // on a whole pixel, so a fractional offset fell on the same pixel for some words (normal
+        // weight) and on the next for others (heavy).
+        const float extra = bold ? std::max(1.0f, std::round(size / 22.0f)) : 0.0f;
         const float spaceW = measure(font, size, " ", " " + 1);
         float w = measure(font, size, b, e) + extra;
         const float avail = right_ - left_;
         if (x_ > left_ && x_ + w > right_ + 0.5f) // (the half pixel: a width measured to fit exactly)
             newline();
-        // A word longer than the line: break it between characters.
-        while (w > avail && b < e) {
+        // A word longer than the line: break it between characters. The same half pixel: a right-
+        // aligned table cell is exactly its text's width, give or take rounding.
+        while (w > avail + 0.5f && b < e) {
             const char* cut = b;
             float used = 0.0f;
             while (cut < e) {
                 const size_t n = std::min<size_t>(utf8Length(static_cast<unsigned char>(*cut)), size_t(e - cut));
                 const float cw = measure(font, size, cut, cut + n);
-                if (used + cw > right_ - x_ && cut > b)
+                if (used + cw > right_ - x_ + 0.5f && cut > b)
                     break;
                 used += cw;
                 cut += n;
@@ -342,9 +346,10 @@ private:
                 lineStartY_ = y_;
                 spanStart_ = false;
             }
-            dl_->AddText(font, size, ImVec2(x_, top), color, b, e);
+            const float textX = std::floor(x_); // where ImGui starts it; the bold copy keeps its offset
+            dl_->AddText(font, size, ImVec2(textX, top), color, b, e);
             if (bold)
-                dl_->AddText(font, size, ImVec2(x_ + extra, top), color, b, e);
+                dl_->AddText(font, size, ImVec2(textX + extra, top), color, b, e);
             decorate(x_, x_ + w, span);
             if (link && links_)
                 links_->push_back({ImVec2(x_, y_), ImVec2(x_ + w, y_ + lineH_), span.url});

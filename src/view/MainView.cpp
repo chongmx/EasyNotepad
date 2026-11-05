@@ -1,4 +1,5 @@
 #include "enp/view/MainView.h"
+#include "enp/Version.h" // generated from the VERSION file (cmake/Version.cmake)
 #include "enp/os/Memory.h"
 #include "enp/view/Fit.h"
 
@@ -120,6 +121,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
     subscriptions_.push_back(vm_.addCommentRequested.subscribe([this]() { openComment_ = true; }));
     subscriptions_.push_back(vm_.preferencesRequested.subscribe([this]() { openPreferences_ = true; }));
     subscriptions_.push_back(vm_.syntaxColorsRequested.subscribe([this]() { openSyntaxColors_ = true; }));
+    subscriptions_.push_back(vm_.intellisenseSettingsRequested.subscribe([this]() { openIntellisenseSettings_ = true; }));
     subscriptions_.push_back(vm_.languagePickerRequested.subscribe([this]() { openLanguagePicker_ = true; }));
     subscriptions_.push_back(vm_.recentPickerRequested.subscribe([this]() {
         if (ImGui::IsPopupOpen("##recentPicker"))
@@ -131,7 +133,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
     subscriptions_.push_back(vm_.terminalFocusRequested.subscribe([this]() {
         if (terminalView_.focused()) {
             vm_.editorRequested.emit();
-            editor_.focus();
+            focusedEditor().focus();
         } else {
             vm_.showPanelTab(viewmodel::PanelTab::Terminal); // starts a shell if there is none
         }
@@ -157,6 +159,9 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
             load("planWidth", planWidth_);
             load("conversationWidth", conversationWidth_);
             load("sideBarWidth", editor_.sideBarWidth());
+            load("markdownColumn", editor_.markdownColumn());
+            if (const model::Json* v = j.find("splitRatio"); v && v->isNumber())
+                splitRatio_ = std::clamp(float(v->asNumber()), 0.1f, 0.9f);
             if (const model::Json* v = j.find("blameColumns"); v && v->isNumber())
                 editor_.blameColumns() = float(v->asNumber());
         },
@@ -168,17 +173,21 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
                 .set("planWidth", planWidth_ / s_)
                 .set("conversationWidth", conversationWidth_ / s_)
                 .set("sideBarWidth", editor_.sideBarWidth() / s_)
+                .set("markdownColumn", editor_.markdownColumn() / s_) // 0: the standard width
+                .set("splitRatio", double(splitRatio_))
                 .set("blameColumns", double(editor_.blameColumns()));
         });
     subscriptions_.push_back(vm_.aboutRequested.subscribe([this]() { openAbout_ = true; }));
+    subscriptions_.push_back(vm_.shortcutsRequested.subscribe([this]() { openShortcuts_ = true; }));
     subscriptions_.push_back(vm_.engineLabRequested.subscribe([this]() { engineLab_.open(); }));
     subscriptions_.push_back(vm_.quitRequested.subscribe([this]() { quitRequested_ = true; }));
     subscriptions_.push_back(vm_.editorRequested.subscribe([this]() { previewTabRequest_ = 1; }));
     subscriptions_.push_back(vm_.workspace.subscribe([this](const WorkspaceMode& mode) {
         vm_.statusText.set(mode == WorkspaceMode::Agent ? "Agent workspace: describe the goal, review the changes"
                                                         : "Code workspace: manual editing with the agent on the side");
-        editor_.focus();
+        focusedEditor().focus();
     }));
+    subscriptions_.push_back(vm_.otherColumnRequested.subscribe([this]() { focusColumn(1 - focusedColumn_); }));
 }
 
 // ---- Frame ------------------------------------------------------------------------------------
@@ -236,6 +245,7 @@ void MainView::render()
         renderAgentWorkspace();
     else
         renderCodeWorkspace();
+    map_.releaseIfMapGone(); // whichever view is shown: the closed folder's map layout goes with it
     ImGui::EndChild();
     renderStatusBar();
     }
@@ -255,7 +265,9 @@ void MainView::render()
     fileDialogView_.render();
     renderPreferencesPopup();
     renderSyntaxColorsPopup();
+    renderIntellisenseSettingsPopup();
     renderAboutPopup();
+    renderShortcutsDialog();
     engineLab_.render(layout_ != Layout::Desktop, pos, ImVec2(pos.x + size.x, pos.y + size.y));
     handleCaptionMouse();
     ImGui::End();
@@ -267,20 +279,24 @@ void MainView::render()
 
 // ---- Input --------------------------------------------------------------------------------------
 
-void MainView::handleShortcuts()
+namespace {
+
+// Editing: only while neither a text field nor the terminal has focus.
+// Global: everywhere except the terminal, whose keys go to the shell (as in VS Code).
+// Always: also while the terminal has focus.
+// EditingRepeat: as Editing, repeating while the keys are held (moving lines, adding carets).
+enum Scope { Editing, EditingRepeat, Global, Always };
+struct Binding {
+    ImGuiKeyChord chord;
+    CommandId id;
+    Scope scope;
+};
+
+// Every shortcut key; the Keyboard Shortcuts list shows this table.
+const std::vector<Binding>& keyBindings()
 {
-    // Editing: only while neither a text field nor the terminal has focus.
-    // Global: everywhere except the terminal, whose keys go to the shell (as in VS Code).
-    // Always: also while the terminal has focus.
-    // EditingRepeat: as Editing, repeating while the keys are held (moving lines, adding carets).
-    enum Scope { Editing, EditingRepeat, Global, Always };
-    struct Binding {
-        ImGuiKeyChord chord;
-        CommandId id;
-        Scope scope;
-    };
     using C = CommandId;
-    static const Binding bindings[] = {
+    static const std::vector<Binding> bindings = {
         {ImGuiMod_Ctrl | ImGuiKey_N, C::NewFile, Global},
         {ImGuiMod_Ctrl | ImGuiKey_O, C::OpenFile, Global},
         {ImGuiMod_Ctrl | ImGuiKey_S, C::Save, Global},
@@ -317,18 +333,28 @@ void MainView::handleShortcuts()
         {ImGuiMod_Ctrl | ImGuiKey_E, C::FocusTerminal, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_U, C::UpperCase, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_U, C::LowerCase, Editing},
-        {ImGuiMod_Ctrl | ImGuiKey_Q, C::ToggleComment, Editing},
+        {ImGuiMod_Ctrl | ImGuiKey_Slash, C::ToggleComment, Editing},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Slash, C::ToggleComment, Editing}, // Ctrl+? (/ with Shift)
         {ImGuiMod_Ctrl | ImGuiKey_F, C::Find, Global},
         {ImGuiMod_Ctrl | ImGuiKey_H, C::Replace, Global},
         {ImGuiKey_F3, C::FindNext, Global},
         {ImGuiMod_Shift | ImGuiKey_F3, C::FindPrevious, Global},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F, C::FindInFiles, Global},
         {ImGuiMod_Ctrl | ImGuiKey_G, C::GoToLine, Global},
+        {ImGuiMod_Ctrl | ImGuiKey_Space, C::TriggerCompletion, Editing},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Space, C::ImplementComment, Editing},
+        {ImGuiKey_F12, C::GoToDefinition, Editing},
+        {ImGuiMod_Alt | ImGuiKey_LeftArrow, C::NavigateBack, Editing},
+        {ImGuiMod_Alt | ImGuiKey_RightArrow, C::NavigateForward, Editing},
         {ImGuiMod_Ctrl | ImGuiKey_F2, C::ToggleBookmark, Global},
         {ImGuiKey_F2, C::NextBookmark, Global},
         {ImGuiMod_Shift | ImGuiKey_F2, C::PreviousBookmark, Global},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_E, C::ToggleExplorer, Global},
         {ImGuiMod_Ctrl | ImGuiKey_J, C::TogglePanel, Always},
+        {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_J, C::ToggleMaximizePanel, Always},
+        {ImGuiMod_Ctrl | ImGuiKey_Backslash, C::ToggleSplitView, Global},
+        {ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_Backslash, C::FocusOtherColumn, Global},
+        {ImGuiKey_F1, C::KeyboardShortcuts, Global},
         {ImGuiMod_Ctrl | ImGuiKey_F1, C::ToggleSlimRibbon, Always},
         {ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_B, C::ToggleLayersMap, Global},
         {ImGuiMod_Ctrl | ImGuiKey_GraveAccent, C::ToggleTerminal, Always},
@@ -348,9 +374,40 @@ void MainView::handleShortcuts()
         {ImGuiMod_Ctrl | ImGuiKey_I, C::AskAgent, Global},
         {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_M, C::ToggleWorkspaceMode, Always},
     };
+    return bindings;
+}
+
+// "Ctrl+Shift+/" rather than ImGui's "Ctrl+Shift+Slash".
+std::string chordLabel(ImGuiKeyChord chord)
+{
+    std::string s;
+    if (chord & ImGuiMod_Ctrl)
+        s += ImGui::GetIO().ConfigMacOSXBehaviors ? "Cmd+" : "Ctrl+";
+    if (chord & ImGuiMod_Shift)
+        s += "Shift+";
+    if (chord & ImGuiMod_Alt)
+        s += ImGui::GetIO().ConfigMacOSXBehaviors ? "Option+" : "Alt+";
+    const ImGuiKey key = ImGuiKey(chord & ~ImGuiMod_Mask_);
+    static const std::pair<ImGuiKey, const char*> symbols[] = {
+        {ImGuiKey_Slash, "/"},          {ImGuiKey_Backslash, "\\"},     {ImGuiKey_GraveAccent, "`"},
+        {ImGuiKey_Equal, "="},          {ImGuiKey_Minus, "-"},          {ImGuiKey_KeypadAdd, "Num +"},
+        {ImGuiKey_KeypadSubtract, "Num -"}, {ImGuiKey_UpArrow, "Up"},   {ImGuiKey_DownArrow, "Down"},
+        {ImGuiKey_LeftArrow, "Left"},   {ImGuiKey_RightArrow, "Right"}, {ImGuiKey_PageUp, "PgUp"},
+        {ImGuiKey_PageDown, "PgDn"},
+    };
+    for (const auto& [k, name] : symbols)
+        if (k == key)
+            return s + name;
+    return s + ImGui::GetKeyName(key);
+}
+
+} // namespace
+
+void MainView::handleShortcuts()
+{
     const bool typing = ImGui::GetIO().WantTextInput;
     const bool terminal = terminalView_.focused();
-    for (const Binding& b : bindings) {
+    for (const Binding& b : keyBindings()) {
         const bool editing = b.scope == Editing || b.scope == EditingRepeat;
         if ((editing && (typing || terminal)) || (b.scope == Global && terminal))
             continue;
@@ -422,7 +479,10 @@ void MainView::renderTopBar()
     if (flatButton("File " ICON_FA_CARET_DOWN, nullptr))
         ImGui::OpenPopup("##fileMenu");
     ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, origin.y + h));
-    if (ImGui::BeginPopup("##fileMenu")) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * s_, 8.0f * s_)); // the ribbon's menus' padding
+    const bool fileMenu = ImGui::BeginPopup("##fileMenu");
+    ImGui::PopStyleVar();
+    if (fileMenu) {
         const CommandId items[] = {CommandId::NewFile, CommandId::OpenFile, CommandId::OpenFolder, CommandId::OpenWorkspace,
                                    CommandId::OpenRecent, CommandId::Save,
                                    CommandId::SaveAs, CommandId::SaveAll, CommandId::CloseFile, CommandId::CloseFolder};
@@ -476,7 +536,8 @@ void MainView::renderTopBar()
     const float tabsX0 = ImGui::GetCursorScreenPos().x + 10.0f * s_;
 
     // Right-aligned: workspace switch, theme, settings, help, version.
-    const char* version = "v" ENP_VERSION;
+    // A build from anything but the release's tag says so: "v1.1.0-dev" (the commit is in the tooltip).
+    const char* version = ENP_RELEASE ? "v" ENP_VERSION : "v" ENP_VERSION "-dev";
     const float modeW = ImGui::CalcTextSize(ICON_FA_ROBOT " Agent").x + ImGui::CalcTextSize(ICON_FA_CODE " Code").x +
                         ImGui::GetStyle().FramePadding.x * 4.0f + 2.0f * s_;
     const float iconW = frameH * 1.1f;
@@ -527,9 +588,14 @@ void MainView::renderTopBar()
         ImGui::OpenPopup("##helpMenu");
     openHelpMenu_ = false;
     registerLastItem("help-menu", "button", "Help", [this]() { openHelpMenu_ = true; });
-    if (ImGui::BeginPopup("##helpMenu")) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * s_, 8.0f * s_));
+    const bool helpMenu = ImGui::BeginPopup("##helpMenu");
+    ImGui::PopStyleVar();
+    if (helpMenu) {
         if (ImGui::MenuItem(ICON_FA_HAND_POINTER "  Take the tour"))
             vm_.execute(CommandId::StartTour);
+        if (ImGui::MenuItem(ICON_FA_KEYBOARD "  Keyboard shortcuts", "F1"))
+            vm_.execute(CommandId::KeyboardShortcuts);
         if (ImGui::MenuItem(ICON_FA_GRADUATION_CAP "  Learn Git"))
             vm_.execute(CommandId::GitGuide);
         if (ImGui::MenuItem(ICON_FA_MICROCHIP "  Local model (offline agent)"))
@@ -544,6 +610,9 @@ void MainView::renderTopBar()
     ImGui::SameLine(0.0f, 8.0f * s_);
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%s", version);
+    ImGui::SetItemTooltip(ENP_RELEASE ? "EasyNotepad " ENP_VERSION_FULL " (release, commit " ENP_COMMIT ")"
+                                      : "EasyNotepad " ENP_VERSION_FULL " (development build)");
+    registerLastItem("version", "text", "EasyNotepad " ENP_VERSION_FULL, nullptr);
 
     // Claim the bar's area with an item: moving the cursor past the content without submitting
     // one is an ImGui error ("SetCursorPos() to extend window boundaries").
@@ -1551,6 +1620,169 @@ void MainView::verticalSplitter(const char* id, float& value, float direction, f
         vm_.settings().markDirty(); // remembered with the layout
 }
 
+namespace {
+
+model::Document* documentWithId(viewmodel::NotepadViewModel& vm, int id, int* index = nullptr)
+{
+    const auto& docs = vm.documents();
+    for (size_t i = 0; i < docs.size(); ++i)
+        if (docs[i]->id == id) {
+            if (index)
+                *index = int(i);
+            return docs[i].get();
+        }
+    return nullptr;
+}
+
+} // namespace
+
+void MainView::focusColumn(int column)
+{
+    if (!editor2_ || column == focusedColumn_)
+        return;
+    const model::Document* active = vm_.activeDocument();
+    int index = -1;
+    documentWithId(vm_, otherDocument_, &index);
+    otherDocument_ = active ? active->id : -1;
+    focusedColumn_ = column;
+    if (index >= 0)
+        vm_.activate(index);
+    focusedEditor().focus();
+}
+
+void MainView::closeColumn(int column)
+{
+    if (column == focusedColumn_) { // the other column's document stays
+        int index = -1;
+        documentWithId(vm_, otherDocument_, &index);
+        if (index >= 0)
+            vm_.activate(index);
+    }
+    vm_.splitView.set(false); // the second view goes on the next frame (it may be drawing now)
+}
+
+void MainView::renderEditors(ImVec2 size)
+{
+    // Each column is a child window of its own: the two views' windows and items get separate IDs,
+    // and a click anywhere in the column without the keyboard is seen here.
+    const ImGuiWindowFlags columnFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground;
+    const bool split = vm_.splitView.get() && layout_ == Layout::Desktop && !vm_.documents().empty();
+    if (!split) {
+        if (editor2_) { // joined: the second column and its caches go
+            editor2_.reset();
+            vm_.requestMemoryTrim(); // released outside the close path (docs/MEMORY.md rule 9)
+            if (focusedColumn_ == 1)
+                editor_.focus();
+            focusedColumn_ = 0;
+            otherDocument_ = -1;
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::BeginChild("##column0", size, ImGuiChildFlags_None, columnFlags);
+        ImGui::PopStyleVar();
+        editor_.render(ImGui::GetContentRegionAvail());
+        ImGui::EndChild();
+        return;
+    }
+    if (!editor2_) {
+        editor2_ = std::make_unique<EditorView>(vm_, fonts_, palette_, s_);
+        editor2_->setEmoji(&emoji_);
+        focusedColumn_ = 0;
+        // The second column starts on the next document (the same one when there is only one).
+        const auto& docs = vm_.documents();
+        const int n = int(docs.size());
+        otherDocument_ = docs[size_t((std::max(0, vm_.activeIndex.get()) + 1) % n)]->id;
+    }
+    model::Document* active = vm_.activeDocument();
+    model::Document* other = documentWithId(vm_, otherDocument_);
+    if (!other) { // closed: the active document in both
+        other = active;
+        otherDocument_ = active ? active->id : -1;
+    }
+    // The layout values are one set: the column with the keyboard may change them.
+    EditorView& second = *editor2_;
+    second.sideBarWidth() = editor_.sideBarWidth();
+    second.markdownColumn() = editor_.markdownColumn();
+    second.blameColumns() = editor_.blameColumns();
+
+    const float gap = kGap * s_;
+    const float avail = std::max(2.0f, size.x - gap);
+    const float minW = std::min(avail * 0.5f, 220.0f * s_);
+    float firstW = std::clamp(std::round(avail * splitRatio_), minW, avail - minW);
+    int clicked = -1;
+    for (int c = 0; c < 2; ++c) {
+        if (c == 1) {
+            ImGui::SameLine(0.0f, 0.0f);
+            verticalSplitter("##columnSplit", firstW, 1.0f, size.y, minW, avail - minW);
+            splitRatio_ = firstW / avail;
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                splitRatio_ = 0.5f; // halves again
+                vm_.settings().markDirty();
+            }
+            ImGui::SetItemTooltip("Drag to resize the columns; double-click for halves");
+            ImGui::SameLine(0.0f, 0.0f);
+        }
+        EditorView& view = c == 0 ? editor_ : second;
+        const bool focused = c == focusedColumn_;
+        model::Document* doc = focused ? active : other;
+        const float w = c == 0 ? firstW : avail - firstW;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::BeginChild(c == 0 ? "##column0" : "##column1", ImVec2(w, size.y), ImGuiChildFlags_None, columnFlags);
+        ImGui::PopStyleVar();
+
+        // Header: the document's name; the column with the keyboard is marked with the accent.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float frameH = ImGui::GetFrameHeight();
+        const float headerH = frameH + 4.0f * s_;
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + headerH), focused ? palette_.editorBg : palette_.panelBg);
+        dl->AddLine(ImVec2(p.x, p.y + headerH - 1.0f), ImVec2(p.x + w, p.y + headerH - 1.0f), palette_.border);
+        if (focused)
+            dl->AddRectFilled(p, ImVec2(p.x + w, p.y + 2.0f * s_), palette_.accent);
+        if (doc) {
+            ImGui::SetCursorScreenPos(ImVec2(p.x + 10.0f * s_, p.y + (headerH - frameH) * 0.5f));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(col(focused ? palette_.accent : palette_.textDim), "%s", fileIcon(doc->title));
+            ImGui::SameLine(0.0f, 6.0f * s_);
+            ImGui::TextColored(col(focused ? palette_.text : palette_.textDim), "%s%s", doc->title.c_str(), doc->modified ? "  \xe2\x97\x8f" : "");
+        }
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w - frameH - 6.0f * s_, p.y + (headerH - frameH) * 0.5f));
+        bool closing = false;
+        if (flatIconButton(ICON_FA_XMARK "##closeColumn", "Close this column", frameH)) {
+            closeColumn(c);
+            closing = true; // not also a click that moves the keyboard here
+        }
+        registerLastItem(c == 0 ? "column:0:close" : "column:1:close", "button", "Close this column", [this, c]() { closeColumn(c); });
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + headerH));
+        ImGui::Dummy(ImVec2(w, 0.0f));
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + headerH));
+
+        const ImVec2 body = ImGui::GetContentRegionAvail();
+        if (focused) {
+            view.render(body);
+        } else { // to look at and scroll; its buttons wait for the column to have the keyboard
+            ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 1.0f);
+            ImGui::BeginDisabled();
+            view.render(body, doc);
+            ImGui::EndDisabled();
+            ImGui::PopStyleVar();
+            if (!closing && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+                (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+                 ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
+                clicked = c;
+        }
+        UiAutomation::instance().add({c == 0 ? "column:0" : "column:1", "panel", doc ? doc->title : std::string("Column"), p,
+                                      ImVec2(p.x + w, p.y + size.y), true, [this, c]() { focusColumn(c); }});
+        ImGui::EndChild();
+    }
+    if (focusedColumn_ == 1) { // the second view's changes are the layout's
+        editor_.sideBarWidth() = second.sideBarWidth();
+        editor_.markdownColumn() = second.markdownColumn();
+        editor_.blameColumns() = second.blameColumns();
+    }
+    if (clicked >= 0)
+        focusColumn(clicked);
+}
+
 void MainView::horizontalSplitter(const char* id, float& value, float width, float minValue, float maxValue)
 {
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1595,10 +1827,11 @@ void MainView::renderCodeWorkspace()
     const float sideW = side ? agentSideWidth_ + gap : 0.0f;
     const float editorW = std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - sideW);
     beginPanel("##editorPanel", nullptr, ImVec2(editorW, topH));
-    if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
+    if (vm_.editorMode.get() == viewmodel::EditorMode::Map) {
         map_.render(ImGui::GetContentRegionAvail());
-    else
-        editor_.render(ImGui::GetContentRegionAvail());
+    } else {
+        renderEditors(ImGui::GetContentRegionAvail());
+    }
     endPanel();
     if (side) {
         ImGui::SameLine(0.0f, 0.0f);
@@ -1896,7 +2129,7 @@ void MainView::renderPreview(ImVec2 size)
     else if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
         map_.render(rest);
     else
-        editor_.render(rest);
+        renderEditors(rest);
 }
 
 bool MainView::explorerVisible(const viewmodel::ExplorerItem& item)
@@ -2513,16 +2746,21 @@ void MainView::renderStatusBar()
                 std::snprintf(t, sizeof(t), bytes >= (100ull << 20) ? "%.0fM" : "%.1fM", double(bytes) / double(1 << 20));
                 return std::string(t);
             };
-            resourceText_ = std::string(ICON_FA_MEMORY " ") + mb(p.privateBytes) + "  " ICON_FA_CUBES " " + mb(heap.liveBytes);
-            char tip[512];
+            // Everything the process holds: its private memory and the shared memory it wrote.
+            resourceText_ = std::string(ICON_FA_MEMORY " ") + mb(p.privateBytes + p.sharedBytes) + "  " ICON_FA_CUBES " " + mb(heap.liveBytes);
+            char tip[768];
             std::snprintf(tip, sizeof(tip),
                           "Process memory (developer mode, every second)\n\n"
-                          "Private memory: %llu KB\nResident: %llu KB\nC++ heap: %llu KB in %llu blocks\n"
+                          "Private memory: %llu KB\nShared memory: %llu KB\nResident: %llu KB\nC++ heap: %llu KB in %llu blocks\n"
+                          "malloc: %llu KB in use, %llu KB held\nGraphics: %llu KB\nCompressed: %llu KB\n"
                           "Handles: %d\nGDI objects: %d\nUSER objects: %d\nThreads: %d\n"
                           "ImGui: %d allocations, %d windows\n\n"
                           "A number that climbs while the app is idle points at a leak.",
-                          static_cast<unsigned long long>(p.privateBytes >> 10), static_cast<unsigned long long>(p.residentBytes >> 10),
+                          static_cast<unsigned long long>(p.privateBytes >> 10), static_cast<unsigned long long>(p.sharedBytes >> 10),
+                          static_cast<unsigned long long>(p.residentBytes >> 10),
                           static_cast<unsigned long long>(heap.liveBytes >> 10), static_cast<unsigned long long>(heap.liveBlocks),
+                          static_cast<unsigned long long>(p.mallocInUseBytes >> 10), static_cast<unsigned long long>(p.mallocHeldBytes >> 10),
+                          static_cast<unsigned long long>(p.graphicsBytes >> 10), static_cast<unsigned long long>(p.compressedBytes >> 10),
                           p.handles, p.gdiObjects, p.userObjects, p.threads,
                           g.DebugAllocInfo.TotalAllocCount - g.DebugAllocInfo.TotalFreeCount, g.Windows.Size);
             resourceTip_ = tip;
@@ -2701,7 +2939,7 @@ void MainView::renderGoToLinePopup()
     goToLine_ = std::clamp(goToLine_, 1, lines);
     if (ImGui::Button("Go", ImVec2(96.0f * s_, 0.0f)) || enter) {
         vm_.goToLine(goToLine_ - 1);
-        editor_.focus();
+        focusedEditor().focus();
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
@@ -2821,9 +3059,150 @@ void MainView::renderPreferencesPopup()
         vm_.workspace.set(WorkspaceMode::Code);
     if (ImGui::Button(ICON_FA_PALETTE "  Syntax colours..."))
         openSyntaxColors_ = true;
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_SLIDERS "  IntelliSense..."))
+        openIntellisenseSettings_ = true;
+    ImGui::SetItemTooltip("Suggestions, the model that writes code from comments (local or online), C/C++ standards and include folders");
     ImGui::Spacing();
     ImGui::TextDisabled(vm_.settingsPath().empty() ? "Settings last for this session." : "Settings are saved automatically.");
     if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+void MainView::renderIntellisenseSettingsPopup()
+{
+    viewmodel::IntellisenseViewModel& is = vm_.intellisense();
+    viewmodel::CodeAssistant& assistant = vm_.codeAssistant();
+    if (openIntellisenseSettings_) {
+        ImGui::OpenPopup("IntelliSense Settings");
+        openIntellisenseSettings_ = false;
+        editClaudeModel_ = assistant.claudeModel.get();
+        editCommand_ = assistant.command.get();
+        editIncludeFolders_ = is.includeFolders.get();
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    bool open = true;
+    fit::constrainNextWindow();
+    if (!ImGui::BeginPopupModal("IntelliSense Settings", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (!editCommand_.empty() || !editClaudeModel_.empty() || !editIncludeFolders_.empty()) { // closed: the fields go
+            os::mem::release(editClaudeModel_);
+            os::mem::release(editCommand_);
+            os::mem::release(editIncludeFolders_);
+        }
+        return;
+    }
+    bool close = registerWindowClose("dialog:intellisense:close", "Close IntelliSense Settings");
+    auto toggle = [](const char* label, viewmodel::Property<bool>& property) {
+        bool value = property.get();
+        if (ImGui::Checkbox(label, &value))
+            property.set(value);
+    };
+    const float fieldW = 300.0f * s_;
+    // Help text at a fixed width: in a window that sizes itself, TextWrapped would wrap at the
+    // window's own (narrow) width and make it very tall.
+    auto help = [this](const char* text) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(460.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 80.0f * s_));
+        ImGui::TextDisabled("%s", text);
+        ImGui::PopTextWrapPos();
+    };
+
+    ImGui::TextDisabled("SUGGESTIONS");
+    toggle("Suggest names while typing", is.autoComplete);
+    ImGui::SetItemTooltip("After two letters, \".\", \"->\" or \"::\". Ctrl+Space shows them anyway.");
+    toggle("Code suggestions from comments", is.aiSuggestions);
+    ImGui::SetItemTooltip("Write a comment saying what the code should do, then press Enter and wait a moment, or press "
+                          "Ctrl+Shift+Space. The model below writes the code; Enter or Tab inserts it, Esc stops it.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("THE MODEL THAT WRITES CODE");
+    {
+        const char* const labels[] = {viewmodel::CodeAssistant::sourceName(viewmodel::CodeAssistant::Source::Local),
+                                      viewmodel::CodeAssistant::sourceName(viewmodel::CodeAssistant::Source::Claude),
+                                      viewmodel::CodeAssistant::sourceName(viewmodel::CodeAssistant::Source::Command)};
+        int source = std::clamp(assistant.source.get(), 0, 2);
+        ImGui::SetNextItemWidth(fieldW);
+        if (ImGui::Combo("Model##codeModel", &source, labels, 3))
+            assistant.source.set(source);
+        switch (viewmodel::CodeAssistant::Source(source)) {
+        case viewmodel::CodeAssistant::Source::Local:
+            help("Runs on this device, offline. The same model as the agent's local answers.");
+            if (ImGui::Button(ICON_FA_MICROCHIP "  Local model set-up..."))
+                vm_.execute(CommandId::LocalModel);
+            break;
+        case viewmodel::CodeAssistant::Source::Claude:
+            ImGui::SetNextItemWidth(fieldW);
+            if (ImGui::InputTextWithHint("Claude model##claudeModel", "haiku, sonnet, opus (empty: Claude Code's own)", &editClaudeModel_))
+                assistant.claudeModel.set(editClaudeModel_);
+            help("Online, through Claude Code (set up in the Agent panel). The comment, the code around it and the "
+                                     "declarations it uses are sent with each request.");
+            break;
+        case viewmodel::CodeAssistant::Source::Command:
+            ImGui::SetNextItemWidth(fieldW);
+            if (ImGui::InputTextWithHint("Command##codeCommand", "ollama run qwen2.5-coder:7b", &editCommand_))
+                assistant.command.set(editCommand_);
+            help("Any program, local or online: it gets the prompt on its standard input and prints the code "
+                                     "(e.g. ollama run ..., llm -m ..., a script calling an API). It runs in the workspace folder.");
+            break;
+        }
+        std::string why;
+        const bool ready = assistant.ready(&why);
+        if (ready)
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconGreen), ICON_FA_CIRCLE_CHECK "  Ready");
+        else
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityWarning), ICON_FA_TRIANGLE_EXCLAMATION "  Not ready: %s", why.c_str());
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("C AND C++");
+    auto standardCombo = [&](const char* label, viewmodel::Property<int>& property, bool c) {
+        size_t count = 0;
+        const int* years = c ? model::cStandards(count) : model::cppStandards(count);
+        // "From the project (C++20, CMakeLists.txt)" while it is in use; plain when another is chosen.
+        char automatic[96];
+        if (property.get() == 0)
+            std::snprintf(automatic, sizeof(automatic), "From the project (%s, %s)",
+                          model::standardName(c ? is.cStandardInUse() : is.cppStandardInUse(), c), is.standardSource(c).c_str());
+        else
+            std::snprintf(automatic, sizeof(automatic), "From the project");
+        ImGui::SetNextItemWidth(fieldW);
+        if (ImGui::BeginCombo(label, property.get() ? model::standardName(property.get(), c) : automatic)) {
+            if (ImGui::Selectable(automatic, property.get() == 0))
+                property.set(0);
+            for (size_t i = 0; i < count; ++i)
+                if (ImGui::Selectable(model::standardName(years[i], c), property.get() == years[i]))
+                    property.set(years[i]);
+            ImGui::EndCombo();
+        }
+    };
+    standardCombo("C++ standard", is.cppStandard, false);
+    ImGui::SetItemTooltip("Which library names and keywords are suggested in C++ files. From the project: CMAKE_CXX_STANDARD, "
+                          "cxx_std_NN or -std=c++NN in CMakeLists.txt, meson.build or a Makefile; else C++17.");
+    standardCombo("C standard", is.cStandard, true);
+    ImGui::SetItemTooltip("The same for .c files (CMAKE_C_STANDARD, c_std_NN, -std=cNN; else C17).");
+    ImGui::SetNextItemWidth(fieldW);
+    if (ImGui::InputTextWithHint("Include folders", "include;src;third_party/lib/include", &editIncludeFolders_))
+        is.includeFolders.set(editIncludeFolders_);
+    ImGui::SetItemTooltip("Workspace folders, separated by ';', where #include looks for headers (after the file's own "
+                          "folder; include/ and src/ are always tried). The names of included headers are suggested first, "
+                          "and a name from a header that is not included says which #include it needs.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("INDEX");
+    if (is.indexing.get())
+        ImGui::TextUnformatted("Reading the workspace...");
+    else if (is.indexReady())
+        ImGui::Text("%zu names from %zu files", is.index().size(), is.index().fileCount());
+    else
+        ImGui::TextDisabled("Read on first use");
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_ROTATE "  Rebuild"))
+        vm_.execute(CommandId::RebuildSymbolIndex);
+
+    ImGui::Spacing();
+    if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        close = true;
+    if (close)
         ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
@@ -3045,7 +3424,7 @@ void MainView::renderAboutPopup()
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(460.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 60.0f * s_));
     ImGui::TextColored(col(palette_.accent), ICON_FA_PEN_TO_SQUARE);
     ImGui::SameLine();
-    ImGui::Text("EasyNotepad %s", ENP_VERSION);
+    ImGui::Text("EasyNotepad %s", ENP_VERSION_FULL);
     // Seven taps on the version turn on developer mode (as on Android): nothing shows until then.
     if (ImGui::IsItemClicked() && !vm_.developerMode.get()) {
         if (++versionTaps_ >= 7) {
@@ -3055,10 +3434,15 @@ void MainView::renderAboutPopup()
             vm_.statusText.set(std::to_string(7 - versionTaps_) + " more taps to turn on developer mode.");
         }
     }
-    registerLastItem("dialog:about:version", "text", std::string("EasyNotepad ") + ENP_VERSION, [this]() {
+    registerLastItem("dialog:about:version", "text", std::string("EasyNotepad ") + ENP_VERSION_FULL, [this]() {
         if (++versionTaps_ >= 7)
             vm_.developerMode.set(true);
     });
+    ImGui::TextDisabled(ENP_RELEASE ? "Release %s, commit %s" : "Development build of %s, commit %s", ENP_VERSION, ENP_COMMIT);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_COPY " Copy")) // for a bug report: the build, the system
+        ImGui::SetClipboardText((std::string("EasyNotepad ") + ENP_VERSION_FULL + " (" + os::osName() + " " + os::archName() + ")").c_str());
+    registerLastItem("dialog:about:copy-version", "button", "Copy the version", nullptr);
     ImGui::TextDisabled("Native text editor with Agent and Code workspaces.");
     ImGui::Separator();
     ImGui::Text("Platform: %s %s", os::osName(), os::archName());
@@ -3066,7 +3450,6 @@ void MainView::renderAboutPopup()
     if (!rendererInfo_.empty())
         ImGui::TextWrapped("Renderer: %s", rendererInfo_.c_str());
     ImGui::Spacing();
-    ImGui::TextDisabled("UI preview build: running on dummy data, no services connected.");
     if (vm_.developerMode.get()) {
         ImGui::Spacing();
         ImGui::TextColored(col(palette_.accent), ICON_FA_FLASK "  Developer mode is on.");
@@ -3084,6 +3467,91 @@ void MainView::renderAboutPopup()
     }
     ImGui::PopTextWrapPos();
     if (ImGui::Button("OK", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+void MainView::renderShortcutsDialog()
+{
+    auto lower = [](std::string s) {
+        for (char& c : s)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    if (openShortcuts_) {
+        ImGui::OpenPopup("Keyboard Shortcuts");
+        openShortcuts_ = false;
+        os::mem::release(shortcutsFilter_);
+        os::mem::release(shortcutsNeedle_);
+        // One row per command, its keys together (Redo: Ctrl+Y, Ctrl+Shift+Z), in the table's
+        // order; then what the mouse does.
+        os::mem::release(shortcutRows_);
+        std::vector<CommandId> seen;
+        for (const Binding& b : keyBindings()) {
+            auto it = std::find(seen.begin(), seen.end(), b.id);
+            if (it != seen.end()) {
+                shortcutRows_[size_t(it - seen.begin())].keys += ",  " + chordLabel(b.chord);
+                continue;
+            }
+            seen.push_back(b.id);
+            shortcutRows_.push_back({chordLabel(b.chord), {}, commandInfo(b.id).label, commandInfo(b.id).tooltip});
+        }
+        shortcutRows_.push_back({"Ctrl+Click", {}, "Definition", "Go to where the name under the mouse is declared"});
+        shortcutRows_.push_back({"Shift+Alt+Drag", {}, "Column Select", "Select a box of text, one caret per line (or drag with the middle button)"});
+        shortcutRows_.push_back({"Double-click", {}, "Edit Markdown", "In rendered Markdown: edit the text at that place"});
+        for (ShortcutRow& row : shortcutRows_)
+            row.search = lower(row.keys + '\n' + row.command + '\n' + row.what);
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(760.0f * s_, 580.0f * s_)), ImGuiCond_Appearing);
+    bool open = true;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * s_, 12.0f * s_));
+    const bool shown = ImGui::BeginPopupModal("Keyboard Shortcuts", &open);
+    ImGui::PopStyleVar();
+    if (!shown) {
+        if (shortcutRows_.capacity() > 0) { // closed: what it held goes
+            os::mem::release(shortcutRows_);
+            os::mem::release(shortcutsFilter_);
+            os::mem::release(shortcutsNeedle_);
+        }
+        return;
+    }
+    if (registerWindowClose("dialog:shortcuts:close", "Close Keyboard Shortcuts"))
+        ImGui::CloseCurrentPopup();
+    if (ImGui::IsWindowAppearing())
+        ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::InputTextWithHint("##filter", ICON_FA_MAGNIFYING_GLASS "  Key or command", &shortcutsFilter_))
+        shortcutsNeedle_ = lower(shortcutsFilter_);
+    registerLastItem("dialog:shortcuts:filter", "textbox", "Filter shortcuts", nullptr);
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                  ImGuiTableFlags_SizingStretchProp;
+    const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+    if (ImGui::BeginTable("##shortcuts", 3, flags, ImVec2(0.0f, -footer))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, 200.0f * s_);
+        ImGui::TableSetupColumn("Command", ImGuiTableColumnFlags_WidthFixed, 120.0f * s_);
+        ImGui::TableSetupColumn("What it does", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const ShortcutRow& row : shortcutRows_) {
+            if (!shortcutsNeedle_.empty() && row.search.find(shortcutsNeedle_) == std::string::npos)
+                continue;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::PushStyleColor(ImGuiCol_Text, col(palette_.accent));
+            ImGui::TextWrapped("%s", row.keys.c_str()); // several keys for one command wrap within the column
+            ImGui::PopStyleColor();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(row.command);
+            ImGui::TableNextColumn();
+            ImGui::PushStyleColor(ImGuiCol_Text, col(palette_.textDim));
+            ImGui::TextWrapped("%s", row.what);
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
         ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }

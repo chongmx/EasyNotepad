@@ -5,6 +5,7 @@
 #   include "GlfwWindowFrame.h"
 #endif
 
+#include "enp/Version.h" // generated from the VERSION file (cmake/Version.cmake)
 #include "enp/os/Dispatch.h"
 #include "enp/os/Memory.h"
 #include "enp/services/debug/MemoryTrace.h"
@@ -13,6 +14,7 @@
 #include "FrameCapture.h"
 
 #include "imgui.h"
+#include "imgui_internal.h" // the input queue: whether anything arrived while the window was covered
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
@@ -30,11 +32,14 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -71,6 +76,7 @@ void mainLoopStep(void* arg)
     // of frames so ImGui settles, then sleeps again.
     static double lastInput = 0.0;
     static int settleFrames = 3;
+    static bool unshown = false; // the last frame was built while the window was covered, not presented
     const ImGuiIO& io = ImGui::GetIO();
     bool input = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || io.MouseWheel != 0.0f ||
                  io.MouseWheelH != 0.0f || io.InputQueueCharacters.Size > 0 || ImGui::IsAnyItemActive();
@@ -90,11 +96,23 @@ void mainLoopStep(void* arg)
         lastFrame = glfwGetTime();
         settleFrames = std::max(0, settleFrames - 1);
     } else {
-        // Idle: sleep until input or posted work, waking only for the caret blink if it is on.
-        if (state->app->blinkCaret())
+        // Idle: sleep until input or posted work, waking only for the caret blink if it is on and
+        // the window has the keyboard (no caret blinks in a window behind others). A frame presented
+        // to a window that cannot be seen is kept by the driver until the window shows again (the
+        // NVIDIA OpenGL driver: about 300 KB a frame; two blinks a second behind a browser grew the
+        // app by 2 GB an hour).
+        if (unshown) {
+            // Covered with a frame not shown: look twice a second, and build a frame only when part of
+            // the window shows again or something new arrives (input, posted work).
             glfwWaitEventsTimeout(0.5);
-        else
+            if (!enp::os::dispatch::hasPending() && ImGui::GetCurrentContext()->InputEventsQueue.Size == 0 &&
+                state->frame && state->frame->covered())
+                return;
+        } else if (state->app->blinkCaret() && glfwGetWindowAttrib(state->window, GLFW_FOCUSED)) {
+            glfwWaitEventsTimeout(0.5);
+        } else {
             glfwWaitEvents();
+        }
         settleFrames = 2;
     }
 #endif
@@ -118,7 +136,14 @@ void mainLoopStep(void* arg)
     int width = 0, height = 0;
     glfwGetFramebufferSize(state->window, &width, &height);
     const ImVec4 clear = state->app->clearColor();
-    if (!minimized) {
+#if !defined(__EMSCRIPTEN__)
+    // Covered by other windows: the frame is built (posted work, state) but not drawn or presented.
+    const bool covered = !minimized && state->frame && state->frame->covered();
+#else
+    const bool covered = false;
+#endif
+    if (!minimized && !covered) {
+        enp::os::mem::Scope scope("gl-driver"); // a clear may compile a shader too
         glViewport(0, 0, width, height);
         glClearColor(clear.x, clear.y, clear.z, clear.w);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -127,7 +152,11 @@ void mainLoopStep(void* arg)
     if (state->app->captureWanted()) { // a screenshot asked for through the automation endpoint
         std::vector<unsigned char> rgba;
         std::string failure;
-        const bool ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        bool ok = false;
+        {
+            enp::os::mem::Scope scope("gl-driver"); // the driver's part; the pixels are released below
+            ok = enp::app::captureFrame(ImGui::GetDrawData(), clear, width, height, rgba, &failure);
+        }
         state->app->deliverCapture(ok, width, height, rgba, failure);
         glViewport(0, 0, width, height);
     }
@@ -138,12 +167,19 @@ void mainLoopStep(void* arg)
 #if !defined(__EMSCRIPTEN__)
     if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
         GLFWwindow* context = glfwGetCurrentContext();
+        enp::os::mem::Scope scope("gl-driver"); // windows of popped-out panels: their contexts and draws
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
         glfwMakeContextCurrent(context);
     }
 #endif
-    glfwSwapBuffers(state->window);
+#if !defined(__EMSCRIPTEN__)
+    unshown = covered;
+#endif
+    if (!covered) {
+        enp::os::mem::Scope scope("gl-driver");
+        glfwSwapBuffers(state->window);
+    }
     state->app->endFrame();
 #if !defined(__EMSCRIPTEN__)
     static int framesShown = 0;
@@ -155,6 +191,68 @@ void mainLoopStep(void* arg)
         glfwSetWindowShouldClose(state->window, GLFW_TRUE);
 }
 
+#if !defined(__EMSCRIPTEN__)
+// --headless: the app without a window or OpenGL, for machines that have neither (CI runners;
+// macOS virtual machines have no GPU, and GLFW asks for an accelerated OpenGL context). The same
+// application, frames, automation connector and memory; nothing is drawn, and textures count as
+// uploaded. For tests such as scripts/memory_cycle.py; the GPU driver's memory is not part of it.
+int runHeadless()
+{
+    IMGUI_CHECKVERSION();
+    ImGui::SetAllocatorFunctions(
+        [](size_t size, void*) -> void* {
+            enp::os::mem::Scope scope("imgui");
+            return ::operator new(size);
+        },
+        [](void* p, void*) { ::operator delete(p); });
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1440.0f, 900.0f);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+    std::unique_ptr<enp::app::Application> app;
+    {
+        enp::os::mem::Scope scope("app");
+        app = std::make_unique<enp::app::Application>();
+    }
+    {
+        enp::os::mem::Scope scope("views");
+        app->attachUi(1.0f, "headless (no window, no OpenGL)", nullptr);
+    }
+    app->openInitialDocuments();
+    std::fprintf(stderr, "EasyNotepad: running headless\n");
+    auto last = std::chrono::steady_clock::now();
+    while (!app->quitRequested()) {
+        // About 30 frames a second: requests from the automation connector are handled each frame.
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        const auto now = std::chrono::steady_clock::now();
+        io.DeltaTime = std::max(1e-4f, std::chrono::duration<float>(now - last).count());
+        last = now;
+        ImGui::NewFrame();
+        app->frame();
+        ImGui::Render();
+        // No renderer: texture requests are acknowledged as done (as the UI tests do).
+        for (ImTextureData* tex : ImGui::GetPlatformIO().Textures) {
+            if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
+                tex->SetTexID(ImTextureID(1));
+                tex->SetStatus(ImTextureStatus_OK);
+            } else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames > 0) {
+                tex->SetTexID(ImTextureID_Invalid);
+                tex->SetStatus(ImTextureStatus_Destroyed);
+            }
+        }
+        if (app->captureWanted()) {
+            std::vector<unsigned char> none;
+            app->deliverCapture(false, 0, 0, none, "no window to capture in --headless mode");
+        }
+        app->endFrame();
+    }
+    app.reset();
+    ImGui::DestroyContext();
+    enp::os::shutdown();
+    return 0;
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -163,16 +261,21 @@ int main(int argc, char** argv)
     enp::os::InitParams params;
     params.argc = argc;
     params.argv = argv;
-    if (!enp::os::init(params))
+    if (!enp::os::init(params)) {
+        std::fprintf(stderr, "EasyNotepad: the platform layer could not start\n");
         return 1;
+    }
 #if !defined(__EMSCRIPTEN__)
     // MCP connector mode: no window, JSON-RPC over stdio to the running app.
     for (int i = 1; i < argc; ++i)
         if (std::strcmp(argv[i], "--mcp") == 0) {
-            const int code = enp::app::runMcpBridge(ENP_VERSION);
+            const int code = enp::app::runMcpBridge(ENP_VERSION_FULL);
             enp::os::shutdown();
             return code;
         }
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--headless") == 0)
+            return runHeadless();
 #endif
 
 #if ENP_GLFW_HAS_PLATFORM && !defined(_WIN32) && !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -181,8 +284,15 @@ int main(int argc, char** argv)
     if (std::getenv("DISPLAY") && glfwPlatformSupported(GLFW_PLATFORM_X11))
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
 #endif
-    if (!glfwInit())
+    // Why a window or GL context cannot be had (no display, no GPU, a driver without OpenGL 3.2)
+    // is GLFW's to say: printed, so a start that fails is never silent.
+    glfwSetErrorCallback([](int code, const char* description) {
+        std::fprintf(stderr, "EasyNotepad: GLFW error 0x%X: %s\n", unsigned(code), description ? description : "");
+    });
+    if (!glfwInit()) {
+        std::fprintf(stderr, "EasyNotepad: GLFW could not start (no display?)\n");
         return 1;
+    }
 #if !defined(__EMSCRIPTEN__)
     // Background work (terminal output, agent answers) wakes the idle loop.
     enp::os::dispatch::setWakeCallback([] { glfwPostEmptyEvent(); });
@@ -236,8 +346,13 @@ int main(int argc, char** argv)
                 height = int(float(h) * scale);
             }
         }
+    // The GL driver's own C++ allocations (Mesa's LLVM registers itself when the driver library
+    // loads; shaders are compiled on first draws) are counted as "gl-driver", not "other"
+    // (docs/MEMORY.md section 2).
+    std::optional<enp::os::mem::Scope> driverScope(std::in_place, "gl-driver");
     GLFWwindow* window = glfwCreateWindow(width, height, "EasyNotepad", nullptr, nullptr);
     if (!window) {
+        std::fprintf(stderr, "EasyNotepad: no window with an OpenGL %s context could be created\n", glslVersion);
         glfwTerminate();
         return 1;
     }
@@ -249,9 +364,12 @@ int main(int argc, char** argv)
     glfwSwapInterval(1);
 
 #if !defined(__EMSCRIPTEN__)
-    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)))
+    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
+        std::fprintf(stderr, "EasyNotepad: the OpenGL functions could not be loaded\n");
         return 1;
+    }
 #endif
+    driverScope.reset();
 
     IMGUI_CHECKVERSION();
     ImGui::SetAllocatorFunctions(
@@ -276,7 +394,10 @@ int main(int argc, char** argv)
 #if defined(__EMSCRIPTEN__)
     ImGui_ImplGlfw_InstallEmscriptenCallbacks(window, "#canvas");
 #endif
-    ImGui_ImplOpenGL3_Init(glslVersion);
+    {
+        enp::os::mem::Scope scope("gl-driver");
+        ImGui_ImplOpenGL3_Init(glslVersion);
+    }
 
     // Owned by a static so it survives main() returning under emscripten_set_main_loop.
     static std::unique_ptr<AppState> stateOwner = std::make_unique<AppState>();
@@ -288,10 +409,18 @@ int main(int argc, char** argv)
     state->frame = std::make_unique<enp::app::GlfwWindowFrame>(window, customTitleBar);
     frame = state->frame.get();
 #endif
-    state->app = std::make_unique<enp::app::Application>();
+    {
+        // The view-model, its services, commands and settings: named, not "other" (subsystems
+        // that have their own scope keep it inside this one).
+        enp::os::mem::Scope scope("app");
+        state->app = std::make_unique<enp::app::Application>();
+    }
     const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
-    state->app->attachUi(scale, std::string(renderer ? renderer : "?") + " / " + (version ? version : "?"), frame);
+    {
+        enp::os::mem::Scope scope("views"); // the views are built here
+        state->app->attachUi(scale, std::string(renderer ? renderer : "?") + " / " + (version ? version : "?"), frame);
+    }
     state->app->openInitialDocuments();
     // --safe-area=left,top,right,bottom (in dp): pretend the system covers those edges, as a phone's
     // bars, notch and keyboard do.

@@ -241,7 +241,10 @@ void GitViewModel::tick(double now)
         return;
     // After a save or an action, soon; while a git view is on screen, every few seconds (another
     // program, or the terminal, may have changed things).
-    if ((refreshWanted_ && now - lastRefresh_ > 0.3) || (visible_ && now - lastRefresh_ > 3.0))
+    // Set once a git view was shown, `visible_` stayed set: git ran every 3 s for as long as the
+    // app ran. A view on screen marks every frame it is drawn in.
+    const bool visible = visibleAt_ >= 0.0 && now - visibleAt_ < 2.0;
+    if ((refreshWanted_ && now - lastRefresh_ > 0.3) || (visible && now - lastRefresh_ > 3.0))
         refresh();
 }
 

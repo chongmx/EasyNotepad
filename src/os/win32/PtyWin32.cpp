@@ -2,6 +2,7 @@
 // without it (pty::supported() then returns false).
 #include "enp/os/Pty.h"
 
+#include "enp/os/Dispatch.h"
 #include "enp/os/Fs.h"
 
 #ifndef NOMINMAX
@@ -82,19 +83,18 @@ COORD coord(int columns, int rows)
     return COORD{SHORT(columns > 0 ? columns : 80), SHORT(rows > 0 ? rows : 24)};
 }
 
-// Threads: `reader_` forwards output until the pipe closes; `waiter_` waits for the process to exit,
-// closes the pseudo console (which ends the output pipe once drained), joins the reader and reports
-// the exit. The pseudo console is closed exactly once, by whoever exchanges `console_` first.
+// Pool threads (kept, see dispatch::runAsync): `reader_` forwards output until the pipe closes;
+// `waiter_` waits for the process to exit, closes the pseudo console (which ends the output pipe
+// once drained), waits for the reader and reports the exit. The pseudo console is closed exactly
+// once, by whoever exchanges `console_` first.
 class ConPtyProcess final : public Process {
 public:
     ~ConPtyProcess() override
     {
         terminate();
-        if (waiter_.joinable())
-            waiter_.join();
+        waiter_.wait();
         closeConsole();
-        if (reader_.joinable())
-            reader_.join();
+        reader_.wait();
         closeHandle(input_);
         closeHandle(output_);
         closeHandle(process_);
@@ -157,20 +157,20 @@ public:
         process_ = info.hProcess;
         waitCancel_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
-        reader_ = std::thread([this, onOutput = std::move(onOutput)]() {
+        reader_.run([this, onOutput = std::move(onOutput)]() {
             char buffer[8192];
             DWORD read = 0;
             while (ReadFile(output_, buffer, sizeof(buffer), &read, nullptr) && read > 0)
                 onOutput(std::string(buffer, read));
         });
-        waiter_ = std::thread([this, onExit = std::move(onExit)]() {
+        waiter_.run([this, onExit = std::move(onExit)]() {
             HANDLE handles[] = {process_, waitCancel_};
             if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) != WAIT_OBJECT_0)
                 return; // cancelled by the destructor
             DWORD code = 0;
             GetExitCodeProcess(process_, &code);
             closeConsole(); // the reader ends after the remaining output
-            reader_.join();
+            reader_.wait();
             onExit(int(code));
         });
         return true;
@@ -215,8 +215,8 @@ private:
     HANDLE output_ = nullptr; // we read terminal output here
     HANDLE process_ = nullptr;
     HANDLE waitCancel_ = nullptr;
-    std::thread reader_;
-    std::thread waiter_;
+    dispatch::Group reader_;
+    dispatch::Group waiter_;
 };
 
 } // namespace

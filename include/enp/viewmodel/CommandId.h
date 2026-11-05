@@ -59,6 +59,11 @@ enum class CommandId {
     AddNextOccurrence, SelectAllOccurrences, AddCursorAbove, AddCursorBelow, CursorsAtLineEnds, CopyLineUp,
     // File and panels (appended)
     OpenRecent, FocusTerminal, OpenWorkspace,
+    // IntelliSense (appended)
+    TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex, NavigateBack, NavigateForward,
+    ImplementComment, ToggleCodeSuggestions, IntellisenseSettings,
+    // View (appended): two columns, the list of shortcut keys
+    ToggleSplitView, FocusOtherColumn, KeyboardShortcuts,
 
     Count
 };

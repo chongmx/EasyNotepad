@@ -10,6 +10,8 @@
 #include "enp/model/Indent.h"
 #include "enp/model/Language.h"
 #include "enp/model/Outline.h"
+#include "enp/model/Symbols.h"
+#include "enp/model/CLibrary.h"
 #include "enp/model/TerminalScreen.h"
 #include "enp/model/TextBuffer.h"
 #include "enp/model/WorkspaceFile.h"
@@ -44,6 +46,7 @@
 #include <atomic>
 #include <cstring>
 #include <map>
+#include <set>
 #include <regex>
 #include <chrono>
 #include <cstdio>
@@ -2942,6 +2945,148 @@ TEST(automation_endpoint_end_to_end)
     CHECK(!stoppedError.empty());
 }
 
+
+TEST(process_stats_read_this_process_and_releases_freed_allocator_memory)
+{
+    // os::processStats() is what the status bar and the test bench read on a user's machine; on
+    // macOS it read 0 until it had its own branch. Every desktop platform CI tests must read this
+    // process. Linux and macOS verify that large freed allocations leave the physical footprint;
+    // the real-app cycle test checks retained workspace memory over repeated open/close cycles.
+    auto show = [](const char* when, const os::ProcessStats& p) {
+        std::printf("    %-22s private %7llu KB  shared %6llu KB  resident %7llu KB  malloc %7llu/%7llu KB"
+                    "  graphics %6llu KB  compressed %6llu KB  threads %d  handles %d\n",
+                    when, (unsigned long long)(p.privateBytes >> 10), (unsigned long long)(p.sharedBytes >> 10),
+                    (unsigned long long)(p.residentBytes >> 10), (unsigned long long)(p.mallocInUseBytes >> 10),
+                    (unsigned long long)(p.mallocHeldBytes >> 10), (unsigned long long)(p.graphicsBytes >> 10),
+                    (unsigned long long)(p.compressedBytes >> 10), p.threads, p.handles);
+    };
+    const os::ProcessStats start = os::processStats();
+    show("start", start);
+#if defined(_WIN32) || defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
+    CHECK(start.privateBytes > 0);
+    CHECK(start.residentBytes > 0);
+    CHECK(start.threads >= 1);
+    CHECK(start.handles >= 1);
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+    std::printf("    (AddressSanitizer: its allocator keeps freed blocks in quarantine; trim not checked)\n");
+#elif (defined(__linux__) && defined(__GLIBC__)) || defined(__APPLE__)
+    CHECK(start.mallocInUseBytes > 0);
+    CHECK(start.mallocHeldBytes >= start.mallocInUseBytes);
+    // Write every page so the process footprint reflects the test allocation.
+#if defined(__APPLE__)
+    // Apple allocator zones may retain small freed allocations in regions. Touch each page
+    // through a volatile pointer so optimized builds cannot elide this test allocation.
+    constexpr size_t kSize = 64 * 1024 * 1024, kPageSize = 4096;
+    std::vector<char> blocks(kSize);
+    volatile char* pages = blocks.data();
+    for (size_t i = 0; i < kSize; i += kPageSize)
+        pages[i] = char(i / kPageSize + 1);
+#else
+    // 64 MB in 2 KB blocks exercises allocator regions, not individually mapped blocks.
+    constexpr size_t kBlocks = 32768, kSize = 2048;
+    std::vector<std::vector<char>> blocks;
+    blocks.reserve(kBlocks);
+    for (size_t i = 0; i < kBlocks; ++i)
+        blocks.emplace_back(kSize, char(i));
+#endif
+    const os::ProcessStats full = os::processStats();
+    show("64 MB allocated", full);
+#if defined(__APPLE__)
+    CHECK(full.privateBytes >= start.privateBytes + 48 * 1024 * 1024);
+#else
+    CHECK(full.mallocInUseBytes >= start.mallocInUseBytes + 60 * 1024 * 1024);
+    CHECK(full.privateBytes >= start.privateBytes + 48 * 1024 * 1024);
+#endif
+    os::mem::release(blocks);
+    const os::ProcessStats freed = os::processStats();
+    show("freed", freed);
+    os::trimMemory();
+    const os::ProcessStats trimmed = os::processStats();
+    show("trimmed", trimmed);
+    // Linux's malloc_trim and Apple's direct large-allocation mappings must return freed pages.
+#if defined(__linux__) && defined(__GLIBC__)
+    CHECK(trimmed.mallocInUseBytes < full.mallocInUseBytes - 60 * 1024 * 1024);
+    CHECK(trimmed.privateBytes < start.privateBytes + 16 * 1024 * 1024);
+#elif defined(__APPLE__)
+    CHECK(trimmed.privateBytes < start.privateBytes + 16 * 1024 * 1024);
+#endif
+#endif
+}
+
+TEST(automation_connector_holds_nothing_per_request)
+{
+    // A test bench polls the app once per request, for hours (scripts/memory_cycle.py). The app's
+    // side of that connection must not grow with the number of requests: after 10 and after 200
+    // requests the connector ("automation" scope: its threads, sockets, requests and replies)
+    // holds exactly the same, and once the bench has disconnected nothing per connection is left.
+    if (!os::mem::enabled()) {
+        std::printf("  (memory accounting off: skipped)\n");
+        return;
+    }
+#if defined(_WIN32)
+    _putenv_s("EASYNOTEPAD_ENDPOINT", (os::fs::appDataDirectory() + "/test-endpoint.json").c_str());
+#else
+    setenv("EASYNOTEPAD_ENDPOINT", (os::fs::appDataDirectory() + "/test-endpoint.json").c_str(), 1);
+#endif
+    const std::uint64_t before = os::mem::liveBytes("automation");
+    {
+        services::AutomationServer server([](const std::string& method, const model::Json& params) {
+            // About the size of a get_state reply.
+            model::Json documents = model::Json::array();
+            for (int i = 0; i < 20; ++i)
+                documents.push(model::Json::object().set("path", "/some/where/file" + std::to_string(i) + ".cpp").set("line", i));
+            return model::Json::object().set("method", method).set("echo", params).set("documents", std::move(documents));
+        });
+        CHECK(server.start());
+        auto requests = [](int n) {
+            int answered = 0;
+            for (int i = 0; i < n; ++i) {
+                std::optional<model::Json> reply;
+                std::atomic<bool> done{false};
+                std::thread client([&]() {
+                    std::string error;
+                    reply = app::forwardToRunningApp("get_state", model::Json::object().set("i", i), &error);
+                    done = true;
+                });
+                for (int t = 0; t < 4000 && !done; ++t) { // the handler runs here, on the "UI thread"
+                    os::dispatch::pump();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                client.join();
+                answered += reply && reply->find("documents") ? 1 : 0;
+            }
+            return answered;
+        };
+        auto settled = [before]() {
+            // Ended connections are reaped every 200 ms; wait for the connector to go back to idle.
+            std::uint64_t last = os::mem::liveBytes("automation");
+            for (int t = 0; t < 40; ++t) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                os::dispatch::pump();
+                const std::uint64_t now = os::mem::liveBytes("automation");
+                if (now == last && t >= 8)
+                    break;
+                last = now;
+            }
+            return os::mem::liveBytes("automation") - before;
+        };
+        CHECK_EQ(requests(10), 10);
+        const std::uint64_t after10 = settled();
+        CHECK_EQ(requests(190), 190);
+        const std::uint64_t after200 = settled();
+        CHECK_EQ(after200, after10);
+        // Idle, nothing per connection (the listening socket and its thread were made by start()).
+        CHECK_EQ(after10, std::uint64_t(0));
+        if (after200 != after10 || after10 != 0)
+            std::printf("  automation scope: %llu bytes after 10 requests, %llu after 200\n",
+                        (unsigned long long)after10, (unsigned long long)after200);
+        server.stop();
+    }
+    os::fs::writeFile(services::AutomationServer::endpointPath(), "");
+    CHECK_EQ(os::mem::liveBytes("automation"), before); // stopped: nothing at all
+}
+
 // ---- Pseudo-terminal backend (real process) -----------------------------------------------------
 
 TEST(pty_runs_a_real_process)
@@ -4062,9 +4207,25 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
         vm.findInFiles().query = "value1";
         vm.findInFiles().searchNow();
         CHECK(vm.findInFiles().hitCount() > 0);
+        // IntelliSense: the index, a list of suggestions, a context for a provider, a definition.
+        vm.intellisense().buildIndexNow();
+        CHECK(vm.intellisense().index().size() >= 2000);
+        vm.setCaret({2, 0}, false);
+        vm.insertText("val");
+        vm.intellisense().trigger();
+        CHECK(vm.intellisense().active() && !vm.intellisense().items().empty());
+        CHECK(!vm.intellisense().contextFor("value", "src/f7.cpp", "int x = value3;").empty());
+        vm.setCaret({3, 6}, false);
+        vm.intellisense().goToDefinition();
+        vm.intellisense().goBack();
+        vm.intellisense().aiSuggestions.set(true);
+        vm.insertText("\n// add one\n");
+        vm.intellisense().implementComment(true); // no model in this build of the test: says why
+        (void)vm.intellisense().includedHeaders(*vm.activeDocument());
         os::dispatch::pump();
         vm.closeFolder();
         os::dispatch::pump();
+        CHECK_EQ(os::mem::liveBytes("intellisense"), std::uint64_t(0)); // every byte of it, every cycle
     };
     // Measuring must not move the needle: snapshots come from the accounting's static pool and
     // are copied into plain records here; nothing on this path allocates.
@@ -4086,6 +4247,1205 @@ TEST(memory_accounting_counts_scopes_and_folder_cycles_release_everything)
     }
     CHECK_EQ(after8.total.liveBytes, after2.total.liveBytes);
     CHECK_EQ(after8.total.liveBlocks, after2.total.liveBlocks);
+}
+
+// ---- IntelliSense -------------------------------------------------------------------------------
+
+namespace {
+
+const model::Symbol* findSymbol(const std::vector<model::Symbol>& symbols, const std::string& name, model::SymbolKind kind)
+{
+    for (const model::Symbol& s : symbols)
+        if (s.name == name && s.kind == kind)
+            return &s;
+    return nullptr;
+}
+
+bool hasSymbol(const std::vector<model::Symbol>& symbols, const std::string& name)
+{
+    for (const model::Symbol& s : symbols)
+        if (s.name == name)
+            return true;
+    return false;
+}
+
+// Types `text` into the active document one character at a time, as the editor does.
+void typeText(viewmodel::NotepadViewModel& vm, const std::string& text)
+{
+    for (char c : text) {
+        const std::string one(1, c);
+        vm.insertText(one);
+        vm.intellisense().typed(one);
+        vm.intellisense().sync();
+    }
+}
+
+int itemIndex(const viewmodel::IntellisenseViewModel& is, const std::string& label)
+{
+    for (size_t i = 0; i < is.items().size(); ++i)
+        if (is.items()[i].label == label)
+            return int(i);
+    return -1;
+}
+
+// A small C++ project: a class declared in a header and defined in a source file.
+std::string writeIntellisenseProject(services::FileService& files, const std::string& name)
+{
+    const std::string root = scratchDirectory() + "/" + name;
+    os::fs::deletePath(root);
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/widget.h",
+                "#pragma once\n"
+                "namespace ui {\n"
+                "class Widget {\n"
+                "public:\n"
+                "    void resize(int width);\n"
+                "    int widthOf() const;\n"
+                "    static constexpr int kMaxWidth = 100;\n"
+                "};\n"
+                "} // namespace ui\n", nullptr);
+    files.write(root + "/src/widget.cpp",
+                "#include \"widget.h\"\n"
+                "void ui::Widget::resize(int width) { (void)width; }\n"
+                "int ui::Widget::widthOf() const { return 0; }\n", nullptr);
+    files.write(root + "/src/main.cpp",
+                "#include \"widget.h\"\n"
+                "int main()\n"
+                "{\n"
+                "    ui::Widget w;\n"
+                "    return 0;\n"
+                "}\n", nullptr);
+    return root;
+}
+
+} // namespace
+
+TEST(symbols_are_found_in_each_language)
+{
+    using K = model::SymbolKind;
+    std::vector<model::Symbol> cpp;
+    model::extractSymbols("#define LIMIT 4\n"
+                          "namespace app {\n"
+                          "// class Commented {};\n"
+                          "const char* text = \"struct InString {\";\n"
+                          "class ENP_API Widget final : public Base<int, char> {\n"
+                          "public:\n"
+                          "    explicit Widget(int size);\n"
+                          "    int size() const { return size_; }\n"
+                          "    static constexpr int kLimit = 4;\n"
+                          "private:\n"
+                          "    std::vector<int> items_, more_;\n"
+                          "};\n"
+                          "enum class Color : uint8_t { Red, Green = 2, Blue };\n"
+                          "template <typename T>\n"
+                          "T maxOf(T a, T b)\n"
+                          "{\n"
+                          "    int local = 3;\n"
+                          "    return a < b ? b : a;\n"
+                          "}\n"
+                          "void Widget::resize(int n) { items_.resize(n); }\n"
+                          "TEST(macro_call_is_not_a_function) {}\n"
+                          "typedef struct { int a; } Pair;\n"
+                          "using Name = std::string;\n"
+                          "class Forward;\n"
+                          "}\n",
+                          model::Language::Cpp, 7, cpp);
+    CHECK(findSymbol(cpp, "LIMIT", K::Macro));
+    CHECK(findSymbol(cpp, "app", K::Namespace));
+    const model::Symbol* widget = findSymbol(cpp, "Widget", K::Type);
+    CHECK(widget && widget->container == "app" && widget->line == 4 && widget->column == 14 && widget->file == 7);
+    CHECK(widget && widget->detail.rfind("class ENP_API Widget", 0) == 0);
+    const model::Symbol* size = findSymbol(cpp, "size", K::Function);
+    CHECK(size && size->container == "Widget" && size->definition);
+    CHECK(findSymbol(cpp, "kLimit", K::Constant));
+    CHECK(findSymbol(cpp, "items_", K::Variable) && findSymbol(cpp, "more_", K::Variable));
+    const model::Symbol* green = findSymbol(cpp, "Green", K::Constant);
+    CHECK(green && green->container == "Color");
+    CHECK(findSymbol(cpp, "maxOf", K::Function));
+    const model::Symbol* resize = findSymbol(cpp, "resize", K::Function);
+    CHECK(resize && resize->container == "Widget" && resize->definition);
+    CHECK(findSymbol(cpp, "Pair", K::Type) && findSymbol(cpp, "Name", K::Type));
+    // Not declarations: comments, strings, locals, macro calls, forward declarations.
+    CHECK(!hasSymbol(cpp, "Commented") && !hasSymbol(cpp, "InString") && !hasSymbol(cpp, "local"));
+    CHECK(!hasSymbol(cpp, "TEST") && !hasSymbol(cpp, "Forward"));
+
+    std::vector<model::Symbol> py;
+    model::extractSymbols("MAX = 3\n"
+                          "class Store(Base):\n"
+                          "    \"\"\"class Fake in a docstring\"\"\"\n"
+                          "    count: int = 0\n"
+                          "    def load(self, url,\n"
+                          "             retries):\n"
+                          "        inner = 1\n"
+                          "        def helper(): pass\n"
+                          "async def main():\n"
+                          "    pass\n",
+                          model::Language::Python, 0, py);
+    CHECK(findSymbol(py, "MAX", K::Constant) && findSymbol(py, "Store", K::Type));
+    const model::Symbol* load = findSymbol(py, "load", K::Function);
+    CHECK(load && load->container == "Store");
+    CHECK(findSymbol(py, "count", K::Variable) && findSymbol(py, "main", K::Function));
+    CHECK(!hasSymbol(py, "Fake") && !hasSymbol(py, "inner") && !hasSymbol(py, "helper") && !hasSymbol(py, "retries"));
+
+    std::vector<model::Symbol> ts;
+    model::extractSymbols("export const API_URL = \"x\";\n"
+                          "const add = (a, b) => a + b;\n"
+                          "export default class Store extends Base {\n"
+                          "  items = [];\n"
+                          "  async load(url) { const r = 1; }\n"
+                          "}\n"
+                          "function helper(a) { let z = 1; }\n"
+                          "interface Shape { area(): number; }\n"
+                          "type Id = string;\n",
+                          model::Language::TypeScript, 0, ts);
+    CHECK(findSymbol(ts, "API_URL", K::Constant) && findSymbol(ts, "add", K::Function));
+    CHECK(findSymbol(ts, "Store", K::Type) && findSymbol(ts, "items", K::Variable) && findSymbol(ts, "load", K::Function));
+    CHECK(findSymbol(ts, "helper", K::Function) && findSymbol(ts, "area", K::Function) && findSymbol(ts, "Id", K::Type));
+    CHECK(!hasSymbol(ts, "Base") && !hasSymbol(ts, "r") && !hasSymbol(ts, "z"));
+
+    std::vector<model::Symbol> rust;
+    model::extractSymbols("pub struct Point { x: f64 }\n"
+                          "impl Point {\n"
+                          "    pub fn new() -> Self { Point { x: 0.0 } }\n"
+                          "}\n"
+                          "pub(crate) enum Shape { Circle(f64), Square }\n"
+                          "const LIMIT: usize = 3;\n",
+                          model::Language::Rust, 0, rust);
+    const model::Symbol* make = findSymbol(rust, "new", K::Function);
+    CHECK(make && make->container == "Point");
+    CHECK(findSymbol(rust, "Shape", K::Type) && findSymbol(rust, "Square", K::Constant) && findSymbol(rust, "LIMIT", K::Constant));
+
+    std::vector<model::Symbol> go;
+    model::extractSymbols("package main\ntype Server struct {\n\taddr string\n}\nfunc (s *Server) Start() error {\n\treturn nil\n}\n",
+                          model::Language::Go, 0, go);
+    const model::Symbol* start = findSymbol(go, "Start", K::Function);
+    CHECK(findSymbol(go, "Server", K::Type) && start && start->container == "Server");
+
+    std::vector<model::Symbol> java;
+    model::extractSymbols("public class App {\n    public static void main(String[] args) {\n        run();\n    }\n}\n",
+                          model::Language::Java, 0, java);
+    CHECK(findSymbol(java, "App", K::Type) && findSymbol(java, "main", K::Function) && !hasSymbol(java, "run"));
+
+    std::vector<model::Symbol> lua;
+    model::extractSymbols("local M = {}\nfunction M.greet(name) return name end\n", model::Language::Lua, 0, lua);
+    const model::Symbol* greet = findSymbol(lua, "greet", K::Function);
+    CHECK(greet && greet->container == "M");
+
+    std::vector<model::Symbol> sh;
+    model::extractSymbols("NAME=x\nbuild() {\n  echo $#\n}\n", model::Language::Shell, 0, sh);
+    CHECK(findSymbol(sh, "build", K::Function) && findSymbol(sh, "NAME", K::Constant));
+
+    CHECK(!model::canExtractSymbols(model::Language::Markdown));
+}
+
+TEST(symbol_matching_prefers_prefixes_and_word_starts)
+{
+    CHECK(model::matchScore("get", "getWidth") > model::matchScore("Get", "getWidth")); // exact case first
+    CHECK(model::matchScore("Get", "getWidth") > model::matchScore("gw", "getWidth"));  // prefixes before humps
+    CHECK(model::matchScore("gw", "getWidth") > 0);
+    CHECK(model::matchScore("gw", "getWidth") > model::matchScore("gt", "getWidth")); // word starts before letters inside
+    CHECK_EQ(model::matchScore("xyz", "getWidth"), -1);
+    CHECK(model::matchScore("w", "getWidth") > 0);    // "W" starts a part of the name
+    CHECK_EQ(model::matchScore("i", "getWidth"), -1); // the first letter must start a part
+    CHECK(model::matchScore("rs", "resize_all") > 0);
+    CHECK(model::matchScore("get", "get") > model::matchScore("get", "getWidth")); // shorter first
+    CHECK_EQ(model::matchScore("", "anything"), 0);
+
+    const std::pair<int, int> around = model::identifierAround("  w.resize(3);", 8);
+    CHECK(around.first == 4 && around.second == 10);
+    const std::pair<int, int> atEnd = model::identifierAround("value", 5);
+    CHECK(atEnd.first == 0 && atEnd.second == 5);
+    const std::pair<int, int> number = model::identifierAround("x = 42", 6);
+    CHECK(number.first == number.second); // a number is not a name
+}
+
+TEST(symbol_index_finds_names_and_replaces_saved_files)
+{
+    model::SymbolIndex index;
+    std::vector<model::Symbol> symbols;
+    model::extractSymbols("void beta();\nvoid alpha();\n", model::Language::Cpp, int(index.fileCount()), symbols);
+    index.addFile("a.h");
+    index.add(symbols);
+    model::extractSymbols("void alpha() {}\n", model::Language::Cpp, int(index.fileCount()), symbols);
+    index.addFile("a.cpp");
+    index.add(symbols);
+    index.finish();
+    CHECK_EQ(index.size(), size_t(3));
+    CHECK(index.at(0).name == "alpha" && index.at(2).name == "beta");
+    CHECK(index.at(2).detail == "void beta();" && index.at(2).kind == model::SymbolKind::Function && !index.at(2).definition);
+    auto [first, last] = index.named("alpha");
+    CHECK_EQ(last - first, size_t(2));
+    CHECK(index.path(index.at(first).file) == "a.h");
+    CHECK(index.path(1) == "a.cpp" && index.path(2).empty() && index.fileIndex("a.cpp") == 1);
+    CHECK_EQ(index.named("gamma").first, index.named("gamma").second);
+
+    // Saving a file replaces its names; saving it many times keeps the index its size.
+    model::extractSymbols("void gamma() {}\n", model::Language::Cpp, -1, symbols);
+    index.replaceFile("a.cpp", symbols, {});
+    const size_t bytes = index.bytes();
+    for (int i = 0; i < 50; ++i) {
+        model::extractSymbols("void gamma() {}\n", model::Language::Cpp, -1, symbols);
+        index.replaceFile("a.cpp", symbols, {});
+    }
+    CHECK(index.bytes() <= bytes);
+    CHECK_EQ(index.named("alpha").second - index.named("alpha").first, size_t(1));
+    CHECK_EQ(index.named("gamma").second - index.named("gamma").first, size_t(1));
+    CHECK(index.path(index.at(index.named("gamma").first).file) == "a.cpp");
+    index.release();
+    CHECK(index.empty() && index.fileCount() == 0 && index.bytes() == 0);
+}
+
+TEST(intellisense_completes_names_of_the_workspace_document_and_language)
+{
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-complete");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+    CHECK(is.indexReady() && is.index().size() >= 6);
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 17}, false); // end of "    ui::Widget w;"
+    vm.newline();
+
+    // Members after ".": the declarations with a container, the typed part narrows them.
+    typeText(vm, "w.");
+    CHECK(is.active() && itemIndex(is, "resize") >= 0 && itemIndex(is, "widthOf") >= 0 && itemIndex(is, "Widget") < 0);
+    typeText(vm, "re");
+    CHECK(is.active() && !is.items().empty() && is.items()[0].label == "resize");
+    CHECK(is.items()[0].source == viewmodel::IntellisenseViewModel::Source::Workspace);
+    CHECK(is.items()[0].location.find("src/widget") == 0);
+    CHECK(is.accept());
+    CHECK(!is.active());
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.resize");
+    vm.execute(viewmodel::CommandId::Undo);
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.re"); // one undoable insertion
+
+    // Names by themselves after two letters: the workspace's, the language's and the document's.
+    vm.setCaret({4, int(vm.activeDocument()->buffer.line(4).size())}, false);
+    vm.newline();
+    typeText(vm, "W");
+    CHECK(!is.active()); // one letter is not enough
+    typeText(vm, "i");
+    CHECK(is.active() && !is.items().empty() && is.items()[0].label == "Widget");
+    CHECK(is.items()[0].kind == model::SymbolKind::Type);
+    is.dismiss();
+    CHECK(is.items().empty() && is.prefix().empty());
+    typeText(vm, ";\n    ret");
+    CHECK(is.active() && itemIndex(is, "return") >= 0);
+    CHECK(is.items()[size_t(itemIndex(is, "return"))].source == viewmodel::IntellisenseViewModel::Source::Language);
+    // The caret leaving the word closes the list.
+    vm.setCaret({0, 0}, false);
+    is.sync();
+    CHECK(!is.active());
+
+    // "ui::" lists what the namespace declares.
+    vm.setCaret({5, int(vm.activeDocument()->buffer.line(5).size())}, false);
+    vm.newline();
+    typeText(vm, "ui::");
+    CHECK(is.active() && itemIndex(is, "Widget") >= 0 && itemIndex(is, "return") < 0);
+    is.dismiss();
+
+    // Ctrl+Space shows suggestions without anything typed; a comment never opens them by itself.
+    vm.newline();
+    is.trigger();
+    CHECK(is.active() && is.items().size() > 5);
+    is.move(+2);
+    CHECK_EQ(is.selected(), 2);
+    is.move(-10);
+    CHECK_EQ(is.selected(), 0);
+    is.dismiss();
+    typeText(vm, "// wid");
+    CHECK(!is.active());
+    // Turned off: nothing appears while typing, Ctrl+Space still works.
+    vm.newline();
+    vm.execute(viewmodel::CommandId::ToggleAutoComplete);
+    CHECK(!is.autoComplete.get() && !vm.isChecked(viewmodel::CommandId::ToggleAutoComplete));
+    typeText(vm, "wid");
+    CHECK(!is.active());
+    vm.execute(viewmodel::CommandId::TriggerCompletion);
+    CHECK(is.active() && itemIndex(is, "widthOf") >= 0);
+    vm.execute(viewmodel::CommandId::ToggleAutoComplete);
+    CHECK(is.autoComplete.get());
+
+    // Closing the document closes its list; closing the folder drops the index.
+    vm.closeDocument(vm.activeIndex.get());
+    CHECK(!is.active());
+    vm.closeFolder();
+    CHECK(!is.indexReady() && is.index().empty());
+}
+
+TEST(intellisense_goes_to_definitions_in_the_file_and_the_workspace)
+{
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-definition");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    vm.intellisense().buildIndexNow();
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 9}, false); // on "Widget" in "    ui::Widget w;"
+    vm.execute(viewmodel::CommandId::GoToDefinition);
+    CHECK(vm.activeDocument()->path == "src/widget.h");
+    CHECK(vm.activeDocument()->caret.line == 2 && vm.activeDocument()->caret.column == 6);
+    // From the declaration in the header to the definition in the source file.
+    vm.setCaret({4, 11}, false); // on "resize"
+    CHECK(vm.intellisense().goToDefinition());
+    CHECK(vm.activeDocument()->path == "src/widget.cpp");
+    CHECK_EQ(vm.activeDocument()->caret.line, 1);
+    // A name declared further down the same document: found in its current (unsaved) text.
+    vm.setCaret({2, 0}, false);
+    vm.insertText("int later = helper();\nint helper() { return 1; }\n");
+    vm.setCaret({2, 14}, false); // on "helper"
+    CHECK(vm.intellisense().goToDefinition());
+    CHECK(vm.activeDocument()->path == "src/widget.cpp" && vm.activeDocument()->caret.line == 3);
+    vm.setCaret({2, 3}, false); // on "int": nothing to go to
+    CHECK(!vm.intellisense().goToDefinition());
+    // The hover tooltip's lookup: the definition before the declaration.
+    const std::optional<model::SymbolView> hovered = vm.intellisense().lookup("resize", "src/widget.h");
+    CHECK(hovered && hovered->definition && vm.intellisense().index().path(hovered->file) == "src/widget.cpp");
+    CHECK(!vm.intellisense().lookup("nothing", ""));
+    // A save updates the index.
+    model::Document* doc = vm.activeDocument();
+    doc->buffer.setText("int renamedFunction() { return 2; }\n");
+    doc->modified = true;
+    vm.execute(viewmodel::CommandId::Save);
+    CHECK(vm.intellisense().lookup("renamedFunction", "").has_value());
+    CHECK(vm.intellisense().lookup("widthOf", "").has_value()); // still declared in the header
+    vm.closeFolder();
+}
+
+TEST(intellisense_suggests_with_one_caret_only)
+{
+    // Each caret has its own word: one list cannot complete them all, so with several carets
+    // (Alt+click, Ctrl+D, Ctrl+Alt+Down) it does not open, and an open one closes.
+    viewmodel::NotepadViewModel vm;
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int widthOne = 1;\nint widthTwo = 2;\nint a = wi;\nint b = wi;\n");
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    vm.setCaret({2, 10}, false);
+    is.trigger();
+    CHECK(is.active() && itemIndex(is, "widthOne") >= 0);
+    vm.execute(viewmodel::CommandId::AddCursorBelow);
+    CHECK_EQ(vm.cursorCount(), 2);
+    is.sync();
+    CHECK(!is.active());
+    is.trigger();
+    CHECK(!is.active());
+    typeText(vm, "d");
+    CHECK(!is.active());
+    CHECK(vm.activeDocument()->buffer.line(2) == "int a = wid;" && vm.activeDocument()->buffer.line(3) == "int b = wid;");
+    vm.clearExtraCursors();
+    is.trigger();
+    CHECK(is.active());
+}
+
+TEST(intellisense_goes_back_and_forward_through_its_jumps)
+{
+    using C = viewmodel::CommandId;
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-history");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+    auto at = [&](const char* path, int line, int column) {
+        const model::Document* doc = vm.activeDocument();
+        return doc && doc->path == path && doc->caret.line == line && doc->caret.column == column;
+    };
+    CHECK(!vm.command(C::NavigateBack).canExecute() && !vm.command(C::NavigateForward).canExecute());
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 9}, false); // "Widget"
+    CHECK(is.goToDefinition());
+    CHECK(at("src/widget.h", 2, 6));
+    vm.setCaret({4, 11}, false); // "resize"
+    CHECK(is.goToDefinition());
+    CHECK(at("src/widget.cpp", 1, 17));
+    CHECK_EQ(is.historySize(), size_t(2));
+    CHECK(vm.command(C::NavigateBack).canExecute());
+
+    vm.execute(C::NavigateBack);
+    CHECK(at("src/widget.h", 4, 11));
+    CHECK(is.goBack());
+    CHECK(at("src/main.cpp", 3, 9));
+    CHECK(!is.canGoBack() && !is.goBack());
+    CHECK(at("src/main.cpp", 3, 9)); // nothing to go back to: it stays
+    vm.execute(C::NavigateForward);
+    CHECK(at("src/widget.h", 4, 11));
+    // A document closed since is opened again from its path.
+    vm.closeDocument(vm.documentIndex("src/widget.cpp"));
+    CHECK(is.goForward());
+    CHECK(at("src/widget.cpp", 1, 17));
+    CHECK(!is.canGoForward());
+    // A new jump drops the way forward.
+    CHECK(is.goBack());
+    CHECK(is.canGoForward());
+    vm.setCaret({5, 9}, false); // "widthOf"
+    CHECK(is.goToDefinition());
+    CHECK(at("src/widget.cpp", 2, 16));
+    CHECK(!is.canGoForward());
+    // An untitled document that closed is skipped on the way back.
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int later = helper();\nint helper() { return 1; }\n");
+    vm.setCaret({0, 14}, false);
+    CHECK(is.goToDefinition()); // in the untitled document itself
+    CHECK_EQ(vm.activeDocument()->caret.line, 1);
+    vm.closeDocument(vm.activeIndex.get());
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 9}, false);
+    CHECK(is.goToDefinition());
+    CHECK(is.goBack());
+    CHECK(at("src/main.cpp", 3, 9));
+    CHECK(is.goBack()); // skips both places in the closed untitled document
+    CHECK(at("src/widget.h", 5, 9));
+    // At most kMaxHistory places are kept each way.
+    for (int i = 0; i < 70; ++i) {
+        vm.openFile("src/main.cpp");
+        vm.setCaret({3, 9}, false);
+        is.goToDefinition();
+    }
+    CHECK_EQ(is.historySize(), viewmodel::IntellisenseViewModel::kMaxHistory);
+    // The folder's places go with it.
+    vm.closeFolder();
+    CHECK_EQ(is.historySize(), size_t(0));
+}
+
+TEST(intellisense_chooses_context_for_an_ai_provider_and_drops_late_answers)
+{
+    // AI completion plugs in as a provider: it is asked with the code around the caret and the
+    // declarations IntelliSense chose, answers later, and is shown first. A late answer to an
+    // older request, or after the list closed, is dropped.
+    using IS = viewmodel::IntellisenseViewModel;
+    services::FileService files;
+    const std::string root = writeIntellisenseProject(files, "enp-test-intellisense-provider");
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    IS& is = vm.intellisense();
+    is.buildIndexNow();
+
+    // The context alone: what is typed, what the code nearby uses, what the file declares.
+    const std::vector<IS::ContextSnippet> context = is.contextFor("res", "src/widget.cpp", "ui::Widget w;\nw.");
+    auto reasonOf = [&](const std::string& name) {
+        for (const IS::ContextSnippet& c : context)
+            if (c.name == name)
+                return int(c.reason);
+        return -1;
+    };
+    CHECK(!context.empty() && context[0].name == "resize" && context[0].reason == IS::ContextReason::Typed);
+    CHECK_EQ(reasonOf("Widget"), int(IS::ContextReason::UsedNearby));
+    CHECK_EQ(reasonOf("widthOf"), int(IS::ContextReason::SameFile));
+    const std::string text = IS::formatContext(context);
+    CHECK(text.find("function resize in Widget (src/widget") != std::string::npos);
+    CHECK(text.find("used nearby") != std::string::npos);
+    IS::ContextBudget small;
+    small.maxSnippets = 2;
+    CHECK_EQ(is.contextFor("res", "src/widget.cpp", "ui::Widget w;", small).size(), size_t(2));
+
+    std::vector<IS::Request> requests;
+    IS::Provider provider;
+    provider.request = [&](const IS::Request& r) { requests.push_back(r); };
+    provider.completes = true;
+    is.setProvider(provider);
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 17}, false);
+    vm.newline();
+    typeText(vm, "w.re");
+    CHECK(is.active() && !requests.empty());
+    const IS::Request& last = requests.back();
+    CHECK(last.serial == is.requestSerial() && last.prefix == "re" && last.path == "src/main.cpp");
+    CHECK(last.before.size() >= 4 && last.before.compare(last.before.size() - 4, 4, "w.re") == 0);
+    CHECK(last.after.find("return 0;") != std::string::npos);
+    CHECK(!last.context.empty() && last.context[0].name == "resize");
+
+    // An answer to an older request is dropped; the current one is shown first and inserted whole.
+    const int older = requests.front().serial;
+    is.provide(older, {IS::Item{"stale", "stale()", "", "", "", model::SymbolKind::Function, IS::Source::Provider, 0}});
+    CHECK(itemIndex(is, "stale") < 0);
+    IS::Item answer;
+    answer.insertText = "resize(800);\nw.widthOf();";
+    is.provide(last.serial, {answer});
+    CHECK(!is.items().empty() && is.items()[0].source == IS::Source::Provider && is.items()[0].label == "resize(800);");
+    CHECK(itemIndex(is, "resize") > 0); // the names stay below
+    CHECK(is.accept());
+    CHECK(vm.activeDocument()->buffer.line(4) == "    w.resize(800);" && vm.activeDocument()->buffer.line(5) == "    w.widthOf();" /* indented like its line */);
+    // After the list closed, an answer is dropped.
+    const int closed = is.requestSerial();
+    is.provide(closed, {answer});
+    CHECK(!is.active() && is.items().empty());
+    is.setProvider({});
+    CHECK(!is.hasProvider());
+    vm.closeFolder();
+}
+
+TEST(closing_a_folder_stops_the_symbol_index_build)
+{
+    // The index is built on a background thread: closing the folder cancels it, and its late
+    // result never lands (in the next folder or anywhere): every byte of it is freed.
+    if (!os::mem::enabled()) {
+        CHECK(true);
+        return;
+    }
+    services::FileService files;
+    const std::string a = scratchDirectory() + "/enp-test-index-a";
+    const std::string b = scratchDirectory() + "/enp-test-index-b";
+    os::fs::deletePath(a);
+    os::fs::deletePath(b);
+    os::fs::createDirectories(a + "/src");
+    os::fs::createDirectories(b + "/src");
+    for (int i = 0; i < 200; ++i) {
+        std::string text;
+        for (int l = 0; l < 50; ++l)
+            text += "int folderA_" + std::to_string(i) + "_" + std::to_string(l) + "(int x) { return x; }\n";
+        files.write(a + "/src/a" + std::to_string(i) + ".cpp", text, nullptr);
+    }
+    files.write(b + "/src/b.cpp", "int onlyInB() { return 1; }\n", nullptr);
+    auto waitForBuilds = []() {
+        for (int i = 0; i < 1000 && viewmodel::IntellisenseViewModel::runningBuilds() > 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // the finished thread lets go of its task
+        os::dispatch::pump();
+    };
+    waitForBuilds();
+    const std::uint64_t before = os::mem::liveBytes("intellisense");
+    {
+        viewmodel::NotepadViewModel vm(nullptr, &files);
+        CHECK(vm.openFolder(a));
+        vm.intellisense().ensureIndex();
+        CHECK(vm.intellisense().indexing.get());
+        CHECK(vm.openFolder(b)); // while it reads folder a
+        CHECK(!vm.intellisense().indexing.get());
+        waitForBuilds();
+        CHECK(!vm.intellisense().indexReady()); // folder a's late result was dropped
+        vm.intellisense().ensureIndex();
+        waitForBuilds();
+        CHECK(vm.intellisense().indexReady());
+        CHECK(vm.intellisense().lookup("onlyInB", "").has_value());
+        CHECK(!vm.intellisense().lookup("folderA_0_0", ""));
+        vm.closeFolder();
+        CHECK(!vm.intellisense().indexReady());
+        CHECK_EQ(os::mem::liveBytes("intellisense"), before);
+        // Destroyed while a build runs: the build stops and its result goes with its task.
+        CHECK(vm.openFolder(a));
+        vm.intellisense().ensureIndex();
+    }
+    waitForBuilds();
+    CHECK_EQ(os::mem::liveBytes("intellisense"), before);
+    CHECK_EQ(viewmodel::IntellisenseViewModel::runningBuilds(), 0);
+}
+
+// ---- IntelliSense: C and C++, code from comments --------------------------------------------------
+
+TEST(c_library_catalog_standards_and_includes)
+{
+    CHECK_EQ(model::detectCppStandard("project(x)\nset(CMAKE_CXX_STANDARD 20)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n"), 2020);
+    CHECK_EQ(model::detectCppStandard("target_compile_features(app PRIVATE cxx_std_17)"), 2017);
+    CHECK_EQ(model::detectCppStandard("CXXFLAGS = -O2 -std=gnu++14 -Wall"), 2014);
+    CHECK_EQ(model::detectCppStandard("CFLAGS = -std=c11"), 0);
+    CHECK_EQ(model::detectCStandard("CFLAGS = -std=c11"), 2011);
+    CHECK_EQ(model::detectCStandard("set(CMAKE_C_STANDARD 99)"), 1999);
+    CHECK_EQ(model::detectCStandard("set(CMAKE_CXX_STANDARD 17)"), 0);
+    CHECK(std::string(model::standardName(2003, false)) == "C++03" && std::string(model::standardName(2023, true)) == "C23");
+    size_t count = 0;
+    CHECK(model::cppStandards(count) != nullptr && count == 8);
+
+    std::vector<model::Include> includes;
+    model::scanIncludes("#include <vector>\n  #  include \"app/widget.h\"\n// #include <nope>\nint x;\n", includes);
+    CHECK_EQ(includes.size(), size_t(2)); // the commented one is not an #include line
+    CHECK(includes[0].name == "vector" && includes[0].system && includes[0].line == 0);
+    CHECK(includes[1].name == "app/widget.h" && !includes[1].system && includes[1].line == 1);
+
+    const model::LibraryName* optional = model::findLibraryName("optional", false);
+    CHECK(optional && std::string(optional->header) == "optional");
+    CHECK(optional && model::libraryNameAvailable(*optional, false, 2017) && !model::libraryNameAvailable(*optional, false, 2014));
+    CHECK(optional && !model::libraryNameAvailable(*optional, true, 2023)); // not C
+    const model::LibraryName* printf = model::findLibraryName("printf", true);
+    CHECK(printf && model::libraryHeader(*printf, true) == "stdio.h" && model::libraryHeader(*printf, false) == "cstdio");
+    CHECK_EQ(model::keywordSince("nullptr", false), 2011);
+    CHECK_EQ(model::keywordSince("nullptr", true), 2023);
+    CHECK_EQ(model::keywordSince("class", true), -1);
+    CHECK(model::isCSource("src/a.c") && !model::isCSource("src/a.cpp") && !model::isCSource("a.h"));
+}
+
+TEST(intellisense_knows_the_headers_and_the_standard)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-intellisense-headers";
+    os::fs::deletePath(root);
+    os::fs::createDirectories(root + "/include/app");
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_C_STANDARD 99)\n", nullptr);
+    files.write(root + "/include/app/widget.h", "#pragma once\n#include <vector>\nclass Widget {\npublic:\n    void paint();\n};\n", nullptr);
+    files.write(root + "/include/app/app.h", "#pragma once\n#include \"app/widget.h\"\nclass App {};\n", nullptr);
+    files.write(root + "/include/app/other.h", "#pragma once\nclass OtherThing {};\n", nullptr);
+    files.write(root + "/src/main.cpp", "#include \"app/app.h\"\n#include <string>\nint main()\n{\n    return 0;\n}\n", nullptr);
+    files.write(root + "/src/plain.c", "#include <stdio.h>\nint main(void)\n{\n    return 0;\n}\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+    // The project's standards.
+    CHECK_EQ(is.cppStandardInUse(), 2014);
+    CHECK_EQ(is.cStandardInUse(), 1999);
+    CHECK(is.standardSource(false) == "CMakeLists.txt");
+    // What main.cpp includes: its lines, then through app.h: widget.h and <vector>.
+    vm.openFile("src/main.cpp");
+    const std::vector<std::string> headers = is.includedHeaders(*vm.activeDocument());
+    auto has = [&](const std::string& h) { return std::find(headers.begin(), headers.end(), h) != headers.end(); };
+    CHECK(has("\"app/app.h\"") && has("<string>") && has("\"app/widget.h\"") && has("<vector>"));
+    auto item = [&](const std::string& label) -> const viewmodel::IntellisenseViewModel::Item* {
+        for (const auto& i : is.items())
+            if (i.label == label)
+                return &i;
+        return nullptr;
+    };
+    vm.setCaret({4, 13}, false);
+    vm.newline();
+    // <vector> (through widget.h): the library's name, with its header; Widget without a clue.
+    typeText(vm, "vec");
+    CHECK(is.active() && item("vector") && item("vector")->note.find("<vector>") == 0);
+    is.dismiss();
+    typeText(vm, ";\nWid");
+    CHECK(item("Widget") && item("Widget")->note.empty());
+    is.dismiss();
+    // A header that is not included: suggested with the #include it needs.
+    typeText(vm, ";\nOtherT");
+    CHECK(item("OtherThing") && item("OtherThing")->note == "needs #include \"app/other.h\"");
+    is.dismiss();
+    typeText(vm, ";\nunique_");
+    CHECK(item("unique_ptr") && item("unique_ptr")->note == "needs #include <memory>");
+    is.dismiss();
+    // C++14: no std::optional; chosen C++17: optional, with the #include it needs.
+    typeText(vm, ";\noptiona");
+    CHECK(!item("optional"));
+    is.dismiss();
+    is.cppStandard.set(2017);
+    is.trigger();
+    CHECK(item("optional") && item("optional")->note == "needs #include <optional>");
+    is.dismiss();
+    // Members of included classes after ".": vector's push_back.
+    typeText(vm, ";\nv.push");
+    CHECK(item("push_back"));
+    is.dismiss();
+    // Keywords of the standard: nullptr since C++11, not in C99.
+    typeText(vm, ";\nnullp");
+    CHECK(item("nullptr"));
+    is.dismiss();
+    vm.openFile("src/plain.c");
+    vm.setCaret({3, 13}, false);
+    vm.newline();
+    typeText(vm, "nullp");
+    CHECK(!item("nullptr"));
+    is.dismiss();
+    typeText(vm, ";\nprin");
+    CHECK(item("printf") && item("printf")->note.find("<stdio.h>") == 0);
+    is.dismiss();
+    typeText(vm, ";\nclas");
+    CHECK(!item("class")); // not C
+    is.dismiss();
+    // The hover's catalog: available in this language and standard.
+    CHECK(is.libraryLookup("printf", *vm.activeDocument()) != nullptr);
+    CHECK(is.libraryLookup("unique_ptr", *vm.activeDocument()) == nullptr); // C++ only
+    vm.closeFolder();
+}
+
+TEST(closing_a_document_frees_its_outline)
+{
+    // Found with the scope trace: after the folder closed, with no document open, the "documents"
+    // scope still held the last active document's outline (84 KB for EditorView.cpp).
+    viewmodel::NotepadViewModel vm;
+    while (!vm.documents().empty())
+        vm.closeDocument(0);
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int a()\n{\n    return 1;\n}\nint b()\n{\n    return 2;\n}\n");
+    CHECK(!vm.outline().empty());
+    CHECK(vm.outlineHeld());
+    vm.closeDocument(vm.activeIndex.get());
+    CHECK(vm.documents().empty());
+    CHECK(!vm.outlineHeld());
+    CHECK(vm.outline().empty());
+    CHECK(!vm.outlineHeld());
+    // Another document closing leaves the active one's outline alone.
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int c()\n{\n    return 3;\n}\n");
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int d()\n{\n    return 4;\n}\n");
+    CHECK(!vm.outline().empty() && vm.outlineHeld());
+    vm.closeDocument(0);
+    CHECK(vm.outlineHeld());
+}
+
+TEST(intellisense_ranks_names_of_this_document_before_short_names_from_elsewhere)
+{
+    // Reported: typing "wid" under "int widthOfWindow = 3;" listed short names from other files
+    // of the workspace (width, widen, widgetData) first and the document's own name sixth.
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-intellisense-rank";
+    os::fs::deletePath(root);
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/other.cpp", "int width = 1;\nint widen(int a) { return a; }\nint widgetData = 0;\n", nullptr);
+    files.write(root + "/src/shapes.h", "#pragma once\nint widestShapeWidth();\n", nullptr);
+    files.write(root + "/src/main.cpp", "#include \"shapes.h\"\nint main()\n{\n    return 0;\n}\n", nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    is.buildIndexNow();
+
+    // An unsaved document: its own name first, the shorter ones from elsewhere after it.
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("int widthOfWindow = 3;\nint main()\n{\n    ");
+    typeText(vm, "wid");
+    CHECK(is.active() && !is.items().empty());
+    if (!is.items().empty())
+        CHECK_EQ(is.items()[0].label, std::string("widthOfWindow"));
+    CHECK(itemIndex(is, "width") > itemIndex(is, "widthOfWindow"));
+    is.dismiss();
+
+    // A file of the workspace: a name from the header it includes comes before a shorter one
+    // from a file it does not include.
+    vm.openFile("src/main.cpp");
+    vm.setCaret({3, 4}, false);
+    typeText(vm, "wid");
+    CHECK(is.active() && itemIndex(is, "widestShapeWidth") >= 0 && itemIndex(is, "width") >= 0);
+    CHECK(itemIndex(is, "widestShapeWidth") < itemIndex(is, "width"));
+    is.dismiss();
+    vm.closeFolder();
+    os::fs::deletePath(root);
+}
+
+TEST(intellisense_leaves_words_in_comments_and_strings_out)
+{
+    viewmodel::NotepadViewModel vm;
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("// the quick brown fox\n/* quietly\n   quoted */\nint quickSort = 0;\nconst char* s = \"quaint\";\n");
+    viewmodel::IntellisenseViewModel& is = vm.intellisense();
+    typeText(vm, "qu");
+    CHECK(is.active());
+    CHECK(itemIndex(is, "quickSort") >= 0);
+    CHECK(itemIndex(is, "quick") < 0 && itemIndex(is, "quietly") < 0 && itemIndex(is, "quoted") < 0 && itemIndex(is, "quaint") < 0);
+}
+
+TEST(intellisense_asks_for_the_code_a_comment_describes)
+{
+    using IS = viewmodel::IntellisenseViewModel;
+    viewmodel::NotepadViewModel vm;
+    IS& is = vm.intellisense();
+    std::vector<IS::Request> requests;
+    int cancels = 0;
+    IS::Provider provider;
+    provider.request = [&](const IS::Request& r) { requests.push_back(r); };
+    provider.cancel = [&]() { ++cancels; };
+    provider.completes = false;
+    provider.implements = true;
+    is.setProvider(provider);
+
+    vm.newDocument();
+    vm.activeDocument()->language = model::Language::Cpp;
+    vm.insertText("#include <vector>\nint sum(const std::vector<int>& v)\n{\n    // add up the values\n    // and return the total\n    \n}\n");
+    vm.setCaret({5, 4}, false);
+    // The index arriving while the code is written (the first use in a folder) keeps the request.
+    is.aiSuggestions.set(true);
+    CHECK(is.implementComment(true));
+    for (int i = 0; i < 1000 && IS::runningBuilds() > 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    os::dispatch::pump();
+    CHECK(is.indexReady());
+    is.sync();
+    CHECK(is.active() && is.awaiting());
+    is.dismiss();
+    requests.clear();
+    is.aiSuggestions.set(false);
+    // Off: nothing is asked (and Ctrl+Shift+Space says why).
+    CHECK(!is.implementComment(true));
+    CHECK(requests.empty() && vm.statusText.get().find("off") != std::string::npos);
+    is.aiSuggestions.set(true);
+    CHECK(is.implementComment(true));
+    CHECK(is.active() && is.block() && is.awaiting() && requests.size() == 1);
+    const IS::Request r = requests.back();
+    CHECK(r.purpose == IS::Request::Purpose::Implement);
+    CHECK(r.instruction == "add up the values\nand return the total");
+    CHECK(r.standard == "C++17" && r.headers.size() == 1 && r.headers[0] == "<vector>");
+    CHECK(r.before.find("// add up the values") != std::string::npos); // the comments stay in the context
+    // The answer: indented like the comment, replacing the empty line.
+    IS::Item answer;
+    answer.insertText = "int total = 0;\nfor (int x : v)\n    total += x;\nreturn total;";
+    is.provide(r.serial, {answer});
+    CHECK(!is.awaiting() && is.items().size() == 1 && is.items()[0].label == "int total = 0;");
+    CHECK(is.accept());
+    {
+        const model::TextBuffer& b = vm.activeDocument()->buffer;
+        CHECK(b.line(5) == "    int total = 0;" && b.line(6) == "    for (int x : v)" && b.line(7) == "        total += x;" &&
+              b.line(8) == "    return total;" && b.line(9) == "}");
+    }
+    vm.execute(viewmodel::CommandId::Undo);
+    CHECK(vm.activeDocument()->buffer.line(5) == "    "); // one undoable edit
+
+    // On the comment itself: the code goes below it.
+    vm.setCaret({3, 8}, false);
+    CHECK(is.implementComment(true));
+    is.provide(requests.back().serial, {answer});
+    CHECK(is.accept());
+    CHECK(vm.activeDocument()->buffer.line(4) == "    // and return the total" && vm.activeDocument()->buffer.line(5) == "    int total = 0;");
+    vm.execute(viewmodel::CommandId::Undo);
+
+    // Typing on while it writes stops it, and its late answer is dropped.
+    vm.setCaret({5, 4}, false);
+    CHECK(is.implementComment(true));
+    const int late = requests.back().serial;
+    vm.insertText("x");
+    is.sync();
+    CHECK(!is.active() && cancels >= 1);
+    is.provide(late, {answer});
+    CHECK(!is.active() && vm.activeDocument()->buffer.line(5) == "    x");
+    vm.execute(viewmodel::CommandId::Undo);
+
+    // Enter after a comment: asked once the caret has rested there.
+    const size_t asked = requests.size();
+    vm.setCaret({4, int(vm.activeDocument()->buffer.line(4).size())}, false);
+    vm.newline();
+    is.afterNewline();
+    is.tick(10.0);
+    is.tick(10.5);
+    CHECK_EQ(requests.size(), asked); // not yet
+    is.tick(10.9);
+    CHECK_EQ(requests.size(), asked + 1);
+    CHECK(is.awaiting());
+    is.dismiss();
+    // Enter then typing on (the comment goes on): nothing is asked.
+    vm.newline();
+    is.afterNewline();
+    is.tick(20.0);
+    vm.insertText("// more");
+    is.tick(21.0);
+    CHECK_EQ(requests.size(), asked + 1);
+    // Not on or below a comment: Ctrl+Shift+Space explains.
+    vm.setCaret({1, 3}, false);
+    CHECK(!is.implementComment(true));
+    CHECK(vm.statusText.get().find("comment") != std::string::npos);
+    is.setProvider({});
+}
+
+namespace {
+
+// A local engine that answers when the test says so.
+struct SlowEngine : interfaces::ILocalEngineService {
+    std::vector<interfaces::LocalChatRequest> chats;
+    std::function<void(const std::string&)> text;
+    std::function<void(const interfaces::LocalChatResult&)> done;
+    int cancels = 0;
+    bool busy = false; // the agent is using the model
+    interfaces::EngineInfo info() override { return {}; }
+    void run(const interfaces::EngineRunSettings&, std::function<void(const std::string&)>,
+             std::function<void(const interfaces::EngineRunResult&)>) override {}
+    void cancel() override
+    {
+        ++cancels;
+        if (done) { // the engine stops and reports it
+            interfaces::LocalChatResult r;
+            r.error = "stopped";
+            auto finish = std::move(done);
+            done = nullptr;
+            text = nullptr;
+            finish(r);
+        }
+    }
+    bool running() const override { return false; }
+    bool chatting() const override { return busy || bool(done); }
+    void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
+              std::function<void(const std::string&)> t, std::function<void(const interfaces::LocalChatResult&)> d) override
+    {
+        chats.push_back(request);
+        stage("Loading the local model");
+        text = std::move(t);
+        done = std::move(d);
+    }
+    void answer(const std::string& piece1, const std::string& piece2)
+    {
+        text(piece1);
+        text(piece2);
+        interfaces::LocalChatResult r;
+        r.ok = true;
+        r.generatedTokens = 12;
+        auto finish = std::move(done);
+        done = nullptr;
+        text = nullptr;
+        finish(r);
+    }
+    std::string modelsDirectory() override { return "/models"; }
+    uint64_t freeSpace(const std::string&) override { return 0; }
+    uint64_t fileSize(const std::string&) override { return 0; }
+    bool startDownload(const std::string&, const std::string&, bool, std::string*) override { return false; }
+    interfaces::DownloadStatus downloadStatus() override { return {}; }
+    void cancelDownload() override {}
+    bool meteredNetwork() override { return false; }
+    void hashFile(const std::string&, std::function<void(double)>, std::function<void(const std::string&)> d) override { d({}); }
+};
+
+// Runs programs when the test says so, and keeps what it was asked.
+struct RecordingProcesses : interfaces::IProcessService {
+    std::vector<interfaces::ProcessRequest> requests;
+    std::function<void(const interfaces::ProcessResult&)> pending;
+    void run(const std::string&, const std::string&, std::function<void(const interfaces::ProcessResult&)> done) override
+    {
+        done({});
+    }
+    void run(const interfaces::ProcessRequest& request, std::function<void(const interfaces::ProcessResult&)> done) override
+    {
+        requests.push_back(request);
+        pending = std::move(done);
+    }
+    std::optional<std::string> setting(const std::string&) const override { return std::nullopt; }
+    void finish(const std::string& output, int exitCode = 0)
+    {
+        auto done = std::move(pending);
+        pending = nullptr;
+        done({true, exitCode, output, {}, {}});
+    }
+};
+
+struct ClaudeCli : interfaces::IAgentCliService {
+    std::string command() const override { return "claude -p"; }
+    bool available() const override { return true; }
+    std::string executable() const override { return "/opt/bin/claude"; }
+    std::string prompt;
+    std::function<void(bool, const std::string&)> pending;
+    void run(const std::string& p, const std::string&, std::function<void(bool, const std::string&)> done) override
+    {
+        prompt = p;
+        pending = std::move(done);
+    }
+};
+
+} // namespace
+
+TEST(code_assistant_writes_code_with_the_chosen_model)
+{
+    using IS = viewmodel::IntellisenseViewModel;
+    using CA = viewmodel::CodeAssistant;
+    CHECK(CA::extractCode("Here you go:\n```cpp\nint y = x + 1;\n```\nThat adds one.", "add one") == "int y = x + 1;");
+    CHECK(CA::extractCode("// add one to x\nx += 1;\n", "add one to x") == "x += 1;");
+    CHECK(CA::shellArguments("ollama run m").size() == 3);
+
+    // Background index builds (of this or earlier tests) finish and their results are taken off
+    // the main thread's queue before each reading.
+    auto settle = []() {
+        for (int i = 0; i < 1000 && viewmodel::IntellisenseViewModel::runningBuilds() > 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        os::dispatch::pump();
+    };
+    settle();
+    const std::uint64_t memoryBefore = os::mem::liveBytes("intellisense");
+    SlowEngine engine;
+    RecordingProcesses processes;
+    ClaudeCli claude;
+    {
+        viewmodel::NotepadViewModel vm;
+        IS& is = vm.intellisense();
+        bool modelReady = true;
+        CA assistant(is, &engine,
+                     [&]() {
+                         viewmodel::AgentViewModel::LocalSetup s;
+                         s.ready = modelReady;
+                         s.why = "the model is not downloaded yet";
+                         s.modelPath = "/models/gemma.gguf";
+                         return s;
+                     },
+                     &claude, &processes);
+        assistant.attach();
+        is.aiSuggestions.set(true);
+        vm.newDocument();
+        vm.activeDocument()->language = model::Language::Cpp;
+        vm.insertText("#include <cstdio>\nvoid greet()\n{\n    // print hello\n    \n}\n");
+        vm.setCaret({4, 4}, false);
+
+        // The local model: the prompt has the comment, the language and the headers.
+        CHECK(is.implementComment(true));
+        CHECK_EQ(engine.chats.size(), size_t(1));
+        const std::string prompt = engine.chats[0].messages.back().text;
+        CHECK(engine.chats[0].messages.size() == 2 && engine.chats[0].modelPath == "/models/gemma.gguf");
+        CHECK(prompt.find("print hello") != std::string::npos && prompt.find("<cstdio>") != std::string::npos &&
+              prompt.find("C++17") != std::string::npos);
+        CHECK(is.providerStatus() == "Loading the local model");
+        engine.answer("```cpp\nstd::printf(\"hello\\n\");", "\n```");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "std::printf(\"hello\\n\");");
+        CHECK(is.accept());
+        CHECK(vm.activeDocument()->buffer.line(4) == "    std::printf(\"hello\\n\");");
+        vm.execute(viewmodel::CommandId::Undo);
+
+        // Closed while it writes: the engine is told to stop; nothing lands.
+        vm.setCaret({4, 4}, false);
+        CHECK(is.implementComment(true));
+        CHECK(engine.chatting());
+        is.dismiss();
+        CHECK(engine.cancels == 1 && !engine.chatting() && !assistant.busy());
+        CHECK(vm.statusText.get().find("could not") == std::string::npos); // stopped by the user: no error
+
+        // The agent has the model: the comment waits for its turn.
+        engine.busy = true;
+        CHECK(is.implementComment(true));
+        CHECK_EQ(engine.chats.size(), size_t(2));
+        CHECK(is.providerStatus().find("agent") != std::string::npos);
+        engine.busy = false;
+        assistant.tick();
+        CHECK_EQ(engine.chats.size(), size_t(3));
+        engine.answer("puts(\"hello\");", "");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "puts(\"hello\");");
+        is.dismiss();
+
+        // Not ready: says why.
+        modelReady = false;
+        CHECK(is.implementComment(true));
+        CHECK(!is.active() && vm.statusText.get().find("not downloaded") != std::string::npos);
+
+        // A command (any model): the shell runs it with the prompt on stdin.
+        assistant.source.set(int(CA::Source::Command));
+        CHECK(!assistant.ready());
+        assistant.command.set("mymodel --code");
+        CHECK(assistant.ready());
+        CHECK(is.implementComment(true));
+        CHECK_EQ(processes.requests.size(), size_t(1));
+        CHECK(processes.requests[0].arguments == CA::shellArguments("mymodel --code"));
+        CHECK(processes.requests[0].input.find("print hello") != std::string::npos);
+        processes.finish("std::puts(\"hello\");\n");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "std::puts(\"hello\");" && is.items()[0].detail == "command");
+        is.dismiss();
+        // A command that fails says so.
+        CHECK(is.implementComment(true));
+        processes.finish("model not found", 1);
+        CHECK(!is.active() && vm.statusText.get().find("could not answer") != std::string::npos);
+
+        // Claude, online: Claude Code's command line, or the chosen model.
+        assistant.source.set(int(CA::Source::Claude));
+        CHECK(is.implementComment(true));
+        CHECK(claude.prompt.find("print hello") != std::string::npos);
+        claude.pending(true, "```\nputs(\"hi\");\n```");
+        CHECK(is.items().size() == 1 && is.items()[0].insertText == "puts(\"hi\");");
+        is.dismiss();
+        assistant.claudeModel.set("haiku");
+        CHECK(is.implementComment(true));
+        CHECK(processes.requests.back().arguments == std::vector<std::string>({"/opt/bin/claude", "-p", "--model", "haiku"}));
+        // Its answer comes after the list closed: dropped.
+        is.dismiss();
+        processes.finish("late();");
+        CHECK(!is.active());
+    }
+    settle();
+    CHECK_EQ(os::mem::liveBytes("intellisense"), memoryBefore); // every byte back
+}
+
+TEST(intellisense_reads_and_builds_without_reallocating)
+{
+    // A scan reads every file into one buffer reserved once.
+    const std::string dir = scratchDirectory() + "/enp-test-read-into";
+    os::fs::createDirectories(dir);
+    services::FileService files;
+    files.write(dir + "/small.txt", "hello\nworld\n", nullptr);
+    files.write(dir + "/big.txt", std::string(5000, 'x'), nullptr);
+    std::string buffer;
+    buffer.reserve(4096);
+    const char* storage = buffer.data();
+    CHECK(files.readInto(dir + "/small.txt", buffer, 4096));
+    CHECK(buffer == "hello\nworld\n" && buffer.data() == storage); // the same storage: nothing allocated
+    CHECK(!files.readInto(dir + "/big.txt", buffer, 4096));        // over the limit: refused, untouched
+    CHECK(buffer == "hello\nworld\n");
+    CHECK(!files.readInto(dir + "/missing.txt", buffer, 4096));
+
+    // Copying a document's text is one allocation, not one per doubling.
+    model::TextBuffer text;
+    std::string many;
+    for (int i = 0; i < 2000; ++i)
+        many += "line number " + std::to_string(i) + " of the text\n";
+    text.setText(many);
+    if (os::mem::enabled()) {
+        const std::uint64_t before = os::mem::stats().totalAllocations;
+        const std::string copy = text.text();
+        CHECK_EQ(os::mem::stats().totalAllocations - before, std::uint64_t(1));
+        CHECK(copy == many);
+    }
+
+    // In place (open documents) or from text: the same declarations and #include lines.
+    model::TextBuffer source("#include <vector>\n#include \"a.h\"\nclass Widget {\n    int size() const;\n};\nint helper(int x) { return x; }\n");
+    std::vector<model::Symbol> fromText, inPlace;
+    model::extractSymbols(source.text(), model::Language::Cpp, 0, fromText);
+    model::extractSymbols(source, model::Language::Cpp, 0, inPlace);
+    CHECK(fromText.size() == inPlace.size() && fromText.size() >= 3);
+    for (size_t i = 0; i < fromText.size() && i < inPlace.size(); ++i)
+        CHECK(fromText[i].name == inPlace[i].name && fromText[i].line == inPlace[i].line && fromText[i].detail == inPlace[i].detail);
+    std::vector<model::Include> a, b;
+    model::scanIncludes(source.text(), a);
+    model::scanIncludes(source, b);
+    CHECK(a.size() == 2 && b.size() == 2 && a[1].name == b[1].name && b[1].name == "a.h" && b[0].system);
+
+    // An index reserved for its source does not reallocate while it is built.
+    std::string code;
+    for (int i = 0; i < 300; ++i)
+        code += "int function" + std::to_string(i) + "(int value) { return value + " + std::to_string(i) + "; }\n";
+    model::SymbolIndex index;
+    // (This code declares a function every 55 bytes, ten times denser than real code: room for it.
+    // Denser code than reserved for still works: the index then grows as usual.)
+    index.reserve(code.size() * 4 * 10, 4);
+    const size_t reserved = index.bytes();
+    std::vector<model::Symbol> symbols;
+    for (int f = 0; f < 4; ++f) {
+        model::extractSymbols(code, model::Language::Cpp, int(index.fileCount()), symbols);
+        index.addFile("file" + std::to_string(f) + ".cpp");
+        index.add(symbols);
+    }
+    CHECK_EQ(index.bytes(), reserved); // grown into the room taken, never reallocated
+    index.finish();
+    CHECK_EQ(index.size(), size_t(1200));
+    CHECK(index.bytes() <= reserved);
+}
+
+TEST(dispatch_worker_runs_tasks_in_order_on_one_thread)
+{
+    // Recurring background work reuses one thread (and its malloc arena) instead of a new one per task.
+    std::mutex m;
+    std::vector<int> order;
+    std::set<std::thread::id> threads;
+    std::atomic<int> done{0};
+    {
+        os::dispatch::Worker worker;
+        CHECK(!worker.started());
+        for (int i = 0; i < 20; ++i)
+            worker.post([&, i]() {
+                std::lock_guard<std::mutex> lock(m);
+                order.push_back(i);
+                threads.insert(std::this_thread::get_id());
+                ++done;
+            });
+        CHECK(worker.started());
+        for (int i = 0; i < 1000 && done.load() < 20; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK_EQ(done.load(), 20);
+    CHECK_EQ(threads.size(), size_t(1));
+    CHECK(threads.count(std::this_thread::get_id()) == 0);
+    bool ordered = true;
+    for (int i = 0; i < int(order.size()); ++i)
+        ordered = ordered && order[size_t(i)] == i;
+    CHECK(ordered);
+    // Destroyed with work queued: the running task finishes, the rest is dropped (and freed).
+    auto held = std::make_shared<int>(7);
+    std::atomic<bool> release{false};
+    {
+        os::dispatch::Worker worker;
+        worker.post([&]() {
+            while (!release.load())
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        });
+        worker.post([held]() { (void)held; });
+        CHECK_EQ(held.use_count(), 2L);
+        release = true;
+    }
+    CHECK_EQ(held.use_count(), 1L); // the queued task, never run, let go of what it held
 }
 
 TEST(measurement_pool_is_a_fixed_first_fit_manager)
