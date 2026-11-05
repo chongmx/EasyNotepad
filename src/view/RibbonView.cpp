@@ -64,6 +64,19 @@ std::string lower(std::string s)
     return s;
 }
 
+// The ribbon's rows scroll sideways only, so the plain mouse wheel scrolls the current child
+// window left/right. ImGui handles Shift+wheel and a trackpad's sideways swipe itself, and passes
+// a plain wheel to the parent (the child cannot scroll up/down). Not NoScrollWithMouse: touch
+// dragging (TouchScroll.cpp) leaves such windows alone.
+void wheelScrollsSideways(float step)
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    const float max = ImGui::GetScrollMaxX();
+    if (io.MouseWheel == 0.0f || io.KeyShift || max <= 0.0f || !ImGui::IsWindowHovered())
+        return;
+    ImGui::SetScrollX(std::clamp(ImGui::GetScrollX() - io.MouseWheel * step, 0.0f, max));
+}
+
 } // namespace
 
 RibbonView::RibbonView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
@@ -362,6 +375,7 @@ void RibbonView::render()
     const float groupsH = (slim() ? kSlimButtonHeight : kButtonHeight + kCaptionHeight) + 4.0f;
     ImGui::BeginChild("##ribbonGroups", ImVec2(origin.x + width - left - toggleRoom, groupsH * s_), ImGuiChildFlags_None,
                       ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
+    wheelScrollsSideways(80.0f * s_);
     renderGroups(shownTab(selectedTab()));
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
@@ -475,6 +489,7 @@ void RibbonView::renderTabRow(float width)
         ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 3.0f * s_);
         ImGui::BeginChild("##ribbonTabs", ImVec2(width, (kTabRowHeight - 2.0f) * s_), ImGuiChildFlags_None,
                           ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
+        wheelScrollsSideways(60.0f * s_);
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 start = ImGui::GetCursorScreenPos();

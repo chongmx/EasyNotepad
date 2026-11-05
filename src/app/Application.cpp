@@ -271,7 +271,9 @@ bool Application::animating() const
 {
     const viewmodel::NotepadViewModel& vm = *viewModel_;
     return vm.agent().busy.get() || vm.tourRunning() || vm.agentPointer.get().visible || view::touch::gliding() ||
-           const_cast<viewmodel::NotepadViewModel&>(vm).logicalMap().analyzing.get() || trimFrames_ > 0 || lateTrimAt_ > 0.0;
+           const_cast<viewmodel::NotepadViewModel&>(vm).logicalMap().analyzing.get() ||
+           const_cast<viewmodel::NotepadViewModel&>(vm).findInFiles().running.get() || // its progress bar moves
+           trimFrames_ > 0 || lateTrimAt_ > 0.0;
 }
 
 int Application::maxFramesPerSecond() const

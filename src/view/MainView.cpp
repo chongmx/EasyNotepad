@@ -538,10 +538,9 @@ void MainView::renderTopBar()
     // Right-aligned: workspace switch, theme, settings, help, version.
     // A build from anything but the release's tag says so: "v1.1.0-dev" (the commit is in the tooltip).
     const char* version = ENP_RELEASE ? "v" ENP_VERSION : "v" ENP_VERSION "-dev";
-    const float modeW = ImGui::CalcTextSize(ICON_FA_ROBOT " Agent").x + ImGui::CalcTextSize(ICON_FA_CODE " Code").x +
-                        ImGui::GetStyle().FramePadding.x * 4.0f + 2.0f * s_;
+    const float modeW = frameH + workspaceChevronWidth();
     const float iconW = frameH * 1.1f;
-    const float rightW = modeW + 3.0f * iconW + ImGui::CalcTextSize(version).x + 40.0f * s_;
+    const float rightW = layoutTogglesWidth() + modeW + 3.0f * iconW + ImGui::CalcTextSize(version).x + 40.0f * s_;
     const float buttonsX = frame_ ? renderWindowButtons(origin.x + width, origin.y, h) : origin.x + width;
     const float rightX = buttonsX - rightW;
 
@@ -562,20 +561,9 @@ void MainView::renderTopBar()
     }
 
     ImGui::SetCursorScreenPos(ImVec2(rightX, y));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f * s_);
-    const bool agent = vm_.workspace.get() == WorkspaceMode::Agent;
-    ImGui::PushStyleColor(ImGuiCol_Text, agent ? col(palette_.modeAgent) : col(palette_.textDim));
-    if (flatButton(ICON_FA_ROBOT " Agent", "Agent workspace: describe the goal, review the changes", true, agent))
-        vm_.execute(CommandId::SwitchToAgentMode);
-    registerLastItem("command:SwitchToAgentMode", "button", "Agent workspace", [this]() { vm_.execute(CommandId::SwitchToAgentMode); });
-    ImGui::PopStyleColor();
-    ImGui::SameLine(0.0f, 2.0f * s_);
-    ImGui::PushStyleColor(ImGuiCol_Text, !agent ? col(palette_.modeCode) : col(palette_.textDim));
-    if (flatButton(ICON_FA_CODE " Code", "Code workspace: manual editing", true, !agent))
-        vm_.execute(CommandId::SwitchToCodeMode);
-    registerLastItem("command:SwitchToCodeMode", "button", "Code workspace", [this]() { vm_.execute(CommandId::SwitchToCodeMode); });
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
+    renderLayoutToggles();
+    ImGui::SameLine(0.0f, 12.0f * s_);
+    renderWorkspaceSwitch();
     ImGui::SameLine(0.0f, 12.0f * s_);
     if (flatButton(vm_.darkTheme.get() ? ICON_FA_SUN : ICON_FA_MOON, "Toggle theme"))
         vm_.execute(CommandId::ToggleTheme);
@@ -1513,6 +1501,178 @@ float MainView::renderWindowButtons(float right, float y, float height)
     }
     ImGui::PopID();
     return left;
+}
+
+namespace {
+
+// The workspaces, in the order the switch goes through them (WorkspaceMode, kWorkspaceModeCount).
+struct Workspace {
+    WorkspaceMode mode;
+    CommandId command; // switches to it; its icon and label
+    const char* automationId;
+};
+constexpr Workspace kWorkspaces[] = {{WorkspaceMode::Agent, CommandId::SwitchToAgentMode, "workspace:agent"},
+                                     {WorkspaceMode::Code, CommandId::SwitchToCodeMode, "workspace:code"}};
+static_assert(std::size(kWorkspaces) == size_t(viewmodel::kWorkspaceModeCount), "a workspace without its switch entry");
+
+} // namespace
+
+float MainView::workspaceChevronWidth() const
+{
+    return std::round(ImGui::GetFrameHeight() * 0.6f);
+}
+
+void MainView::renderWorkspaceSwitch()
+{
+    const Workspace* current = &kWorkspaces[0];
+    for (const Workspace& w : kWorkspaces)
+        if (w.mode == vm_.workspace.get())
+            current = &w;
+    auto modeColor = [this](WorkspaceMode mode) { return mode == WorkspaceMode::Agent ? palette_.modeAgent : palette_.modeCode; };
+    const float size = ImGui::GetFrameHeight();
+    const float rounding = 5.0f * s_;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::PushID("workspaceSwitch");
+
+    // The icon of the current workspace: a click goes on to the next one.
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const bool next = ImGui::InvisibleButton("##next", ImVec2(size, size));
+    const bool iconHovered = ImGui::IsItemHovered();
+    registerLastItem("workspace-switch", "button", std::string(commandInfo(current->command).label) + " workspace",
+                     [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); });
+    if (iconHovered)
+        ImGui::SetTooltip("%s workspace: click for the next one (%s)", commandInfo(current->command).label,
+                          commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
+    // The chevron, right against it: the list of workspaces.
+    ImGui::SameLine(0.0f, 0.0f);
+    const float chevronW = workspaceChevronWidth();
+    const bool open = ImGui::InvisibleButton("##menu", ImVec2(chevronW, size)) || openWorkspaceMenu_;
+    const bool chevronHovered = ImGui::IsItemHovered();
+    openWorkspaceMenu_ = false;
+    registerLastItem("workspace-menu", "button", "Workspaces", [this]() { openWorkspaceMenu_ = true; });
+    if (chevronHovered)
+        ImGui::SetTooltip("Workspaces");
+
+    // One rounded block, each half lit on its own when hovered.
+    const ImVec2 end(at.x + size + chevronW, at.y + size);
+    if (iconHovered)
+        dl->AddRectFilled(at, ImVec2(at.x + size, end.y), palette_.hover, rounding, ImDrawFlags_RoundLeft);
+    if (chevronHovered || ImGui::IsPopupOpen("##workspaceMenu"))
+        dl->AddRectFilled(ImVec2(at.x + size, at.y), end, palette_.hover, rounding, ImDrawFlags_RoundRight);
+    const char* icon = commandIcon(current->command);
+    const ImVec2 iconSize = ImGui::CalcTextSize(icon);
+    dl->AddText(ImVec2(std::floor(at.x + (size - iconSize.x) * 0.5f), std::floor(at.y + (size - iconSize.y) * 0.5f)),
+                modeColor(current->mode), icon);
+    // The chevron is drawn small, like a caret, close to the icon.
+    const float c = std::round(3.5f * s_);
+    const ImVec2 m(std::floor(at.x + size + chevronW * 0.4f) + 0.5f, std::floor(at.y + size * 0.5f) + 0.5f);
+    dl->AddTriangleFilled(ImVec2(m.x - c, m.y - c * 0.5f), ImVec2(m.x + c, m.y - c * 0.5f), ImVec2(m.x, m.y + c * 0.6f), palette_.textDim);
+
+    if (next)
+        vm_.execute(CommandId::ToggleWorkspaceMode);
+    if (open)
+        ImGui::OpenPopup("##workspaceMenu");
+    ImGui::SetNextWindowPos(ImVec2(end.x, end.y + 4.0f * s_), ImGuiCond_Always, ImVec2(1.0f, 0.0f)); // under it, right-aligned
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * s_, 8.0f * s_)); // the other menus' padding
+    const bool menu = ImGui::BeginPopup("##workspaceMenu");
+    ImGui::PopStyleVar();
+    if (menu) {
+        // Each workspace: its icon in its colour, its name, and what it is for.
+        const float rowW = 300.0f * s_, rowH = ImGui::GetTextLineHeight() * 2.0f + 10.0f * s_;
+        for (const Workspace& w : kWorkspaces) {
+            const viewmodel::CommandInfo& info = commandInfo(w.command);
+            ImGui::PushID(w.automationId);
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##workspace", w.mode == current->mode, ImGuiSelectableFlags_None, ImVec2(rowW, rowH)))
+                vm_.execute(w.command);
+            registerLastItem(w.automationId, "menuitem", std::string(info.label) + " workspace",
+                             [this, id = w.command]() { vm_.execute(id); });
+            ImGui::PopID();
+            ImDrawList* pdl = ImGui::GetWindowDrawList();
+            const char* wIcon = commandIcon(w.command);
+            pdl->AddText(ImVec2(p.x + 6.0f * s_, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), modeColor(w.mode), wIcon);
+            const float textX = p.x + 6.0f * s_ + ImGui::GetFontSize() * 1.6f;
+            pdl->AddText(ImVec2(textX, p.y + 4.0f * s_), palette_.text, info.label);
+            const char* colon = std::strchr(info.tooltip, ':'); // "Agent-centric workspace: describe ..." -> "describe ..."
+            const char* detail = colon ? colon + 2 : info.tooltip;
+            pdl->PushClipRect(p, ImVec2(p.x + rowW, p.y + rowH), true);
+            pdl->AddText(ImVec2(textX, p.y + 6.0f * s_ + ImGui::GetTextLineHeight()), palette_.textDim, detail);
+            pdl->PopClipRect();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("Next workspace: click the icon, or %s", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+
+float MainView::layoutTogglesWidth() const
+{
+    return 3.0f * ImGui::GetFrameHeight() + 2.0f * 2.0f * s_ + 12.0f * s_; // three buttons, their gaps, the gap after
+}
+
+void MainView::renderLayoutToggles()
+{
+    struct Toggle {
+        CommandId id;
+        const char* automationId;
+        int pane; // 0 left, 1 bottom, 2 right
+    };
+    static constexpr Toggle toggles[] = {{CommandId::ToggleExplorer, "layout:explorer", 0},
+                                         {CommandId::TogglePanel, "layout:panel", 1},
+                                         {CommandId::ToggleAgentPanel, "layout:agent-panel", 2}};
+    // The agent workspace has no agent side panel: its right-hand side is always the preview.
+    const bool codeWorkspace = vm_.workspace.get() == WorkspaceMode::Code;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float size = ImGui::GetFrameHeight();
+    const float thickness = std::max(1.0f, s_);
+    ImGui::PushID("layoutToggles");
+    for (const Toggle& t : toggles) {
+        const bool enabled = t.pane != 2 || codeWorkspace;
+        const bool on = enabled && vm_.isChecked(t.id);
+        if (t.pane > 0)
+            ImGui::SameLine(0.0f, 2.0f * s_);
+        ImGui::PushID(t.pane);
+        ImGui::BeginDisabled(!enabled);
+        const bool clicked = ImGui::InvisibleButton("##layoutToggle", ImVec2(size, size));
+        ImGui::EndDisabled();
+        ImGui::PopID();
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (enabled)
+                dl->AddRectFilled(a, b, palette_.hover, 4.0f * s_);
+            const viewmodel::CommandInfo& info = commandInfo(t.id);
+            if (enabled)
+                ImGui::SetTooltip("%s (%s)", info.tooltip, info.shortcut);
+            else
+                ImGui::SetTooltip("%s: in the Code workspace", info.tooltip);
+        }
+        if (clicked && enabled)
+            vm_.execute(t.id);
+        registerLastItem(t.automationId, "toggle", commandInfo(t.id).label, [this, id = t.id]() { vm_.execute(id); }, enabled);
+
+        // The window: 14 x 12, on whole pixels so its 1 px lines stay sharp.
+        const ImU32 c = enabled ? palette_.text : palette_.textDim;
+        const float w = std::round(14.0f * s_), h = std::round(12.0f * s_);
+        const ImVec2 o(std::floor((a.x + b.x - w) * 0.5f) + 0.5f, std::floor((a.y + b.y - h) * 0.5f) + 0.5f);
+        const ImVec2 e(o.x + w, o.y + h);
+        const float side = std::round(w * 0.32f), bottom = std::round(h * 0.38f);
+        ImVec2 p0, p1; // the pane
+        if (t.pane == 0)
+            p0 = o, p1 = ImVec2(o.x + side, e.y);
+        else if (t.pane == 1)
+            p0 = ImVec2(o.x, e.y - bottom), p1 = e;
+        else
+            p0 = ImVec2(e.x - side, o.y), p1 = e;
+        if (on)
+            dl->AddRectFilled(p0, p1, c);
+        else if (t.pane == 1)
+            dl->AddLine(p0, ImVec2(p1.x, p0.y), c, thickness);
+        else
+            dl->AddLine(t.pane == 0 ? ImVec2(p1.x, p0.y) : p0, t.pane == 0 ? p1 : ImVec2(p0.x, p1.y), c, thickness);
+        dl->AddRect(o, e, c, 1.5f * s_, thickness);
+    }
+    ImGui::PopID();
 }
 
 void MainView::handleCaptionMouse()

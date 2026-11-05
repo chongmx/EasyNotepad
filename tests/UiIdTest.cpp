@@ -369,8 +369,25 @@ int main(int argc, char** argv)
                 if (w->WasActive && !(w->Flags & ImGuiWindowFlags_ChildWindow) && std::strcmp(w->Name, "##main") == 0)
                     check(w->Scroll.x == 0.0f && w->Scroll.y == 0.0f, "the app itself must never be dragged sideways");
 
-            // A mouse drag over the text selects, as it always did, and does not scroll.
+            // The plain mouse wheel (no Shift) scrolls the ribbon's rows sideways: the groups and the tabs.
             h.setTouch(false);
+            auto wheel = [&](const char* window, ImVec2 at) {
+                h.frame(at);
+                const float before = scrollOf(window, 0);
+                ImGui::GetIO().AddMouseWheelEvent(0.0f, before > 0.0f ? 3.0f : -3.0f); // towards the room there is
+                h.frame(at);
+                h.frame(at);
+                check(before >= 0.0f && std::fabs(scrollOf(window, 0) - before) > 50.0f,
+                      std::string("the mouse wheel should scroll ") + window + " sideways (" + std::to_string(before) + " -> " +
+                          std::to_string(scrollOf(window, 0)) + ")");
+            };
+            wheel("##ribbonGroups", ImVec2(130.0f, 95.0f));
+            wheel("##ribbonTabs", ImVec2(250.0f, 51.0f));
+            for (ImGuiWindow* w : GImGui->Windows)
+                if (w->WasActive && !(w->Flags & ImGuiWindowFlags_ChildWindow) && std::strcmp(w->Name, "##main") == 0)
+                    check(w->Scroll.x == 0.0f && w->Scroll.y == 0.0f, "the mouse wheel must not scroll the app itself");
+
+            // A mouse drag over the text selects, as it always did, and does not scroll.
             h.click(ImVec2(19.0f, 18.0f)); // hide the ribbon
             h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
             h.settle();
@@ -431,6 +448,66 @@ int main(int argc, char** argv)
             while (!h.vm().documents().empty())
                 h.vm().closeDocument(0);
             h.settle();
+
+            // The title bar's layout buttons: each hides its pane and shows it again; the agent
+            // panel's is off in the agent workspace, which has none.
+            h.setContext("layout buttons");
+            h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+            h.settle();
+            struct Pane {
+                const char* id;
+                viewmodel::Property<bool>& shown;
+            };
+            for (const Pane& pane : {Pane{"layout:explorer", h.vm().showExplorer}, Pane{"layout:panel", h.vm().showPanel},
+                                     Pane{"layout:agent-panel", h.vm().showAgentPanel}}) {
+                const bool before = pane.shown.get();
+                for (int i = 0; i < 2; ++i) {
+                    const view::UiElement* e = view::UiAutomation::instance().find(pane.id);
+                    if (!e || !e->activate) {
+                        std::printf("  FAILED layout buttons: no button %s\n", pane.id), ++checksFailed;
+                        break;
+                    }
+                    const std::function<void()> action = e->activate; // the registry is rebuilt next frame
+                    action();
+                    h.settle();
+                    if (pane.shown.get() != (i == 0 ? !before : before))
+                        std::printf("  FAILED layout buttons: %s did not toggle its pane\n", pane.id), ++checksFailed;
+                }
+            }
+            h.vm().workspace.set(viewmodel::WorkspaceMode::Agent);
+            h.settle();
+            if (const view::UiElement* e = view::UiAutomation::instance().find("layout:agent-panel"); !e || e->enabled)
+                std::printf("  FAILED layout buttons: the agent panel's button is on in the agent workspace\n"), ++checksFailed;
+            h.vm().workspace.set(viewmodel::WorkspaceMode::Code);
+            h.settle();
+
+            // The workspace switch: its icon goes on to the next workspace, and around; its chevron
+            // lists them, and choosing one there switches to it.
+            h.setContext("workspace switch");
+            auto press = [&](const char* id) {
+                const view::UiElement* e = view::UiAutomation::instance().find(id);
+                if (!e || !e->activate) {
+                    std::printf("  FAILED workspace switch: no control %s\n", id), ++checksFailed;
+                    return;
+                }
+                const std::function<void()> action = e->activate;
+                action();
+                h.settle();
+            };
+            for (int i = 1; i <= viewmodel::kWorkspaceModeCount; ++i) {
+                press("workspace-switch");
+                const auto expected = viewmodel::WorkspaceMode((int(viewmodel::WorkspaceMode::Code) + i) % viewmodel::kWorkspaceModeCount);
+                if (h.vm().workspace.get() != expected)
+                    std::printf("  FAILED workspace switch: press %d did not go on to the next workspace\n", i), ++checksFailed;
+            }
+            press("workspace-menu");
+            press("workspace:agent");
+            if (h.vm().workspace.get() != viewmodel::WorkspaceMode::Agent)
+                std::printf("  FAILED workspace switch: choosing Agent in the list did not switch to it\n"), ++checksFailed;
+            press("workspace-menu");
+            press("workspace:code");
+            if (h.vm().workspace.get() != viewmodel::WorkspaceMode::Code)
+                std::printf("  FAILED workspace switch: choosing Code in the list did not switch to it\n"), ++checksFailed;
 
             // Images, entities and formulas: drawn without ImGui errors, and the image textures
             // (decoded here from a data URL, as a file's bytes would be) go with the document.

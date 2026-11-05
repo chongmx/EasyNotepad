@@ -1262,13 +1262,36 @@ TEST(find_in_files_searches_workspace_and_replaces)
     CHECK_EQ(total, 4); // a.cpp: 2, notes.md: 2 (one unsaved)
     CHECK_EQ(find.hitCount(), 4);
 
-    // The asynchronous search gives the same answer.
+    // The asynchronous search gives the same answer, and shows its progress while it runs: files
+    // read of files to read (notes.md, src/a.cpp, src/b.h, bin.dat; build/ is not in the tree).
     find.search();
+    CHECK_EQ(find.progressTotal(), 4);
+    CHECK(find.progressDone() >= 0 && find.progressDone() <= find.progressTotal());
     for (int i = 0; i < 200 && find.running.get(); ++i) {
         os::dispatch::pump();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     CHECK(!find.running.get() && find.hitCount() == 4);
+    CHECK_EQ(find.progressTotal(), 0); // forgotten once the results are in
+
+    // A newer search replaces a running one; a clear stops it and nothing arrives after.
+    find.search();
+    find.query = "other";
+    find.search();
+    for (int i = 0; i < 200 && find.running.get(); ++i) {
+        os::dispatch::pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(!find.running.get() && find.hitCount() == 1);
+    find.search();
+    find.clear();
+    CHECK(!find.running.get() && find.progressTotal() == 0);
+    for (int i = 0; i < 20; ++i) {
+        os::dispatch::pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(!find.running.get() && find.results().empty());
+    find.query = "widget";
 
     // Include filter and whole word.
     find.include = "*.cpp";

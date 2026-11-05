@@ -6,6 +6,7 @@
 #include "misc/cpp/imgui_stdlib.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace enp::view {
 
@@ -95,8 +96,14 @@ void SearchPanel::render()
     ImGui::PushTextWrapPos(0.0f);
     if (!find.error.get().empty())
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityError), "%s", find.error.get().c_str());
-    else if (find.running.get())
-        ImGui::TextDisabled(ICON_FA_SPINNER "  Searching...");
+    else if (find.running.get()) {
+        // Files read of files to read: a long search shows it is moving (a spinner alone looked hung).
+        const int done = find.progressDone(), total = find.progressTotal();
+        char overlay[64];
+        std::snprintf(overlay, sizeof(overlay), "Searching: %d of %d files", done, total);
+        ImGui::ProgressBar(total > 0 ? float(done) / float(total) : 0.0f, ImVec2(-1.0f, 0.0f), overlay);
+        registerLastItem("search:progress", "progress", overlay, nullptr);
+    }
     else if (!find.query.empty() && find.generation() > 0)
         ImGui::TextDisabled("%d result(s) in %d file(s)%s, %d file(s) searched", find.hitCount(), int(find.results().size()),
                             find.truncated() ? " (stopped: too many)" : "", find.filesSearched());

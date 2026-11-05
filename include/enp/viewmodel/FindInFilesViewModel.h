@@ -6,6 +6,7 @@
 #include "enp/model/Search.h"
 #include "enp/viewmodel/Observable.h"
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -53,8 +54,18 @@ public:
     int filesSearched() const { return filesSearched_; }
     bool truncated() const { return truncated_; }
     int generation() const { return generation_; }
+    // The running search's progress (files read of files to read), updated by its thread.
+    int progressDone() const { return progress_ ? progress_->done.load(std::memory_order_relaxed) : 0; }
+    int progressTotal() const { return progress_ ? progress_->total : 0; }
 
 private:
+    // Shared with the search's thread: it counts, and stops when cancelled (a newer search or a
+    // clear), instead of reading the rest of the workspace for nothing.
+    struct Progress {
+        std::atomic<int> done{0};
+        int total = 0; // set before the thread starts
+        std::atomic<bool> cancel{false};
+    };
     struct Source {
         std::string path;    // as shown
         std::string disk;    // absolute, for reading
@@ -70,8 +81,9 @@ private:
     };
     std::vector<Source> collect() const;
     static Outcome run(const std::vector<Source>& sources, const std::string& query, const model::SearchOptions& options,
-                       interfaces::IFileService* files);
+                       interfaces::IFileService* files, Progress* progress = nullptr);
     void apply(Outcome outcome);
+    void cancelRunning(); // stops the running search's thread and forgets its progress
 
     NotepadViewModel& owner_;
     interfaces::IFileService* files_;
@@ -80,6 +92,7 @@ private:
     int filesSearched_ = 0;
     bool truncated_ = false;
     int generation_ = 0;
+    std::shared_ptr<Progress> progress_; // only while a search runs
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 
