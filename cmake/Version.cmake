@@ -9,6 +9,9 @@
 # v<VERSION> and the tree has no changes. Anything else is a development build: its version reads
 # <VERSION>-dev+<commit>, with ".dirty" when the tree has changes.
 
+# A script run with -P starts with no policies: without this, if(... IN_LIST ...) is an error.
+cmake_minimum_required(VERSION 3.22)
+
 set(commit "")
 set(dirty FALSE)
 set(tagged FALSE)
