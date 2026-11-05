@@ -3450,7 +3450,6 @@ void MainView::renderAboutPopup()
     if (!rendererInfo_.empty())
         ImGui::TextWrapped("Renderer: %s", rendererInfo_.c_str());
     ImGui::Spacing();
-    ImGui::TextDisabled("UI preview build: running on dummy data, no services connected.");
     if (vm_.developerMode.get()) {
         ImGui::Spacing();
         ImGui::TextColored(col(palette_.accent), ICON_FA_FLASK "  Developer mode is on.");
