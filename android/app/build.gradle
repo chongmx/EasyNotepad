@@ -82,14 +82,14 @@ android {
 
 // Like the other platforms' binaries (bin/<os>/<arch>/), each APK is also copied to bin/android/
 // at the repository root: EasyNotepad-debug.apk, EasyNotepad-release.apk. One APK holds every ABI.
-android.applicationVariants.all { variant ->
-    variant.assembleProvider.configure { task ->
-        task.doLast {
-            project.copy {
-                from variant.outputs.collect { it.outputFile }
-                into rootProject.file('../bin/android')
-                rename { "EasyNotepad-${variant.name}.apk" }
-            }
-        }
+// (A copy task after assemble<Type>: AGP 9 removed the applicationVariants API this used.)
+['debug', 'release'].each { type ->
+    def Type = type.substring(0, 1).toUpperCase() + type.substring(1)
+    def copyApk = tasks.register("copy${Type}Apk", Copy) {
+        from layout.buildDirectory.dir("outputs/apk/${type}")
+        include '*.apk'
+        into rootProject.file('../bin/android')
+        rename { "EasyNotepad-${type}.apk" }
     }
+    tasks.matching { it.name == "assemble${Type}" }.configureEach { finalizedBy copyApk }
 }

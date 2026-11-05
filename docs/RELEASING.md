@@ -38,7 +38,8 @@ and that `CHANGELOG.md` has a section for it. On a tag `v*`, it also checks that
 
 On a tag `v*`, once every build has passed, the **release** job publishes a GitHub Release named
 after the tag: one zip per platform (the app and its resources, without the test programs), the
-web build and the Android APK, with the version's `CHANGELOG.md` section as its notes.
+web build and the Android APKs (the debug one, and the signed release one when the key is set,
+below), with the version's `CHANGELOG.md` section as its notes.
 
 ## Making a release
 
@@ -57,6 +58,18 @@ web build and the Android APK, with the version's `CHANGELOG.md` section as its 
 5. Start the next version: on a branch, raise `VERSION` (for example to `1.2.0`) and add a
    `## [1.2.0] - unreleased` section at the top of `CHANGELOG.md`.
 
-The Android APK attached to a release is the debug build (installable for testing). A Play
-Store build is signed with the release key, which never enters the repository (see
-`android/app/build.gradle`).
+## The Android release key
+
+Android installs only signed APKs, and an update only when it is signed with the same key as the
+installed app. The key is our own, self-signed (as every Android key is): create it once with
+
+```sh
+scripts/android-release-key.sh ~/keys/easynotepad-release.jks
+```
+
+and store the four secrets it lists (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`) in the repository's Actions secrets. With them, CI
+builds `EasyNotepad-release.apk` signed with the key on every run, and a release attaches it next
+to the debug APK. Without them CI builds the debug APK only. The keystore never enters the
+repository (`*.jks` is ignored); back it up with its password: if it is lost, the installed app
+can never be updated, only uninstalled and installed again.
