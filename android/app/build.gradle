@@ -2,6 +2,13 @@ plugins {
     id 'com.android.application'
 }
 
+// The version lives in the repository's VERSION file (docs/RELEASING.md), as for every other build.
+// versionCode must grow with every release: MAJOR * 10000 + MINOR * 100 + PATCH (1.1.0 -> 10100).
+def appVersion = rootProject.file('../VERSION').text.trim()
+def versionParts = appVersion.tokenize('.').collect { it as int }
+if (versionParts.size() != 3)
+    throw new GradleException("VERSION must be MAJOR.MINOR.PATCH, not '${appVersion}'")
+
 android {
     namespace 'com.easynotepad.app'
     // The emoji pack is read in parts (AAsset_seek): it must be stored, not deflated, in the APK.
@@ -17,8 +24,8 @@ android {
         applicationId 'com.easynotepad.app'
         minSdk 24
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        versionCode versionParts[0] * 10000 + versionParts[1] * 100 + versionParts[2]
+        versionName appVersion
 
         ndk {
             // aarch64 devices and x86_64 emulators / Chromebooks
@@ -26,7 +33,8 @@ android {
         }
         externalNativeBuild {
             cmake {
-                arguments '-DANDROID_STL=c++_static'
+                // -PreleaseTag=v<VERSION> (CI, building a release tag): a release build (docs/RELEASING.md).
+                arguments '-DANDROID_STL=c++_static', "-DENP_RELEASE_TAG=${project.findProperty('releaseTag') ?: ''}"
             }
         }
     }

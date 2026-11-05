@@ -5,12 +5,55 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Jobs only read the repository.
+# Jobs only read the repository; the release job alone may write (it publishes a release).
 permissions:
   contents: read
 
 jobs:
+  # The version (docs/RELEASING.md): VERSION is MAJOR.MINOR.PATCH and CHANGELOG.md has its
+  # section; a tag v* must be v + VERSION, with its section dated. Every build takes the version
+  # from here for its artifact names, and the tag (when building one) to be a release build.
+  version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check VERSION and CHANGELOG.md
+        id: check
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(tr -d ' \r\n' < VERSION)
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=VERSION::VERSION must be MAJOR.MINOR.PATCH, not '$version'"
+            exit 1
+          fi
+          header=$(grep -E "^## \[${version//./\\.}\]" CHANGELOG.md || true)
+          if [ -z "$header" ]; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md has no section '## [$version]'"
+            exit 1
+          fi
+          release_tag=""
+          if [ "$REF_TYPE" = tag ]; then
+            if [ "$REF_NAME" != "v$version" ]; then
+              echo "::error::Tag $REF_NAME does not match VERSION ($version): tag v$version, or change VERSION"
+              exit 1
+            fi
+            if echo "$header" | grep -qi unreleased; then
+              echo "::error file=CHANGELOG.md::Date the [$version] section of CHANGELOG.md before tagging"
+              exit 1
+            fi
+            release_tag="v$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "EasyNotepad $version${release_tag:+ (release $release_tag)}" >> "$GITHUB_STEP_SUMMARY"
+
   desktop:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -40,7 +83,7 @@ jobs:
         run: brew install ninja
 
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} "-DENP_RELEASE_TAG=${{ needs.version.outputs.release_tag }}"
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
@@ -69,10 +112,11 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: EasyNotepad-${{ matrix.name }}
+          name: EasyNotepad-${{ needs.version.outputs.version }}-${{ matrix.name }}
           path: bin/
 
   web:
+    needs: version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -97,15 +141,16 @@ jobs:
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: Configure
-        run: cmake --preset web
+        run: cmake --preset web "-DENP_RELEASE_TAG=${{ needs.version.outputs.release_tag }}"
       - name: Build
         run: cmake --build --preset web
       - uses: actions/upload-artifact@v7
         with:
-          name: EasyNotepad-web
+          name: EasyNotepad-${{ needs.version.outputs.version }}-web
           path: bin/web/
 
   android:
+    needs: version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -120,8 +165,54 @@ jobs:
           gradle-version: '8.11.1'
       - name: Build APK (arm64-v8a, x86_64)
         working-directory: android
-        run: gradle assembleDebug
+        run: gradle assembleDebug "-PreleaseTag=${{ needs.version.outputs.release_tag }}"
       - uses: actions/upload-artifact@v7
         with:
-          name: EasyNotepad-android
+          name: EasyNotepad-${{ needs.version.outputs.version }}-android
           path: bin/android/*.apk
+
+  # A tag v<VERSION> pushed and every build passed: the GitHub Release, with one download per
+  # platform and the version's CHANGELOG.md section as its notes (docs/RELEASING.md).
+  release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [version, desktop, web, android]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+      - name: Package
+        run: |
+          mkdir dist
+          for dir in artifacts/EasyNotepad-"$VERSION"-*; do
+            name=$(basename "$dir")
+            case "$name" in
+              *-android)
+                for apk in "$dir"/*.apk; do cp "$apk" "dist/$name-$(basename "$apk")"; done ;;
+              *)
+                # The app and its resources: not the test programs. Artifacts lose the executable
+                # bit; the zips have it back.
+                find "$dir" \( -name 'enp_tests*' -o -name 'enp_ui_tests*' \) -delete
+                find "$dir" -type f -name EasyNotepad -exec chmod +x {} +
+                (cd "$dir" && zip -qr "$GITHUB_WORKSPACE/dist/$name.zip" .) ;;
+            esac
+          done
+          ls -l dist
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" dist/* --verify-tag --title "EasyNotepad $VERSION" --notes-file notes.md

@@ -1,4 +1,5 @@
 #include "enp/view/MainView.h"
+#include "enp/Version.h" // generated from the VERSION file (cmake/Version.cmake)
 #include "enp/os/Memory.h"
 #include "enp/view/Fit.h"
 
@@ -535,7 +536,8 @@ void MainView::renderTopBar()
     const float tabsX0 = ImGui::GetCursorScreenPos().x + 10.0f * s_;
 
     // Right-aligned: workspace switch, theme, settings, help, version.
-    const char* version = "v" ENP_VERSION;
+    // A build from anything but the release's tag says so: "v1.1.0-dev" (the commit is in the tooltip).
+    const char* version = ENP_RELEASE ? "v" ENP_VERSION : "v" ENP_VERSION "-dev";
     const float modeW = ImGui::CalcTextSize(ICON_FA_ROBOT " Agent").x + ImGui::CalcTextSize(ICON_FA_CODE " Code").x +
                         ImGui::GetStyle().FramePadding.x * 4.0f + 2.0f * s_;
     const float iconW = frameH * 1.1f;
@@ -608,6 +610,9 @@ void MainView::renderTopBar()
     ImGui::SameLine(0.0f, 8.0f * s_);
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%s", version);
+    ImGui::SetItemTooltip(ENP_RELEASE ? "EasyNotepad " ENP_VERSION_FULL " (release, commit " ENP_COMMIT ")"
+                                      : "EasyNotepad " ENP_VERSION_FULL " (development build)");
+    registerLastItem("version", "text", "EasyNotepad " ENP_VERSION_FULL, nullptr);
 
     // Claim the bar's area with an item: moving the cursor past the content without submitting
     // one is an ImGui error ("SetCursorPos() to extend window boundaries").
@@ -3419,7 +3424,7 @@ void MainView::renderAboutPopup()
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(460.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 60.0f * s_));
     ImGui::TextColored(col(palette_.accent), ICON_FA_PEN_TO_SQUARE);
     ImGui::SameLine();
-    ImGui::Text("EasyNotepad %s", ENP_VERSION);
+    ImGui::Text("EasyNotepad %s", ENP_VERSION_FULL);
     // Seven taps on the version turn on developer mode (as on Android): nothing shows until then.
     if (ImGui::IsItemClicked() && !vm_.developerMode.get()) {
         if (++versionTaps_ >= 7) {
@@ -3429,10 +3434,15 @@ void MainView::renderAboutPopup()
             vm_.statusText.set(std::to_string(7 - versionTaps_) + " more taps to turn on developer mode.");
         }
     }
-    registerLastItem("dialog:about:version", "text", std::string("EasyNotepad ") + ENP_VERSION, [this]() {
+    registerLastItem("dialog:about:version", "text", std::string("EasyNotepad ") + ENP_VERSION_FULL, [this]() {
         if (++versionTaps_ >= 7)
             vm_.developerMode.set(true);
     });
+    ImGui::TextDisabled(ENP_RELEASE ? "Release %s, commit %s" : "Development build of %s, commit %s", ENP_VERSION, ENP_COMMIT);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_COPY " Copy")) // for a bug report: the build, the system
+        ImGui::SetClipboardText((std::string("EasyNotepad ") + ENP_VERSION_FULL + " (" + os::osName() + " " + os::archName() + ")").c_str());
+    registerLastItem("dialog:about:copy-version", "button", "Copy the version", nullptr);
     ImGui::TextDisabled("Native text editor with Agent and Code workspaces.");
     ImGui::Separator();
     ImGui::Text("Platform: %s %s", os::osName(), os::archName());

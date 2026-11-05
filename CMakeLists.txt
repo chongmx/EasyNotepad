@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(EasyNotepad VERSION 0.1.0 LANGUAGES C CXX)
+# The version lives in one place, the VERSION file (docs/RELEASING.md); the Android build reads it too.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" ENP_VERSION_FILE LIMIT_COUNT 1)
+string(STRIP "${ENP_VERSION_FILE}" ENP_VERSION_FILE)
+if(NOT ENP_VERSION_FILE MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must be MAJOR.MINOR.PATCH, not '${ENP_VERSION_FILE}'")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+
+project(EasyNotepad VERSION ${ENP_VERSION_FILE} LANGUAGES C CXX)
+
+# A release build is one built from its tag (cmake/Version.cmake); CI passes the tag it builds.
+set(ENP_RELEASE_TAG "" CACHE STRING "The tag being built for a release (vMAJOR.MINOR.PATCH); empty otherwise")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -412,7 +423,18 @@ add_library(enp_view STATIC
     src/view/MainView.cpp
 )
 target_link_libraries(enp_view PUBLIC enp_viewmodel imgui PRIVATE icon_font_headers enp_os enp_services)
-target_compile_definitions(enp_view PRIVATE ENP_VERSION="${PROJECT_VERSION}")
+
+# enp/Version.h: the version, commit and release flag, written at build time (cmake/Version.cmake).
+set(ENP_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_target(enp_version
+    COMMAND ${CMAKE_COMMAND} -DVERSION=${PROJECT_VERSION} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUTPUT=${ENP_GENERATED_DIR}/enp/Version.h -DRELEASE_TAG=${ENP_RELEASE_TAG}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.cmake
+    BYPRODUCTS ${ENP_GENERATED_DIR}/enp/Version.h
+    COMMENT "Version ${PROJECT_VERSION}"
+    VERBATIM)
+add_dependencies(enp_view enp_version)
+target_include_directories(enp_view PRIVATE ${ENP_GENERATED_DIR})
 
 # ---- Application -------------------------------------------------------------------------------
 # automation: the MCP connector (agent access to the running app) and its command handlers
@@ -432,7 +454,14 @@ if(ENP_PLATFORM STREQUAL "android")
 else()
     add_executable(EasyNotepad ${ENP_APP_SOURCES} src/app/MainGlfw.cpp)
     target_link_libraries(EasyNotepad PRIVATE enp_view enp_services enp_automation enp_os)
-    target_compile_definitions(EasyNotepad PRIVATE ENP_VERSION="${PROJECT_VERSION}")
+    add_dependencies(EasyNotepad enp_version)
+    target_include_directories(EasyNotepad PRIVATE ${ENP_GENERATED_DIR})
+    if(WIN32)
+        # Explorer's Properties > Details: the version, the product and its description.
+        enable_language(RC)
+        configure_file(cmake/EasyNotepad.rc.in ${ENP_GENERATED_DIR}/EasyNotepad.rc @ONLY)
+        target_sources(EasyNotepad PRIVATE ${ENP_GENERATED_DIR}/EasyNotepad.rc)
+    endif()
 
     if(ENP_IS_DESKTOP)
         # Custom title bar: native caption hit-testing on Windows, manual move/resize on X11.

@@ -5,6 +5,7 @@
 #   include "GlfwWindowFrame.h"
 #endif
 
+#include "enp/Version.h" // generated from the VERSION file (cmake/Version.cmake)
 #include "enp/os/Dispatch.h"
 #include "enp/os/Memory.h"
 #include "enp/services/debug/MemoryTrace.h"
@@ -268,7 +269,7 @@ int main(int argc, char** argv)
     // MCP connector mode: no window, JSON-RPC over stdio to the running app.
     for (int i = 1; i < argc; ++i)
         if (std::strcmp(argv[i], "--mcp") == 0) {
-            const int code = enp::app::runMcpBridge(ENP_VERSION);
+            const int code = enp::app::runMcpBridge(ENP_VERSION_FULL);
             enp::os::shutdown();
             return code;
         }
