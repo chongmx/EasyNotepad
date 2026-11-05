@@ -34,7 +34,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::SortLines: return {"Sort", "Sort the selected lines ascending", ""};
     case CommandId::UpperCase: return {"UPPER", "Convert the selection to upper case", "Ctrl+Shift+U"};
     case CommandId::LowerCase: return {"lower", "Convert the selection to lower case", "Ctrl+U"};
-    case CommandId::ToggleComment: return {"Comment", "Toggle line comment", "Ctrl+Q"};
+    case CommandId::ToggleComment: return {"Comment", "Toggle line comment", "Ctrl+/"};
     case CommandId::Indent: return {"Indent", "Increase indentation", "Tab"};
     case CommandId::Outdent: return {"Outdent", "Decrease indentation", "Shift+Tab"};
     case CommandId::TrimTrailing: return {"Trim", "Trim trailing whitespace", ""};
@@ -52,7 +52,7 @@ CommandInfo makeInfo(CommandId id)
 
     case CommandId::ToggleExplorer: return {"Explorer", "Show or hide the workspace explorer", "Ctrl+Shift+E"};
     case CommandId::TogglePanel: return {"Panel", "Show or hide the bottom panel (review and terminal)", "Ctrl+J"};
-    case CommandId::ToggleMaximizePanel: return {"Maximize", "Maximize or restore the bottom panel", ""};
+    case CommandId::ToggleMaximizePanel: return {"Maximize", "Maximize or restore the bottom panel", "Ctrl+Shift+J"};
     case CommandId::ToggleSlimRibbon: return {"Slim Ribbon", "A slimmer ribbon: icons only, more room for your work", "Ctrl+F1"};
     case CommandId::ToggleAgentPanel: return {"Agent Panel", "Show or hide the agent side panel", "Ctrl+Shift+I"};
     case CommandId::ToggleWordWrap: return {"Word Wrap", "Wrap long lines", "Alt+Z"};
@@ -184,6 +184,9 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::OpenRecent: return {"Recent", "Switch to a recent folder or file", "Ctrl+R"};
     case CommandId::FocusTerminal: return {"Terminal Focus", "Jump to the terminal (again: back to the editor)", "Ctrl+E"};
     case CommandId::OpenWorkspace: return {"Open Workspace", "Import a VS Code workspace or a Visual Studio solution", ""};
+    case CommandId::ToggleSplitView: return {"Two Columns", "Show two documents side by side, or one", "Ctrl+\\"};
+    case CommandId::FocusOtherColumn: return {"Other Column", "Move to the other column (two columns)", "Ctrl+Alt+\\"};
+    case CommandId::KeyboardShortcuts: return {"Shortcuts", "Every shortcut key", "F1"};
 
     case CommandId::Count: break;
     }
@@ -359,6 +362,9 @@ const char* commandKey(CommandId id)
     case CommandId::ImplementComment: return "ImplementComment";
     case CommandId::ToggleCodeSuggestions: return "ToggleCodeSuggestions";
     case CommandId::IntellisenseSettings: return "IntellisenseSettings";
+    case CommandId::ToggleSplitView: return "ToggleSplitView";
+    case CommandId::FocusOtherColumn: return "FocusOtherColumn";
+    case CommandId::KeyboardShortcuts: return "KeyboardShortcuts";
     case CommandId::Count: break;
     }
     return "";

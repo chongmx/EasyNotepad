@@ -25,8 +25,9 @@ class EditorView {
 public:
     EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale);
 
-    // Find bar (when visible) plus the text area, filling `size`.
-    void render(ImVec2 size);
+    // Find bar (when visible) plus the text area, filling `size`. With `shown` (the column of two
+    // that does not have the keyboard): that document, to look at and scroll; no input, no bars.
+    void render(ImVec2 size, model::Document* shown = nullptr);
     void focus() { focusRequested_ = true; }
     void setEmoji(EmojiCache* emoji) { emoji_ = emoji; } // pictures for emoji in rendered Markdown
     const DataViews& dataViews() const { return data_; }
@@ -139,6 +140,7 @@ private:
     float markdownColumn_ = 0.0f; // 0: the standard width (set by dragging the ruler's ends)
     float rulerDragStart_ = 0.0f, rulerDragMouse_ = 0.0f;
     bool rulerHovered_ = false;   // the mouse is on the ruler: no link click, no double-click to edit
+    bool passive_ = false;        // this frame shows a document other than the active one (render's `shown`)
     void markdownRuler(ImVec2 winPos, float viewW, float column, float widest);
     struct RenderedMarkdown {
         MarkdownView view;

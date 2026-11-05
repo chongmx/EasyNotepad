@@ -191,6 +191,8 @@ void NotepadViewModel::initCommands()
         showPanel.set(true);
         panelMaximized.set(!panelMaximized.get());
     });
+    set(C::ToggleSplitView, [this]() { splitView.set(!splitView.get()); });
+    set(C::FocusOtherColumn, [this]() { otherColumnRequested.emit(); }, [this]() { return splitView.get(); });
     set(C::ToggleTerminal, [this]() {
         if (showPanel.get() && panelTab.get() == PanelTab::Terminal) {
             showPanel.set(false);
@@ -489,6 +491,7 @@ void NotepadViewModel::initCommands()
     set(C::NavigateForward, [this]() { intellisense_.goForward(); }, [this]() { return intellisense_.canGoForward(); });
     set(C::Preferences, [this]() { preferencesRequested.emit(); });
     set(C::About, [this]() { aboutRequested.emit(); });
+    set(C::KeyboardShortcuts, [this]() { shortcutsRequested.emit(); });
     set(C::EngineLab, [this]() { engineLabRequested.emit(); }, [this]() { return developerMode.get(); });
     set(C::Exit, [this]() { requestQuit(); });
 }
@@ -515,6 +518,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::TogglePanel: return showPanel.get();
     case C::ToggleTerminal: return showPanel.get() && panelTab.get() == PanelTab::Terminal;
     case C::ToggleMaximizePanel: return panelMaximized.get();
+    case C::ToggleSplitView: return splitView.get();
     case C::ToggleSlimRibbon: return slimRibbon.get();
     case C::ToggleAgentPanel: return showAgentPanel.get();
     case C::ToggleWordWrap: return wordWrap.get();

@@ -1,6 +1,7 @@
 // forkpty() backend for Linux and macOS.
 #include "enp/os/Pty.h"
 
+#include "enp/os/Dispatch.h"
 #include "enp/os/Fs.h"
 
 #include <atomic>
@@ -34,16 +35,15 @@ winsize windowSize(int columns, int rows)
     return ws;
 }
 
-// The reader thread forwards output until the master side reports EOF/EIO (all slaves closed),
-// then reaps the child and reports the exit code.
+// The reader (a pool thread, kept: see dispatch::runAsync) forwards output until the master side
+// reports EOF/EIO (all slaves closed), then reaps the child and reports the exit code.
 class ForkPtyProcess final : public Process {
 public:
     ~ForkPtyProcess() override
     {
         stopping_ = true;
         terminate();
-        if (reader_.joinable())
-            reader_.join();
+        reader_.wait();
         if (master_ >= 0)
             close(master_);
     }
@@ -76,7 +76,7 @@ public:
             _exit(127);
         }
         pid_ = pid;
-        reader_ = std::thread([this, onOutput = std::move(onOutput), onExit = std::move(onExit)]() {
+        reader_.run([this, onOutput = std::move(onOutput), onExit = std::move(onExit)]() {
             char buffer[8192];
             for (;;) {
                 pollfd pfd{master_, POLLIN, 0};
@@ -135,7 +135,7 @@ private:
     int master_ = -1;
     std::atomic<pid_t> pid_{-1};
     std::atomic<bool> stopping_{false};
-    std::thread reader_;
+    dispatch::Group reader_;
 };
 
 } // namespace

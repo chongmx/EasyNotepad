@@ -192,8 +192,20 @@ void Application::giveMemoryBack()
             }
         for (ImGuiTableTempData& temp : g->TablesTempData)
             ImGui::TableGcCompactTransientBuffers(&temp);
-        ImGui::GcCompactTransientMiscBuffers();
-        ImGui::GetIO().Fonts->CompactCache();
+        // ImGui::GcCompactTransientMiscBuffers() without its font atlas repack: a repack puts the
+        // glyphs in a new texture even when it is no smaller, and the OpenGL driver keeps memory
+        // from every texture it replaces (NVIDIA: about 450 KB), so each close grew the app for
+        // good. The atlas is bounded by itself (ImGui drops unused sizes when it needs the room);
+        // it is repacked here only when it has grown large, where a repack makes it smaller.
+        g->ItemFlagsStack.clear();
+        g->GroupStack.clear();
+        g->InputTextLineIndex.clear();
+        g->MultiSelectTempDataStacked = 0;
+        g->MultiSelectTempData.clear_destruct();
+        ImGui::TableGcCompactSettings();
+        ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+        if (atlas->TexData && (atlas->TexData->Width >= 2048 || atlas->TexData->Height >= 2048))
+            atlas->CompactCache();
     }
     os::trimMemory();
 }

@@ -399,6 +399,39 @@ int main(int argc, char** argv)
             if (held != 0)
                 std::printf("  FAILED rendered Markdown of %zu closed document(s) still held\n", held), ++checksFailed;
 
+            // Two columns: drawn without ID conflicts, the keyboard moving between them; the
+            // second column's view drops a closed document's caches, and goes when they join.
+            h.setContext("two columns");
+            h.vm().openFile(viewmodel::dummy::kWelcomePath); // Markdown, rendered
+            h.vm().newDocument();                            // text, active
+            h.vm().splitView.set(true);
+            h.settle(); // the second column starts on the next document: the Markdown one
+            if (!h.view().secondColumn())
+                std::printf("  FAILED two columns: no second column\n"), ++checksFailed;
+            const model::Document* text = h.vm().activeDocument();
+            h.vm().execute(viewmodel::CommandId::FocusOtherColumn);
+            h.settle();
+            if (h.vm().activeDocument() == text)
+                std::printf("  FAILED two columns: the other column's document did not become active\n"), ++checksFailed;
+            h.vm().execute(viewmodel::CommandId::FocusOtherColumn);
+            h.settle();
+            if (h.vm().activeDocument() != text)
+                std::printf("  FAILED two columns: the keyboard did not come back\n"), ++checksFailed;
+            const size_t shownMarkdown = h.view().secondColumn() ? h.view().secondColumn()->renderedMarkdownCount() : 0;
+            if (shownMarkdown != 1)
+                std::printf("  FAILED two columns: the second column holds %zu rendered documents, not 1\n", shownMarkdown), ++checksFailed;
+            h.vm().closeDocument(h.vm().documentIndexById(text->id) == 0 ? 1 : 0); // the Markdown one
+            h.settle();
+            if (h.view().secondColumn() && h.view().secondColumn()->renderedMarkdownCount() != 0)
+                std::printf("  FAILED two columns: the second column kept a closed document's Markdown\n"), ++checksFailed;
+            h.vm().splitView.set(false);
+            h.settle();
+            if (h.view().secondColumn())
+                std::printf("  FAILED two columns: the second view was kept after joining\n"), ++checksFailed;
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settle();
+
             // Images, entities and formulas: drawn without ImGui errors, and the image textures
             // (decoded here from a data URL, as a file's bytes would be) go with the document.
             h.setContext("rendered Markdown with an image, entities and LaTeX");

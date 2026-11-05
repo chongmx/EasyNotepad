@@ -5,6 +5,7 @@
 #pragma once
 
 #include "enp/model/Json.h"
+#include "enp/os/Dispatch.h"
 
 #include <atomic>
 #include <functional>
@@ -55,10 +56,10 @@ private:
     std::mutex connectionsMutex_;
     struct Connection {
         std::shared_ptr<os::net::Socket> socket;
-        std::thread thread;
-        std::shared_ptr<std::atomic<bool>> finished; // serve() returned: the thread can be joined
+        std::shared_ptr<std::atomic<bool>> finished; // serve() returned: the entry can go
     };
     std::vector<Connection> connections_;
+    os::dispatch::Group serving_; // each connection is served on a pool thread (kept, not one per request)
     std::atomic<bool> stopping_{false};
     int port_ = 0;
     std::string token_;

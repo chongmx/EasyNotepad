@@ -509,10 +509,11 @@ TextPos EditorView::hitTest(const model::Document& doc, ImVec2 mouse, const Metr
 
 // ---- Frame --------------------------------------------------------------------------------------
 
-void EditorView::render(ImVec2 size)
+void EditorView::render(ImVec2 size, model::Document* shown)
 {
     images_.collect(); // textures the backend destroyed since last frame
-    model::Document* doc = vm_.activeDocument();
+    passive_ = shown != nullptr;
+    model::Document* doc = passive_ ? shown : vm_.activeDocument();
     if (!doc) {
         renderEmptyState(size);
         return;
@@ -529,7 +530,7 @@ void EditorView::render(ImVec2 size)
         renderConflictBar(*doc);
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
-    if (vm_.findVisible.get()) {
+    if (vm_.findVisible.get() && !passive_) { // the find bar belongs to the active document
         const float before = ImGui::GetCursorPosY();
         renderFindBar();
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
@@ -605,7 +606,7 @@ void EditorView::render(ImVec2 size)
     m.blameW = gitFile && vm_.git().blameShown(doc->path) ? blameColumns_ * m.charW * 0.85f : 0.0f;
     m.gutterW = m.markerW + m.blameW + m.changeW + m.foldW +
                 (vm_.showLineNumbers.get() ? float(std::max(digits, 3)) * m.charW + 6.0f * s_ : 0.0f);
-    const bool sideBar = vm_.showLayersMap.get() && !compact_;
+    const bool sideBar = vm_.showLayersMap.get() && !compact_ && !passive_;
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
     sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
@@ -629,11 +630,11 @@ void EditorView::render(ImVec2 size)
     panel::beginChild("##editorText", size, palette_.editorBg, ImGuiChildFlags_None,
                       (wrap ? ImGuiWindowFlags_None : ImGuiWindowFlags_HorizontalScrollbar) | ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
-    if (focusRequested_ && !vm_.findVisible.get()) {
+    if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
     }
-    focused_ = ImGui::IsWindowFocused();
+    focused_ = ImGui::IsWindowFocused() && !passive_;
 
     const ImGuiStyle& style = ImGui::GetStyle();
     const ImVec2 winPos = ImGui::GetWindowPos();
@@ -648,29 +649,31 @@ void EditorView::render(ImVec2 size)
     buildRows(*doc, wrapColumns);
     const ImVec2 switchAt(m.viewMax.x - 8.0f * s_, winPos.y + 6.0f * s_);
     const bool dataSwitch = DataViews::hasSwitch(*doc);
-    const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
+    const bool hovered = !passive_ && ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(m.viewMin, m.viewMax) &&
                          !(markdownDoc && markdownSwitchRect(switchAt, s_).Contains(ImGui::GetMousePos())) &&
                          !(dataSwitch && data_.switchRect(*doc, switchAt).Contains(ImGui::GetMousePos()));
-    if (!handleDefinitionLink(*doc, m, hovered)) // Ctrl+click on a name goes to its definition
-        handleMouse(*doc, m, hovered);
-    if (linkRow_ >= 0)
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    if (focused_)
-        handleKeyboard(*doc, m);
     viewmodel::IntellisenseViewModel& intellisense = vm_.intellisense();
-    intellisense.sync(); // follows the caret; closes when it leaves the word
-    if (intellisense.active() && !focused_ && !completionFocused_ && !completionHovered_)
-        intellisense.dismiss(); // the editor lost the keyboard
+    if (!passive_) { // the other column only shows its document: a click there moves the keyboard (MainView)
+        if (!handleDefinitionLink(*doc, m, hovered)) // Ctrl+click on a name goes to its definition
+            handleMouse(*doc, m, hovered);
+        if (linkRow_ >= 0)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (focused_)
+            handleKeyboard(*doc, m);
+        intellisense.sync(); // follows the caret; closes when it leaves the word
+        if (intellisense.active() && !focused_ && !completionFocused_ && !completionHovered_)
+            intellisense.dismiss(); // the editor lost the keyboard
 
-    doc = vm_.activeDocument(); // input may have edited the text
-    buildRows(*doc, wrapColumns);
-    if (pendingScrollLine_ >= 0) { // from the minimap: centre that line
-        const float rowY = float(rowOf({pendingScrollLine_, 0})) * m.lineH;
-        ImGui::SetScrollY(std::max(0.0f, rowY - viewH * 0.5f));
-        pendingScrollLine_ = -1;
+        doc = vm_.activeDocument(); // input may have edited the text
+        buildRows(*doc, wrapColumns);
+        if (pendingScrollLine_ >= 0) { // from the minimap: centre that line
+            const float rowY = float(rowOf({pendingScrollLine_, 0})) * m.lineH;
+            ImGui::SetScrollY(std::max(0.0f, rowY - viewH * 0.5f));
+            pendingScrollLine_ = -1;
+        }
+        if (revealCaret_)
+            revealCaret(*doc, m);
     }
-    if (revealCaret_)
-        revealCaret(*doc, m);
 
     const int firstRow = std::clamp(int((ImGui::GetScrollY() - kTopPadding * s_) / m.lineH), 0, int(rows_.size()) - 1);
     const int lastRow = std::min(int(rows_.size()) - 1, firstRow + m.visibleRows + 1);
@@ -695,11 +698,11 @@ void EditorView::render(ImVec2 size)
         jumpToConflict(*doc, ImGui::GetIO().KeyShift ? -1 : 1);
     if (hovered && !dragging_)
         drawHoverTooltip(*doc, m);
-    if (intellisense.active() && intellisense.documentId() == doc->id)
+    if (intellisense.active() && intellisense.documentId() == doc->id && !passive_)
         renderCompletion(*doc, m);
     else
         completionHovered_ = completionFocused_ = false;
-    if (markdownDoc || dataSwitch) {
+    if ((markdownDoc || dataSwitch) && !passive_) { // they switch the active document's view
         ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
         if (markdownDoc)
             markdownSwitch(*doc, switchAt);
@@ -715,6 +718,8 @@ void EditorView::render(ImVec2 size)
     scroll_[doc->id].text = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     ImGui::PopFont();
+    if (passive_)
+        return;
     renderChangePeek(*vm_.activeDocument());
     if (sideBar) {
         ImGui::SameLine(0.0f, 0.0f);
@@ -810,7 +815,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     }
     if (!md.view.onLink)
         md.view.onLink = [this](const std::string& url) {
-            if (rulerHovered_) // the click was on the ruler over the text
+            if (rulerHovered_ || passive_) // the click was on the ruler, or moves the keyboard to this column
                 return;
             if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0)
                 vm_.openLink(url);
@@ -821,7 +826,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     md.view.onImage = [this, &md, &doc](const std::string& source) { return loadImage(md, doc, source); };
     md.view.emoji = emoji_;
 
-    const bool sideBar = vm_.showLayersMap.get() && !compact_;
+    const bool sideBar = vm_.showLayersMap.get() && !compact_ && !passive_;
     if (sideBarWidth_ <= 0.0f)
         sideBarWidth_ = 280.0f * s_;
     sideBarWidth_ = std::clamp(sideBarWidth_, 190.0f * s_, std::max(190.0f * s_, size.x * 0.55f));
@@ -834,11 +839,11 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
         shownMarkdownDoc_ = doc.id;
     }
     panel::beginChild("##markdownText", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
-    if (focusRequested_ && !vm_.findVisible.get()) {
+    if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
     }
-    focused_ = ImGui::IsWindowFocused();
+    focused_ = ImGui::IsWindowFocused() && !passive_;
     const ImVec2 winPos = ImGui::GetWindowPos();
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float zoom = vm_.zoom.get();
@@ -850,7 +855,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     md.view.render(md.text, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
     ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f)); // room to scroll the end up
     rulerHovered_ = false;
-    if (!compact_)
+    if (!compact_ && !passive_)
         markdownRuler(winPos, viewW, column, widest);
 
     if (!md.shown) { // just switched here: show where the caret was
@@ -859,7 +864,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     }
     // Double-click: edit the text there.
     if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && md.view.hoveredLine() >= 0 &&
-        !rulerHovered_) {
+        !rulerHovered_ && !passive_) {
         const int line = md.view.hoveredLine();
         vm_.execute(viewmodel::CommandId::ToggleMarkdownView);
         vm_.goToLine(line);
@@ -867,8 +872,9 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     // Typing here does nothing: say how to edit.
     if (focused_ && ImGui::GetIO().InputQueueCharacters.Size > 0)
         vm_.statusText.set("This Markdown file is shown rendered: press Ctrl+Shift+V (or double-click) to edit it");
-    markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
-                               winPos.y + (compact_ ? 6.0f : 18.0f) * s_)); // below the ruler
+    if (!passive_)
+        markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
+                                   winPos.y + (compact_ ? 6.0f : 18.0f) * s_)); // below the ruler
     scroll_[doc.id].markdown = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     if (sideBar) {

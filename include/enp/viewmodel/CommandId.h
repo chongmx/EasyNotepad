@@ -62,6 +62,8 @@ enum class CommandId {
     // IntelliSense (appended)
     TriggerCompletion, GoToDefinition, ToggleAutoComplete, RebuildSymbolIndex, NavigateBack, NavigateForward,
     ImplementComment, ToggleCodeSuggestions, IntellisenseSettings,
+    // View (appended): two columns, the list of shortcut keys
+    ToggleSplitView, FocusOtherColumn, KeyboardShortcuts,
 
     Count
 };

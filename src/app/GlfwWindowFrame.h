@@ -39,6 +39,10 @@ public:
     void setDarkTheme(bool dark) override;
 
     bool inDragRegion(float x, float y) const;
+    // Windows: other windows cover every pixel of this one's client area, so a frame presented now
+    // would not be seen (and the OpenGL driver may keep it until the window shows again). Elsewhere
+    // false.
+    bool covered() const;
 
 private:
     enum class Mode { Native, Win32Caption, Manual };

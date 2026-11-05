@@ -73,6 +73,8 @@ private:
     void renderCustomizeDialog();
     void groupCaption(const Group& group, float x0, float x1, float y);
     void morePopup(const Group& group); // the group's extra commands (inside its "##more" popup)
+    // The group's "##more" popup below `at`, with the window padding the groups are drawn without.
+    void moreMenu(const Group& group, ImVec2 at);
     // The small chevron at the ribbon's lower right that makes it slim, or full again.
     void renderSizeToggle(ImVec2 topLeft);
     bool slim() const { return vm_.slimRibbon.get(); }
@@ -92,6 +94,7 @@ private:
     std::string search_;
     bool searchFocused_ = false;
     bool customizeRequested_ = false;
+    const char* openMore_ = nullptr; // a group whose menu an agent opened (its name), on the next frame
     int shownTab_ = -1; // the tab last scrolled into view in a too-narrow tab row
     std::string pinFilter_;
     std::string newActionName_;

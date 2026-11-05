@@ -1,5 +1,6 @@
 #include "enp/os/Process.h"
 
+#include "enp/os/Dispatch.h"
 #include "enp/os/Fs.h"
 #include "enp/os/Os.h"
 
@@ -120,15 +121,17 @@ Result run(const std::string& commandLine, const std::string& input, const std::
     HANDLE job = startInJob(info);
     CloseHandle(info.hThread);
 
-    // Feed stdin on its own thread so a chatty child cannot deadlock against a full pipe.
-    std::thread writer([inWrite, input]() {
+    // Feed stdin on a thread of its own so a chatty child cannot deadlock against a full pipe
+    // (pool threads, kept: see dispatch::runAsync).
+    dispatch::Group pipes;
+    pipes.run([inWrite, &input]() {
         DWORD written = 0;
         size_t done = 0;
         while (done < input.size() && WriteFile(inWrite, input.data() + done, DWORD(input.size() - done), &written, nullptr))
             done += written;
         CloseHandle(inWrite);
     });
-    std::thread reader([outRead, &result]() {
+    pipes.run([outRead, &result]() {
         char buffer[8192];
         DWORD read = 0;
         while (ReadFile(outRead, buffer, sizeof(buffer), &read, nullptr) && read > 0)
@@ -141,8 +144,7 @@ Result run(const std::string& commandLine, const std::string& input, const std::
     CloseHandle(info.hProcess);
     if (job)
         CloseHandle(job); // ends anything it left running
-    writer.join();
-    reader.join();
+    pipes.wait();
     CloseHandle(outRead);
     return result;
 }
@@ -259,20 +261,15 @@ Result run(const Command& command)
     result.started = true;
     HANDLE job = startInJob(info);
     CloseHandle(info.hThread);
-    std::thread writer([inWrite, input = command.input]() {
+    dispatch::Group pipes; // pool threads, kept: see dispatch::runAsync
+    pipes.run([inWrite, &input = command.input]() {
         DWORD written = 0;
         size_t done = 0;
         while (done < input.size() && WriteFile(inWrite, input.data() + done, DWORD(input.size() - done), &written, nullptr))
             done += written;
         CloseHandle(inWrite);
     });
-    auto drain = [](HANDLE pipe, std::string* into) {
-        char buffer[8192];
-        DWORD read = 0;
-        while (ReadFile(pipe, buffer, sizeof(buffer), &read, nullptr) && read > 0)
-            into->append(buffer, read);
-    };
-    std::thread outReader([&]() {
+    pipes.run([&]() {
         char buffer[8192];
         DWORD read = 0;
         while (ReadFile(outRead, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
@@ -281,7 +278,12 @@ Result run(const Command& command)
                 command.onOutput(buffer, read);
         }
     });
-    std::thread errReader(drain, errRead, &result.errorOutput);
+    pipes.run([errRead, &result]() {
+        char buffer[8192];
+        DWORD read = 0;
+        while (ReadFile(errRead, buffer, sizeof(buffer), &read, nullptr) && read > 0)
+            result.errorOutput.append(buffer, read);
+    });
     waitForExit(info.hProcess, job, command.timeoutSeconds, command.cancel, result);
     DWORD code = 0;
     GetExitCodeProcess(info.hProcess, &code);
@@ -289,9 +291,7 @@ Result run(const Command& command)
     CloseHandle(info.hProcess);
     if (job)
         CloseHandle(job); // ends anything it left running
-    writer.join();
-    outReader.join();
-    errReader.join();
+    pipes.wait();
     CloseHandle(outRead);
     CloseHandle(errRead);
     return result;
@@ -370,7 +370,8 @@ Result run(const std::string& commandLine, const std::string& input, const std::
     close(in[0]);
     close(out[1]);
     signal(SIGPIPE, SIG_IGN);
-    std::thread writer([fd = in[1], input]() {
+    dispatch::Group writer; // a pool thread, kept: see dispatch::runAsync
+    writer.run([fd = in[1], &input]() {
         size_t done = 0;
         while (done < input.size()) {
             const ssize_t n = write(fd, input.data() + done, input.size() - done);
@@ -405,7 +406,7 @@ Result run(const std::string& commandLine, const std::string& input, const std::
     int status = 0;
     waitpid(pid, &status, 0);
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    writer.join();
+    writer.wait();
     return result;
 }
 
@@ -492,7 +493,8 @@ Result run(const Command& command)
     close(out[1]);
     close(err[1]);
     signal(SIGPIPE, SIG_IGN);
-    std::thread writer([fd = in[1], input = command.input]() {
+    dispatch::Group writer; // a pool thread, kept: see dispatch::runAsync
+    writer.run([fd = in[1], &input = command.input]() {
         size_t done = 0;
         while (done < input.size()) {
             const ssize_t n = write(fd, input.data() + done, input.size() - done);
@@ -540,7 +542,7 @@ Result run(const Command& command)
     int status = 0;
     waitpid(pid, &status, 0);
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    writer.join();
+    writer.wait();
     if (result.exitCode == 126)
         result.error = "could not enter " + command.workingDirectory;
     else if (result.exitCode == 127 && result.output.empty() && result.errorOutput.empty())

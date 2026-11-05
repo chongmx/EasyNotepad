@@ -13,6 +13,7 @@
 #include "FrameCapture.h"
 
 #include "imgui.h"
+#include "imgui_internal.h" // the input queue: whether anything arrived while the window was covered
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
@@ -72,6 +73,7 @@ void mainLoopStep(void* arg)
     // of frames so ImGui settles, then sleeps again.
     static double lastInput = 0.0;
     static int settleFrames = 3;
+    static bool unshown = false; // the last frame was built while the window was covered, not presented
     const ImGuiIO& io = ImGui::GetIO();
     bool input = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || io.MouseWheel != 0.0f ||
                  io.MouseWheelH != 0.0f || io.InputQueueCharacters.Size > 0 || ImGui::IsAnyItemActive();
@@ -91,11 +93,23 @@ void mainLoopStep(void* arg)
         lastFrame = glfwGetTime();
         settleFrames = std::max(0, settleFrames - 1);
     } else {
-        // Idle: sleep until input or posted work, waking only for the caret blink if it is on.
-        if (state->app->blinkCaret())
+        // Idle: sleep until input or posted work, waking only for the caret blink if it is on and
+        // the window has the keyboard (no caret blinks in a window behind others). A frame presented
+        // to a window that cannot be seen is kept by the driver until the window shows again (the
+        // NVIDIA OpenGL driver: about 300 KB a frame; two blinks a second behind a browser grew the
+        // app by 2 GB an hour).
+        if (unshown) {
+            // Covered with a frame not shown: look twice a second, and build a frame only when part of
+            // the window shows again or something new arrives (input, posted work).
             glfwWaitEventsTimeout(0.5);
-        else
+            if (!enp::os::dispatch::hasPending() && ImGui::GetCurrentContext()->InputEventsQueue.Size == 0 &&
+                state->frame && state->frame->covered())
+                return;
+        } else if (state->app->blinkCaret() && glfwGetWindowAttrib(state->window, GLFW_FOCUSED)) {
+            glfwWaitEventsTimeout(0.5);
+        } else {
             glfwWaitEvents();
+        }
         settleFrames = 2;
     }
 #endif
@@ -119,7 +133,13 @@ void mainLoopStep(void* arg)
     int width = 0, height = 0;
     glfwGetFramebufferSize(state->window, &width, &height);
     const ImVec4 clear = state->app->clearColor();
-    if (!minimized) {
+#if !defined(__EMSCRIPTEN__)
+    // Covered by other windows: the frame is built (posted work, state) but not drawn or presented.
+    const bool covered = !minimized && state->frame && state->frame->covered();
+#else
+    const bool covered = false;
+#endif
+    if (!minimized && !covered) {
         enp::os::mem::Scope scope("gl-driver"); // a clear may compile a shader too
         glViewport(0, 0, width, height);
         glClearColor(clear.x, clear.y, clear.z, clear.w);
@@ -150,7 +170,10 @@ void mainLoopStep(void* arg)
         glfwMakeContextCurrent(context);
     }
 #endif
-    {
+#if !defined(__EMSCRIPTEN__)
+    unshown = covered;
+#endif
+    if (!covered) {
         enp::os::mem::Scope scope("gl-driver");
         glfwSwapBuffers(state->window);
     }

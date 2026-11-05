@@ -96,9 +96,7 @@ void AutomationServer::stop()
         for (Connection& c : connections_)
             c.socket->shutdown();
     }
-    for (Connection& c : connections_)
-        if (c.thread.joinable())
-            c.thread.join();
+    serving_.wait();
     connections_.clear();
     listener_.reset();
     // Only remove the endpoint file if it is still ours (another instance may have taken over).
@@ -116,15 +114,11 @@ void AutomationServer::acceptLoop()
         const bool pending = listener_->waitReadable(200);
         std::lock_guard<std::mutex> lock(connectionsMutex_);
         // Connections that ended are reaped at least every 200 ms (a test bench and the MCP bridge
-        // connect once per request): an unjoined thread keeps its stack mapped and its socket,
-        // so the connector holds nothing for a connection once it has ended.
-        for (auto it = connections_.begin(); it != connections_.end();) {
-            if (it->finished->load()) {
-                it->thread.join();
-                it = connections_.erase(it);
-            } else
-                ++it;
-        }
+        // connect once per request), so the connector holds nothing for a connection once it has
+        // ended. Each is served on a pool thread, kept for the next: a thread per request cost
+        // memory in libraries that see every thread start (os::dispatch::runAsync).
+        for (auto it = connections_.begin(); it != connections_.end();)
+            it = it->finished->load() ? connections_.erase(it) : std::next(it);
         if (connections_.empty())
             os::mem::release(connections_); // idle: not even the list's room
         if (!pending)
@@ -133,8 +127,8 @@ void AutomationServer::acceptLoop()
         if (!connection)
             continue;
         auto finished = std::make_shared<std::atomic<bool>>(false);
-        connections_.push_back({connection, {}, finished});
-        connections_.back().thread = std::thread([this, connection, finished]() {
+        connections_.push_back({connection, finished});
+        serving_.run([this, connection, finished]() {
             serve(connection);
             *finished = true;
         });

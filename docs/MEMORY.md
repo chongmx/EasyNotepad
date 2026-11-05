@@ -68,8 +68,9 @@ gives everything back. Concretely, all of these hold:
    kind of list (`LibraryView::beginTable`).
 9. **Freed is not returned.** The C allocator keeps freed pages for reuse, so a release does not
    show in a task manager by itself. When a folder or the last document closes, the view-model
-   sets `takeMemoryTrimRequest()`; `Application::endFrame()` then compacts ImGui's buffers and the
-   font atlas and calls `os::trimMemory()` (glibc `malloc_trim`; Windows `_heapmin` and a working
+   sets `takeMemoryTrimRequest()`; `Application::endFrame()` then compacts ImGui's buffers (the
+   font atlas only once it has grown to 2048 pixels: a repack is a new texture, and the OpenGL
+   driver keeps memory from the textures it replaces) and calls `os::trimMemory()` (glibc `malloc_trim`; Windows `_heapmin` and a working
    set trim; macOS `malloc_zone_pressure_relief`, which madvises every zone's free pages away as
    memory pressure would; Android `M_PURGE`) twice: four frames later, once the textures released by the close are destroyed, and
    1.5 s later, once late results of background work are freed too. The app keeps drawing until
@@ -129,7 +130,8 @@ frees it, so a scope's live bytes are exactly what that subsystem still holds. S
 | `library` | what a library or program contains while its view shows it (`LibraryView`, `model::bin::Image`): freed on close or when opened as text |
 | `views` | everything else the views allocate (`Application::frame`) |
 | `imgui` | Dear ImGui: windows, draw buffers, font atlas, textures |
-| `automation` | the automation connector, the app's side of a test bench or the MCP bridge: its connection threads, requests, replies and calls queued for the main thread (`services::AutomationServer`). Ended connections are reaped every 200 ms; idle, it holds 0 bytes, and while a reading is taken it holds exactly that request |
+| `automation` | the automation connector, the app's side of a test bench or the MCP bridge: requests, replies and calls queued for the main thread (`services::AutomationServer`). Ended connections are reaped every 200 ms; idle, it holds 0 bytes, and while a reading is taken it holds exactly that request |
+| `dispatch` | the background thread pool (`os::dispatch::runAsync`): its queue and its threads, kept for the life of the process and as many as the most work ever run at once. A thread per task cost memory in libraries that see every thread start (NVIDIA's OpenGL driver: about 70 KB a thread, up to 37 MB) |
 | `app` | the view-model, its services, commands and settings, made at start-up (`MainGlfw.cpp`) |
 | `gl-driver` | the GL driver's own C++ allocations (Mesa's LLVM registers itself when the driver loads and compiles shaders on first draws): creating the window and context, each frame's clear, draw, read-back and swap, popped-out windows |
 | `static-init` | constructors that run before `main()`, ours and the libraries' (`os::mem::programStarted()`, called by `os::init()`, ends it) |
@@ -305,7 +307,7 @@ Kept so the same mistakes are recognised quickly. Each row is fixed and has a te
 | `views` read 221 KB after a close, of which 156 KB was not the views' | the local engine's one-time set-up (llama.cpp's log ring and registry) ran inside a draw | `local-engine` scope in `initBackend`; `views` 65 KB |
 | 438 KB of the C++ heap had no owner (`other`) | the GL driver's C++ (LLVM) allocations, constructors before `main()`, and the app's start-up objects were unscoped | `gl-driver`, `static-init`, `app` (above); 12 KB left in `other`, named in the table. Every scope after each of three closes, to the byte: 6,191,835 bytes in all |
 | The closed folder's path kept as heap storage by the terminal and the code assistant | `setWorkingDirectory(home)` assigned a short path into the string that held the long one (rule 5) | swapped in |
-| **Open:** about 1.5 MB/s while idle with a large repo, Windows only | not reproduced on Linux (flat for minutes in every mode); Windows-only code audited without a finding | watch the developer readout on Windows: which counter climbs names it |
+| About 1.5 MB/s while idle, Windows only (NVIDIA); also +0.35 MB each time the same two tabs were closed and opened again, the C++ heap identical to the byte | found 2026-11-06 by diffing the process's committed regions (`VirtualQueryEx`) and breaking on `NtAllocateVirtualMemory` under gdb: every growing byte was committed by `nvoglv64.dll`. Three causes, each reproduced in a small GL program: (1) frames presented to a window covered by others are kept by the driver until it shows again, about 300 KB a frame, and the idle loop presented two a second for the caret blink even unfocused; (2) the driver's `DllMain` keeps about 70 KB for every thread the process starts (up to 37 MB): `runAsync`, each process run (three pipe threads) and each automation request started a new thread; (3) every trim repacked the font atlas into a new texture. Also git refreshed every 3 s forever once a git view had been shown (`visible_` never cleared) | the caret blink wakes only a focused window, and a covered window is not drawn or presented (`GlfwWindowFrame::covered()`); background work runs on a kept thread pool (`os::dispatch::runAsync`, `Group`; `dispatch` scope); the atlas is repacked only past 2048 px; a git view's visibility lapses when it is not drawn. 20 close-all/open-two cycles: private 204.3 to 205.2 MB, then the same to the KB for the last 7; split/join and idle flat |
 
 ## 7. What "Rust-like" means here, and what it does not
 

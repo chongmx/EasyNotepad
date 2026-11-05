@@ -173,6 +173,9 @@ const char* commandIcon(CommandId id)
     case CommandId::ImplementComment: return ICON_FA_WAND_MAGIC_SPARKLES;
     case CommandId::ToggleCodeSuggestions: return ICON_FA_ROBOT;
     case CommandId::IntellisenseSettings: return ICON_FA_SLIDERS;
+    case CommandId::ToggleSplitView: return ICON_FA_TABLE_COLUMNS;
+    case CommandId::FocusOtherColumn: return ICON_FA_RIGHT_LEFT;
+    case CommandId::KeyboardShortcuts: return ICON_FA_KEYBOARD;
     case CommandId::Count: break;
     }
     return ICON_FA_SQUARE;

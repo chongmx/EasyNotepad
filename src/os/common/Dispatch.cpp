@@ -1,5 +1,7 @@
 #include "../OsInternal.h"
 
+#include "enp/os/Memory.h"
+
 #include <deque>
 #include <mutex>
 #include <utility>
@@ -55,12 +57,122 @@ bool hasPending()
     return !g_queue.empty();
 }
 
+#if defined(ENP_HAS_THREADS)
+namespace {
+
+struct Pool {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<Task> tasks;
+    int idle = 0;     // threads waiting for a task
+    int starting = 0; // threads started, not yet waiting
+    int threads = 0;
+};
+
+// Never destroyed: its threads wait on it until the process ends.
+Pool& pool()
+{
+    static Pool* p = new Pool;
+    return *p;
+}
+
+void poolThread()
+{
+    Pool& p = pool();
+    std::unique_lock<std::mutex> lock(p.mutex);
+    --p.starting;
+    for (;;) {
+        ++p.idle;
+        p.wake.wait(lock, [&p] { return !p.tasks.empty(); });
+        --p.idle;
+        Task task = std::move(p.tasks.front());
+        p.tasks.pop_front();
+        lock.unlock();
+        task();
+        task = nullptr; // what it captured goes here, on this thread, before the next one
+        lock.lock();
+    }
+}
+
+} // namespace
+#endif
+
 void runAsync(Task work)
 {
 #if defined(ENP_HAS_THREADS)
-    std::thread(std::move(work)).detach();
+    // The pool's own room (the queue, its threads) is its own, whoever posts the first task.
+    mem::Scope scope("dispatch");
+    Pool& p = pool();
+    bool start = false;
+    {
+        std::lock_guard<std::mutex> lock(p.mutex);
+        p.tasks.push_back(std::move(work));
+        if (int(p.tasks.size()) > p.idle + p.starting) { // every kept thread is busy
+            ++p.starting;
+            ++p.threads;
+            start = true;
+        }
+    }
+    if (start)
+        std::thread(poolThread).detach();
+    else
+        p.wake.notify_one();
 #else
     postToMain(std::move(work));
+#endif
+}
+
+int poolThreads()
+{
+#if defined(ENP_HAS_THREADS)
+    std::lock_guard<std::mutex> lock(pool().mutex);
+    return pool().threads;
+#else
+    return 0;
+#endif
+}
+
+// ---- Group -----------------------------------------------------------------------------------------
+
+struct Group::State {
+    std::mutex mutex;
+#if defined(ENP_HAS_THREADS)
+    std::condition_variable done;
+#endif
+    int pending = 0;
+};
+
+Group::Group() : state_(std::make_shared<State>()) {}
+
+Group::~Group()
+{
+    wait();
+}
+
+void Group::run(Task task)
+{
+#if defined(ENP_HAS_THREADS)
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        ++state_->pending;
+    }
+    runAsync([state = state_, task = std::move(task)]() mutable {
+        task();
+        task = nullptr;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (--state->pending == 0)
+            state->done.notify_all();
+    });
+#else
+    task(); // no threads: at once
+#endif
+}
+
+void Group::wait()
+{
+#if defined(ENP_HAS_THREADS)
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    state_->done.wait(lock, [this] { return state_->pending == 0; });
 #endif
 }
 

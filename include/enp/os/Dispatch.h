@@ -21,7 +21,30 @@ bool hasPending();
 
 // Run `work` on a background thread when the platform has threads; otherwise it is
 // deferred to the next pump() on the main thread (single-threaded wasm).
+// The threads are a pool kept for the life of the process: a task runs on an idle one, and a new
+// thread starts only when every kept thread is busy. The process has as many threads as the most
+// work it ever ran at once, never one more per task: a new thread costs memory in libraries that
+// see every thread start (the NVIDIA OpenGL driver keeps about 70 KB per thread its DllMain saw,
+// up to 37 MB), so a thread per task grew the app for as long as it ran.
 void runAsync(Task work);
+// Background threads started so far (all kept; tests and the developer readout).
+int poolThreads();
+
+// Tasks run on the pool, waited for together (the reading and writing ends of a process's pipes).
+// Destroying the group waits too.
+class Group {
+public:
+    Group();
+    ~Group();
+    Group(const Group&) = delete;
+    Group& operator=(const Group&) = delete;
+    void run(Task task);
+    void wait();
+
+private:
+    struct State;
+    std::shared_ptr<State> state_; // shared with the running tasks, which signal it
+};
 
 // One background thread kept for its owner's lifetime, running its tasks one at a time in order.
 // Work that recurs (an index rebuilt for every folder) runs on the same thread every time, so it

@@ -102,7 +102,9 @@ public:
     // ---- Refresh --------------------------------------------------------------------------
     void refresh();
     void requestRefresh(); // soon, when nothing else runs
-    void setVisible(bool visible) { visible_ = visible; } // the Git tab, chip or History is on screen
+    // The Git tab, chip or History was drawn this frame (they call it while on screen; it lapses
+    // when they stop, and with it the refresh every few seconds).
+    void setVisible(bool visible) { visibleAt_ = visible ? now_ : -1.0; }
     void tick(double now);
 
     // ---- Changes and commit ---------------------------------------------------------------
@@ -246,7 +248,7 @@ private:
     bool running_ = false;
     bool refreshWanted_ = false;
     bool refreshing_ = false;
-    bool visible_ = false;
+    double visibleAt_ = -1.0; // time of the last frame a git view was drawn, -1: never
     double now_ = 0.0, lastRefresh_ = 0.0;
     bool logAll_ = false;
     std::string logPath_;

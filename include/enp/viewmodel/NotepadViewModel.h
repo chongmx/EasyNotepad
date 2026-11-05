@@ -105,6 +105,8 @@ public:
     Property<bool> developerMode{false};
     Property<bool> showPanel{true};
     Property<bool> panelMaximized{false};
+    // The editor area in two columns: the active document in the focused one, another beside it.
+    Property<bool> splitView{false};
     Property<bool> showAgentPanel{true};
     // Explorer: dot files and folders (.github, .gitignore) and, on Windows, entries with the
     // hidden attribute. The .git folder itself never shows.
@@ -165,6 +167,8 @@ public:
     Event<> goToLineRequested;
     Event<> addCommentRequested;
     Event<> aboutRequested;
+    Event<> shortcutsRequested;  // the list of shortcut keys
+    Event<> otherColumnRequested; // two columns: the keyboard moves to the other one
     Event<> engineLabRequested;
     Event<> localModelRequested; // the agent set-up card, local model part
     Event<> preferencesRequested;
