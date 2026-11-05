@@ -158,6 +158,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
             load("planWidth", planWidth_);
             load("conversationWidth", conversationWidth_);
             load("sideBarWidth", editor_.sideBarWidth());
+            load("markdownColumn", editor_.markdownColumn());
             if (const model::Json* v = j.find("blameColumns"); v && v->isNumber())
                 editor_.blameColumns() = float(v->asNumber());
         },
@@ -169,6 +170,7 @@ MainView::MainView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, float ui
                 .set("planWidth", planWidth_ / s_)
                 .set("conversationWidth", conversationWidth_ / s_)
                 .set("sideBarWidth", editor_.sideBarWidth() / s_)
+                .set("markdownColumn", editor_.markdownColumn() / s_) // 0: the standard width
                 .set("blameColumns", double(editor_.blameColumns()));
         });
     subscriptions_.push_back(vm_.aboutRequested.subscribe([this]() { openAbout_ = true; }));

@@ -745,6 +745,60 @@ void EditorView::markdownSwitch(model::Document& doc, ImVec2 topRight)
                                        : "Show it formatted (Ctrl+Shift+V)");
 }
 
+// The rendered text's width, as a bar along the top that stays while the text scrolls: dragging
+// either end widens or narrows the column (it stays centred), a double-click restores the
+// standard width.
+void EditorView::markdownRuler(ImVec2 winPos, float viewW, float column, float widest)
+{
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = 12.0f * s_, grip = 5.0f * s_;
+    const float left = winPos.x + std::max(24.0f * s_, (viewW - column) * 0.5f), right = left + column;
+    const float mid = std::floor(winPos.y + h * 0.5f);
+    dl->AddRectFilled(winPos, ImVec2(winPos.x + viewW, winPos.y + h), palette_.editorBg); // text scrolls under it
+
+    bool hot = false, reset = false;
+    auto end = [&](const char* id, float x, float sign) {
+        ImGui::SetCursorScreenPos(ImVec2(x - grip, winPos.y));
+        ImGui::InvisibleButton(id, ImVec2(grip * 2.0f, h));
+        if (ImGui::IsItemActivated()) {
+            rulerDragStart_ = column;
+            rulerDragMouse_ = ImGui::GetIO().MousePos.x;
+        }
+        if (ImGui::IsItemActive()) // both sides move: the column stays centred
+            markdownColumn_ = std::clamp(rulerDragStart_ + sign * 2.0f * (ImGui::GetIO().MousePos.x - rulerDragMouse_),
+                                         std::min(widest, 240.0f * s_), widest);
+        if (ImGui::IsItemDeactivated())
+            vm_.settings().markDirty(); // remembered with the layout
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            hot = true;
+        }
+        reset = reset || (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
+    };
+    end("##rulerLeft", left, -1.0f);
+    end("##rulerRight", right, 1.0f);
+    ImGui::SetCursorScreenPos(ImVec2(left + grip, winPos.y));
+    ImGui::InvisibleButton("##rulerBar", ImVec2(std::max(1.0f, column - grip * 2.0f), h));
+    registerLastItem("markdown-ruler", "button", "Restore the standard text width", [this]() {
+        markdownColumn_ = 0.0f;
+        vm_.settings().markDirty();
+    });
+    hot = hot || ImGui::IsItemHovered();
+    reset = reset || (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Text width: drag either end; double-click for the standard width");
+    if (reset) {
+        markdownColumn_ = 0.0f;
+        vm_.settings().markDirty();
+    }
+    rulerHovered_ = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(winPos, ImVec2(winPos.x + viewW, winPos.y + h));
+
+    const ImU32 color = hot ? palette_.accent : palette_.border;
+    dl->AddLine(ImVec2(left, mid), ImVec2(right, mid), color, 1.0f * s_);
+    for (float x : {left, right})
+        dl->AddRectFilled(ImVec2(x - 2.0f * s_, winPos.y + 2.0f * s_), ImVec2(x + 2.0f * s_, winPos.y + h - 2.0f * s_), color, 2.0f * s_);
+}
+
 void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
 {
     os::mem::Scope scope("markdown");
@@ -756,6 +810,8 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     }
     if (!md.view.onLink)
         md.view.onLink = [this](const std::string& url) {
+            if (rulerHovered_) // the click was on the ruler over the text
+                return;
             if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0)
                 vm_.openLink(url);
             else if (!url.empty() && url[0] != '#') // a file next to this one
@@ -786,19 +842,24 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     const ImVec2 winPos = ImGui::GetWindowPos();
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float zoom = vm_.zoom.get();
-    // A readable column: centred, at most ~90 characters wide.
+    // A readable column: centred, at most ~90 characters wide unless the ruler set another width.
     const float pad = 24.0f * s_;
-    const float column = std::min(viewW - pad * 2.0f, 820.0f * s_ * zoom);
+    const float widest = std::max(1.0f, viewW - pad * 2.0f);
+    const float column = markdownColumn_ > 0.0f ? std::min(widest, markdownColumn_) : std::min(widest, 820.0f * s_ * zoom);
     ImGui::SetCursorPos(ImVec2(std::max(pad, (viewW - column) * 0.5f), pad));
     md.view.render(md.text, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
     ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f)); // room to scroll the end up
+    rulerHovered_ = false;
+    if (!compact_)
+        markdownRuler(winPos, viewW, column, widest);
 
     if (!md.shown) { // just switched here: show where the caret was
         ImGui::SetScrollY(std::max(0.0f, md.view.offsetOfLine(doc.caret.line) - 8.0f * s_));
         md.shown = true;
     }
     // Double-click: edit the text there.
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && md.view.hoveredLine() >= 0) {
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && md.view.hoveredLine() >= 0 &&
+        !rulerHovered_) {
         const int line = md.view.hoveredLine();
         vm_.execute(viewmodel::CommandId::ToggleMarkdownView);
         vm_.goToLine(line);
@@ -807,7 +868,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     if (focused_ && ImGui::GetIO().InputQueueCharacters.Size > 0)
         vm_.statusText.set("This Markdown file is shown rendered: press Ctrl+Shift+V (or double-click) to edit it");
     markdownSwitch(doc, ImVec2(winPos.x + ImGui::GetWindowWidth() - (ImGui::GetScrollMaxY() > 0.0f ? ImGui::GetStyle().ScrollbarSize : 0.0f) - 8.0f * s_,
-                               winPos.y + 6.0f * s_));
+                               winPos.y + (compact_ ? 6.0f : 18.0f) * s_)); // below the ruler
     scroll_[doc.id].markdown = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
     if (sideBar) {

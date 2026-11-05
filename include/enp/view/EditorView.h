@@ -133,8 +133,13 @@ private:
 public:
     float& sideBarWidth() { return sideBarWidth_; } // remembered with the layout
     float& blameColumns() { return blameColumns_; } // the blame column's width in characters, remembered too
+    float& markdownColumn() { return markdownColumn_; } // rendered Markdown's text width, remembered too
 private:
     float sideBarWidth_ = 0.0f;   // 0: default on first use
+    float markdownColumn_ = 0.0f; // 0: the standard width (set by dragging the ruler's ends)
+    float rulerDragStart_ = 0.0f, rulerDragMouse_ = 0.0f;
+    bool rulerHovered_ = false;   // the mouse is on the ruler: no link click, no double-click to edit
+    void markdownRuler(ImVec2 winPos, float viewW, float column, float widest);
     struct RenderedMarkdown {
         MarkdownView view;
         uint64_t revision = UINT64_MAX;
