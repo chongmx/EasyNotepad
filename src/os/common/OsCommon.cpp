@@ -280,11 +280,8 @@ void trimMemory()
     malloc_trim(0); // returns free pages at the top of the heap and inside it (MADV_DONTNEED)
 #elif defined(__ANDROID__) && defined(M_PURGE) && __ANDROID_API__ >= 26
     mallopt(M_PURGE, 0); // bionic: release cached pages (mallopt is API 26+; minSdk is 24)
-#elif defined(__APPLE__)
-    // libmalloc keeps freed pages of its tiny/small/medium regions (and recently freed large
-    // blocks in its cache) mapped and counted in the footprint until the system is short of
-    // memory. Pressure relief does now what memory pressure would: every zone madvises its free
-    // pages away (0: as much as it can).
+#elif defined(__APPLE__) && defined(ENP_APPLE_MALLOC_PRESSURE_RELIEF)
+    // Best-effort only: some zones, including current xzone malloc, use a no-op callback here.
     malloc_zone_pressure_relief(nullptr, 0);
 #endif
 }

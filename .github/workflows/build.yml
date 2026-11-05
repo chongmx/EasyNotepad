@@ -49,6 +49,24 @@ jobs:
         if: matrix.test
         run: ctest --test-dir build/${{ matrix.preset }} -C Release --output-on-failure
 
+      # macOS only: a memory benchmark instead of the strict checks (its footprint moves by whole
+      # pages and its allocator keeps freed pages, so readings differ without any leak). 30 open and
+      # close cycles; it passes while the growth overall and over the last 10 cycles stays under the
+      # limits (scripts/memory_cycle.py --bench). The numbers are an annotation of every run. The
+      # runner is a virtual machine without a GPU (no OpenGL window): the app runs --headless.
+      # TEMPORARY COMPROMISE (2026-11-05, docs/MEMORY.md "macOS benchmark"): over the last 10 cycles
+      # the C++ heap and its blocks may not grow at all, and the footprint by at most 20 KB (the
+      # first green run measured +16 KB: one 16 KB page). To be replaced by the full checks.
+      - name: Benchmark macOS folder-cycle memory
+        if: runner.os == 'macOS' && matrix.test
+        run: |
+          python3 scripts/memory_cycle.py \
+            --app bin/macos/universal/EasyNotepad \
+            --folder "$GITHUB_WORKSPACE" \
+            --files CMakeLists.txt docs/MEMORY.md src/os/common/OsCommon.cpp tests/TestMain.cpp \
+            --cycles 30 --warmup 5 --bench --headless \
+            --bench-private-last10-kb 20 --bench-heap-last10-kb 0 --bench-blocks-last10 0
+
       - uses: actions/upload-artifact@v7
         with:
           name: EasyNotepad-${{ matrix.name }}

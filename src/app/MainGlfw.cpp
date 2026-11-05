@@ -31,12 +31,14 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -188,6 +190,68 @@ void mainLoopStep(void* arg)
         glfwSetWindowShouldClose(state->window, GLFW_TRUE);
 }
 
+#if !defined(__EMSCRIPTEN__)
+// --headless: the app without a window or OpenGL, for machines that have neither (CI runners;
+// macOS virtual machines have no GPU, and GLFW asks for an accelerated OpenGL context). The same
+// application, frames, automation connector and memory; nothing is drawn, and textures count as
+// uploaded. For tests such as scripts/memory_cycle.py; the GPU driver's memory is not part of it.
+int runHeadless()
+{
+    IMGUI_CHECKVERSION();
+    ImGui::SetAllocatorFunctions(
+        [](size_t size, void*) -> void* {
+            enp::os::mem::Scope scope("imgui");
+            return ::operator new(size);
+        },
+        [](void* p, void*) { ::operator delete(p); });
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1440.0f, 900.0f);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+    std::unique_ptr<enp::app::Application> app;
+    {
+        enp::os::mem::Scope scope("app");
+        app = std::make_unique<enp::app::Application>();
+    }
+    {
+        enp::os::mem::Scope scope("views");
+        app->attachUi(1.0f, "headless (no window, no OpenGL)", nullptr);
+    }
+    app->openInitialDocuments();
+    std::fprintf(stderr, "EasyNotepad: running headless\n");
+    auto last = std::chrono::steady_clock::now();
+    while (!app->quitRequested()) {
+        // About 30 frames a second: requests from the automation connector are handled each frame.
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        const auto now = std::chrono::steady_clock::now();
+        io.DeltaTime = std::max(1e-4f, std::chrono::duration<float>(now - last).count());
+        last = now;
+        ImGui::NewFrame();
+        app->frame();
+        ImGui::Render();
+        // No renderer: texture requests are acknowledged as done (as the UI tests do).
+        for (ImTextureData* tex : ImGui::GetPlatformIO().Textures) {
+            if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
+                tex->SetTexID(ImTextureID(1));
+                tex->SetStatus(ImTextureStatus_OK);
+            } else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames > 0) {
+                tex->SetTexID(ImTextureID_Invalid);
+                tex->SetStatus(ImTextureStatus_Destroyed);
+            }
+        }
+        if (app->captureWanted()) {
+            std::vector<unsigned char> none;
+            app->deliverCapture(false, 0, 0, none, "no window to capture in --headless mode");
+        }
+        app->endFrame();
+    }
+    app.reset();
+    ImGui::DestroyContext();
+    enp::os::shutdown();
+    return 0;
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -196,8 +260,10 @@ int main(int argc, char** argv)
     enp::os::InitParams params;
     params.argc = argc;
     params.argv = argv;
-    if (!enp::os::init(params))
+    if (!enp::os::init(params)) {
+        std::fprintf(stderr, "EasyNotepad: the platform layer could not start\n");
         return 1;
+    }
 #if !defined(__EMSCRIPTEN__)
     // MCP connector mode: no window, JSON-RPC over stdio to the running app.
     for (int i = 1; i < argc; ++i)
@@ -206,6 +272,9 @@ int main(int argc, char** argv)
             enp::os::shutdown();
             return code;
         }
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--headless") == 0)
+            return runHeadless();
 #endif
 
 #if ENP_GLFW_HAS_PLATFORM && !defined(_WIN32) && !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -214,8 +283,15 @@ int main(int argc, char** argv)
     if (std::getenv("DISPLAY") && glfwPlatformSupported(GLFW_PLATFORM_X11))
         glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
 #endif
-    if (!glfwInit())
+    // Why a window or GL context cannot be had (no display, no GPU, a driver without OpenGL 3.2)
+    // is GLFW's to say: printed, so a start that fails is never silent.
+    glfwSetErrorCallback([](int code, const char* description) {
+        std::fprintf(stderr, "EasyNotepad: GLFW error 0x%X: %s\n", unsigned(code), description ? description : "");
+    });
+    if (!glfwInit()) {
+        std::fprintf(stderr, "EasyNotepad: GLFW could not start (no display?)\n");
         return 1;
+    }
 #if !defined(__EMSCRIPTEN__)
     // Background work (terminal output, agent answers) wakes the idle loop.
     enp::os::dispatch::setWakeCallback([] { glfwPostEmptyEvent(); });
@@ -275,6 +351,7 @@ int main(int argc, char** argv)
     std::optional<enp::os::mem::Scope> driverScope(std::in_place, "gl-driver");
     GLFWwindow* window = glfwCreateWindow(width, height, "EasyNotepad", nullptr, nullptr);
     if (!window) {
+        std::fprintf(stderr, "EasyNotepad: no window with an OpenGL %s context could be created\n", glslVersion);
         glfwTerminate();
         return 1;
     }
@@ -286,8 +363,10 @@ int main(int argc, char** argv)
     glfwSwapInterval(1);
 
 #if !defined(__EMSCRIPTEN__)
-    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)))
+    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
+        std::fprintf(stderr, "EasyNotepad: the OpenGL functions could not be loaded\n");
         return 1;
+    }
 #endif
     driverScope.reset();
 

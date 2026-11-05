@@ -24,4 +24,4 @@ android/build/
 /ref/
 
 # Packaged skills (upload artifacts)
-/.claude/skills/*.zip
+/.claude/skills/*.zip__pycache__/

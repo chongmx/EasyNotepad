@@ -5,11 +5,16 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <new>
 
 #if defined(_WIN32)
 #   include <malloc.h>
+#endif
+#if defined(__APPLE__) && defined(ENP_APPLE_LARGE_ALLOCATION_MMAP)
+#   include <sys/mman.h>
+#   include <unistd.h>
 #endif
 
 #ifndef ENP_MEM_POOL_BYTES
@@ -135,6 +140,18 @@ struct Header {
 };
 static_assert(sizeof(Header) == kHeader, "the header keeps the default new alignment");
 constexpr std::uint32_t kMagic = 0x454E504Du; // "ENPM"
+constexpr std::uint32_t kMappedMagic = 0x454E5041u; // "ENPA"
+#if defined(__APPLE__) && defined(ENP_APPLE_LARGE_ALLOCATION_MMAP)
+constexpr std::size_t kAppleMmapThreshold = 1u << 20;
+
+std::size_t appleMappingSize(std::size_t size)
+{
+    const std::size_t pageSize = static_cast<std::size_t>(::getpagesize());
+    if (!pageSize || size > std::numeric_limits<std::size_t>::max() - (pageSize - 1))
+        return 0;
+    return ((size + pageSize - 1) / pageSize) * pageSize;
+}
+#endif
 
 struct Registry {
     std::atomic<std::uint64_t> bytes[kMaxScopes];
@@ -200,17 +217,33 @@ void* allocate(std::size_t size, std::size_t alignment)
     // The header sits right before the returned pointer; `alignment` bytes (at least the header)
     // are reserved in front so that the result keeps the requested alignment.
     const std::size_t front = std::max(alignment, kHeader);
+    if (size > std::numeric_limits<std::size_t>::max() - front)
+        return nullptr;
     const std::size_t total = size + front;
     void* raw = nullptr;
-    if (alignment <= kHeader) {
-        raw = std::malloc(total);
-    } else {
-#if defined(_WIN32)
-        raw = _aligned_malloc(total, alignment);
-#else
-        if (posix_memalign(&raw, alignment, total) != 0)
-            raw = nullptr;
+    bool mapped = false;
+#if defined(__APPLE__) && defined(ENP_APPLE_LARGE_ALLOCATION_MMAP)
+    if (alignment <= kHeader && size >= kAppleMmapThreshold) {
+        const std::size_t mappingSize = appleMappingSize(total);
+        if (!mappingSize)
+            return nullptr;
+        raw = ::mmap(nullptr, mappingSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (raw == MAP_FAILED)
+            return nullptr;
+        mapped = true;
+    }
 #endif
+    if (!raw) {
+        if (alignment <= kHeader) {
+            raw = std::malloc(total);
+        } else {
+#if defined(_WIN32)
+            raw = _aligned_malloc(total, alignment);
+#else
+            if (posix_memalign(&raw, alignment, total) != 0)
+                raw = nullptr;
+#endif
+        }
     }
     if (!raw)
         return nullptr;
@@ -221,7 +254,7 @@ void* allocate(std::size_t size, std::size_t alignment)
         scope = kStaticInit; // a static constructor, before main()
     h->size = size;
     h->scope = std::uint32_t(scope);
-    h->magic = kMagic;
+    h->magic = mapped ? kMappedMagic : kMagic;
     Registry& r = registry();
     r.bytes[scope].fetch_add(size, std::memory_order_relaxed);
     r.blocks[scope].fetch_add(1, std::memory_order_relaxed);
@@ -237,16 +270,26 @@ void releaseBlock(void* p, std::size_t alignment)
         return;
     const std::size_t front = std::max(alignment, kHeader);
     Header* h = reinterpret_cast<Header*>(static_cast<char*>(p) - kHeader);
-    if (h->magic == kMagic) {
+    const bool mapped = h->magic == kMappedMagic;
+    const std::size_t size = h->size;
+    if (h->magic == kMagic || mapped) {
         Registry& r = registry();
         const int scope = int(h->scope) < kMaxScopes ? int(h->scope) : 0;
-        r.bytes[scope].fetch_sub(h->size, std::memory_order_relaxed);
+        r.bytes[scope].fetch_sub(size, std::memory_order_relaxed);
         r.blocks[scope].fetch_sub(1, std::memory_order_relaxed);
         h->magic = 0;
         if (ReleaseHook hook = g_onRelease.load(std::memory_order_acquire))
             hook(p);
     }
     void* raw = static_cast<char*>(p) - front;
+#if defined(__APPLE__) && defined(ENP_APPLE_LARGE_ALLOCATION_MMAP)
+    if (mapped) {
+        const std::size_t mappingSize = appleMappingSize(size + kHeader);
+        if (!mappingSize || ::munmap(raw, mappingSize) != 0)
+            std::abort();
+        return;
+    }
+#endif
     if (alignment <= kHeader)
         std::free(raw);
     else {

@@ -73,6 +73,44 @@ def theil_sen(values):
     return slopes[len(slopes) // 2]
 
 
+def benchmark(closes, args):
+    """--bench: growth from the first close to the last, and over the last 10 cycles, against limits."""
+    n = len(closes)
+    tail = min(10, n - 1)
+    measures = (("privateKB", "footprint", "KB", args.bench_private_kb, args.bench_private_last10_kb),
+                ("heapKB", "C++ heap", "KB", args.bench_heap_kb, args.bench_heap_last10_kb),
+                ("blocks", "heap blocks", "", args.bench_blocks, args.bench_blocks_last10))
+    print(f"benchmark: growth after close 1 -> after close {n} (overall), and after close {n - tail} -> {n} "
+          f"(last {tail} cycles):", flush=True)
+    failures, summary = [], []
+    for key, name, unit, limit_all, limit_tail in measures:
+        overall = closes[-1][key] - closes[0][key]
+        recent = closes[-1][key] - closes[-1 - tail][key]
+        print(f"  {name:<12} overall {overall:+9d} {unit:<2} (limit {limit_all})    last {tail} {recent:+9d} {unit:<2} "
+              f"(limit {limit_tail})    first {closes[0][key]}  last {closes[-1][key]}")
+        summary.append(f"{name} {overall:+d} / {recent:+d}{' ' + unit if unit else ''}")
+        if overall > limit_all:
+            failures.append(f"{name} grew {overall:+d} {unit} over {n} cycles (limit {limit_all})")
+        if recent > limit_tail:
+            failures.append(f"{name} grew {recent:+d} {unit} over the last {tail} cycles (limit {limit_tail})")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::notice title=memory benchmark ({n} cycles - overall / last {tail})::" + ", ".join(summary), flush=True)
+    return failures
+
+
+def trend_limit(name, args):
+    """How much a series may grow over the window, or None for figures only reported."""
+    if not args.no_growth:
+        return 8 if name == "heap blocks" else args.trend_kb
+    if name in ("graphics", "compressed"):
+        return None  # the driver's and the system's (memory pressure), not the app's
+    if name == "heap blocks":
+        return args.step_blocks
+    if name == "heap bytes" or name.startswith("scope "):
+        return args.step_kb * 1024
+    return args.trend_kb  # footprint and allocator figures, in KB
+
+
 def call(endpoint, method, params=None, timeout=60):
     ep = json.load(open(endpoint))
     with socket.create_connection(("127.0.0.1", ep["port"]), timeout=timeout) as s:
@@ -93,8 +131,11 @@ def snapshot(endpoint, settle):
     time.sleep(settle)  # the app trims 4 frames after a close and again 1.5 s later
     st = call(endpoint, "get_state")
     mem, proc = st["memory"], st["process"]
+    scope_bytes = {s["name"]: int(s.get("liveBytes", s["liveKB"] * 1024))
+                   for s in mem["scopes"] if s["blocks"]}
     return {
         "heapKB": mem["liveKB"],
+        "heapBytes": int(mem.get("liveBytes", mem["liveKB"] * 1024)),
         "blocks": mem["blocks"],
         # Everything the process holds: private memory plus the shared memory it wrote (Linux:
         # the window's MIT-SHM frame buffer), nothing left out. On macOS privateKB is the physical
@@ -114,6 +155,7 @@ def snapshot(endpoint, settle):
         "threads": proc.get("threads", 0),
         "imguiWindows": st.get("imgui", {}).get("windows", 0),
         "scopes": {s["name"]: s["liveKB"] for s in mem["scopes"] if s["blocks"]},
+        "scopeBytes": scope_bytes,
         # The test bench's own side in the app (the automation connector): while this reading is
         # taken it holds exactly this request; it must read the same every time.
         "automationBytes": next((int(s.get("liveBytes", s["liveKB"] * 1024)) for s in mem["scopes"] if s["name"] == "automation"), 0),
@@ -145,6 +187,28 @@ def main():
     ap.add_argument("--print-every", type=int, default=1, help="print only every Nth cycle (long runs)")
     ap.add_argument("--trend-kb", type=float, default=128.0,
                     help="long runs: fail when the fitted growth over the second half of the cycles exceeds this (KB)")
+    ap.add_argument("--no-growth", action="store_true",
+                    help="strict: the accounted heap may not grow after the warm-up beyond one small step "
+                         "(--step-kb, --step-blocks); the process figures may not trend up (--trend-kb) or climb "
+                         "in every cycle. The trend is fitted over every reading after the warm-up.")
+    ap.add_argument("--step-kb", type=float, default=16.0,
+                    help="--no-growth: one-time growth of the accounted heap (and each scope) allowed after the "
+                         "warm-up (a late cache or a new ImGui window)")
+    ap.add_argument("--step-blocks", type=int, default=32, help="--no-growth: the same in heap blocks")
+    ap.add_argument("--headless", action="store_true",
+                    help="start the app with --headless: no window or OpenGL (CI machines without a GPU)")
+    ap.add_argument("--bench", action="store_true",
+                    help="benchmark (the macOS CI job): print how much the footprint, the C++ heap and its blocks "
+                         "grew from the first close to the last (overall) and over the last 10 cycles; pass when "
+                         "neither exceeds its limit. The other checks are printed, not enforced.")
+    ap.add_argument("--bench-private-kb", type=int, default=8192, help="--bench: footprint growth allowed overall (KB)")
+    ap.add_argument("--bench-private-last10-kb", type=int, default=20, help="--bench: ... over the last 10 cycles (KB)")
+    ap.add_argument("--bench-heap-kb", type=int, default=256, help="--bench: C++ heap growth allowed overall (KB)")
+    ap.add_argument("--bench-heap-last10-kb", type=int, default=0, help="--bench: ... over the last 10 cycles (KB)")
+    ap.add_argument("--bench-blocks", type=int, default=512, help="--bench: heap blocks growth allowed overall")
+    ap.add_argument("--bench-blocks-last10", type=int, default=0, help="--bench: ... over the last 10 cycles")
+    ap.add_argument("--report-only", action="store_true",
+                    help="print the failures (as warnings on GitHub Actions) but exit 0")
     ap.add_argument("--settle", type=float, default=3.5, help="seconds to wait before each reading")
     ap.add_argument("--no-map", action="store_true", help="skip the Map view and Refresh Map")
     ap.add_argument("--heap-slack-kb", type=int, default=256,
@@ -157,18 +221,43 @@ def main():
     proc = None
     endpoint = args.endpoint
     if args.app:
-        endpoint = os.path.join(tempfile.mkdtemp(prefix="enp-memory-cycle-"), "endpoint.json")
+        temp_dir = tempfile.mkdtemp(prefix="enp-memory-cycle-")
+        endpoint = os.path.join(temp_dir, "endpoint.json")
+        startup_log_path = os.path.join(temp_dir, "startup.log")
         env = dict(os.environ, EASYNOTEPAD_ENDPOINT=endpoint)
-        proc = subprocess.Popen([os.path.abspath(args.app)], env=env, cwd=os.path.dirname(os.path.abspath(args.app)),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(100):
-            if os.path.exists(endpoint) and os.path.getsize(endpoint) > 0:
-                break
-            time.sleep(0.1)
+        with open(startup_log_path, "w+", encoding="utf-8") as startup_log:
+            proc = subprocess.Popen([os.path.abspath(args.app)] + (["--headless"] if args.headless else []), env=env, cwd=os.path.dirname(os.path.abspath(args.app)),
+                                    stdout=startup_log, stderr=subprocess.STDOUT)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if os.path.exists(endpoint) and os.path.getsize(endpoint) > 0:
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            if not os.path.exists(endpoint) or os.path.getsize(endpoint) == 0:
+                exit_code = proc.poll()
+                if exit_code is None:
+                    proc.terminate()
+                    try:
+                        exit_code = proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        exit_code = proc.wait()
+                startup_log.flush()
+                startup_log.seek(0)
+                diagnostic = startup_log.read().strip()
+                detail = f"\nApp startup log:\n{diagnostic}" if diagnostic else "\nApp produced no startup output."
+                if os.environ.get("GITHUB_ACTIONS") == "true":  # readable without the job's log
+                    flat = " | ".join(diagnostic.splitlines()[-12:]) if diagnostic else "no startup output"
+                    print(f"::error title=memory_cycle startup::exit code {exit_code}: {flat[:900]}", flush=True)
+                sys.exit(f"EasyNotepad did not publish its automation endpoint within 30 seconds "
+                         f"(exit code: {exit_code}).{detail}")
     if not endpoint or not os.path.exists(endpoint):
         sys.exit("no endpoint: pass --app, or --endpoint of an app started with EASYNOTEPAD_ENDPOINT")
 
     failures = []
+    bench_failures = []
     try:
         fresh = snapshot(endpoint, args.settle)
         row("fresh start", fresh)
@@ -230,6 +319,8 @@ def main():
                         m.get("driver", {}).get("dirty", 0), m.get("driver", {}).get("size", 0), opened["heapKB"])) + "\n")
 
         last = closes[-1]
+        if args.bench:
+            bench_failures = benchmark(closes, args)
         base = min(args.warmup, len(closes) - 1)  # the first close after the warm-up
         if maps[base] and maps[-1]:
             print(f"private memory by mapping, after close {base + 1} -> after close {len(closes)} (KB):")
@@ -248,28 +339,43 @@ def main():
         later = closes[base:]
         # Long runs: fit a robust trend through the second half of the readings. Early cycles may
         # still be filling caches and driver buffers; whatever is still rising after that is a leak.
-        if len(later) >= 20:
-            half = later[len(later) // 2:]
-            half_maps = [m for m in maps[base:][len(later) // 2:] if m]
+        if len(later) >= 20 or (args.no_growth and len(later) >= 3):
+            # Long runs fit the second half (caches may still fill early on); --no-growth fits every
+            # reading after the warm-up: more readings, so noise moves the fitted slope less.
+            start = 0 if args.no_growth else len(later) // 2
+            half = later[start:]
+            half_maps = [m for m in maps[base:][start:] if m]
             series = {"private": [c["privateKB"] for c in half], "heap blocks": [c["blocks"] for c in half]}
+            if args.no_growth:
+                series["heap bytes"] = [c["heapBytes"] for c in half]
             # Without /proc (macOS, Windows), the split comes from the app's own readings.
             for key, name in (("mallocHeldKB", "malloc held"), ("mallocInUseKB", "malloc in use"),
                               ("graphicsKB", "graphics"), ("compressedKB", "compressed")):
                 if any(c[key] for c in half):
                     series[name] = [c[key] for c in half]
+            if args.no_growth:
+                scope_names = sorted({name for c in half for name in c["scopeBytes"]})
+                for name in scope_names:
+                    series[f"scope {name} bytes"] = [c["scopeBytes"].get(name, 0) for c in half]
             if len(half_maps) == len(half):
                 series["malloc heap dirty"] = [m.get("heap", {}).get("dirty", 0) for m in half_maps]
                 series["anonymous dirty"] = [m.get("anon", {}).get("dirty", 0) for m in half_maps]
                 series["driver dirty"] = [m.get("driver", {}).get("dirty", 0) for m in half_maps]
-            print(f"trend over cycles {base + 1 + len(later) // 2}..{len(closes)} (Theil-Sen, per cycle -> over the window):")
+            print(f"trend over cycles {base + 1 + start}..{len(closes)} (Theil-Sen, per cycle -> over the window):")
             for name, values in series.items():
                 slope = theil_sen(values)
                 grown = slope * len(values)
-                limit = 8 if name == "heap blocks" else args.trend_kb
+                limit = trend_limit(name, args)
+                note = "   (report only)" if limit is None else ""
                 print(f"  {name:<18} {slope:+9.3f} per cycle -> {grown:+9.1f} over {len(values)} cycles   "
-                      f"min {min(values)}  max {max(values)}  mean {sum(values) / len(values):.1f}")
-                if grown > limit:
-                    failures.append(f"{name} still climbs in the second half: {slope:+.3f}/cycle = {grown:+.1f} over {len(values)} cycles (limit {limit})")
+                      f"min {min(values)}  max {max(values)}  mean {sum(values) / len(values):.1f}{note}")
+                if limit is not None and grown > limit:
+                    failures.append(f"{name} still climbs after the warm-up: {slope:+.3f}/cycle = {grown:+.1f} over "
+                                    f"{len(values)} cycles (limit {limit}); readings {values}")
+                # Rising at every reading is a leak however small the steps (noise goes both ways).
+                if (args.no_growth and limit is not None and len(values) > 3
+                        and all(b >= a for a, b in zip(values, values[1:])) and values[-1] - values[0] > limit):
+                    failures.append(f"{name} rises in every cycle after the warm-up: {values}")
         if len(later) > 1 and (max(c["heapKB"] for c in later) - min(c["heapKB"] for c in later) > 16):
             failures.append("heap after close is not stable after the warm-up: " + str([c["heapKB"] for c in later]))
         if last["heapKB"] > fresh["heapKB"] + args.heap_slack_kb:
@@ -280,11 +386,29 @@ def main():
             first = later[0]
             if last["blocks"] - first["blocks"] > 64:
                 failures.append(f"heap blocks grow per cycle: {first['blocks']} -> {last['blocks']}")
-            if last["privateKB"] - first["privateKB"] > args.drift_kb:
+            # The accounted heap is the app's own and nearly deterministic: one small step at most.
+            # Process figures (footprint, allocator) are checked by their trend above, not by two
+            # single readings, which differ by noise alone.
+            if args.no_growth and last["heapBytes"] - first["heapBytes"] > args.step_kb * 1024:
+                failures.append(f"heap grows after warm-up: {first['heapBytes']} -> {last['heapBytes']} bytes "
+                                f"(one step of {args.step_kb:g} KB allowed)")
+            private_drift = last["privateKB"] - first["privateKB"]
+            if private_drift > args.drift_kb:
                 failures.append(f"private grows per cycle: {first['privateKB']} -> {last['privateKB']} KB")
+            if args.no_growth and last["blocks"] - first["blocks"] > args.step_blocks:
+                failures.append(f"heap blocks grow after warm-up: {first['blocks']} -> {last['blocks']} "
+                                f"({args.step_blocks} allowed)")
             for key in ("handles", "gdi", "user", "threads"):
                 if last[key] > first[key] + 2:
                     failures.append(f"{key} grow per cycle: {first[key]} -> {last[key]}")
+            if args.no_growth:
+                scope_names = set(first["scopeBytes"]) | set(last["scopeBytes"])
+                for name in sorted(scope_names):
+                    start_bytes = first["scopeBytes"].get(name, 0)
+                    end_bytes = last["scopeBytes"].get(name, 0)
+                    if end_bytes - start_bytes > args.step_kb * 1024:
+                        failures.append(f"scope {name} grows after warm-up: {start_bytes} -> {end_bytes} bytes "
+                                        f"(one step of {args.step_kb:g} KB allowed)")
         connector = sorted({c["automationBytes"] for c in [fresh] + closes})
         if len(connector) > 1:
             failures.append(f"the automation connector's memory changes between readings: {connector} bytes")
@@ -300,9 +424,20 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    if args.bench:
+        if failures:
+            print("other checks (printed, not enforced with --bench):\n  " + "\n  ".join(failures))
+        failures = bench_failures
     if failures:
-        print("FAILED:\n  " + "\n  ".join(failures))
-        sys.exit(1)
+        print(("FINDINGS (report only):\n  " if args.report_only else "FAILED:\n  ") + "\n  ".join(failures))
+        # GitHub Actions: each failure also as an annotation (readable without the job's log).
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            level = "warning" if args.report_only else "error"
+            for f in failures:
+                print(f"::{level} title=memory_cycle::{f[:900]}")
+        if not args.report_only:
+            sys.exit(1)
+        return
     print("OK: closing the folder gives the memory back")
 
 
