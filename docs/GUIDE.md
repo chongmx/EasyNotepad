@@ -165,7 +165,7 @@ or for one language, separately for the dark and light themes, with a live previ
 are saved in `settings.json` in the app's data folder.
 
 **Enhanced UI** (Preferences, or the wand in View > Theme) gives the app a game-like look: hints
-have no box, only translucent text with a glowing outline, and the button, tab or toggle under the
+have no box, only translucent text with a glow in its shape, and the button, tab or toggle under the
 pointer glows. Off, hints are a rounded, semi-transparent box without a border.
 
 ## A ribbon you can make your own

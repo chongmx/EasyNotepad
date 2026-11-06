@@ -91,7 +91,8 @@ void UiAutomation::applyHover()
     io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); // gone: until the real mouse moves
 }
 
-void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate, bool enabled)
+void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate, bool enabled,
+                      bool boxGlow)
 {
     UiElement e;
     e.id = std::move(id);
@@ -103,7 +104,7 @@ void registerLastItem(std::string id, std::string role, std::string label, std::
     e.activate = std::move(activate);
     // The enhanced UI lights the control under the pointer (ImGui knows it is this item, not one
     // under a popup that covers it), fading in, and out once the pointer leaves.
-    if (ui::enhanced() && (e.role == "button" || e.role == "tab" || e.role == "toggle" || e.role == "checkbox"))
+    if (boxGlow && ui::enhanced() && (e.role == "button" || e.role == "tab" || e.role == "toggle" || e.role == "checkbox"))
         ui::hoverGlow(ImGui::GetWindowDrawList(), ImGui::GetItemID(), enabled && ImGui::IsItemHovered(), e.min, e.max,
                       5.0f * ImGui::GetStyle().FontScaleDpi);
     UiAutomation::instance().add(std::move(e));

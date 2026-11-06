@@ -1455,6 +1455,7 @@ void MainView::renderAllTabsPopup()
 float MainView::renderWindowButtons(float right, float y, float height)
 {
     // Minimize, maximize/restore and close, drawn as thin line glyphs like the OS caption buttons.
+    // No hints: at the window's edge they would hang outside it, and the glyphs say it all.
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float w = 46.0f * s_;
     const float g = 5.0f * s_; // glyph half-size
@@ -1477,7 +1478,6 @@ float MainView::renderWindowButtons(float right, float y, float height)
         const ImVec2 m(std::floor(x + w * 0.5f) + 0.5f, std::floor(y + height * 0.5f) + 0.5f);
         if (i == 0) {
             dl->AddLine(ImVec2(m.x - g, m.y), ImVec2(m.x + g, m.y), c, thickness);
-            ui::itemTooltip("Minimize");
             if (clicked)
                 frame_->minimize();
         } else if (i == 1) {
@@ -1491,13 +1491,11 @@ float MainView::renderWindowButtons(float right, float y, float height)
             } else {
                 dl->AddRect(ImVec2(m.x - g, m.y - g), ImVec2(m.x + g, m.y + g), c, 0.0f, thickness);
             }
-            ui::itemTooltip(maximized ? "Restore" : "Maximize");
             if (clicked)
                 frame_->toggleMaximize();
         } else {
             dl->AddLine(ImVec2(m.x - g, m.y - g), ImVec2(m.x + g, m.y + g), c, thickness);
             dl->AddLine(ImVec2(m.x - g, m.y + g), ImVec2(m.x + g, m.y - g), c, thickness);
-            ui::itemTooltip("Close");
             if (clicked)
                 vm_.requestQuit(); // unsaved documents are asked about first
         }

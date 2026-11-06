@@ -398,29 +398,43 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool agent = vm_.workspace.get() == WorkspaceMode::Agent;
     ImGui::InvisibleButton("##workspace", ImVec2(width, height));
-    registerLastItem("workspace", "button", agent ? "Agent workspace" : "Code workspace",
-                     [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); });
     const bool hovered = ImGui::IsItemHovered();
+    // Enhanced UI: the big button lights its symbol and its name, not its whole box.
+    const float light = ui::hoverLight(ImGui::GetItemID(), hovered);
+    registerLastItem("workspace", "button", agent ? "Agent workspace" : "Code workspace",
+                     [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); }, true, false);
     if (ImGui::IsItemClicked())
         ImGui::OpenPopup("##workspacePopup");
     if (hovered)
         ui::itemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
 
     const float pad = 6.0f * s_;
-    if (hovered)
+    if (hovered && !ui::enhanced()) // the enhanced UI lights the symbol and the name instead
         dl->AddRectFilled(ImVec2(p.x + pad, p.y + pad), ImVec2(p.x + width - pad, p.y + height - pad), palette_.hover, 6.0f * s_);
 
-    const ImU32 modeColor = agent ? palette_.modeAgent : palette_.modeCode;
+    const ImU32 baseColor = agent ? palette_.modeAgent : palette_.modeCode;
+    const ImU32 modeColor = ui::lit(baseColor, light);
     const char* icon = commandIcon(agent ? CommandId::SwitchToAgentMode : CommandId::SwitchToCodeMode);
     const char* name = agent ? "Agent" : "Code";
+    // The symbol with a light shining in it, the name with a glow in its shape.
+    auto symbol = [&](ImVec2 at, ImVec2 size, float fontSize) {
+        ui::iconLight(dl, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), size.y * 0.95f, baseColor, light);
+        drawText(dl, at, modeColor, icon, fontSize);
+    };
+    auto glowingText = [&](ImVec2 at, ImU32 color, const char* text, float fontSize) {
+        ImGui::PushFont(nullptr, fontSize);
+        ui::textGlow(dl, at, text, light);
+        ImGui::PopFont();
+        drawText(dl, at, color, text, fontSize);
+    };
     if (slim()) { // the icon over "Code ▾"
         const std::string caption = std::string(name) + " " ICON_FA_CARET_DOWN;
         const ImVec2 iconSize = textSize(icon, 20.0f);
         const ImVec2 captionSize = textSize(caption.c_str(), kLabelSize);
         float y = p.y + (height - iconSize.y - captionSize.y - 3.0f * s_) * 0.5f;
-        drawText(dl, ImVec2(p.x + (width - iconSize.x) * 0.5f, y), modeColor, icon, 20.0f);
+        symbol(ImVec2(p.x + (width - iconSize.x) * 0.5f, y), iconSize, 20.0f);
         y += iconSize.y + 3.0f * s_;
-        drawText(dl, ImVec2(p.x + (width - captionSize.x) * 0.5f, y), palette_.text, caption.c_str(), kLabelSize);
+        glowingText(ImVec2(p.x + (width - captionSize.x) * 0.5f, y), palette_.text, caption.c_str(), kLabelSize);
         ImGui::SetNextWindowPos(ImVec2(p.x + pad, p.y + height));
         renderWorkspacePopup();
         return;
@@ -430,9 +444,9 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     const char* sub = "Workspace " ICON_FA_CARET_DOWN;
     const ImVec2 subSize = textSize(sub, kCaptionSize);
     float y = p.y + (height - iconSize.y - nameSize.y - subSize.y - 6.0f * s_) * 0.5f;
-    drawText(dl, ImVec2(p.x + (width - iconSize.x) * 0.5f, y), modeColor, icon, 26.0f);
+    symbol(ImVec2(p.x + (width - iconSize.x) * 0.5f, y), iconSize, 26.0f);
     y += iconSize.y + 4.0f * s_;
-    drawText(dl, ImVec2(p.x + (width - nameSize.x) * 0.5f, y), palette_.text, name, 15.0f);
+    glowingText(ImVec2(p.x + (width - nameSize.x) * 0.5f, y), palette_.text, name, 15.0f);
     y += nameSize.y + 2.0f * s_;
     drawText(dl, ImVec2(p.x + (width - subSize.x) * 0.5f, y), palette_.textDim, sub, kCaptionSize);
 
@@ -1090,8 +1104,13 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
         const ImVec2 iconSize = textSize(icon, Fonts::kRibbonIconSize);
         drawText(dl, ImVec2(p.x + (w - iconSize.x) * 0.5f, p.y + 5.0f * s_), enabled ? tint : fade(tint, 0.35f), icon,
                  Fonts::kRibbonIconSize);
-        drawText(dl, ImVec2(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_),
-                 enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
+        const ImVec2 labelAt(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_);
+        if (light > 0.0f) {
+            ImGui::PushFont(nullptr, kLabelSize);
+            ui::textGlow(dl, labelAt, label, light);
+            ImGui::PopFont();
+        }
+        drawText(dl, labelAt, enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
     }
 
     if (hovered && ui::beginTooltip()) {

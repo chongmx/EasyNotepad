@@ -5,6 +5,7 @@
 #include "imgui_internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstring>
 
@@ -16,7 +17,6 @@ struct Look {
     bool enhanced = false;
     float s = 1.0f;
     ImU32 box = IM_COL32(37, 41, 47, 224); // the normal hint's box
-    ImU32 halo = IM_COL32(8, 10, 14, 255); // the enhanced hint's outline: against the text's colour
     ImU32 glow = IM_COL32(59, 130, 246, 255);
 };
 Look look;
@@ -25,6 +25,7 @@ Look look;
 constexpr float kLightIn = 0.12f;
 constexpr float kLightOut = 0.28f;
 constexpr float kHintIn = 0.14f;
+constexpr float kHintWidth = 26.0f; // in ems: wider hints wrap
 
 // How lit a control is: a fixed set of slots (no allocation per frame), one per control that is
 // lit or fading; a control gone from the screen frees its slot.
@@ -69,13 +70,6 @@ ImU32 withAlpha(ImU32 c, float alpha)
     return (c & ~IM_COL32_A_MASK) | (ImU32(a + 0.5f) << IM_COL32_A_SHIFT);
 }
 
-float luminance(ImU32 c)
-{
-    const float r = float((c >> IM_COL32_R_SHIFT) & 0xFF), g = float((c >> IM_COL32_G_SHIFT) & 0xFF),
-                b = float((c >> IM_COL32_B_SHIFT) & 0xFF);
-    return (0.2126f * r + 0.7152f * g + 0.0722f * b) / 255.0f;
-}
-
 Light* findLight(ImGuiID id)
 {
     for (Light& l : lights)
@@ -115,7 +109,8 @@ float updateLight(ImGuiID id, bool hovered)
 bool begin(ImGuiTooltipFlags flags)
 {
     const float s = look.s;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(9.0f * s, 6.0f * s));
+    // Without a box the padding is room for the glow (and keeps the text where the box had it).
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, look.enhanced ? ImVec2(12.0f * s, 9.0f * s) : ImVec2(9.0f * s, 6.0f * s));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * s); // a tooltip is not a popup: it takes the window's
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_PopupBg, look.enhanced ? IM_COL32(0, 0, 0, 0) : look.box);
@@ -143,6 +138,8 @@ bool begin(ImGuiTooltipFlags flags)
         ImGui::PushStyleColor(ImGuiCol_TextDisabled,
                               ImVec4((text.x + dim.x) * 0.5f, (text.y + dim.y) * 0.5f, (text.z + dim.z) * 0.5f, dim.w));
     }
+    // A long hint wraps: about 55 characters a line (a caller may set its own width inside).
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + kHintWidth * ImGui::GetFontSize());
     if (depth < kMaxDepth)
         open[depth] = o;
     ++depth;
@@ -166,23 +163,20 @@ void copyUnder(ImDrawList* dl, int first, int count, unsigned vtxOffset, ImVec2 
         dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
 }
 
-// The enhanced hint: the content (channel 1) a little translucent, under it (channel 0) a glow in
-// the accent fading outwards over three rings and an outline in the halo colour, drawn from copies
-// of its own glyphs. Content that is not one draw command (an image, a clipped child) gets the
-// normal box instead.
+// The enhanced hint: the content (channel 1) a little translucent; under it (channel 0) a glow in
+// the accent, no outline: blurs of the glyphs, drawn as copies of them spread over a disc (a
+// sunflower pattern, so no direction has a gap) with Gaussian weights, which add up to the text's
+// shape fading outwards. Content that is not one draw command
+// (an image, a clipped child), or too much of it, gets the normal box instead.
 void glowContent(ImDrawList* dl, int first)
 {
-    struct Ring {
-        float radius;
-        bool halo;
-        float alpha;
-    };
-    static constexpr Ring kRings[] = {{4.2f, false, 0.05f}, {3.1f, false, 0.08f}, {2.2f, false, 0.11f},
-                                      {1.7f, true, 0.32f},  {0.9f, true, 0.7f}};
-    static const ImVec2 kDirections[8] = {{1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
-                                          {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f}};
-    constexpr int kCopies = int(sizeof(kRings) / sizeof(kRings[0])) * 8;
+    constexpr int kInner = 16;      // copies of the close glow
+    constexpr int kMaxGlow = 40;    // copies of the wide glow
+    constexpr int kMinGlow = 12;    // fewer looks grainy: a box instead
+    constexpr float kSpread = 6.0f; // the wide glow's radius, in pixels at 100%
     const int count = dl->VtxBuffer.Size - first;
+    // One draw list holds at most 64K vertices: a long hint gets fewer copies.
+    const int glowCopies = count > 0 ? std::min(kMaxGlow, 60000 / count - 1 - kInner) : 0;
     int commands = 0;
     unsigned vtxOffset = 0;
     for (const ImDrawCmd& c : dl->CmdBuffer)
@@ -192,7 +186,7 @@ void glowContent(ImDrawList* dl, int first)
             if (c.UserCallback)
                 commands = 99;
         }
-    const bool glow = commands == 1 && count > 0 && count * kCopies < 60000;
+    const bool glow = commands == 1 && glowCopies >= kMinGlow;
     if (glow) {
         indices.resize(dl->IdxBuffer.Size);
         std::memcpy(indices.Data, dl->IdxBuffer.Data, size_t(dl->IdxBuffer.Size) * sizeof(ImDrawIdx));
@@ -203,11 +197,25 @@ void glowContent(ImDrawList* dl, int first)
     }
     dl->ChannelsSetCurrent(0);
     if (glow) {
-        const float s = look.s;
-        for (const Ring& ring : kRings)
-            for (const ImVec2& d : kDirections)
-                copyUnder(dl, first, count, vtxOffset, ImVec2(d.x * ring.radius * s, d.y * ring.radius * s),
-                          withAlpha(ring.halo ? look.halo : look.glow, ring.alpha));
+        const float s = look.s, spread = kSpread * s;
+        // The glow reaches past the content's clip rect (half the padding): clip to the window.
+        const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+        dl->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), false);
+        constexpr float kGolden = 2.39996323f; // radians between neighbours in a sunflower
+        // Two layers of glow in the accent, both blurs of the glyphs: a wide soft one, and a close,
+        // denser one that sets the text off from what lies under it.
+        auto blur = [&](int copies, float radius, float strength) {
+            const float sig = radius * 0.42f;
+            for (int i = 0; i < copies; ++i) {
+                const float r = radius * std::sqrt((float(i) + 0.5f) / float(copies));
+                const float a = float(i) * kGolden;
+                const float weight = std::exp(-0.5f * (r / sig) * (r / sig));
+                copyUnder(dl, first, count, vtxOffset, ImVec2(std::cos(a) * r, std::sin(a) * r), withAlpha(look.glow, strength * weight));
+            }
+        };
+        blur(glowCopies, spread, 0.09f);
+        blur(kInner, 2.2f * s, 0.16f);
+        dl->PopClipRect();
     } else {
         const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
         dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), look.box, 6.0f * look.s);
@@ -246,8 +254,6 @@ void configure(bool enhanced, const Palette& palette, float scale)
     look.s = scale;
     const ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_PopupBg];
     look.box = ImGui::GetColorU32(ImVec4(bg.x, bg.y, bg.z, 0.88f));
-    // Light text gets a dark outline, dark text a light one.
-    look.halo = luminance(palette.text) > 0.5f ? IM_COL32(6, 8, 12, 255) : IM_COL32(255, 255, 255, 255);
     look.glow = palette.accent;
 }
 
@@ -294,6 +300,7 @@ bool beginItemTooltip()
 void endTooltip()
 {
     depth = std::max(0, depth - 1);
+    ImGui::PopTextWrapPos();
     if (depth < kMaxDepth && open[depth].split) {
         ImGui::PopStyleColor();
         glowContent(ImGui::GetWindowDrawList(), open[depth].firstVertex);
@@ -327,6 +334,24 @@ void hoverGlow(ImDrawList* dl, ImGuiID id, bool hovered, ImVec2 min, ImVec2 max,
                                     IM_COL32(255, 255, 255, int(amount * 22.0f)), IM_COL32(255, 255, 255, int(amount * 22.0f)),
                                     IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
     dl->AddRect(min, max, withAlpha(look.glow, amount * 0.85f), rounding, 1.2f * s);
+}
+
+float hoverLight(ImGuiID id, bool hovered) { return look.enhanced ? updateLight(id, hovered) : 0.0f; }
+
+void textGlow(ImDrawList* dl, ImVec2 pos, const char* text, float amount)
+{
+    if (amount <= 0.0f)
+        return;
+    // As the hint's glow: copies over a disc with Gaussian weights, fewer (a label is short).
+    constexpr int kCopies = 24;
+    constexpr float kGolden = 2.39996323f;
+    const float spread = 5.0f * look.s, sigma = spread * 0.45f;
+    for (int i = 0; i < kCopies; ++i) {
+        const float r = spread * std::sqrt((float(i) + 0.5f) / float(kCopies));
+        const float a = float(i) * kGolden;
+        const float weight = std::exp(-0.5f * (r / sigma) * (r / sigma));
+        dl->AddText(ImVec2(pos.x + std::cos(a) * r, pos.y + std::sin(a) * r), withAlpha(look.glow, amount * 0.11f * weight), text);
+    }
 }
 
 float light(ImGuiID id)

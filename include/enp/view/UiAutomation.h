@@ -53,8 +53,9 @@ private:
 // cursor shows the click). Returns true once after such a click: the caller closes the window.
 bool registerWindowClose(const std::string& id, const std::string& label);
 
-// Shorthand for registering the last submitted ImGui item.
+// Shorthand for registering the last submitted ImGui item. In the enhanced UI a button, tab, toggle
+// or checkbox glows while hovered; `boxGlow` false leaves the glow to the caller (ui::hoverLight).
 void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate,
-                      bool enabled = true);
+                      bool enabled = true, bool boxGlow = true);
 
 } // namespace enp::view
