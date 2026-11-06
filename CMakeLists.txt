@@ -406,6 +406,7 @@ add_library(enp_view STATIC
     src/view/LibraryView.cpp
     src/view/TableReset.cpp
     src/view/MathView.cpp
+    src/view/CodeGrid.cpp
     src/view/TouchScroll.cpp
     src/view/Fit.cpp
     src/view/ReviewPanel.cpp

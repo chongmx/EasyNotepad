@@ -40,6 +40,10 @@ its release notes on GitHub.
 - Git no longer runs every three seconds for as long as the app runs once a git view was shown.
 - Rendered Markdown: bold text has one weight; numbers in right-aligned table cells stay on one
   line.
+- Rendered Markdown code blocks are a grid of cells, as in a terminal: box drawing (`┌─┐ │ ╔═╗`)
+  and block elements (`█▓▒░`) are drawn to fill their cells, so borders are as wide as the text
+  and lines join between rows; wide characters and emoji take two cells, tabs stop at multiples
+  of 4, and a long line wraps at a whole character (it used to break characters apart).
 - The menus of the ribbon and the title bar have room around their items.
 - Editor: the caret no longer drifts from the text on long lines; suggestions keep their order.
 - Memory goes back to the system when a folder closes, on Linux, macOS and Windows; every byte
