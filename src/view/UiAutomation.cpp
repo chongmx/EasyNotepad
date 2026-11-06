@@ -101,10 +101,11 @@ void registerLastItem(std::string id, std::string role, std::string label, std::
     e.max = ImGui::GetItemRectMax();
     e.enabled = enabled;
     e.activate = std::move(activate);
-    // The enhanced UI lights the control under the pointer (ImGui knows it is this item, not
-    // one under a popup that covers it).
-    if (enabled && (e.role == "button" || e.role == "tab" || e.role == "toggle" || e.role == "checkbox") && ui::enhanced() && ImGui::IsItemHovered())
-        ui::hoverGlow(ImGui::GetWindowDrawList(), e.min, e.max, 5.0f * ImGui::GetStyle().FontScaleDpi);
+    // The enhanced UI lights the control under the pointer (ImGui knows it is this item, not one
+    // under a popup that covers it), fading in, and out once the pointer leaves.
+    if (ui::enhanced() && (e.role == "button" || e.role == "tab" || e.role == "toggle" || e.role == "checkbox"))
+        ui::hoverGlow(ImGui::GetWindowDrawList(), ImGui::GetItemID(), enabled && ImGui::IsItemHovered(), e.min, e.max,
+                      5.0f * ImGui::GetStyle().FontScaleDpi);
     UiAutomation::instance().add(std::move(e));
 }
 

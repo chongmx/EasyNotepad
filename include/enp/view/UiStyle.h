@@ -25,7 +25,16 @@ bool beginTooltip();
 bool beginItemTooltip();
 void endTooltip();
 
-// The enhanced look's glow around a hovered control [min, max]; nothing in the normal look.
-void hoverGlow(ImDrawList* dl, ImVec2 min, ImVec2 max, float rounding);
+// The enhanced look's glow around control `id` (its ImGui item id) at [min, max]: it fades in while
+// `hovered` and out after. Called once a frame for the control; nothing in the normal look.
+void hoverGlow(ImDrawList* dl, ImGuiID id, bool hovered, ImVec2 min, ImVec2 max, float rounding);
+// How lit control `id` is, 0..1 (as its last hoverGlow left it; 0 in the normal look).
+float light(ImGuiID id);
+// `tint` more saturated and brighter by `amount` (0..1): an icon with light shining in it.
+ImU32 lit(ImU32 tint, float amount);
+// A soft round light behind an icon, brightest at `center`, gone at `radius`.
+void iconLight(ImDrawList* dl, ImVec2 center, float radius, ImU32 tint, float amount);
+// Whether a hint or a glow is fading: the app keeps drawing frames until it ends.
+bool animating();
 
 } // namespace enp::view::ui

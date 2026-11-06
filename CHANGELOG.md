@@ -9,6 +9,8 @@ its release notes on GitHub.
 ### Added
 - **Enhanced UI** (Preferences, or View > Theme): hints without a box, as translucent text with a
   glowing outline, and a glow around the button, tab or toggle under the pointer, as in a game.
+  The glow fades in and out and away from the control; a ribbon icon lights up from within (a
+  richer colour, a soft light behind it). Hints fade in, rising into place.
 - Agents can rest the pointer on a control (`hover`) to see its hover effect and hint, without
   moving the mouse.
 

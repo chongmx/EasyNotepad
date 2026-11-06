@@ -21,6 +21,27 @@ struct Look {
 };
 Look look;
 
+// Fades, in seconds.
+constexpr float kLightIn = 0.12f;
+constexpr float kLightOut = 0.28f;
+constexpr float kHintIn = 0.14f;
+
+// How lit a control is: a fixed set of slots (no allocation per frame), one per control that is
+// lit or fading; a control gone from the screen frees its slot.
+struct Light {
+    ImGuiID id = 0;
+    float progress = 0.0f; // 0 dark .. 1 lit, linear in time
+    int frame = -1;        // last updated
+    bool hovered = false;
+};
+constexpr int kLights = 32;
+Light lights[kLights];
+
+// The hint on screen: when it appeared, for its fade in.
+double hintShownAt = 0.0;
+float hintFade = 1.0f;
+int hintFrame = -1;
+
 // An open tooltip: where its content starts in its window's draw list, and whether the content
 // went to a channel of its own (the enhanced look draws the outline under it).
 struct Open {
@@ -31,6 +52,16 @@ constexpr int kMaxDepth = 4; // tooltips do not nest; a margin
 Open open[kMaxDepth];
 int depth = 0;
 ImVector<ImDrawIdx> indices; // the content's, copied while it is drawn (kept: no allocation per frame)
+
+float ease(float t)
+{
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// One frame's step of a fade: at most a 30th of a second, so the first frame after the app sat
+// idle does not jump to the end.
+float step() { return std::clamp(ImGui::GetIO().DeltaTime, 0.0f, 1.0f / 30.0f); }
 
 ImU32 withAlpha(ImU32 c, float alpha)
 {
@@ -45,6 +76,42 @@ float luminance(ImU32 c)
     return (0.2126f * r + 0.7152f * g + 0.0722f * b) / 255.0f;
 }
 
+Light* findLight(ImGuiID id)
+{
+    for (Light& l : lights)
+        if (l.id == id)
+            return &l;
+    return nullptr;
+}
+
+// The control's light this frame, moved one step towards lit (hovered) or dark.
+float updateLight(ImGuiID id, bool hovered)
+{
+    const int frame = ImGui::GetFrameCount();
+    Light* light = findLight(id);
+    if (!light) {
+        if (!hovered)
+            return 0.0f;
+        for (Light& l : lights)
+            if (l.id == 0 || l.frame < frame - 2) { // free, or its control left the screen
+                l = Light{id, 0.0f, -1, false};
+                light = &l;
+                break;
+            }
+        if (!light)
+            return 0.0f;
+    }
+    if (light->frame != frame) {
+        light->progress = std::clamp(light->progress + (hovered ? step() / kLightIn : -step() / kLightOut), 0.0f, 1.0f);
+        light->frame = frame;
+        light->hovered = hovered;
+    }
+    const float amount = ease(light->progress);
+    if (light->progress <= 0.0f && !hovered)
+        light->id = 0;
+    return amount;
+}
+
 bool begin(ImGuiTooltipFlags flags)
 {
     const float s = look.s;
@@ -57,6 +124,13 @@ bool begin(ImGuiTooltipFlags flags)
     ImGui::PopStyleVar(3);
     if (!shown)
         return false;
+    if (depth == 0) {
+        const int frame = ImGui::GetFrameCount();
+        if (ImGui::IsWindowAppearing() || hintFrame < frame - 1)
+            hintShownAt = ImGui::GetTime();
+        hintFrame = frame;
+        hintFade = ease(float(ImGui::GetTime() - hintShownAt) / kHintIn);
+    }
     Open o;
     if (look.enhanced && depth == 0) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -92,12 +166,22 @@ void copyUnder(ImDrawList* dl, int first, int count, unsigned vtxOffset, ImVec2 
         dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
 }
 
-// The enhanced hint: the content (channel 1) a little translucent, with an outline in the halo
-// colour and a glow in the accent under it (channel 0), drawn from copies of its own glyphs. Content
-// that is not one draw command (an image, a clipped child) gets the normal box instead.
+// The enhanced hint: the content (channel 1) a little translucent, under it (channel 0) a glow in
+// the accent fading outwards over three rings and an outline in the halo colour, drawn from copies
+// of its own glyphs. Content that is not one draw command (an image, a clipped child) gets the
+// normal box instead.
 void glowContent(ImDrawList* dl, int first)
 {
-    constexpr int kCopies = 24; // three rings of eight
+    struct Ring {
+        float radius;
+        bool halo;
+        float alpha;
+    };
+    static constexpr Ring kRings[] = {{4.2f, false, 0.05f}, {3.1f, false, 0.08f}, {2.2f, false, 0.11f},
+                                      {1.7f, true, 0.32f},  {0.9f, true, 0.7f}};
+    static const ImVec2 kDirections[8] = {{1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
+                                          {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f}};
+    constexpr int kCopies = int(sizeof(kRings) / sizeof(kRings[0])) * 8;
     const int count = dl->VtxBuffer.Size - first;
     int commands = 0;
     unsigned vtxOffset = 0;
@@ -119,19 +203,11 @@ void glowContent(ImDrawList* dl, int first)
     }
     dl->ChannelsSetCurrent(0);
     if (glow) {
-        static const ImVec2 kDirections[8] = {{1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
-                                              {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f}};
         const float s = look.s;
-        // Outermost first: the glow, wide and faint; a soft outline that hides what is under the
-        // text; the outline, close and strong.
-        struct Ring {
-            float radius;
-            ImU32 color;
-        };
-        const Ring rings[] = {{3.2f, withAlpha(look.glow, 0.15f)}, {2.0f, withAlpha(look.halo, 0.35f)}, {1.0f, withAlpha(look.halo, 0.7f)}};
-        for (const Ring& ring : rings)
+        for (const Ring& ring : kRings)
             for (const ImVec2& d : kDirections)
-                copyUnder(dl, first, count, vtxOffset, ImVec2(d.x * ring.radius * s, d.y * ring.radius * s), ring.color);
+                copyUnder(dl, first, count, vtxOffset, ImVec2(d.x * ring.radius * s, d.y * ring.radius * s),
+                          withAlpha(ring.halo ? look.halo : look.glow, ring.alpha));
     } else {
         const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
         dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), look.box, 6.0f * look.s);
@@ -139,6 +215,19 @@ void glowContent(ImDrawList* dl, int first)
     dl->ChannelsMerge();
     if (indices.Capacity > 1 << 16) // one huge hint does not keep its buffer
         indices.clear();
+}
+
+// The hint fading in: every vertex of its window (box, glow, text) at the fade's alpha, rising
+// into place from a few pixels below.
+void fadeHint(ImDrawList* dl)
+{
+    if (hintFade >= 1.0f)
+        return;
+    const float rise = (1.0f - hintFade) * 4.0f * look.s;
+    for (ImDrawVert& v : dl->VtxBuffer) {
+        v.col = withAlpha(v.col, hintFade);
+        v.pos.y += rise;
+    }
 }
 
 void textTooltip(ImGuiTooltipFlags flags, const char* fmt, va_list args)
@@ -163,6 +252,17 @@ void configure(bool enhanced, const Palette& palette, float scale)
 }
 
 bool enhanced() { return look.enhanced; }
+
+bool animating()
+{
+    const int frame = ImGui::GetFrameCount();
+    if (hintFade < 1.0f && hintFrame >= frame - 1)
+        return true;
+    for (const Light& l : lights)
+        if (l.id != 0 && l.frame >= frame - 1 && (l.hovered ? l.progress < 1.0f : l.progress > 0.0f))
+            return true;
+    return false;
+}
 
 void tooltip(const char* fmt, ...)
 {
@@ -198,22 +298,70 @@ void endTooltip()
         ImGui::PopStyleColor();
         glowContent(ImGui::GetWindowDrawList(), open[depth].firstVertex);
     }
+    if (depth == 0)
+        fadeHint(ImGui::GetWindowDrawList());
     ImGui::EndTooltip();
 }
 
-void hoverGlow(ImDrawList* dl, ImVec2 min, ImVec2 max, float rounding)
+void hoverGlow(ImDrawList* dl, ImGuiID id, bool hovered, ImVec2 min, ImVec2 max, float rounding)
 {
     if (!look.enhanced)
         return;
+    const float amount = updateLight(id, hovered);
+    if (amount <= 0.0f)
+        return;
     const float s = look.s;
-    // Rings fading outwards, then a lit edge and a faint fill: a highlighted button in a game's menu.
-    for (int i = 4; i >= 1; --i) {
-        const float g = float(i) * 1.6f * s;
-        dl->AddRect(ImVec2(min.x - g, min.y - g), ImVec2(max.x + g, max.y + g), withAlpha(look.glow, 0.07f * float(5 - i)),
-                    rounding + g, 2.0f * s);
+    // A glow fading outwards, one pixel at a time (eased: no bands), a faint fill with a sheen on its
+    // upper half, and a lit edge: a highlighted button in a game's menu.
+    constexpr int kRings = 8;
+    for (int i = kRings; i >= 1; --i) {
+        const float g = float(i) * s;
+        const float t = 1.0f - (float(i) - 0.5f) / float(kRings);
+        dl->AddRect(ImVec2(min.x - g, min.y - g), ImVec2(max.x + g, max.y + g), withAlpha(look.glow, amount * 0.30f * t * t),
+                    rounding + g, 1.0f * s);
     }
-    dl->AddRectFilled(min, max, withAlpha(look.glow, 0.10f), rounding);
-    dl->AddRect(min, max, withAlpha(look.glow, 0.85f), rounding, 1.2f * s);
+    dl->AddRectFilled(min, max, withAlpha(look.glow, amount * 0.10f), rounding);
+    const float inset = rounding * 0.6f, mid = (min.y + max.y) * 0.5f;
+    if (max.x - min.x > inset * 2.0f)
+        dl->AddRectFilledMultiColor(ImVec2(min.x + inset, min.y + 1.0f * s), ImVec2(max.x - inset, mid),
+                                    IM_COL32(255, 255, 255, int(amount * 22.0f)), IM_COL32(255, 255, 255, int(amount * 22.0f)),
+                                    IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
+    dl->AddRect(min, max, withAlpha(look.glow, amount * 0.85f), rounding, 1.2f * s);
+}
+
+float light(ImGuiID id)
+{
+    if (!look.enhanced)
+        return 0.0f;
+    const Light* l = findLight(id);
+    return l ? ease(l->progress) : 0.0f;
+}
+
+ImU32 lit(ImU32 tint, float amount)
+{
+    if (amount <= 0.0f)
+        return tint;
+    const ImVec4 c = ImGui::ColorConvertU32ToFloat4(tint);
+    float h, s, v;
+    ImGui::ColorConvertRGBtoHSV(c.x, c.y, c.z, h, s, v);
+    s = std::min(1.0f, s * (1.0f + 0.35f * amount) + 0.08f * amount);
+    v = std::min(1.0f, v + 0.14f * amount);
+    ImVec4 out(0.0f, 0.0f, 0.0f, c.w);
+    ImGui::ColorConvertHSVtoRGB(h, s, v, out.x, out.y, out.z);
+    return ImGui::ColorConvertFloat4ToU32(out);
+}
+
+void iconLight(ImDrawList* dl, ImVec2 center, float radius, ImU32 tint, float amount)
+{
+    if (amount <= 0.0f)
+        return;
+    // Discs of the icon's colour, smaller and smaller: their overlaps make a light that is brightest
+    // in the middle and fades to nothing at `radius`.
+    constexpr int kDiscs = 8;
+    for (int i = 0; i < kDiscs; ++i) {
+        const float r = radius * (1.0f - float(i) / float(kDiscs));
+        dl->AddCircleFilled(center, r, withAlpha(lit(tint, amount), amount * 0.045f), 32);
+    }
 }
 
 } // namespace enp::view::ui

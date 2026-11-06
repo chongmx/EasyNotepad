@@ -1073,6 +1073,14 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
         dl->AddRectFilled(p, q, palette_.accentSoft, 6.0f * s_);
     if (hovered && enabled)
         dl->AddRectFilled(p, q, held ? fade(palette_.hover, 2.0f) : palette_.hover, 6.0f * s_);
+    // Enhanced UI: as the button lights up, a light shines in its icon (a richer colour, a soft glow).
+    const float light = enabled ? ui::light(ImGui::GetItemID()) : 0.0f;
+    if (light > 0.0f) {
+        const ImVec2 iconSize = textSize(icon, small ? kSlimIconSize : Fonts::kRibbonIconSize);
+        const ImVec2 iconCenter(p.x + w * 0.5f, small ? p.y + h * 0.5f : p.y + 5.0f * s_ + iconSize.y * 0.5f);
+        ui::iconLight(dl, iconCenter, iconSize.y * 0.95f, tint, light);
+        tint = ui::lit(tint, light);
+    }
 
     if (small) {
         const ImVec2 iconSize = textSize(icon, kSlimIconSize);
