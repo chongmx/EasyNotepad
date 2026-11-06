@@ -121,7 +121,9 @@ struct PageDocument {
     // Encoded images (PNG, JPEG, QOI, ...) by key; the views decode them when first shown and may
     // drop the bytes then (a page read again puts them back).
     std::map<std::string, std::string> media;
-    std::unique_ptr<PageSource> source; // pages not loaded yet are read through it (its one owner)
+    // Pages not loaded yet are read through it, on the reader service's thread while the document
+    // is shown here: shared across threads, so a shared_ptr (the last holder frees the file).
+    std::shared_ptr<PageSource> source;
 
     // Reads page `index` if it is not loaded; true when it is loaded now.
     bool load(std::size_t index);

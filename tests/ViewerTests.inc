@@ -478,3 +478,103 @@ TEST(viewer_reads_sample_folder)
     for (const std::string& f : failures)
         std::printf("    %s\n", f.c_str());
 }
+
+// ---- Reading off the UI thread: the reader service and the view-model (MVVM) ----------------------
+
+namespace viewertest {
+
+// Files kept in memory (read on the reader service's thread: guarded).
+class MemoryFiles final : public interfaces::IFileService {
+public:
+    std::map<std::string, std::string> files;
+    std::mutex mutex;
+    std::optional<std::string> read(const std::string& path, std::string* error) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto it = files.find(path);
+        if (it == files.end()) {
+            if (error)
+                *error = "no such file";
+            return std::nullopt;
+        }
+        return it->second;
+    }
+    bool write(const std::string&, std::string_view, std::string*) override { return false; }
+    std::vector<interfaces::DirectoryEntry> list(const std::string&) override { return {}; }
+    bool isDirectory(const std::string&) override { return false; }
+    std::string absolute(const std::string& path) override { return path; }
+    bool createDirectories(const std::string&) override { return false; }
+};
+
+// Runs main-thread tasks until `done` or about 10 s.
+template <class F>
+bool pumpUntil(F done)
+{
+    for (int i = 0; i < 2000 && !done(); ++i) {
+        os::dispatch::pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    os::dispatch::pump();
+    return done();
+}
+
+} // namespace viewertest
+
+TEST(viewer_reads_documents_off_the_ui_thread)
+{
+    using namespace viewertest;
+    using State = viewmodel::ViewerViewModel::State;
+    MemoryFiles files;
+    for (const auto& [name, bytes] : sampleDocuments())
+        files.files["/docs/" + name] = bytes;
+    services::DocumentReaderService reader(&files);
+    int trims = 0;
+    {
+        viewmodel::ViewerViewModel viewer(&reader, [&trims]() { ++trims; });
+        // A Word document: Loading until the service delivers it, on the main thread.
+        viewer.open(1, "/docs/sample.docx");
+        CHECK(viewer.find(1) && viewer.find(1)->state == State::Loading && viewer.loadingCount() == 1);
+        CHECK(pumpUntil([&]() { return viewer.find(1)->state != State::Loading; }));
+        CHECK(viewer.find(1)->state == State::Ready && viewer.find(1)->doc.shape == mv::Shape::Flow);
+        // Its picture's bytes come out once.
+        CHECK(viewer.takeMedia(1, "word/media/image1.png") == tinyPicture());
+        CHECK(viewer.takeMedia(1, "word/media/image1.png").empty());
+
+        // A PDF: pages are read when shown, and dropped when far away.
+        viewer.open(2, "/docs/sample.pdf");
+        CHECK(pumpUntil([&]() { return viewer.find(2)->state != State::Loading; }));
+        const viewmodel::ViewerViewModel::Entry* pdf = viewer.find(2);
+        CHECK(pdf->state == State::Ready && pdf->doc.pages.pages.size() == 2 && !pdf->doc.pages.pages[0].loaded);
+        viewer.showPages(2, 0, 0);
+        CHECK(pumpUntil([&]() { return viewer.loadingCount() == 0; }));
+        CHECK(pdf->doc.pages.pages[0].loaded && pdf->doc.pages.pages[1].loaded); // the one shown and its neighbour
+        CHECK(runWith(pdf->doc.pages.pages[0], "Page one") != nullptr);
+        CHECK(!viewer.takeMedia(2, "pdf-image-7").empty()); // the page's picture, encoded (QOI)
+
+        // A file that is not there: Failed, with the reason.
+        viewer.open(3, "/docs/missing.pdf");
+        CHECK(pumpUntil([&]() { return viewer.find(3)->state != State::Loading; }));
+        CHECK(viewer.find(3)->state == State::Failed && !viewer.find(3)->doc.error.empty());
+
+        // Closed while it is read: the late result is dropped, nothing stays anywhere.
+        viewer.open(4, "/docs/sample.pptx");
+        viewer.release(4);
+        CHECK(!viewer.find(4));
+        CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+        CHECK(!viewer.find(4));
+        // Opened again: a new generation, read again.
+        const std::uint64_t before = viewer.find(1)->generation;
+        viewer.release(1);
+        viewer.open(1, "/docs/sample.docx");
+        CHECK(viewer.find(1)->generation != before);
+        CHECK(pumpUntil([&]() { return viewer.find(1)->state == State::Ready; }));
+
+        const int trimsBefore = trims;
+        viewer.releaseAll();
+        CHECK(viewer.entryCount() == 0 && trims > trimsBefore);
+        CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+        // Destroyed with reads in flight: their results are never delivered to it.
+        viewer.open(5, "/docs/sample.xlsx");
+    }
+    CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+}

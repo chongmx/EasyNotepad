@@ -21,11 +21,12 @@ Page / Plot / Pitch workspaces unchanged:
 | Excel (.xlsx) into a workbook: shared strings, number formats (`NumberFormat`), dates, booleans, errors, formulas' text, fonts, fills, alignment, widths, heights, merges, frozen panes | `model/viewer/Xlsx.cpp`, `NumberFormat.cpp` | unit tests |
 | PowerPoint (.pptx) into fixed pages: shapes, custom paths, text boxes, pictures, tables, groups; layout and master placeholders, title / body styles, theme colours, backgrounds, notes | `model/viewer/Pptx.cpp` | unit test |
 | PDF (added to the plan): xref tables and streams, object streams, a rebuilt xref for damaged files, Flate / LZW / ASCII85 / hex / run-length with predictors; paths, text placed by the fonts' widths (ToUnicode, standard encodings, glyph names, CID widths), images (JPEG, raw samples, masks, soft masks), forms; pages read when shown | `model/viewer/PdfObjects.cpp`, `Pdf.cpp` | unit tests |
-| One renderer for flowing text (`MarkdownView::renderBlocks`), one painter for pages (`PagePainter`), a cell grid; `ViewerView` holds a document's state by id | `view/MarkdownView.cpp`, `view/viewer/` | UI test: drawn, swept, closed, nothing held |
+| Reading off the UI thread, in MVVM layers: `IDocumentReaderService` / `DocumentReaderService` read and parse on one kept thread (whole documents, then PDF pages on request; cancellable); `ViewerViewModel` owns the documents by id, asks for the pages near the view and drops far ones; the UI thread reads only a file's first 4 KB to know it is a document | `services/DocumentReaderService.cpp`, `viewmodel/ViewerViewModel.cpp` | unit test (loading, failure, close while reading, reopen, destroyed with reads in flight); UI test waits for the reads |
+| One renderer for flowing text (`MarkdownView::renderBlocks`), one painter for pages (`PagePainter`), a cell grid; `ViewerView` only draws ("Reading" while a document or a page is read) and keeps view caches by id | `view/MarkdownView.cpp`, `view/viewer/` | UI test: drawn, swept, closed, nothing held in the view, the view-model or the service |
 | Robustness: LibreOffice's own test documents (`ENP_VIEWER_SAMPLES`) | `tests/ViewerTests.inc` | 3,269 of 3,285 read, none crashed or hung (the rest: encrypted PDFs, ZIP64, fuzzed files) |
 
 Not yet: encrypted PDFs, ZIP64, PDF clipping / shadings / embedded font outlines, charts, the
-workspaces themselves (25.0), reading on a background thread.
+workspaces themselves (25.0).
 
 ## LibreOffice: what it is, and the essence worth extracting
 

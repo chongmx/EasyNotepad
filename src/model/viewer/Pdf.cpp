@@ -1286,7 +1286,7 @@ ViewerDocument readPdf(std::string bytes)
 {
     ViewerDocument doc;
     doc.format = "PDF document";
-    auto source = std::make_unique<pdf::Source>();
+    auto source = std::make_shared<pdf::Source>();
     std::string error;
     if (!source->file.open(std::move(bytes), &error)) {
         doc.error = error;

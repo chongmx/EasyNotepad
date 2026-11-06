@@ -20,6 +20,8 @@
 #include "FakeTerminalService.h"
 #include "ViewerFixtures.h"
 #include "enp/interfaces/IFileService.h"
+#include "enp/os/Dispatch.h"
+#include "enp/services/DocumentReaderService.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -30,7 +32,9 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <chrono>
 #include <functional>
+#include <thread>
 #include <map>
 #include <set>
 #include <string>
@@ -81,6 +85,11 @@ public:
     }
     std::optional<std::string> readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total) override
     {
+        if (const auto it = memory.find(path); it != memory.end()) {
+            if (total)
+                *total = it->second.size();
+            return offset < it->second.size() ? it->second.substr(size_t(offset), size) : std::string();
+        }
         return os::fs::readFileRange(path, offset, size, total);
     }
     bool write(const std::string&, std::string_view, std::string*) override { return false; }
@@ -116,6 +125,16 @@ public:
 
     viewmodel::NotepadViewModel& vm() { return vm_; }
     ReadOnlyFiles& files() { return files_; }
+    services::DocumentReaderService& documentReader() { return documentReader_; }
+    // Frames until the reader service has delivered everything asked of it (at most about 10 s).
+    void settleReading()
+    {
+        for (int i = 0; i < 2000 && (vm_.viewer().loadingCount() > 0 || documentReader_.pendingTickets() > 0); ++i) {
+            frame(ImVec2(-100.0f, -100.0f));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        settle();
+    }
     view::MainView& view() { return *view_; }
     const std::vector<Failure>& failures() const { return failures_; }
     int frames() const { return frames_; }
@@ -133,6 +152,7 @@ public:
         io.AddMousePosEvent(pos.x, pos.y);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
         terminalService_.pump();
+        os::dispatch::pump(); // results of background work (the reader service) arrive here, as in the app
         ImGui::NewFrame();
         // Conflicts are evaluated in NewFrame() for the item hovered in the previous frame.
         ImGuiContext& g = *GImGui;
@@ -212,7 +232,8 @@ private:
 
     tests::FakeTerminalService terminalService_; // declared before vm_, which uses it
     ReadOnlyFiles files_;
-    viewmodel::NotepadViewModel vm_{&terminalService_, &files_};
+    services::DocumentReaderService documentReader_{&files_}; // Word, Excel, PowerPoint, PDF: read off the UI thread
+    viewmodel::NotepadViewModel vm_{&terminalService_, &files_, nullptr, nullptr, nullptr, &documentReader_};
     view::Fonts fonts_;
     FakeFrame frame_;
     std::unique_ptr<view::MainView> view_;
@@ -990,8 +1011,15 @@ int main(int argc, char** argv)
                         ++checksFailed;
                         continue;
                     }
-                    h.settle();
+                    h.settle(); // the first frames show "Reading": the service reads it off the UI thread
                     h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    h.settleReading();
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    h.settleReading(); // pages asked for while sweeping
+                    const viewmodel::ViewerViewModel::Entry* model = h.vm().viewer().find(doc->id);
+                    if (!model || model->state != viewmodel::ViewerViewModel::State::Ready)
+                        std::printf("  FAILED document viewer: %s was not read (%s)\n", path.c_str(), model ? model->doc.error.c_str() : "no entry"),
+                            ++checksFailed;
                     if (!viewer.holds(doc->id))
                         std::printf("  FAILED document viewer: %s was not read\n", path.c_str()), ++checksFailed;
                     for (const char* button : {"viewer:zoom-in", "viewer:zoom-out", "viewer:zoom-fit"})
@@ -1013,10 +1041,12 @@ int main(int argc, char** argv)
                 }
                 while (!h.vm().documents().empty())
                     h.vm().closeDocument(0);
-                h.settle();
-                if (viewer.entryCount() != 0 || viewer.heldImageCount() != 0 || h.view().editor().imageTextureCount() != 0)
-                    std::printf("  FAILED document viewer: %zu documents, %zu pictures, %zu textures held after closing them\n", viewer.entryCount(),
-                                viewer.heldImageCount(), h.view().editor().imageTextureCount()),
+                h.settleReading(); // results that were on their way are dropped
+                if (viewer.entryCount() != 0 || viewer.heldImageCount() != 0 || h.view().editor().imageTextureCount() != 0 ||
+                    h.vm().viewer().entryCount() != 0 || h.documentReader().pendingTickets() != 0)
+                    std::printf("  FAILED document viewer: %zu view entries, %zu pictures, %zu textures, %zu models, %zu reads held after closing them\n",
+                                viewer.entryCount(), viewer.heldImageCount(), h.view().editor().imageTextureCount(), h.vm().viewer().entryCount(),
+                                h.documentReader().pendingTickets()),
                         ++checksFailed;
             }
             h.files().memory.clear();

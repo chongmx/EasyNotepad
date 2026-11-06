@@ -41,12 +41,13 @@ std::string fileName(const std::string& path)
 
 NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService, interfaces::IFileService* fileService,
                                    interfaces::IAgentCliService* agentCli, interfaces::IProcessService* processService,
-                                   interfaces::ILocalEngineService* localEngine)
+                                   interfaces::ILocalEngineService* localEngine, interfaces::IDocumentReaderService* documentReader)
     : commands_(size_t(CommandId::Count)), explorer_(dummy::workspace()), files_(fileService), engineLab_(localEngine),
       terminal_(terminalService),
       logicalMap_(*this, agentCli), fileDialog_(*this, fileService),
       findInFiles_(*this, fileService), intellisense_(*this, fileService),
-      codeAssistant_(intellisense_, localEngine, [this]() { return localSetup(); }, agentCli, processService), settings_(fileService)
+      codeAssistant_(intellisense_, localEngine, [this]() { return localSetup(); }, agentCli, processService),
+      viewer_(documentReader, [this]() { memoryTrimRequested_ = true; }), settings_(fileService)
 {
     {
         // The languages' keyword tables are built on first use and kept for the process: built
@@ -419,6 +420,7 @@ void NotepadViewModel::closeDocument(int index)
         intellisense_.dismiss(); // its suggestions go with it
     if (outline_.documentId == documents_[size_t(index)]->id)
         releaseOutline(); // and its outline and region summaries
+    viewer_.release(documents_[size_t(index)]->id); // a document read for viewing: its model and reads in flight
     // An image or a library: what its view decoded is large, so the pages go back to the system now.
     const bool large = documents_[size_t(index)]->kind != model::FileKind::Text;
     documents_.erase(documents_.begin() + index);
@@ -457,6 +459,24 @@ void NotepadViewModel::openFile(const std::string& path)
     }
     std::string error;
     os::mem::Scope scope("documents");
+    // A document the viewer reads (Word, Excel, PowerPoint, PDF) is known by its first bytes: the
+    // reader service reads the whole file on its own thread, the UI thread reads only these.
+    if (std::optional<std::string> head = files_->readRange(absolutePath(path), 0, 4096, nullptr)) {
+        const model::FileType type = model::detectFileType(path, *head);
+        os::mem::release(*head);
+        if (type.kind == model::FileKind::Document) {
+            model::Document& doc = addDocument(fileName(path), path, {});
+            doc.kind = type.kind;
+            doc.format = type.format;
+            doc.rendered = false;
+            doc.onDisk = true;
+            viewer_.open(doc.id, absolutePath(path));
+            recordDiskStamp(doc);
+            remember(recentFiles_, absolutePath(path), kMaxRecentFiles);
+            statusText.set("Opening " + path + " (" + type.format + ", read only)");
+            return;
+        }
+    }
     std::optional<std::string> text = files_->read(absolutePath(path), &error);
     if (!text) {
         statusText.set("Cannot open " + path + ": " + error);
@@ -472,6 +492,8 @@ void NotepadViewModel::openFile(const std::string& path)
         doc.format = type.format;
         doc.rendered = false;
         doc.onDisk = true;
+        if (doc.kind == model::FileKind::Document) // only when its first bytes could not be read alone
+            viewer_.open(doc.id, absolutePath(path));
         recordDiskStamp(doc);
         remember(recentFiles_, absolutePath(path), kMaxRecentFiles);
         statusText.set(type.kind == model::FileKind::Image      ? "Opened " + path + " (" + type.format + " image)"
@@ -511,6 +533,7 @@ bool NotepadViewModel::openAsText(int index)
     model::Document& doc = *documents_[size_t(index)];
     if (doc.kind == model::FileKind::Text)
         return true;
+    viewer_.release(doc.id); // read for viewing until now: that goes
     std::string error;
     os::mem::Scope scope("documents");
     std::optional<std::string> text = files_->read(absolutePath(doc.path), &error);

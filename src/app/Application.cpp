@@ -19,7 +19,7 @@ Application::Application()
     : services_(services::ServiceContainer::createDefault()),
       viewModel_(std::make_unique<viewmodel::NotepadViewModel>(services_.terminal.get(), services_.files.get(),
                                                               services_.agentCli.get(), services_.processes.get(),
-                                                              services_.localEngine.get()))
+                                                              services_.localEngine.get(), services_.documentReader.get()))
 {
     if (const std::string dir = os::fs::appDataDirectory(); !dir.empty())
         viewModel_->setSettingsPath(os::fs::path::join(dir, "settings.json"));

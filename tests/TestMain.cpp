@@ -44,6 +44,8 @@
 #include "enp/services/ImageDecoder.h"
 #include "enp/services/ImageEncoder.h"
 #include "enp/services/ProcessService.h"
+#include "enp/services/DocumentReaderService.h"
+#include "enp/viewmodel/ViewerViewModel.h"
 
 #include "AutomationController.h"
 #include "McpBridge.h"

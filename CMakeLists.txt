@@ -355,6 +355,7 @@ add_library(enp_services STATIC
     src/services/ProcessService.cpp
     src/services/AutomationServer.cpp
     src/services/LocalEngineService.cpp
+    src/services/DocumentReaderService.cpp
     src/services/ServiceContainer.cpp
     src/services/ImageDecoder.cpp
     src/services/ImageEncoder.cpp
@@ -384,6 +385,7 @@ add_library(enp_viewmodel STATIC
     src/viewmodel/EngineLabViewModel.cpp
     src/viewmodel/ReviewViewModel.cpp
     src/viewmodel/TerminalViewModel.cpp
+    src/viewmodel/ViewerViewModel.cpp
     src/viewmodel/LayersViewModel.cpp
     src/viewmodel/LogicalMapViewModel.cpp
     src/viewmodel/FileDialogViewModel.cpp

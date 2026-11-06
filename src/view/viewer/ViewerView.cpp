@@ -55,12 +55,17 @@ ViewerView::ViewerView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, cons
 ViewerView::~ViewerView()
 {
     for (auto& [id, e] : entries_) {
-        for (auto& [media, held] : e.images)
-            images_.release(held.key);
+        releaseImages(e.images);
         for (auto& [page, held] : e.pageImages)
-            for (auto& [media, h] : held)
-                images_.release(h.key);
+            releaseImages(held);
     }
+}
+
+void ViewerView::releaseImages(std::map<std::string, HeldImage>& held)
+{
+    for (auto& [media, h] : held)
+        images_.release(h.key);
+    std::map<std::string, HeldImage>().swap(held);
 }
 
 std::size_t ViewerView::heldImageCount() const
@@ -76,17 +81,15 @@ std::size_t ViewerView::heldImageCount() const
 
 void ViewerView::releaseEntry(Entry& e)
 {
-    for (auto& [media, held] : e.images)
-        images_.release(held.key);
+    releaseImages(e.images);
     for (auto& [page, held] : e.pageImages)
-        for (auto& [media, h] : held)
-            images_.release(h.key);
+        releaseImages(held);
     if (shownDoc_ == e.id)
         shownDoc_ = -1;
     entries_.erase(e.id);
     if (entries_.empty())
         painter_.release();
-    vm_.requestMemoryTrim(); // a document's model can be large: give the pages back to the OS
+    vm_.requestMemoryTrim(); // the pictures' pixels can be large: give the pages back to the OS
 }
 
 void ViewerView::release(int documentId)
@@ -101,32 +104,30 @@ void ViewerView::releaseClosed()
     for (auto it = entries_.begin(); it != entries_.end();) {
         const int id = it->first;
         ++it; // releaseEntry erases the entry
-        if (vm_.documentIndexById(id) < 0)
+        if (vm_.documentIndexById(id) < 0 || !vm_.viewer().find(id))
             release(id);
     }
 }
 
-ViewerView::Entry& ViewerView::entryFor(model::Document& doc)
+ViewerView::Entry& ViewerView::entryFor(const model::Document& doc, const viewmodel::ViewerViewModel::Entry& model)
 {
     auto it = entries_.find(doc.id);
+    if (it != entries_.end() && it->second.generation != model.generation) { // read again: start over
+        releaseEntry(it->second);
+        it = entries_.end();
+    }
     if (it != entries_.end())
         return it->second;
     os::mem::Scope scope("viewer");
     Entry& e = entries_[doc.id];
     e.id = doc.id;
-    e.keyPrefix = vm_.absolutePath(doc.path) + "#";
-    e.doc = mv::readViewerDocument(doc.path, vm_.readWorkspaceFile(doc.path));
+    e.generation = model.generation;
+    e.keyPrefix = model.path + "#";
     e.flow.emoji = emoji_;
-    for (std::size_t i = 0; i < e.doc.book.sheets.size(); ++i)
-        if (!e.doc.book.sheets[i].hidden) {
-            e.sheet = int(i);
-            break;
-        }
     return e;
 }
 
-const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage>& held, const std::string& media,
-                                       std::map<std::string, std::string>& bytes)
+const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage>& held, const std::string& media)
 {
     const auto found = held.find(media);
     if (found != held.end())
@@ -134,16 +135,13 @@ const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage
     os::mem::Scope scope("images");
     HeldImage h;
     h.key = e.keyPrefix + media;
-    const auto data = bytes.find(media);
-    if (data == bytes.end()) {
+    // The encoded bytes come out of the view-model once: the cache keeps the pixels (a PDF page
+    // read again brings them back). Freed at the end of this function.
+    const std::string bytes = vm_.viewer().takeMedia(e.id, media);
+    if (bytes.empty())
         h.image = images_.acquireUnavailable(h.key, "not in the file");
-    } else {
-        h.image = images_.acquire(h.key, data->second);
-        // The cache keeps the pixels; the encoded bytes are not needed any more (a PDF page read
-        // again puts them back).
-        os::mem::release(data->second);
-        bytes.erase(data);
-    }
+    else
+        h.image = images_.acquire(h.key, bytes);
     const MarkdownImage* image = h.image;
     held.emplace(media, std::move(h));
     return image;
@@ -151,18 +149,30 @@ const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage
 
 void ViewerView::render(model::Document& doc, ImVec2 size)
 {
-    Entry& e = entryFor(doc);
+    viewmodel::ViewerViewModel& viewer = vm_.viewer();
+    const viewmodel::ViewerViewModel::Entry* model = viewer.find(doc.id);
+    if (!model) { // not asked for yet (a document restored with the session): the view-model reads it
+        viewer.open(doc.id, vm_.absolutePath(doc.path));
+        model = viewer.find(doc.id);
+    }
     os::mem::Scope scope("viewer");
     ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-    const float pad = 8.0f * s_;
-    if (e.doc.shape == mv::Shape::None) {
-        unreadable(doc, e, size);
+    if (!model || model->state == viewmodel::ViewerViewModel::State::Loading) {
+        loading(doc, size);
         ImGui::PopFont();
         return;
     }
+    const mv::ViewerDocument& d = model->doc;
+    if (model->state == viewmodel::ViewerViewModel::State::Failed) {
+        unreadable(doc, d.format, d.error, size);
+        ImGui::PopFont();
+        return;
+    }
+    Entry& e = entryFor(doc, *model);
+    const float pad = 8.0f * s_;
     const float before = ImGui::GetCursorPosY();
     ImGui::SetCursorPos(ImVec2(pad, pad * 0.5f));
-    toolbar(doc, e, size.x - pad * 2.0f);
+    toolbar(doc, e, d, size.x - pad * 2.0f);
     ImGui::SetCursorPosX(0.0f);
     const float used = ImGui::GetCursorPosY() - before;
     const ImVec2 rest(size.x, std::max(1.0f, size.y - used));
@@ -170,18 +180,17 @@ void ViewerView::render(model::Document& doc, ImVec2 size)
         ImGui::SetNextWindowScroll(e.scroll);
         shownDoc_ = doc.id;
     }
-    switch (e.doc.shape) {
-    case mv::Shape::Flow: flow(doc, e, rest); break;
-    case mv::Shape::Sheet: sheet(e, rest); break;
-    case mv::Shape::Pages: pages(e, rest); break;
+    switch (d.shape) {
+    case mv::Shape::Flow: flow(e, d, rest); break;
+    case mv::Shape::Sheet: sheet(e, d, rest); break;
+    case mv::Shape::Pages: pages(e, d, rest); break;
     case mv::Shape::None: break;
     }
     ImGui::PopFont();
 }
 
-void ViewerView::toolbar(model::Document& doc, Entry& e, float width)
+void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocument& d, float width)
 {
-    const mv::ViewerDocument& d = e.doc;
     ImGui::AlignTextToFramePadding();
     if (d.shape == mv::Shape::Pages) {
         const bool slides = d.format != "PDF document";
@@ -234,7 +243,16 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, float width)
     registerLastItem("open-as-text", "button", "Open as text anyway", [this, index]() { vm_.openAsText(index); });
 }
 
-void ViewerView::unreadable(model::Document& doc, Entry& e, ImVec2 size)
+void ViewerView::loading(model::Document& doc, ImVec2 size)
+{
+    // The reader service reads the document on its own thread; the dots move meanwhile.
+    const float pad = 24.0f * s_;
+    ImGui::SetCursorPos(ImVec2(pad, std::max(pad, size.y * 0.3f)));
+    static const char* const kDots[] = {"", ".", "..", "..."};
+    ImGui::TextDisabled("%s  Reading %s%s", ICON_FA_HOURGLASS_HALF, doc.title.c_str(), kDots[int(ImGui::GetTime() * 3.0) % 4]);
+}
+
+void ViewerView::unreadable(model::Document& doc, const std::string& format, const std::string& error, ImVec2 size)
 {
     const float pad = 24.0f * s_;
     const float column = std::min(size.x - pad * 2.0f, 560.0f * s_);
@@ -245,7 +263,7 @@ void ViewerView::unreadable(model::Document& doc, Entry& e, ImVec2 size)
     ImGui::PopFont();
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + column);
     ImGui::Text("%s cannot be shown", doc.title.c_str());
-    ImGui::TextDisabled("%s: %s.", e.doc.format.empty() ? doc.format.c_str() : e.doc.format.c_str(), e.doc.error.c_str());
+    ImGui::TextDisabled("%s: %s.", format.empty() ? doc.format.c_str() : format.c_str(), error.c_str());
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     const int index = vm_.documentIndexById(doc.id);
@@ -257,9 +275,8 @@ void ViewerView::unreadable(model::Document& doc, Entry& e, ImVec2 size)
 
 // ---- Word: the shared Markdown renderer ----------------------------------------------------------
 
-void ViewerView::flow(model::Document& doc, Entry& e, ImVec2 size)
+void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
 {
-    (void)doc;
     if (!e.flow.onLink)
         e.flow.onLink = [this](const std::string& url) {
             if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0)
@@ -267,7 +284,7 @@ void ViewerView::flow(model::Document& doc, Entry& e, ImVec2 size)
         };
     // `e` is a map node: its address holds until the document closes and the entry is erased.
     if (!e.flow.onImage) // set once: `e` is a map node, its address holds until the entry is erased
-        e.flow.onImage = [this, &e](const std::string& source) { return image(e, e.images, source, e.doc.flow.media); };
+        e.flow.onImage = [this, &e](const std::string& source) { return image(e, e.images, source); };
     e.flow.emoji = emoji_;
     panel::beginChild("##viewerFlow", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     const float viewW = ImGui::GetContentRegionAvail().x;
@@ -275,7 +292,7 @@ void ViewerView::flow(model::Document& doc, Entry& e, ImVec2 size)
     const float pad = 24.0f * s_;
     const float column = std::min(std::max(1.0f, viewW - pad * 2.0f), 820.0f * s_ * zoom);
     ImGui::SetCursorPos(ImVec2(std::max(pad, (viewW - column) * 0.5f), pad));
-    e.flow.renderBlocks(e.doc.flow.blocks, 1, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
+    e.flow.renderBlocks(d.flow.blocks, e.generation, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
     ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f));
     e.scroll = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
@@ -283,11 +300,19 @@ void ViewerView::flow(model::Document& doc, Entry& e, ImVec2 size)
 
 // ---- Excel: a grid that draws only the visible cells ---------------------------------------------
 
-void ViewerView::sheet(Entry& e, ImVec2 size)
+void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
 {
-    const mv::Workbook& book = e.doc.book;
+    const mv::Workbook& book = d.book;
     if (book.sheets.empty())
         return;
+    if (e.sheet < 0) { // the first sheet not hidden
+        e.sheet = 0;
+        for (std::size_t i = 0; i < book.sheets.size(); ++i)
+            if (!book.sheets[i].hidden) {
+                e.sheet = int(i);
+                break;
+            }
+    }
     e.sheet = std::clamp(e.sheet, 0, int(book.sheets.size()) - 1);
     const float pad = 8.0f * s_;
     const float rowLine = ImGui::GetFrameHeight();
@@ -597,11 +622,11 @@ void ViewerView::sheet(Entry& e, ImVec2 size)
 
 // ---- PowerPoint and PDF: pages drawn by the page painter -----------------------------------------
 
-void ViewerView::pages(Entry& e, ImVec2 size)
+void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
 {
-    mv::PageDocument& pd = e.doc.pages;
+    const mv::PageDocument& pd = d.pages;
     const int n = int(pd.pages.size());
-    const bool slides = e.doc.format != "PDF document";
+    const bool slides = d.format != "PDF document";
     panel::beginChild("##viewerPages", size, IM_COL32(110, 110, 110, 60), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float pad = 16.0f * s_, gap = 14.0f * s_;
@@ -647,19 +672,18 @@ void ViewerView::pages(Entry& e, ImVec2 size)
     if (last < 0)
         last = first;
     e.currentPage = first;
-    for (int i = std::max(0, first - 1); i <= std::min(n - 1, last + 1); ++i)
-        pd.load(size_t(i));
-    if (pd.source)
-        for (int i = 0; i < n; ++i)
-            if ((i < first - 6 || i > last + 6) && pd.pages[size_t(i)].loaded) {
-                pd.unload(size_t(i));
-                const auto held = e.pageImages.find(size_t(i));
-                if (held != e.pageImages.end()) {
-                    for (auto& [media, h] : held->second)
-                        images_.release(h.key);
-                    e.pageImages.erase(held);
-                }
-            }
+    // The view-model reads the pages in view (and their neighbours) through the reader service,
+    // and drops pages far away; the pictures of a page no longer read go here.
+    if (n > 0)
+        vm_.viewer().showPages(e.id, size_t(first), size_t(std::max(first, last)));
+    for (auto it = e.pageImages.begin(); it != e.pageImages.end();) {
+        if (it->first < pd.pages.size() && pd.pages[it->first].loaded) {
+            ++it;
+            continue;
+        }
+        releaseImages(it->second);
+        it = e.pageImages.erase(it);
+    }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float scrollX = ImGui::GetScrollX();
     for (int i = first; i <= last && i < n; ++i) {
@@ -670,6 +694,8 @@ void ViewerView::pages(Entry& e, ImVec2 size)
                           IM_COL32(0, 0, 0, 50));
         PageImageSource source(*this, e, size_t(i));
         painter_.draw(page, at, scale, fonts_, &source);
+        if (!page.loaded) // being read by the reader service
+            dl->AddText(ImVec2(at.x + 12.0f * s_, at.y + 10.0f * s_), IM_COL32(120, 120, 120, 255), ICON_FA_HOURGLASS_HALF "  Reading the page...");
         if (!page.notes.empty()) {
             ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + page.height * scale + gap * 0.5f));
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(wrap, std::max(w, 200.0f * s_)));
