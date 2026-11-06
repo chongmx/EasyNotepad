@@ -3,6 +3,7 @@
 
 #include "enp/model/Language.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -73,11 +74,11 @@ void FileDialogView::render()
     if (ImGui::Button(ICON_FA_ARROW_LEFT))
         vm_.back();
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Back");
+    ui::itemTooltip("Back");
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_ARROW_UP))
         vm_.up();
-    ImGui::SetItemTooltip("Up one folder");
+    ui::itemTooltip("Up one folder");
     registerLastItem("file-dialog:up", "button", "Up one folder", [this]() { vm_.up(); });
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);

@@ -67,6 +67,7 @@ const char* commandIcon(CommandId id)
     case CommandId::ZoomOut: return ICON_FA_MAGNIFYING_GLASS_MINUS;
     case CommandId::ZoomReset: return ICON_FA_TEXT_WIDTH;
     case CommandId::ToggleTheme: return ICON_FA_CIRCLE_HALF_STROKE;
+    case CommandId::ToggleEnhancedUi: return ICON_FA_WAND_MAGIC_SPARKLES;
     case CommandId::SyntaxColors: return ICON_FA_PALETTE;
     case CommandId::DetailFull: return ICON_FA_ALIGN_JUSTIFY;
     case CommandId::DetailBalanced: return ICON_FA_ALIGN_LEFT;

@@ -1152,6 +1152,9 @@ int main(int argc, char** argv)
                  vm.detailLevel.set(1);
                  vm.darkTheme.set(false);
              }},
+            // From here on every hint is drawn as glowing text and hovered controls glow: the
+            // states after this one sweep the enhanced look, the ones before it the normal one.
+            {"enhanced UI", [](auto& vm) { vm.enhancedUi.set(true); }},
             {"find and replace bar", [](auto& vm) {
                  vm.findQuery.set("word");
                  vm.execute(viewmodel::CommandId::Replace);

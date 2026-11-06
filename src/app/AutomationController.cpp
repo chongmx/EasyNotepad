@@ -217,6 +217,10 @@ const std::vector<AutomationTool>& automationTools()
          schema({{"id", "Element id"}, {"message", "What to tell the user"}}, {"id", "message"},
                 {{"seconds", "How long to show it (default 8; 0 keeps it until hide_pointer)"}})},
         {"hide_pointer", "Hides the agent cursor.", schema({})},
+        {"hover",
+         "Rests the app's pointer on an element for a while, as if the mouse were there, so its hover effect and its "
+         "hint show (read them with screenshot). The user's own mouse is not moved; it takes over when the time ends.",
+         schema({{"id", "Element id"}}, {"id"}, {{"seconds", "How long to rest there (default 3)"}})},
         {"screenshot",
          "A picture of the app window as it is drawn now (PNG), whatever covers it on the screen: the app draws its "
          "frame again off screen and reads it back. Optionally also saved to `path`. Not while the window is minimized.",
@@ -551,6 +555,15 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
         vm.pointAt(id, params.getString("message"), false, params.getNumber("seconds", 8.0));
         const bool visible = view::UiAutomation::instance().find(id) != nullptr || id.rfind("command:", 0) == 0;
         return Json::object().set("pointing", id).set("onScreen", visible);
+    }
+    if (method == "hover") {
+        const std::string id = params.getString("id");
+        const view::UiElement* e = view::UiAutomation::instance().find(id);
+        if (!e)
+            return error("no element '" + id + "' on screen; call list_elements to see what is there");
+        const ImVec2 at((e->min.x + e->max.x) * 0.5f, (e->min.y + e->max.y) * 0.5f);
+        view::UiAutomation::instance().hover(at, params.getNumber("seconds", 3.0));
+        return Json::object().set("hovering", id).set("x", double(at.x)).set("y", double(at.y));
     }
     if (method == "hide_pointer") {
         vm.hidePointer();

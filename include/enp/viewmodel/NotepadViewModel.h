@@ -99,6 +99,7 @@ public:
     Property<std::string> statusText{"Ready"};
 
     Property<bool> darkTheme{true};
+    Property<bool> enhancedUi{false}; // glowing hints and hover, as in a game (UiStyle.h)
     Property<bool> showExplorer{true};
     Property<bool> slimRibbon{false}; // icons only, one row: more room for the work
     // Developer and power-user pages (the Engine lab). Turned on by tapping the version in About

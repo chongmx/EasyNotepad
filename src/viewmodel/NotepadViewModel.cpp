@@ -2061,6 +2061,7 @@ void NotepadViewModel::setSettingsPath(const std::string& path)
 void NotepadViewModel::bindSettings()
 {
     settings_.bind("view.darkTheme", darkTheme);
+    settings_.bind("view.enhancedUi", enhancedUi);
     settings_.bind("view.workspace", workspace);
     settings_.bind("view.showExplorer", showExplorer);
     settings_.bind("view.slimRibbon", slimRibbon);

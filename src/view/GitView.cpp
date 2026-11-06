@@ -1,6 +1,7 @@
 #include "enp/view/GitView.h"
 
 #include "enp/view/Fit.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -114,7 +115,7 @@ bool GitView::iconButton(const char* id, const char* icon, const char* tooltip)
     const float size = ImGui::GetFrameHeight();
     const bool clicked = ImGui::Button(icon, ImVec2(size, size));
     ImGui::PopStyleColor(2);
-    ImGui::SetItemTooltip("%s", tooltip);
+    ui::itemTooltip("%s", tooltip);
     ImGui::PopID();
     return clicked;
 }
@@ -335,13 +336,13 @@ void GitView::fileActionItems(const FileChange& file, const std::string& ref, So
         else
             restore();
     }
-    ImGui::SetItemTooltip("Replace your copy with this version");
+    ui::itemTooltip("Replace your copy with this version");
     if (source != Source::Compare) {
         if (ImGui::MenuItem(ICON_FA_CODE_PULL_REQUEST "  Apply only this file's change")) {
             git().applyFileChange(ref, path);
             tookFromCompare_ = true;
         }
-        ImGui::SetItemTooltip("Apply this change to the file, on top of your copy");
+        ui::itemTooltip("Apply this change to the file, on top of your copy");
     }
     ImGui::Separator();
     if (ImGui::MenuItem(ICON_FA_CLOCK_ROTATE_LEFT "  File history"))
@@ -355,7 +356,7 @@ void GitView::fileRow(const FileChange& file, const std::string& ref, Source sou
     ImGui::PushID(file.path.c_str());
     if (check) {
         ImGui::Checkbox("##pick", check);
-        ImGui::SetItemTooltip("Include this file");
+        ui::itemTooltip("Include this file");
         ImGui::SameLine(0.0f, 4.0f * s_);
     }
     const ImVec2 start = ImGui::GetCursorScreenPos();
@@ -368,7 +369,7 @@ void GitView::fileRow(const FileChange& file, const std::string& ref, Source sou
     };
     if (ImGui::Selectable("##file", false, ImGuiSelectableFlags_AllowOverlap))
         open();
-    ImGui::SetItemTooltip("%s\nClick: what changed  ·  right-click: open, restore or apply this file", file.path.c_str());
+    ui::itemTooltip("%s\nClick: what changed  ·  right-click: open, restore or apply this file", file.path.c_str());
     registerLastItem("git:file@" + ref + ":" + file.path, "row", file.path, open);
     if (ImGui::BeginPopupContextItem("##fileActions")) {
         fileActionItems(file, ref, source);
@@ -467,7 +468,7 @@ void GitView::renderBranchStrip()
     if (ImGui::Button(label.c_str()))
         openBranchPicker(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y), false);
     ImGui::PopStyleColor();
-    ImGui::SetItemTooltip(status.detached ? "You are on a commit, not a branch: switch to a branch to keep working"
+    ui::itemTooltip(status.detached ? "You are on a commit, not a branch: switch to a branch to keep working"
                                           : "Switch, create or merge branches");
     registerLastItem("git:branch", "button", "Branches", [this]() { vm_.execute(viewmodel::CommandId::GitBranches); });
 
@@ -490,9 +491,9 @@ void GitView::renderBranchStrip()
     ImGui::EndDisabled();
     ImGui::PopStyleColor();
     if (publish)
-        ImGui::SetItemTooltip("Publish: put %s on the server so others (and other computers) can get it", status.branch.c_str());
+        ui::itemTooltip("Publish: put %s on the server so others (and other computers) can get it", status.branch.c_str());
     else
-        ImGui::SetItemTooltip("Sync: pull %d, then push %d", status.behind, status.ahead);
+        ui::itemTooltip("Sync: pull %d, then push %d", status.behind, status.ahead);
     registerLastItem("git:sync", "button", publish ? "Publish branch" : "Sync", [this, publish]() { publish ? git().push() : git().sync(); });
     ImGui::SameLine(0.0f, 2.0f * s_);
     if (iconButton("more", git().busy() ? ICON_FA_SPINNER : ICON_FA_ELLIPSIS, git().busy() ? "Working..." : "More git actions"))
@@ -548,7 +549,7 @@ void GitView::renderMoreMenu()
         git().showStatusText();
         showOutput_ = true;
     }
-    ImGui::SetItemTooltip("git's own summary: branch, staged, changed, untracked and submodules");
+    ui::itemTooltip("git's own summary: branch, staged, changed, untracked and submodules");
     if (ImGui::MenuItem(ICON_FA_TERMINAL "  Show git's last output", nullptr, false, !git().lastOutput().empty()))
         showOutput_ = true;
     if (demo()) {
@@ -581,7 +582,7 @@ void GitView::renderMergeBanner()
     const char* what = r.operation == GitOperation::Rebase ? "Rebasing" : r.operation == GitOperation::CherryPick ? "Cherry-picking"
                        : r.operation == GitOperation::Revert ? "Reverting" : "Merging";
     ImGui::TextColored(col(palette_.severityWarning), ICON_FA_TRIANGLE_EXCLAMATION "  %s", what);
-    ImGui::SetItemTooltip("%s", r.operationLabel.c_str());
+    ui::itemTooltip("%s", r.operationLabel.c_str());
     if (steps)
         ImGui::TextColored(col(palette_.textDim), "commit %d of %d", r.operationStep, r.operationTotal);
     ImGui::TextColored(col(palette_.textDim), "%d %s left", conflicts, conflicts == 1 ? "conflict" : "conflicts");
@@ -591,7 +592,7 @@ void GitView::renderMergeBanner()
         sawMerge_ = true;
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Available when every conflict is resolved and staged");
+    ui::itemTooltip("Available when every conflict is resolved and staged");
     registerLastItem("git:operation-continue", "button", "Continue", [this]() { git().continueOperation(); });
     ImGui::SameLine();
     if (ImGui::SmallButton(ICON_FA_XMARK " Abort"))
@@ -602,7 +603,7 @@ void GitView::renderMergeBanner()
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_FORWARD " Skip"))
             git().skipOperation();
-        ImGui::SetItemTooltip("Leave this commit out and go on with the next");
+        ui::itemTooltip("Leave this commit out and go on with the next");
     }
     ImGui::EndGroup();
     ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + h + 6.0f * s_));
@@ -639,12 +640,12 @@ void GitView::renderCommitBox()
         git().commitWithMessage();
     ImGui::EndDisabled();
     ImGui::PopStyleColor(3);
-    ImGui::SetItemTooltip(staged ? "Commit the staged changes (Ctrl+Enter)" : "Nothing staged: stage every change and commit");
+    ui::itemTooltip(staged ? "Commit the staged changes (Ctrl+Enter)" : "Nothing staged: stage every change and commit");
     registerLastItem("git:commit", "button", "Commit", [this]() { git().commitWithMessage(); });
     ImGui::SameLine(0.0f, 4.0f * s_);
     if (ImGui::Button(ICON_FA_CARET_DOWN "##commitMenu", ImVec2(button, 0.0f)))
         ImGui::OpenPopup("##commitOptions");
-    ImGui::SetItemTooltip("More ways to commit");
+    ui::itemTooltip("More ways to commit");
     if (ImGui::BeginPopup("##commitOptions")) {
         if (ImGui::MenuItem("Commit", nullptr, false, canCommit))
             git().commitWithMessage();
@@ -663,11 +664,11 @@ void GitView::renderCommitBox()
         git().writeMessage();
     ImGui::EndDisabled();
     ImGui::PopStyleColor();
-    ImGui::SetItemTooltip("Let the agent write the message from the staged changes");
+    ui::itemTooltip("Let the agent write the message from the staged changes");
     registerLastItem("git:write-message", "button", "Write the commit message", [this]() { git().writeMessage(); });
     if (ImGui::Checkbox("Amend last commit", &git().amend) && git().amend && message.empty() && !repo().log.empty())
         message = repo().log.front().message;
-    ImGui::SetItemTooltip("Change the last commit (its message and its files) instead of adding a new one.\n"
+    ui::itemTooltip("Change the last commit (its message and its files) instead of adding a new one.\n"
                           "Only for a commit you have not pushed yet.");
     ImGui::Spacing();
 }
@@ -822,10 +823,10 @@ void GitView::renderRow(const Change& change, int index)
     registerLastItem((change.submodule.empty() ? "git:file:" : "git:submodule:") + change.path, "row", change.path,
                      [this, change]() { clickRow(change); });
     if (!change.submodule.empty())
-        ImGui::SetItemTooltip("%s\nSubmodule (a repository inside this one): %s\nClick: its new commits  ·  right-click: update it",
+        ui::itemTooltip("%s\nSubmodule (a repository inside this one): %s\nClick: its new commits  ·  right-click: update it",
                               change.path.c_str(), change.submodule.c_str());
     else
-        ImGui::SetItemTooltip("%s%s\nClick: what changed  ·  double-click: open  ·  Ctrl/Shift-click: select several",
+        ui::itemTooltip("%s%s\nClick: what changed  ·  double-click: open  ·  Ctrl/Shift-click: select several",
                               change.path.c_str(), change.origPath.empty() ? "" : ("\nrenamed from " + change.origPath).c_str());
     if (ImGui::BeginPopupContextItem("##fileMenu")) {
         const std::vector<std::string> list = targets(change);
@@ -848,7 +849,7 @@ void GitView::renderRow(const Change& change, int index)
                         "The submodule goes back to the commit this repository records (git submodule update). Commits and "
                         "changes inside it that are not recorded here are no longer checked out.",
                         "Update", [this, path = change.path]() { git().updateSubmodule(path); }, false);
-            ImGui::SetItemTooltip("Check out the commit this repository records for it");
+            ui::itemTooltip("Check out the commit this repository records for it");
         }
         ImGui::Separator();
         if (ImGui::MenuItem(ICON_FA_CODE_COMPARE "  Open diff"))
@@ -907,7 +908,7 @@ void GitView::renderRow(const Change& change, int index)
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         auto action = [&](const char* id, const char* icon, const char* tip) {
             const bool clicked = ImGui::Button((std::string(icon) + "##" + id).c_str(), ImVec2(button, ImGui::GetItemRectSize().y));
-            ImGui::SetItemTooltip("%s", tip);
+            ui::itemTooltip("%s", tip);
             ImGui::SameLine(0.0f, 0.0f);
             return clicked;
         };
@@ -959,16 +960,16 @@ void GitView::renderStashes()
         ImGui::PushID(i);
         const std::string label = std::string(ICON_FA_BOX_ARCHIVE "  ") + stash.message + "###stash";
         const bool expanded = ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_SpanFullWidth);
-        ImGui::SetItemTooltip("%s  ·  %s  ·  made on %s\nRight-click: apply, pop, branch, drop", stash.ref.c_str(), stash.when.c_str(),
+        ui::itemTooltip("%s  ·  %s  ·  made on %s\nRight-click: apply, pop, branch, drop", stash.ref.c_str(), stash.when.c_str(),
                               stash.branch.c_str());
         registerLastItem("git:stash:" + std::to_string(i), "row", stash.message, nullptr);
         if (ImGui::BeginPopupContextItem("##stashMenu")) {
             if (ImGui::MenuItem(ICON_FA_BOX_OPEN "  Apply"))
                 git().stashApply(i, false);
-            ImGui::SetItemTooltip("Bring the changes back and keep the stash");
+            ui::itemTooltip("Bring the changes back and keep the stash");
             if (ImGui::MenuItem(ICON_FA_BOX_OPEN "  Pop"))
                 git().stashApply(i, true);
-            ImGui::SetItemTooltip("Bring the changes back and remove the stash");
+            ui::itemTooltip("Bring the changes back and remove the stash");
             if (ImGui::MenuItem(ICON_FA_CODE_BRANCH "  Apply on a new branch..."))
                 ask("Apply the stash on a new branch", "Branch name", {}, "Create",
                     [this, i](const std::string& name) { git().stashBranch(i, name); });
@@ -1250,7 +1251,7 @@ void GitView::branchMenu(const Branch& b)
         git().merge(name);
         sawMerge_ = true;
     }
-    ImGui::SetItemTooltip("Bring %s's commits into %s", name.c_str(), branch().c_str());
+    ui::itemTooltip("Bring %s's commits into %s", name.c_str(), branch().c_str());
     if (ImGui::MenuItem(ICON_FA_LAYER_GROUP "  Rebase current onto this", nullptr, false, !current))
         confirm("Rebase " + branch() + "?", "Your commits on " + branch() + " are replayed on top of " + name +
                                             ". This rewrites them: do it only for commits you have not pushed.",
@@ -1259,7 +1260,7 @@ void GitView::branchMenu(const Branch& b)
         compareWith(name);
         ImGui::CloseCurrentPopup();
     }
-    ImGui::SetItemTooltip("Commits and files that differ; cherry-pick commits or take files");
+    ui::itemTooltip("Commits and files that differ; cherry-pick commits or take files");
     ImGui::Separator();
     if (b.kind == RefKind::Local) {
         if (ImGui::MenuItem(ICON_FA_PEN "  Rename..."))
@@ -1317,7 +1318,7 @@ void GitView::renderBranchPicker()
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_BROOM "  Clean up..."))
         openCleanup_ = true;
-    ImGui::SetItemTooltip("Delete branches that are merged or whose server copy is gone");
+    ui::itemTooltip("Delete branches that are merged or whose server copy is gone");
     registerLastItem("git:cleanup", "button", "Clean up branches", [this]() { openCleanup_ = true; });
     if (creatingBranch_) {
         ImGui::Spacing();
@@ -1426,7 +1427,7 @@ void GitView::renderBranchPicker()
                 else
                     git().switchTo(b.name);
             }
-            ImGui::SetItemTooltip(kind == RefKind::Remote ? "Click: a local branch that tracks %s" : "Click: look at the files at %s", b.name.c_str());
+            ui::itemTooltip(kind == RefKind::Remote ? "Click: a local branch that tracks %s" : "Click: look at the files at %s", b.name.c_str());
             branchMenu(b);
             ImGui::PopID();
         }
@@ -1547,7 +1548,7 @@ void GitView::renderHistory()
         fit::sameLineIfFits(ImGui::CalcTextSize(ICON_FA_FLASK " Demo data").x, 10.0f * s_);
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(col(guideOpen_ ? palette_.iconPurple : palette_.iconOrange), ICON_FA_FLASK " Demo data");
-        ImGui::SetItemTooltip("Made-up commits, so you can try everything safely");
+        ui::itemTooltip("Made-up commits, so you can try everything safely");
     }
     fit::sameLineIfFits(150.0f * s_, 12.0f * s_);
     if (historyMode_ == 0)
@@ -1615,7 +1616,7 @@ void GitView::renderStatusSummary()
     if (demo()) {
         fit::sameLineIfFits(ImGui::CalcTextSize(ICON_FA_FLASK " Demo").x, 10.0f * s_);
         ImGui::TextColored(col(palette_.iconOrange), ICON_FA_FLASK " Demo");
-        ImGui::SetItemTooltip("Made-up data, so you can try everything safely");
+        ui::itemTooltip("Made-up data, so you can try everything safely");
     }
     if (!st.upstream.empty())
         ImGui::TextDisabled("Tracks %s", st.upstream.c_str());
@@ -1660,7 +1661,7 @@ void GitView::renderStatusSummary()
     }
     ImGui::TextColored(col(colour), "%s", line.c_str());
     if (!tip.empty())
-        ImGui::SetItemTooltip("%s", tip.c_str());
+        ui::itemTooltip("%s", tip.c_str());
     // As of when? Ahead and behind are only as fresh as the last fetch.
     if (!st.upstream.empty())
         ImGui::TextDisabled(r.fetchedAt ? "Checked with the remote %s" : "Never fetched: the remote may have more",
@@ -1699,7 +1700,7 @@ void GitView::renderStatusSummary()
             fit::sameLineIfFitsButton(label);
         if (ImGui::Button(label))
             run();
-        ImGui::SetItemTooltip("%s", tooltip);
+        ui::itemTooltip("%s", tooltip);
         registerLastItem(id, "button", tooltip, run, !busy);
     };
     action(ICON_FA_ROTATE "  Fetch", "git-status:fetch", "Ask the remote what is new (changes nothing here)", [this]() { git().fetch(); }, true);
@@ -1764,7 +1765,7 @@ void GitView::renderStatusFiles()
         ImGui::PushStyleColor(ImGuiCol_Header, col(palette_.panelHeaderBg));
         const bool open = ImGui::CollapsingHeader(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopStyleColor();
-        ImGui::SetItemTooltip("%s", g.hint);
+        ui::itemTooltip("%s", g.hint);
         registerLastItem(std::string("git-status:group:") + g.title, "button", g.title, nullptr);
         if (!open)
             continue;
@@ -1790,7 +1791,7 @@ void GitView::renderStatusRow(const Change& change)
     const ImVec2 end = ImGui::GetItemRectMax();
     registerLastItem("git-status:file:" + change.path, "row", change.path,
                      [this, change]() { git().showChange(change.path, change.group); });
-    ImGui::SetItemTooltip("%s%s\nClick: what changed  ·  double-click: open", change.path.c_str(),
+    ui::itemTooltip("%s%s\nClick: what changed  ·  double-click: open", change.path.c_str(),
                           change.origPath.empty() ? "" : ("\nrenamed from " + change.origPath).c_str());
     if (ImGui::BeginPopupContextItem("##menu")) {
         if (change.group == Area::Staged) {
@@ -1836,7 +1837,7 @@ void GitView::renderStatusRow(const Change& change)
         const char* icon = staged ? ICON_FA_MINUS : change.group == Area::Conflicts ? ICON_FA_CHECK : ICON_FA_PLUS;
         if (ImGui::Button(icon, ImVec2(button, rowH)))
             staged ? git().unstage({change.path}) : git().stage({change.path});
-        ImGui::SetItemTooltip(staged ? "Unstage (your edits stay)" : change.group == Area::Conflicts ? "Mark resolved (stage it)" : "Stage");
+        ui::itemTooltip(staged ? "Unstage (your edits stay)" : change.group == Area::Conflicts ? "Mark resolved (stage it)" : "Stage");
         ImGui::PopStyleColor();
     }
     ImGui::PopID();
@@ -1859,7 +1860,7 @@ void GitView::renderLog()
             historyPath_.clear();
             git().loadLog(historyBranch_ == 1, historyPath_);
         }
-        ImGui::SetItemTooltip("History of %s only: click to show every file", historyPath_.c_str());
+        ui::itemTooltip("History of %s only: click to show every file", historyPath_.c_str());
     }
     fit::sameLineIfFits(140.0f * s_);
     ImGui::SetNextItemWidth(fit::itemWidth(260.0f * s_, 140.0f * s_));
@@ -2024,11 +2025,11 @@ void GitView::renderCommitDetails(const Commit& c)
     fit::sameLineIfFitsButton(ICON_FA_CODE_PULL_REQUEST "  Cherry-pick", true);
     if (ImGui::SmallButton(ICON_FA_CODE_PULL_REQUEST "  Cherry-pick"))
         git().cherryPick({c.hash});
-    ImGui::SetItemTooltip("Copy this commit onto %s", branch().c_str());
+    ui::itemTooltip("Copy this commit onto %s", branch().c_str());
     fit::sameLineIfFitsButton(ICON_FA_ROTATE_LEFT "  Revert", true);
     if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT "  Revert"))
         git().revert(c.hash);
-    ImGui::SetItemTooltip("Undo this commit with a new commit (safe even after pushing)");
+    ui::itemTooltip("Undo this commit with a new commit (safe even after pushing)");
     fit::sameLineIfFitsButton(ICON_FA_ELLIPSIS "##more", true);
     if (ImGui::SmallButton(ICON_FA_ELLIPSIS "##more"))
         ImGui::OpenPopup("##commitMenu");
@@ -2103,7 +2104,7 @@ void GitView::renderCompare()
     fit::sameLineIfFitsButton(ICON_FA_RIGHT_LEFT "##swap");
     if (ImGui::Button(ICON_FA_RIGHT_LEFT "##swap"))
         std::swap(compareBase_, compareTarget_);
-    ImGui::SetItemTooltip("Swap");
+    ui::itemTooltip("Swap");
     fit::sameLineIfFits(ImGui::CalcTextSize("take from").x + 130.0f * s_);
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(col(palette_.textDim), "take from");
@@ -2159,9 +2160,9 @@ void GitView::renderCompare()
     }
     ImGui::EndDisabled();
     if (!intoCurrent)
-        ImGui::SetItemTooltip("Cherry-picking goes into the current branch: choose it under Into");
+        ui::itemTooltip("Cherry-picking goes into the current branch: choose it under Into");
     else
-        ImGui::SetItemTooltip("Copy the checked commits onto %s, oldest first; a conflict stops in the merge-conflict flow", base.c_str());
+        ui::itemTooltip("Copy the checked commits onto %s, oldest first; a conflict stops in the merge-conflict flow", base.c_str());
     registerLastItem("git:compare-cherry-pick", "button", "Cherry-pick selected commits", nullptr);
     ImGui::Separator();
     for (int i = 0; i < int(commits.size()); ++i) {
@@ -2203,7 +2204,7 @@ void GitView::renderCompare()
     const float stageW = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("Stage").x;
     controlsAtRight(smallButtonWidth(takeLabel) + stageW + ImGui::GetStyle().ItemSpacing.x);
     ImGui::Checkbox("Stage", &stageTaken_);
-    ImGui::SetItemTooltip("Stage the files after taking them");
+    ui::itemTooltip("Stage the files after taking them");
     ImGui::SameLine();
     ImGui::BeginDisabled(filesPicked == 0 || !intoCurrent || git().busy());
     if (ImGui::SmallButton(takeLabel.c_str())) {
@@ -2231,7 +2232,7 @@ void GitView::renderCompare()
         }
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Copy these files' versions from %s into your folder", target.c_str());
+    ui::itemTooltip("Copy these files' versions from %s into your folder", target.c_str());
     registerLastItem("git:compare-take", "button", "Take selected files", nullptr);
     ImGui::Separator();
     for (size_t k = 0; k < files.size(); ++k) {
@@ -2357,7 +2358,7 @@ void GitView::renderDemoBanner()
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 8.0f * s_, p0.y + 3.0f * s_));
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(col(tint), "%s", guideOpen_ ? ICON_FA_GRADUATION_CAP "  Learning · demo data" : ICON_FA_FLASK "  Demo data");
-    ImGui::SetItemTooltip("These files, branches and commits are made up so you can try everything safely.\n"
+    ui::itemTooltip("These files, branches and commits are made up so you can try everything safely.\n"
                           "Nothing here touches your real project.");
     const float button = ImGui::GetFrameHeight();
     ImGui::SameLine(contentMaxX() - 2.0f * button - 6.0f * s_);
@@ -2829,7 +2830,7 @@ void GitView::renderGuide()
             git().resetDemo();
             baselineGuide();
         }
-        ImGui::SetItemTooltip("Start again with the original made-up files, branches and commits");
+        ui::itemTooltip("Start again with the original made-up files, branches and commits");
         registerLastItem("git-guide:reset", "button", "Reset demo data", [this]() {
             git().resetDemo();
             baselineGuide();
@@ -2889,7 +2890,7 @@ void GitView::renderGuide()
         if (ImGui::Button(ICON_FA_HAND_POINTER "  Show me"))
             guideShowMe(lesson_);
         ImGui::PopStyleColor();
-        ImGui::SetItemTooltip("Point at it in the app (opens what is needed)");
+        ui::itemTooltip("Point at it in the app (opens what is needed)");
         registerLastItem("git-guide:show-me", "button", "Show me", [this]() { guideShowMe(lesson_); });
         if (*l.task) {
             const bool done = guideDone(lesson_);

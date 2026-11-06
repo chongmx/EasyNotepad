@@ -4,6 +4,7 @@
 #include "enp/view/PanelFrame.h"
 #include "enp/view/TableReset.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -144,7 +145,7 @@ void DataViews::viewSwitch(model::Document& doc, ImVec2 topRight)
         if (ImGui::Button(label_, ImVec2(segment, r.GetHeight())) && !active)
             choose();
         ImGui::PopStyleColor(2);
-        ImGui::SetItemTooltip("%s", options[i].tooltip);
+        ui::itemTooltip("%s", options[i].tooltip);
         registerLastItem(options[i].id, "button", options[i].tooltip, choose);
     }
     ImGui::PopStyleVar(2);
@@ -328,7 +329,7 @@ void DataViews::renderTable(model::Document& doc, ImVec2 size)
                 }
                 if (cut && ImGui::IsItemHovered()) {
                     const int n = int(std::min<size_t>(cell.size(), 4000));
-                    ImGui::SetTooltip("%.*s", n, cell.data());
+                    ui::tooltip("%.*s", n, cell.data());
                 }
             }
         }
@@ -660,7 +661,7 @@ void DataViews::accordionChildren(Entry& e, std::uint32_t node, int depth)
         dl->AddText(ImVec2(p.x + keyW, ty), valueColor(child.kind), line0.data(), line0.data() + line0.size());
         dl->PopClipRect();
         if (hovered && (line0.size() != v.size() || ImGui::CalcTextSize(line0.data(), line0.data() + line0.size()).x > width - keyW))
-            ImGui::SetTooltip("%.*s", int(std::min<size_t>(v.size(), 4000)), v.data());
+            ui::tooltip("%.*s", int(std::min<size_t>(v.size(), 4000)), v.data());
         ImGui::PopID();
     }
 }

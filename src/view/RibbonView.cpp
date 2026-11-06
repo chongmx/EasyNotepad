@@ -3,6 +3,7 @@
 
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 #include "enp/os/Memory.h"
 
 #include "IconsFontAwesome6.h"
@@ -142,7 +143,7 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
         {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap, C::ToggleMarkdownView},
          {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}},
         {"Zoom", {C::ZoomIn, C::ZoomOut, C::ZoomReset}, {}},
-        {"Theme", {C::ToggleTheme, C::SyntaxColors}, {}},
+        {"Theme", {C::ToggleTheme, C::ToggleEnhancedUi, C::SyntaxColors}, {}},
     };
     static const std::vector<Tab> codeTabs = {
         {"Home",
@@ -403,7 +404,7 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     if (ImGui::IsItemClicked())
         ImGui::OpenPopup("##workspacePopup");
     if (hovered)
-        ImGui::SetItemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
+        ui::itemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
 
     const float pad = 6.0f * s_;
     if (hovered)
@@ -507,7 +508,7 @@ void RibbonView::renderTabRow(float width)
             shownTab_ = i;
         }
         registerLastItem(std::string("ribbon-tab:") + tab.name, "tab", tab.name, [this, i]() { selectedTab() = i; });
-        ImGui::SetItemTooltip("Right-click to hide or move this tab");
+        ui::itemTooltip("Right-click to hide or move this tab");
         if (ImGui::BeginPopupContextItem("##tabMenu")) {
             tabMenu(mode, l, i);
             ImGui::EndPopup();
@@ -535,7 +536,7 @@ void RibbonView::renderTabRow(float width)
             dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 5.0f * s_);
         dl->AddText(ImVec2(x + 4.0f * s_ + 9.0f * s_, start.y + (pillH - ImGui::GetTextLineHeight()) * 0.5f),
                     hovered ? palette_.text : palette_.textFaint, label);
-        ImGui::SetItemTooltip("Customize the ribbon: show, hide and arrange its tabs, pin commands, add your own actions");
+        ui::itemTooltip("Customize the ribbon: show, hide and arrange its tabs, pin commands, add your own actions");
         registerLastItem("ribbon-customize", "button", "Customize the ribbon", [this]() { customizeRequested_ = true; });
         x += w + 8.0f * s_;
     }
@@ -604,7 +605,7 @@ void RibbonView::renderCommandSearch(float width)
             vm_.execute(id);
             search_.clear();
         }
-        ImGui::SetItemTooltip("%s", info.tooltip);
+        ui::itemTooltip("%s", info.tooltip);
     }
     searchFocused_ = ImGui::IsWindowHovered() && !search_.empty();
     ImGui::End();
@@ -644,7 +645,7 @@ void RibbonView::renderGroups(const Tab& tab)
                 const ImVec2 caretSize = textSize(ICON_FA_CARET_DOWN, kCaptionSize);
                 drawText(dl, ImVec2(ImGui::GetItemRectMin().x + (13.0f * s_ - caretSize.x) * 0.5f, top + (kSlimButtonHeight * s_ - caretSize.y) * 0.5f),
                          hovered ? palette_.text : palette_.textFaint, ICON_FA_CARET_DOWN, kCaptionSize);
-                ImGui::SetItemTooltip("More: %s", group.name);
+                ui::itemTooltip("More: %s", group.name);
                 const float caretRight = ImGui::GetItemRectMax().x;
                 moreMenu(group, ImVec2(x0, top + kSlimButtonHeight * s_ + 2.0f * s_));
                 x1 = caretRight;
@@ -714,7 +715,7 @@ void RibbonView::tabMenu(int mode, const Layout& l, int shownIndex)
     if (ImGui::MenuItem(ICON_FA_EYE_SLASH "  Hide this tab", nullptr, false, count > 1))
         queueTabEdit(TabEdit::Hide, mode, name);
     if (count <= 1)
-        ImGui::SetItemTooltip("At least one tab stays visible");
+        ui::itemTooltip("At least one tab stays visible");
     if (ImGui::MenuItem(ICON_FA_ARROW_LEFT "  Move left", nullptr, false, shownIndex > 0))
         queueTabEdit(TabEdit::StepAmongShown, mode, name, 0, -1);
     if (ImGui::MenuItem(ICON_FA_ARROW_RIGHT "  Move right", nullptr, false, shownIndex + 1 < count))
@@ -776,7 +777,7 @@ void RibbonView::renderCustomizeDialog()
         if (ImGui::Button(customizeMode_ == 1 ? ICON_FA_ROTATE_LEFT "  Restore default Agent tabs" : ICON_FA_ROTATE_LEFT "  Restore default Code tabs"))
             vm_.restoreRibbonTabs(mode);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip(custom ? "Every tab of this workspace, shown, in the original order" : "The tabs are already as they came");
+        ui::itemTooltip(custom ? "Every tab of this workspace, shown, in the original order" : "The tabs are already as they came");
         registerLastItem("customize-ribbon:restore", "button", "Restore default tabs", [this, mode]() { vm_.restoreRibbonTabs(mode); }, custom);
     } else if (customizeSection_ == 1) {
         const bool any = !vm_.pinnedCommands().empty();
@@ -884,7 +885,7 @@ void RibbonView::renderTabsSection()
             queueTabEdit(show ? TabEdit::Show : TabEdit::Hide, mode, t.name);
         ImGui::EndDisabled();
         if (last)
-            ImGui::SetItemTooltip("At least one tab stays visible");
+            ui::itemTooltip("At least one tab stays visible");
         registerLastItem("customize-ribbon:show:" + t.name, "checkbox", (t.visible ? "Hide " : "Show ") + t.name,
                          [this, mode, name = t.name, visibleNow = t.visible]() {
                              queueTabEdit(visibleNow ? TabEdit::Hide : TabEdit::Show, mode, name);
@@ -907,7 +908,7 @@ void RibbonView::renderTabsSection()
         if (ImGui::Button(ICON_FA_ARROW_UP "##up"))
             queueTabEdit(TabEdit::Step, mode, {}, p, -1);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Move up (earlier on the ribbon)");
+        ui::itemTooltip("Move up (earlier on the ribbon)");
         registerLastItem("customize-ribbon:up:" + t.name, "button", "Move " + t.name + " up",
                          [this, mode, p]() { queueTabEdit(TabEdit::Step, mode, {}, p, -1); }, p > 0);
         ImGui::SameLine(0.0f, 2.0f * s_);
@@ -915,7 +916,7 @@ void RibbonView::renderTabsSection()
         if (ImGui::Button(ICON_FA_ARROW_DOWN "##down"))
             queueTabEdit(TabEdit::Step, mode, {}, p, +1);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Move down (later on the ribbon)");
+        ui::itemTooltip("Move down (later on the ribbon)");
         registerLastItem("customize-ribbon:down:" + t.name, "button", "Move " + t.name + " down",
                          [this, mode, p]() { queueTabEdit(TabEdit::Step, mode, {}, p, +1); }, p + 1 < n);
         ImGui::PopID();
@@ -962,7 +963,7 @@ void RibbonView::renderPinnedSection()
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_FA_XMARK "##unpin"))
                 unpinId = id;
-            ImGui::SetItemTooltip("Unpin");
+            ui::itemTooltip("Unpin");
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -1030,7 +1031,7 @@ void RibbonView::renderActionsSection()
             ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton(ICON_FA_TRASH_CAN "##remove"))
                 remove = i;
-            ImGui::SetItemTooltip("Remove");
+            ui::itemTooltip("Remove");
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -1085,10 +1086,10 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
                  enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
     }
 
-    if (hovered && ImGui::BeginTooltip()) {
+    if (hovered && ui::beginTooltip()) {
         ImGui::TextUnformatted(tooltip);
         ImGui::TextDisabled("%s", detail);
-        ImGui::EndTooltip();
+        ui::endTooltip();
     }
     return clicked && enabled;
 }
@@ -1139,7 +1140,7 @@ void RibbonView::renderSizeToggle(ImVec2 topLeft)
     const ImVec2 iconSize = textSize(icon, iconPx);
     drawText(dl, ImVec2(topLeft.x + (size.x - iconSize.x) * 0.5f, topLeft.y + (size.y - iconSize.y) * 0.5f),
              hovered ? palette_.text : palette_.textFaint, icon, iconPx);
-    ImGui::SetItemTooltip(slim() ? "Full ribbon (Ctrl+F1)" : "Slim ribbon: icons only, more room for your work (Ctrl+F1)");
+    ui::itemTooltip(slim() ? "Full ribbon (Ctrl+F1)" : "Slim ribbon: icons only, more room for your work (Ctrl+F1)");
 }
 
 void RibbonView::groupCaption(const Group& group, float x0, float x1, float y)

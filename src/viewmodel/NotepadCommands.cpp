@@ -241,6 +241,7 @@ void NotepadViewModel::initCommands()
     set(C::ZoomOut, [this]() { setZoom(zoom.get() - 0.1f); }, [this]() { return zoom.get() > kMinZoom; });
     set(C::ZoomReset, [this]() { setZoom(1.0f); });
     set(C::ToggleTheme, [this]() { darkTheme.set(!darkTheme.get()); });
+    set(C::ToggleEnhancedUi, [this]() { enhancedUi.set(!enhancedUi.get()); });
     set(C::SyntaxColors, [this]() { syntaxColorsRequested.emit(); });
 
     set(C::DetailFull, [this]() { detailLevel.set(0); }, hasDoc);
@@ -527,6 +528,7 @@ bool NotepadViewModel::isChecked(CommandId id) const
     case C::ToggleLineNumbers: return showLineNumbers.get();
     case C::ToggleIndentGuides: return showIndentGuides.get();
     case C::ToggleTheme: return darkTheme.get();
+    case C::ToggleEnhancedUi: return enhancedUi.get();
     case C::DetailFull: return detailLevel.get() == 0;
     case C::DetailBalanced: return detailLevel.get() == 1;
     case C::DetailOverview: return detailLevel.get() == 2;

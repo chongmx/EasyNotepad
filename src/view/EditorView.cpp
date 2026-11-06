@@ -9,6 +9,7 @@
 #include "enp/view/SyntaxColors.h"
 #include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "imgui_internal.h"
@@ -746,7 +747,7 @@ void EditorView::markdownSwitch(model::Document& doc, ImVec2 topRight)
     ImGui::PopStyleVar();
     registerLastItem("markdown-view", "button", doc.rendered ? "Edit the Markdown text" : "Show the Markdown rendered",
                      [this]() { vm_.execute(viewmodel::CommandId::ToggleMarkdownView); });
-    ImGui::SetItemTooltip(doc.rendered ? "Edit the text (Ctrl+Shift+V; or double-click where you want to edit)"
+    ui::itemTooltip(doc.rendered ? "Edit the text (Ctrl+Shift+V; or double-click where you want to edit)"
                                        : "Show it formatted (Ctrl+Shift+V)");
 }
 
@@ -791,7 +792,7 @@ void EditorView::markdownRuler(ImVec2 winPos, float viewW, float column, float w
     hot = hot || ImGui::IsItemHovered();
     reset = reset || (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Text width: drag either end; double-click for the standard width");
+        ui::tooltip("Text width: drag either end; double-click for the standard width");
     if (reset) {
         markdownColumn_ = 0.0f;
         vm_.settings().markDirty();
@@ -981,11 +982,11 @@ void EditorView::renderFindBar()
     fit::sameLineIfFitsButton(ICON_FA_ARROW_UP);
     if (ImGui::Button(ICON_FA_ARROW_UP))
         vm_.findNext(-1);
-    ImGui::SetItemTooltip("Previous match (Shift+F3)");
+    ui::itemTooltip("Previous match (Shift+F3)");
     fit::sameLineIfFits(fit::buttonWidth(ICON_FA_ARROW_DOWN), 2.0f * s_);
     if (ImGui::Button(ICON_FA_ARROW_DOWN))
         vm_.findNext(+1);
-    ImGui::SetItemTooltip("Next match (F3)");
+    ui::itemTooltip("Next match (F3)");
     fit::sameLineIfFitsButton("Aa");
     const bool matchCase = vm_.matchCase.get();
     if (matchCase)
@@ -994,15 +995,15 @@ void EditorView::renderFindBar()
         vm_.matchCase.set(!matchCase);
     if (matchCase)
         ImGui::PopStyleColor();
-    ImGui::SetItemTooltip("Match case");
+    ui::itemTooltip("Match case");
     fit::sameLineIfFits(fit::buttonWidth(ICON_FA_RIGHT_LEFT), 2.0f * s_);
     if (ImGui::Button(ICON_FA_RIGHT_LEFT))
         vm_.replaceVisible.set(!vm_.replaceVisible.get());
-    ImGui::SetItemTooltip("Toggle replace");
+    ui::itemTooltip("Toggle replace");
     fit::sameLineIfFits(fit::buttonWidth(ICON_FA_XMARK), 2.0f * s_);
     if (ImGui::Button(ICON_FA_XMARK) || (findActive && ImGui::IsKeyPressed(ImGuiKey_Escape)))
         vm_.findVisible.set(false);
-    ImGui::SetItemTooltip("Close (Esc)");
+    ui::itemTooltip("Close (Esc)");
 
     if (vm_.replaceVisible.get()) {
         ImGui::SetNextItemWidth(inputW);
@@ -1703,13 +1704,13 @@ void EditorView::drawSummaryRow(const model::Document& doc, const Row& row, cons
                 count.c_str());
     if (hovered) {
         ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-        if (ImGui::BeginTooltip()) {
+        if (ui::beginTooltip()) {
             ImGui::TextUnformatted(region->title.c_str());
             ImGui::TextDisabled("%s, lines %d-%d. Click to expand.", model::outlineKindName(region->kind),
                                 region->startLine + 1, region->endLine + 1);
             ImGui::TextDisabled(vm_.workspaceRoot().empty() ? "Summary from sample data."
                                                             : "Summary from the code's comments and structure.");
-            ImGui::EndTooltip();
+            ui::endTooltip();
         }
         ImGui::PopFont();
     }
@@ -1789,7 +1790,7 @@ void EditorView::renderSideBar(const model::Document& doc, ImVec2 size)
     if (ImGui::InvisibleButton("##hideSideBar", ImVec2(closeW, tabH)))
         vm_.showLayersMap.set(false);
     const bool closeHovered = ImGui::IsItemHovered();
-    ImGui::SetItemTooltip("Hide the side bar (Read > Side Bar brings it back)");
+    ui::itemTooltip("Hide the side bar (Read > Side Bar brings it back)");
     registerLastItem("command:ToggleLayersMap", "button", "Hide side bar", [this]() { vm_.showLayersMap.set(false); });
     if (closeHovered)
         dl->AddRectFilled(c0, ImVec2(c0.x + closeW, c0.y + tabH), palette_.hover, 5.0f * s_);
@@ -1914,7 +1915,7 @@ void EditorView::drawHoverTooltip(const model::Document& doc, const Metrics& m)
     }
     // Only show when hovering the gutter or the text of that line.
     ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-    if (ImGui::BeginTooltip()) {
+    if (ui::beginTooltip()) {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
         for (const model::ReviewFinding* f : onLine) {
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(severityColor(f->severity, palette_)), "%s %s",
@@ -1928,7 +1929,7 @@ void EditorView::drawHoverTooltip(const model::Document& doc, const Metrics& m)
             ImGui::TextWrapped("%s", c->text.c_str());
         }
         ImGui::PopTextWrapPos();
-        ImGui::EndTooltip();
+        ui::endTooltip();
     }
     ImGui::PopFont();
 }
@@ -1977,12 +1978,12 @@ void EditorView::renderConflictBar(const model::Document& doc)
     ImGui::SameLine();
     if (ImGui::SmallButton(ICON_FA_ARROW_UP "  Previous"))
         jumpToConflict(doc, -1);
-    ImGui::SetItemTooltip("Shift+F8");
+    ui::itemTooltip("Shift+F8");
     registerLastItem("conflict:previous", "button", "Previous conflict", [this, &doc]() { jumpToConflict(doc, -1); });
     ImGui::SameLine();
     if (ImGui::SmallButton(ICON_FA_ARROW_DOWN "  Next"))
         jumpToConflict(doc, 1);
-    ImGui::SetItemTooltip("F8");
+    ui::itemTooltip("F8");
     registerLastItem("conflict:next", "button", "Next conflict", [this, &doc]() { jumpToConflict(doc, 1); });
     ImGui::EndChild();
 }
@@ -2054,21 +2055,21 @@ void EditorView::drawConflictActions(const model::Document& doc, const Metrics& 
         const std::string incoming = b.incoming.empty() ? "incoming" : b.incoming;
         if (ImGui::SmallButton("Accept current"))
             resolveConflict(i, int(model::git::Resolution::Current));
-        ImGui::SetItemTooltip("Keep %s's lines (yours) and drop the others", current.c_str());
+        ui::itemTooltip("Keep %s's lines (yours) and drop the others", current.c_str());
         registerLastItem("conflict:" + std::to_string(i) + ":current", "button", "Accept current", [this, i]() {
             resolveConflict(i, int(model::git::Resolution::Current));
         });
         ImGui::SameLine(0.0f, 4.0f * s_);
         if (ImGui::SmallButton("Accept incoming"))
             resolveConflict(i, int(model::git::Resolution::Incoming));
-        ImGui::SetItemTooltip("Keep %s's lines and drop yours", incoming.c_str());
+        ui::itemTooltip("Keep %s's lines and drop yours", incoming.c_str());
         registerLastItem("conflict:" + std::to_string(i) + ":incoming", "button", "Accept incoming", [this, i]() {
             resolveConflict(i, int(model::git::Resolution::Incoming));
         });
         ImGui::SameLine(0.0f, 4.0f * s_);
         if (ImGui::SmallButton("Accept both"))
             resolveConflict(i, int(model::git::Resolution::Both));
-        ImGui::SetItemTooltip("Keep both: yours first, then the incoming lines");
+        ui::itemTooltip("Keep both: yours first, then the incoming lines");
         ImGui::SameLine(0.0f, 4.0f * s_);
         if (ImGui::SmallButton(ICON_FA_CODE_COMPARE " Compare")) {
             const int currentEnd = b.base >= 0 ? b.base : b.middle;
@@ -2127,13 +2128,13 @@ void EditorView::renderChangePeek(const model::Document& doc)
         vm_.replaceLines(first, last, head);
         ImGui::CloseCurrentPopup();
     }
-    ImGui::SetItemTooltip("Put these lines back as they were in the last commit (Undo brings your version back)");
+    ui::itemTooltip("Put these lines back as they were in the last commit (Undo brings your version back)");
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_CODE_COMPARE "  Open diff")) {
         vm_.git().showChange(vm_.git().repoPath(doc.path), model::git::Area::Changes);
         ImGui::CloseCurrentPopup();
     }
-    ImGui::SetItemTooltip("The whole file's changes, where you can stage some of them");
+    ui::itemTooltip("The whole file's changes, where you can stage some of them");
     ImGui::EndPopup();
 }
 
@@ -2176,9 +2177,9 @@ void EditorView::drawBlame(const model::Document& doc, const Metrics& m, int fir
         if (inColumn && mouse.y >= y && mouse.y < y + m.lineH) {
             dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + m.blameW, y + m.lineH), palette_.hover);
             if (uncommitted)
-                ImGui::SetTooltip("Not committed yet");
+                ui::tooltip("Not committed yet");
             else
-                ImGui::SetTooltip("%s\n%s, %s\n%s\nClick: show this commit in History", b.summary.c_str(), b.author.c_str(),
+                ui::tooltip("%s\n%s, %s\n%s\nClick: show this commit in History", b.summary.c_str(), b.author.c_str(),
                                   model::git::relativeTime(b.time, now).c_str(), b.hash.substr(0, 10).c_str());
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !uncommitted)
                 vm_.gitShowCommitRequested.emit(b.hash);
@@ -2210,7 +2211,7 @@ void EditorView::drawBlame(const model::Document& doc, const Metrics& m, int fir
     if (edgeHovered || edgeActive)
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     if (edgeHovered && !edgeActive)
-        ImGui::SetTooltip("Drag to resize the blame column; double-click for the full width");
+        ui::tooltip("Drag to resize the blame column; double-click for the full width");
     if (edgeActive && ImGui::GetIO().MouseDelta.x != 0.0f) {
         blameColumns_ = std::clamp(blameColumns_ + ImGui::GetIO().MouseDelta.x / std::max(1.0f, m.blameW / blameColumns_), 9.0f, 60.0f);
         vm_.settings().markDirty();
@@ -2466,7 +2467,7 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
         const bool c = model::isCSource(doc.path.empty() ? doc.title : doc.path);
         const std::string_view header = model::libraryHeader(*library, c);
         ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-        ImGui::BeginTooltip();
+        ui::beginTooltip();
         const bool member = library->scope[0] && std::strcmp(library->scope, "std") != 0;
         ImGui::TextDisabled("%s %s%s%s", model::symbolKindName(library->kind), c ? "" : library->scope,
                             (c || !library->scope[0]) ? "" : member ? "::" : "::", library->name);
@@ -2475,7 +2476,7 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
         ImGui::PopFont();
         ImGui::TextDisabled("#include <%.*s>  \u00b7  since %s", int(header.size()), header.data(),
                             model::standardName(c ? library->cSince : library->cppSince, c));
-        ImGui::EndTooltip();
+        ui::endTooltip();
         ImGui::PopFont();
         return;
     }
@@ -2485,7 +2486,7 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
     std::snprintf(where, sizeof(where), "%.*s:%d%s", int(file.size()), file.data(), symbol->line + 1,
                   symbol->definition ? "" : "  (declaration)");
     ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
-    ImGui::BeginTooltip();
+    ui::beginTooltip();
     ImGui::TextDisabled("%s %.*s%s%.*s", model::symbolKindName(symbol->kind), int(symbol->container.size()), symbol->container.data(),
                         symbol->container.empty() ? "" : "::", int(symbol->name.size()), symbol->name.data());
     ImGui::PushFont(fonts_.mono, Fonts::kUiSize);
@@ -2493,7 +2494,7 @@ void EditorView::drawSymbolTooltip(const model::Document& doc, const Metrics& m)
     ImGui::PopFont();
     ImGui::TextDisabled("%s", where);
     ImGui::TextDisabled("F12 or Ctrl+click: go to definition");
-    ImGui::EndTooltip();
+    ui::endTooltip();
     ImGui::PopFont();
 }
 

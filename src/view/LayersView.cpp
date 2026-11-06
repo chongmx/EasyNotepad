@@ -1,6 +1,7 @@
 #include "enp/view/LayersView.h"
 
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -171,7 +172,7 @@ void LayersView::segmented(const char* id, const char* const* labels, const char
         dl->AddText(ImVec2(std::floor(a.x + (b.x - a.x - ts.x) * 0.5f), std::floor(a.y + (b.y - a.y - ts.y) * 0.5f)),
                     i == selected || hovered ? palette_.text : palette_.textDim, labels[i]);
         if (tooltips)
-            ImGui::SetItemTooltip("%s", tooltips[i]);
+            ui::itemTooltip("%s", tooltips[i]);
         registerLastItem(std::string(id) + ":" + (tooltips ? tooltips[i] : labels[i]), "button", tooltips ? tooltips[i] : labels[i],
                          [onSelect, i]() { onSelect(i); });
         x += widths[size_t(i)];
@@ -240,7 +241,7 @@ void LayersView::renderBreadcrumb(float width)
         layers.zoomOut();
     if (canBack && ImGui::IsItemHovered())
         dl->AddRectFilled(b0, ImVec2(b0.x + backW, b0.y + backW), palette_.hover, 5.0f * s_);
-    ImGui::SetItemTooltip("Zoom out (mouse back)");
+    ui::itemTooltip("Zoom out (mouse back)");
     registerLastItem("layers-zoom-out", "button", "Zoom out", [&layers]() { layers.zoomOut(); }, canBack);
     const ImVec2 arrow = ImGui::CalcTextSize(ICON_FA_ARROW_LEFT);
     dl->AddText(ImVec2(std::floor(b0.x + (backW - arrow.x) * 0.5f), std::floor(b0.y + (backW - arrow.y) * 0.5f)),
@@ -279,7 +280,7 @@ void LayersView::renderBreadcrumb(float width)
         const int hidden = crumbs[first - 1];
         if (ImGui::InvisibleButton("##crumbEllipsis", ImVec2(ew, rowH - 6.0f * s_)))
             layers.zoomTo(hidden);
-        ImGui::SetItemTooltip("%s", nodes[size_t(hidden)].title.c_str());
+        ui::itemTooltip("%s", nodes[size_t(hidden)].title.c_str());
         dl->AddText(ImVec2(x, textY), ImGui::IsItemHovered() ? palette_.accent : palette_.textFaint, "\xE2\x80\xA6");
         x += ew;
     }
@@ -397,7 +398,7 @@ float LayersView::card(int index, int maxSize, bool current, float x, float y, f
     const bool doubleClicked = hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
     registerLastItem("layer:" + node.id, "region", node.title, [&layers, index]() { layers.open(index); });
     if (density == LayerDensity::Compact && hovered && !node.summary.empty())
-        ImGui::SetItemTooltip("%s", node.summary.c_str());
+        ui::itemTooltip("%s", node.summary.c_str());
     bool zoom = false;
     bool chevronHovered = false;
     const float chevronSize = kChevronColumn * s_;
@@ -407,9 +408,9 @@ float LayersView::card(int index, int maxSize, bool current, float x, float y, f
         zoom = ImGui::InvisibleButton("##zoom", ImVec2(chevronSize, chevronSize));
         chevronHovered = ImGui::IsItemHovered();
         if (node.children.empty())
-            ImGui::SetItemTooltip("Zoom in: load this file's parts");
+            ui::itemTooltip("Zoom in: load this file's parts");
         else
-            ImGui::SetItemTooltip("Zoom in: %d part%s", int(node.children.size()), node.children.size() == 1 ? "" : "s");
+            ui::itemTooltip("Zoom in: %d part%s", int(node.children.size()), node.children.size() == 1 ? "" : "s");
         registerLastItem("layer-zoom:" + node.id, "button", "Zoom into " + node.title,
                          [&layers, index]() { layers.zoomIn(index); });
     }

@@ -4,6 +4,7 @@
 #include "enp/view/PanelFrame.h"
 #include "enp/view/TableReset.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "imgui_internal.h"
@@ -397,7 +398,7 @@ void LibraryView::toolbar(model::Document& doc, Entry& e, float width)
     ImGui::SetCursorScreenPos(ImVec2(x, y));
     if (ImGui::Button(textLabel))
         vm_.openAsText(index);
-    ImGui::SetItemTooltip("Show the bytes as text. Saving from the text view would rewrite the file.");
+    ui::itemTooltip("Show the bytes as text. Saving from the text view would rewrite the file.");
     registerLastItem("open-as-text", "button", "Open as text anyway", [this, index]() { vm_.openAsText(index); });
     if (img.mangled) {
         x -= demangleW + 14.0f * s_;
@@ -407,7 +408,7 @@ void LibraryView::toolbar(model::Document& doc, Entry& e, float width)
             e.raw = !demangle;
             e.rowsDirty = e.sortColumn == Name;
         }
-        ImGui::SetItemTooltip("Mangled C++, Rust and D names shown readable (on) or as stored in the file (off)");
+        ui::itemTooltip("Mangled C++, Rust and D names shown readable (on) or as stored in the file (off)");
         // Actions find the entry again by id: one may run after the document closed.
         registerLastItem("library:demangle", "checkbox", "Demangle names", [this, id = e.id]() {
             if (auto it = entries_.find(id); it != entries_.end()) {
@@ -651,7 +652,7 @@ void LibraryView::symbolTable(Entry& e, float height)
                 ImGui::PopStyleColor();
             ImGui::PopID();
             if (hovered && (s.mangling != bin::Mangling::None || ImGui::GetItemRectMax().x > ImGui::GetWindowPos().x + ImGui::GetWindowWidth())) {
-                ImGui::BeginTooltip();
+                ui::beginTooltip();
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40.0f);
                 const std::string_view shown = img.text(s.shown), stored = img.text(s.name);
                 ImGui::TextUnformatted(shown.data(), shown.data() + shown.size());
@@ -661,7 +662,7 @@ void LibraryView::symbolTable(Entry& e, float height)
                     ImGui::TextUnformatted(stored.data(), stored.data() + stored.size());
                 }
                 ImGui::PopTextWrapPos();
-                ImGui::EndTooltip();
+                ui::endTooltip();
             }
             auto cell = [&](int column, const char* text, bool dim = false) {
                 if (!ImGui::TableSetColumnIndex(column) || !text || !*text)
@@ -815,7 +816,7 @@ void LibraryView::libraryTable(Entry& e, float height)
         if (ImGui::Selectable(label_, false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick) &&
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
             go = i;
-        ImGui::SetItemTooltip("Double-click: its symbols");
+        ui::itemTooltip("Double-click: its symbols");
         ImGui::PopID();
         ImGui::TableSetColumnIndex(1);
         const char* how = img.format == bin::Format::Archive ? "symbols of this import library come from it"
@@ -868,7 +869,7 @@ void LibraryView::memberTable(Entry& e, float height)
             if (ImGui::Selectable(label_, false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                 go = i;
-            ImGui::SetItemTooltip("Double-click: its symbols");
+            ui::itemTooltip("Double-click: its symbols");
             ImGui::PopID();
             ImGui::TableSetColumnIndex(1);
             const std::string_view format = img.text(m.format);

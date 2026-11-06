@@ -6,6 +6,19 @@ its release notes on GitHub.
 
 ## [1.2.0] - unreleased
 
+### Added
+- **Enhanced UI** (Preferences, or View > Theme): hints without a box, as translucent text with a
+  glowing outline, and a glow around the button, tab or toggle under the pointer, as in a game.
+- Agents can rest the pointer on a control (`hover`) to see its hover effect and hint, without
+  moving the mouse.
+
+### Changed
+- Hints are a rounded, semi-transparent box without a border.
+
+### Fixed
+- Hints opened from the ribbon (and other places without padding) had their text touching the
+  edges of a box too small for it.
+
 ## [1.1.0] - 2026-11-06
 
 ### Added
