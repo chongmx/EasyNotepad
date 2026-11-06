@@ -206,6 +206,12 @@ void Application::giveMemoryBack()
         g->MultiSelectTempData.clear_destruct();
         ImGui::TableGcCompactSettings();
         ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+        // Font sizes not drawn in the last frames (a closed document's headings, a PDF's or a
+        // slide's text sizes) go with their glyph tables: each size keeps tables indexed by code
+        // point, up to the icons' (U+F000 and above), about 200 KB a size. Their room in the atlas
+        // is reused; a size drawn again is baked again. Sizes on screen stay.
+        if (atlas->Builder)
+            ImFontAtlasBuildDiscardBakes(atlas, 3);
         if (atlas->TexData && (atlas->TexData->Width >= 2048 || atlas->TexData->Height >= 2048))
             atlas->CompactCache();
     }

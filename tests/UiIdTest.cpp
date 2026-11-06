@@ -18,6 +18,7 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include "FakeTerminalService.h"
+#include "ViewerFixtures.h"
 #include "enp/interfaces/IFileService.h"
 
 #include "imgui.h"
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -69,7 +71,14 @@ struct Failure {
 // Reads real files (the library view's fixtures) and nothing else: no folder is listed or written.
 class ReadOnlyFiles final : public interfaces::IFileService {
 public:
-    std::optional<std::string> read(const std::string& path, std::string* error) override { return os::fs::readFile(path, error); }
+    // Files the test made up (the viewer's sample documents), served before the disk.
+    std::map<std::string, std::string> memory;
+    std::optional<std::string> read(const std::string& path, std::string* error) override
+    {
+        if (const auto it = memory.find(path); it != memory.end())
+            return it->second;
+        return os::fs::readFile(path, error);
+    }
     std::optional<std::string> readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total) override
     {
         return os::fs::readFileRange(path, offset, size, total);
@@ -106,6 +115,7 @@ public:
     }
 
     viewmodel::NotepadViewModel& vm() { return vm_; }
+    ReadOnlyFiles& files() { return files_; }
     view::MainView& view() { return *view_; }
     const std::vector<Failure>& failures() const { return failures_; }
     int frames() const { return frames_; }
@@ -960,6 +970,60 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,
+        // sheets and zoom gone through; everything it read and every picture it decoded must go
+        // when it is opened as text, and when it closes.
+        {
+            h.setContext("document viewer");
+            const view::ViewerView& viewer = h.view().editor().viewerView();
+            std::vector<std::string> paths; // served from memory by the test's file service
+            for (const auto& [name, bytes] : viewertest::sampleDocuments()) {
+                paths.push_back("/enp-ui-viewer/" + name);
+                h.files().memory[paths.back()] = bytes;
+            }
+            for (int round = 0; round < 2; ++round) {
+                for (const std::string& path : paths) {
+                    h.vm().openFile(path);
+                    model::Document* doc = h.vm().activeDocument();
+                    if (!doc || doc->kind != model::FileKind::Document) {
+                        std::printf("  FAILED document viewer: %s did not open as a document\n", path.c_str());
+                        ++checksFailed;
+                        continue;
+                    }
+                    h.settle();
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    if (!viewer.holds(doc->id))
+                        std::printf("  FAILED document viewer: %s was not read\n", path.c_str()), ++checksFailed;
+                    for (const char* button : {"viewer:zoom-in", "viewer:zoom-out", "viewer:zoom-fit"})
+                        if (const view::UiElement* e = view::UiAutomation::instance().find(button); e && e->activate) {
+                            const std::function<void()> action = e->activate;
+                            action();
+                            h.settle();
+                        }
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                }
+                if (viewer.entryCount() != paths.size())
+                    std::printf("  FAILED document viewer: %zu documents held, expected %zu\n", viewer.entryCount(), paths.size()), ++checksFailed;
+                if (round == 0) { // opened as text: what the viewer read goes at once
+                    const int id = h.vm().activeDocument() ? h.vm().activeDocument()->id : -1;
+                    h.vm().openAsText(h.vm().activeIndex.get());
+                    h.settle();
+                    if (viewer.holds(id))
+                        std::printf("  FAILED document viewer: a document opened as text still holds what was read\n"), ++checksFailed;
+                }
+                while (!h.vm().documents().empty())
+                    h.vm().closeDocument(0);
+                h.settle();
+                if (viewer.entryCount() != 0 || viewer.heldImageCount() != 0 || h.view().editor().imageTextureCount() != 0)
+                    std::printf("  FAILED document viewer: %zu documents, %zu pictures, %zu textures held after closing them\n", viewer.entryCount(),
+                                viewer.heldImageCount(), h.view().editor().imageTextureCount()),
+                        ++checksFailed;
+            }
+            h.files().memory.clear();
+            h.vm().openStartupDocuments({});
+            h.settle();
+        }
+
         // Libraries and programs: every list of each fixture drawn and swept, names shown both ways;
         // what a file contained must go when it is opened as text, and when it closes.
         {
@@ -1277,6 +1341,14 @@ int main(int argc, char** argv)
             }
         }
 
+        // The automation registry's room is taken once (view::UiAutomation::kReservedElements): every
+        // layout state drawn above must fit in it, or the room is too small and has to be raised.
+        const std::size_t peak = view::UiAutomation::instance().peakElements();
+        std::printf("automation registry: at most %zu elements in a frame, room for %zu\n", peak, view::UiAutomation::kReservedElements);
+        if (peak > view::UiAutomation::kReservedElements)
+            std::printf("  FAILED a frame registered %zu automation elements, more than the %zu reserved: raise kReservedElements\n", peak,
+                        view::UiAutomation::kReservedElements),
+                ++checksFailed;
         for (const Failure& f : h.failures())
             std::printf("  FAILED %s at (%.0f, %.0f) in %s\n", f.what.c_str(), f.mouse.x, f.mouse.y, f.where.c_str());
         std::printf("%d frames, %d ID failure(s), %d failed check(s)\n", h.frames(), int(h.failures().size()), checksFailed);

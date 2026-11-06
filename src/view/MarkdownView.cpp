@@ -6,6 +6,7 @@
 #include "enp/view/CodeGrid.h"
 #include "enp/view/MathView.h"
 #include "enp/view/UiStyle.h"
+#include "enp/os/Memory.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -439,8 +440,8 @@ model::Language codeLanguage(const std::string& name)
 float MarkdownView::offsetOfLine(int line) const
 {
     float y = 0.0f;
-    for (size_t i = 0; i < blocks_.size() && i < tops_.size(); ++i) {
-        if (blocks_[i].line > line)
+    for (size_t i = 0; i < shown().size() && i < tops_.size(); ++i) {
+        if (shown()[i].line > line)
             break;
         y = tops_[i];
     }
@@ -749,10 +750,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     return height;
 }
 
-void MarkdownView::render(const std::string& text, float width, const Fonts& fonts, const Palette& palette, float fontSize,
-                          float uiScale)
+void MarkdownView::styleFor(Style& st, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale)
 {
-    Style st;
     st.ui = fonts.ui;
     st.mono = fonts.mono ? fonts.mono : fonts.ui;
     ImGui::PushFont(fonts.ui, fontSize);
@@ -770,25 +769,53 @@ void MarkdownView::render(const std::string& text, float width, const Fonts& fon
     st.images = &onImage;
     st.emoji = emoji;
     st.math = &math_;
-    width = std::max(width, 40.0f * uiScale);
+}
 
-    if (text != text_) {
+void MarkdownView::render(const std::string& text, float width, const Fonts& fonts, const Palette& palette, float fontSize,
+                          float uiScale)
+{
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    if (text != text_ || external_) {
         text_ = text;
         blocks_ = md::parse(text_);
+        external_ = nullptr;
         math_.clear();
         width_ = -1.0f;
     }
+    layoutAndDraw(st, std::max(width, 40.0f * uiScale));
+}
+
+void MarkdownView::renderBlocks(const std::vector<md::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
+                                const Palette& palette, float fontSize, float uiScale)
+{
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    if (external_ != &blocks || generation != generation_) {
+        os::mem::release(text_); // no own text: the blocks are the caller's
+        os::mem::release(blocks_);
+        external_ = &blocks;
+        generation_ = generation;
+        math_.clear();
+        width_ = -1.0f;
+    }
+    layoutAndDraw(st, std::max(width, 40.0f * uiScale));
+}
+
+void MarkdownView::layoutAndDraw(const Style& st, float width)
+{
+    const std::vector<md::Block>& blocks = shown();
     // Measure every block when the layout changed (text, width or size).
-    if (width != width_ || st.size != fontSize_ || tops_.size() != blocks_.size()) {
+    if (width != width_ || st.size != fontSize_ || tops_.size() != blocks.size()) {
         width_ = width;
         fontSize_ = st.size;
-        tops_.assign(blocks_.size(), 0.0f);
-        heights_.assign(blocks_.size(), 0.0f);
+        tops_.assign(blocks.size(), 0.0f);
+        heights_.assign(blocks.size(), 0.0f);
         float y = 0.0f;
-        for (size_t i = 0; i < blocks_.size(); ++i) {
-            y += gapBefore(i > 0 ? &blocks_[i - 1] : nullptr, blocks_[i], st.lineH());
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            y += gapBefore(i > 0 ? &blocks[i - 1] : nullptr, blocks[i], st.lineH());
             tops_[i] = y;
-            heights_[i] = drawBlock(blocks_[i], ImVec2(0.0f, 0.0f), width, st, false);
+            heights_[i] = drawBlock(blocks[i], ImVec2(0.0f, 0.0f), width, st, false);
             y += heights_[i];
         }
     }
@@ -799,16 +826,16 @@ void MarkdownView::render(const std::string& text, float width, const Fonts& fon
     const ImVec2 mouse = ImGui::GetMousePos();
     const bool hovered = ImGui::IsWindowHovered();
     hoveredLine_ = -1;
-    for (size_t i = 0; i < blocks_.size(); ++i) {
+    for (size_t i = 0; i < blocks.size(); ++i) {
         const float top = origin.y + tops_[i];
         const float bottom = top + heights_[i];
         if (hovered && mouse.y >= top - 4.0f && mouse.y < bottom + 4.0f && mouse.x >= origin.x && mouse.x <= origin.x + width)
-            hoveredLine_ = blocks_[i].line;
+            hoveredLine_ = blocks[i].line;
         if (bottom < clipTop || top > clipBottom)
             continue; // off screen
-        heights_[i] = drawBlock(blocks_[i], ImVec2(origin.x, top), width, st, true);
+        heights_[i] = drawBlock(blocks[i], ImVec2(origin.x, top), width, st, true);
     }
-    const float total = blocks_.empty() ? 0.0f : tops_.back() + heights_.back();
+    const float total = blocks.empty() ? 0.0f : tops_.back() + heights_.back();
     ImGui::Dummy(ImVec2(width, std::max(total, 1.0f)));
 }
 

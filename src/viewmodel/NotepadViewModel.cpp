@@ -474,7 +474,8 @@ void NotepadViewModel::openFile(const std::string& path)
         doc.onDisk = true;
         recordDiskStamp(doc);
         remember(recentFiles_, absolutePath(path), kMaxRecentFiles);
-        statusText.set(type.kind == model::FileKind::Image ? "Opened " + path + " (" + type.format + " image)"
+        statusText.set(type.kind == model::FileKind::Image      ? "Opened " + path + " (" + type.format + " image)"
+                       : type.kind == model::FileKind::Document ? "Opened " + path + " (" + type.format + ", read only)"
                        : library ? "Opened " + path + " (" + type.format + "): its functions, imports and sections are listed"
                                  : path + " is a binary file (" + type.format + "): not opened as text");
         return;
@@ -542,7 +543,8 @@ std::string NotepadViewModel::absolutePath(const std::string& path) const
 bool NotepadViewModel::saveDocument(model::Document& doc)
 {
     if (doc.kind != model::FileKind::Text) { // nothing was loaded: writing the empty buffer would destroy the file
-        statusText.set(doc.title + " is shown as " + (doc.kind == model::FileKind::Image ? "an image" : "a binary file") +
+        statusText.set(doc.title + " is shown as " +
+                       (doc.kind == model::FileKind::Image ? "an image" : doc.kind == model::FileKind::Document ? "a read-only " + doc.format : "a binary file") +
                        ": there is nothing to save");
         return false;
     }

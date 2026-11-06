@@ -1,0 +1,1274 @@
+// PowerPoint (.pptx): each slide into a fixed page. Shapes (preset rectangles, ellipses, lines,
+// custom paths) with their fills and outlines, text bodies, pictures, tables and groups; master
+// and layout shapes behind the slide's; placeholders take their position from the layout or the
+// master and their text style from the master's title / body styles; theme colours through the
+// master's colour map. Charts, SmartArt and media are drawn as labelled boxes.
+#include "enp/model/viewer/Viewer.h"
+
+#include "Ooxml.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <map>
+#include <memory>
+
+namespace enp::model::viewer {
+namespace {
+
+using ooxml::XmlReader;
+using Event = XmlReader::Event;
+
+constexpr double kEmuPerPoint = 12700.0;
+
+struct Xf {
+    double ox = 0.0, oy = 0.0, sx = 1.0 / kEmuPerPoint, sy = 1.0 / kEmuPerPoint;
+    Rect map(double x, double y, double w, double h) const
+    {
+        return Rect{float(ox + x * sx), float(oy + y * sy), float(w * sx), float(h * sy)};
+    }
+};
+
+struct LevelStyle {
+    float size = 0.0f; // points; 0: not set
+    std::uint32_t color = 0;
+    bool hasColor = false;
+    int bold = -1;
+    std::string bullet; // a character, "auto" for numbering, "" for none set, "none"
+};
+
+struct TextStyle {
+    LevelStyle levels[9];
+};
+
+struct Placeholder {
+    Rect box;
+    bool hasBox = false;
+    int anchor = -1;
+};
+
+// What a master or a layout gives the slides that use it.
+struct Template {
+    std::string part;
+    ooxml::Relationships rels;
+    std::map<std::string, Placeholder> byIdx, byType;
+    std::uint32_t background = 0;
+    bool hasBackground = false;
+    std::string backgroundImage;
+    bool showMasterShapes = true;
+};
+
+struct Master : Template {
+    ooxml::Theme theme;
+    std::map<std::string, std::string> clrMap;
+    TextStyle title, body, other;
+};
+
+struct Context {
+    const Master* master = nullptr;
+    const Template* layout = nullptr;
+    const ooxml::Relationships* rels = nullptr; // of the part being drawn (pictures)
+    bool skipPlaceholders = false;
+};
+
+struct ShapeProps {
+    bool hasXfrm = false;
+    double x = 0, y = 0, w = 0, h = 0;
+    bool flipH = false, flipV = false;
+    std::string geometry = "rect";
+    std::vector<std::vector<Point>> custom; // custGeom paths in 0..1 of the box
+    std::vector<bool> customClosed;
+    std::uint32_t fill = 0;
+    bool hasFill = false;
+    std::uint32_t line = 0;
+    bool hasLine = false;
+    double lineWidth = 12700.0 * 0.75;
+    // From <p:style>: what the theme's references give when spPr says nothing.
+    std::uint32_t styleFill = 0, styleLine = 0, styleFont = 0;
+    bool hasStyleFill = false, hasStyleLine = false, hasStyleFont = false;
+};
+
+std::string phKey(const std::string& type)
+{
+    if (type.empty() || type == "obj")
+        return "body";
+    if (type == "ctrTitle")
+        return "title";
+    return type;
+}
+
+void flattenEllipse(std::vector<Point>& out, Rect r)
+{
+    const int n = 48;
+    for (int i = 0; i < n; ++i) {
+        const double a = 2.0 * 3.14159265358979 * i / n;
+        out.push_back({float(r.x + r.w * 0.5 * (1.0 + std::cos(a))), float(r.y + r.h * 0.5 * (1.0 + std::sin(a)))});
+    }
+}
+
+void roundedRect(std::vector<Point>& out, Rect r, float radius)
+{
+    radius = std::min({radius, r.w * 0.5f, r.h * 0.5f});
+    const int n = 6;
+    auto corner = [&](float cx, float cy, double start) {
+        for (int i = 0; i <= n; ++i) {
+            const double a = start + (3.14159265358979 / 2.0) * i / n;
+            out.push_back({float(cx + radius * std::cos(a)), float(cy + radius * std::sin(a))});
+        }
+    };
+    corner(r.x + r.w - radius, r.y + radius, -3.14159265358979 / 2.0);
+    corner(r.x + r.w - radius, r.y + r.h - radius, 0.0);
+    corner(r.x + radius, r.y + r.h - radius, 3.14159265358979 / 2.0);
+    corner(r.x + radius, r.y + radius, 3.14159265358979);
+}
+
+class PptxReader {
+public:
+    explicit PptxReader(ooxml::ZipArchive& zip) : zip_(zip) {}
+
+    ViewerDocument read()
+    {
+        ViewerDocument doc;
+        doc.format = "PowerPoint presentation";
+        const std::string main = ooxml::mainPart(zip_, "ppt/presentation.xml");
+        const std::optional<std::string> xml = zip_.read(main);
+        if (!xml) {
+            doc.error = "the presentation part (" + main + ") is missing";
+            return doc;
+        }
+        const ooxml::Relationships rels = ooxml::readRelationships(zip_, main);
+        float width = 720.0f, height = 540.0f;
+        std::vector<std::string> slides;
+        XmlReader x(*xml);
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            if (x.localName() == "sldSz") {
+                width = float(std::atof(x.attribute("cx").c_str()) / kEmuPerPoint);
+                height = float(std::atof(x.attribute("cy").c_str()) / kEmuPerPoint);
+            } else if (x.localName() == "sldId") {
+                const auto it = rels.find(x.attribute("r:id"));
+                if (it != rels.end() && slides.size() < 2000)
+                    slides.push_back(it->second.target);
+            }
+        }
+        if (width < 1.0f || height < 1.0f) {
+            width = 720.0f;
+            height = 540.0f;
+        }
+        doc_ = &doc;
+        for (const std::string& part : slides) {
+            Page page;
+            page.width = width;
+            page.height = height;
+            slide(part, page);
+            if (page.title.empty())
+                page.title = "Slide " + std::to_string(doc.pages.pages.size() + 1);
+            doc.pages.pages.push_back(std::move(page));
+        }
+        if (doc.pages.pages.empty()) {
+            doc.error = "the presentation has no slides";
+            return doc;
+        }
+        if (charts_)
+            doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart" : " charts") + " (shown as boxes)");
+        if (diagrams_)
+            doc.notShown.push_back(std::to_string(diagrams_) + " SmartArt diagrams (shown as boxes)");
+        if (media_)
+            doc.notShown.push_back(std::to_string(media_) + " videos or sounds");
+        doc.shape = Shape::Pages;
+        return doc;
+    }
+
+private:
+    // ---- masters and layouts -----------------------------------------------------------------
+    const Master* master(const std::string& part)
+    {
+        auto it = masters_.find(part);
+        if (it != masters_.end())
+            return it->second.get();
+        auto m = std::make_unique<Master>();
+        m->part = part;
+        m->rels = ooxml::readRelationships(zip_, part);
+        m->theme = ooxml::readTheme(zip_, ooxml::targetOfType(m->rels, "theme"));
+        if (const std::optional<std::string> xml = zip_.read(part)) {
+            XmlReader x(*xml);
+            for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+                if (e != Event::Start)
+                    continue;
+                const std::string_view n = x.localName();
+                if (n == "clrMap") {
+                    for (const char* k : {"bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"})
+                        if (x.hasAttribute(k))
+                            m->clrMap[k] = x.attribute(k);
+                } else if (n == "titleStyle" || n == "bodyStyle" || n == "otherStyle") {
+                    readTextStyle(x, n == "titleStyle" ? m->title : n == "bodyStyle" ? m->body : m->other, m->theme, &m->clrMap);
+                }
+            }
+        }
+        readTemplate(*m, m->theme, &m->clrMap);
+        return (masters_[part] = std::move(m)).get();
+    }
+
+    const Template* layout(const std::string& part, const Master& m)
+    {
+        auto it = layouts_.find(part);
+        if (it != layouts_.end())
+            return it->second.get();
+        auto l = std::make_unique<Template>();
+        l->part = part;
+        l->rels = ooxml::readRelationships(zip_, part);
+        readTemplate(*l, m.theme, &m.clrMap);
+        return (layouts_[part] = std::move(l)).get();
+    }
+
+    // A master's or layout's placeholders (their boxes), background and showMasterSp.
+    void readTemplate(Template& t, const ooxml::Theme& theme, const std::map<std::string, std::string>* clrMap)
+    {
+        const std::optional<std::string> xml = zip_.read(t.part);
+        if (!xml)
+            return;
+        XmlReader x(*xml);
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "sldLayout" || n == "sld") {
+                const std::string show = x.attribute("showMasterSp");
+                t.showMasterShapes = !(show == "0" || show == "false");
+            } else if (n == "bg") {
+                background(x, theme, clrMap, t.rels, t.background, t.hasBackground, t.backgroundImage);
+            } else if (n == "sp") {
+                std::string type, idx;
+                Placeholder p;
+                const int depth = x.depth();
+                bool inSpPr = false;
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End) {
+                        if (x.depth() < depth)
+                            break;
+                        if (x.localName() == "spPr")
+                            inSpPr = false;
+                        continue;
+                    }
+                    if (f != Event::Start)
+                        continue;
+                    const std::string_view m = x.localName();
+                    if (m == "ph") {
+                        type = x.hasAttribute("type") ? x.attribute("type") : "obj";
+                        idx = x.attribute("idx");
+                    } else if (m == "spPr") {
+                        inSpPr = true;
+                    } else if (inSpPr && m == "off") {
+                        p.box.x = float(std::atof(x.attribute("x").c_str()) / kEmuPerPoint);
+                        p.box.y = float(std::atof(x.attribute("y").c_str()) / kEmuPerPoint);
+                        p.hasBox = true;
+                    } else if (inSpPr && m == "ext") {
+                        p.box.w = float(std::atof(x.attribute("cx").c_str()) / kEmuPerPoint);
+                        p.box.h = float(std::atof(x.attribute("cy").c_str()) / kEmuPerPoint);
+                    } else if (m == "bodyPr") {
+                        const std::string a = x.attribute("anchor");
+                        if (!a.empty())
+                            p.anchor = a == "ctr" ? 1 : a == "b" ? 2 : 0;
+                    } else if (m == "txBody" || m == "style") {
+                        if (m == "style")
+                            x.skip();
+                    }
+                }
+                if (type.empty())
+                    continue;
+                if (!idx.empty())
+                    t.byIdx.emplace(idx, p);
+                t.byType.emplace(phKey(type), p);
+            }
+        }
+    }
+
+    static void readTextStyle(XmlReader& x, TextStyle& style, const ooxml::Theme& theme, const std::map<std::string, std::string>* clrMap)
+    {
+        const int depth = x.depth();
+        int level = -1;
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n.size() == 7 && n.substr(0, 3) == "lvl" && n.substr(4) == "pPr") {
+                level = std::clamp(n[3] - '1', 0, 8);
+            } else if (level >= 0 && n == "defRPr") {
+                LevelStyle& l = style.levels[level];
+                if (x.hasAttribute("sz"))
+                    l.size = float(std::atof(x.attribute("sz").c_str()) / 100.0);
+                if (x.hasAttribute("b"))
+                    l.bold = x.attribute("b") == "1" ? 1 : 0;
+            } else if (level >= 0 && n == "solidFill") {
+                bool found = false;
+                const std::uint32_t c = ooxml::readFillIn(x, theme, clrMap, &found);
+                if (found) {
+                    style.levels[level].color = c;
+                    style.levels[level].hasColor = true;
+                }
+            } else if (level >= 0 && n == "buChar") {
+                style.levels[level].bullet = x.attribute("char");
+            } else if (level >= 0 && n == "buAutoNum") {
+                style.levels[level].bullet = "auto";
+            } else if (level >= 0 && n == "buNone") {
+                style.levels[level].bullet = "none";
+            }
+        }
+    }
+
+    void background(XmlReader& x, const ooxml::Theme& theme, const std::map<std::string, std::string>* clrMap,
+                    const ooxml::Relationships& rels, std::uint32_t& color, bool& has, std::string& image)
+    {
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "solidFill" || n == "gradFill" || n == "bgRef") {
+                bool found = false;
+                const std::uint32_t c = ooxml::readFillIn(x, theme, clrMap, &found);
+                if (found) {
+                    color = c;
+                    has = true;
+                }
+            } else if (n == "blip") {
+                const auto it = rels.find(x.attribute("r:embed"));
+                if (it != rels.end() && !it->second.external) {
+                    image = it->second.target;
+                    has = true;
+                }
+            }
+        }
+    }
+
+    // ---- a slide -----------------------------------------------------------------------------
+    void slide(const std::string& part, Page& page)
+    {
+        const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
+        const std::string layoutPart = ooxml::targetOfType(rels, "slideLayout");
+        const ooxml::Relationships layoutRels = ooxml::readRelationships(zip_, layoutPart);
+        const std::string masterPart = ooxml::targetOfType(layoutRels, "slideMaster");
+        const Master* m = master(masterPart);
+        const Template* l = layout(layoutPart, *m);
+        Template slideTemplate; // the slide's own background and showMasterSp
+        slideTemplate.part = part;
+        slideTemplate.rels = rels;
+        readTemplate(slideTemplate, m->theme, &m->clrMap);
+
+        // Background: the slide's, else the layout's, else the master's, else the theme's light colour.
+        const Template* bg = slideTemplate.hasBackground ? &slideTemplate : l->hasBackground ? l : m->hasBackground ? m : nullptr;
+        page.background = bg && !bg->backgroundImage.empty() ? kWhite : bg ? bg->background : m->theme.color("lt1", kWhite);
+        if (bg && !bg->backgroundImage.empty()) {
+            if (addMedia(bg->backgroundImage)) {
+                ImageItem img;
+                img.box = Rect{0, 0, page.width, page.height};
+                img.media = bg->backgroundImage;
+                page.add(img);
+            }
+        }
+
+        Context c;
+        c.master = m;
+        c.layout = l;
+        if (l->showMasterShapes && slideTemplate.showMasterShapes) {
+            c.rels = &m->rels;
+            c.skipPlaceholders = true;
+            drawPart(m->part, c, page);
+        }
+        if (slideTemplate.showMasterShapes) {
+            c.rels = &l->rels;
+            c.skipPlaceholders = true;
+            drawPart(l->part, c, page);
+        }
+        c.rels = &rels;
+        c.skipPlaceholders = false;
+        title_.clear();
+        drawPart(part, c, page);
+        page.title = title_;
+        const std::string notes = ooxml::targetOfType(rels, "notesSlide");
+        if (!notes.empty())
+            page.notes = notesText(notes);
+    }
+
+    void drawPart(const std::string& part, const Context& c, Page& page)
+    {
+        const std::optional<std::string> xml = zip_.read(part);
+        if (!xml)
+            return;
+        XmlReader x(*xml);
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::Start && x.localName() == "spTree") {
+                tree(x, c, page, Xf{});
+                return;
+            }
+        }
+    }
+
+    // At the Start of spTree or grpSp: the shapes inside, in order.
+    void tree(XmlReader& x, const Context& c, Page& page, const Xf& xf)
+    {
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "sp" || n == "cxnSp")
+                shape(x, c, page, xf);
+            else if (n == "pic")
+                picture(x, c, page, xf);
+            else if (n == "grpSp")
+                group(x, c, page, xf);
+            else if (n == "graphicFrame")
+                frame(x, c, page, xf);
+            else if (n == "Fallback")
+                x.skip();
+            else if (n == "nvGrpSpPr" || n == "grpSpPr")
+                x.skip();
+            // AlternateContent / Choice: descended into
+        }
+    }
+
+    void group(XmlReader& x, const Context& c, Page& page, const Xf& xf)
+    {
+        double off[2] = {0, 0}, ext[2] = {1, 1}, chOff[2] = {0, 0}, chExt[2] = {1, 1};
+        bool haveExt = false;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "grpSpPr") {
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    const std::string_view m = x.localName();
+                    if (m == "off") {
+                        off[0] = std::atof(x.attribute("x").c_str());
+                        off[1] = std::atof(x.attribute("y").c_str());
+                    } else if (m == "ext") {
+                        ext[0] = std::atof(x.attribute("cx").c_str());
+                        ext[1] = std::atof(x.attribute("cy").c_str());
+                        haveExt = true;
+                    } else if (m == "chOff") {
+                        chOff[0] = std::atof(x.attribute("x").c_str());
+                        chOff[1] = std::atof(x.attribute("y").c_str());
+                    } else if (m == "chExt") {
+                        chExt[0] = std::atof(x.attribute("cx").c_str());
+                        chExt[1] = std::atof(x.attribute("cy").c_str());
+                    }
+                }
+            } else if (n == "nvGrpSpPr") {
+                x.skip();
+            } else {
+                // The children: in the group's child space, mapped onto its box.
+                Xf inner = xf;
+                if (haveExt && chExt[0] > 0 && chExt[1] > 0) {
+                    const double kx = ext[0] / chExt[0], ky = ext[1] / chExt[1];
+                    inner.sx = xf.sx * kx;
+                    inner.sy = xf.sy * ky;
+                    inner.ox = xf.ox + xf.sx * (off[0] - chOff[0] * kx);
+                    inner.oy = xf.oy + xf.sy * (off[1] - chOff[1] * ky);
+                }
+                if (n == "sp" || n == "cxnSp")
+                    shape(x, c, page, inner);
+                else if (n == "pic")
+                    picture(x, c, page, inner);
+                else if (n == "grpSp")
+                    group(x, c, page, inner);
+                else if (n == "graphicFrame")
+                    frame(x, c, page, inner);
+                else if (n == "Fallback")
+                    x.skip();
+            }
+        }
+    }
+
+    // At the Start of xfrm (a:xfrm or p:xfrm): position, size and flips.
+    static void readXfrm(XmlReader& x, ShapeProps& p)
+    {
+        p.hasXfrm = true;
+        p.flipH = x.attribute("flipH") == "1";
+        p.flipV = x.attribute("flipV") == "1";
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            if (x.localName() == "off") {
+                p.x = std::atof(x.attribute("x").c_str());
+                p.y = std::atof(x.attribute("y").c_str());
+            } else if (x.localName() == "ext") {
+                p.w = std::atof(x.attribute("cx").c_str());
+                p.h = std::atof(x.attribute("cy").c_str());
+            }
+        }
+    }
+
+    // At the Start of spPr.
+    void readSpPr(XmlReader& x, const Context& c, ShapeProps& p)
+    {
+        const ooxml::Theme& theme = c.master->theme;
+        const auto* map = &c.master->clrMap;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "xfrm") {
+                readXfrm(x, p);
+            } else if (n == "prstGeom") {
+                p.geometry = x.attribute("prst");
+                x.skip();
+            } else if (n == "custGeom") {
+                p.geometry = "custom";
+                customGeometry(x, p);
+            } else if (n == "noFill") {
+                p.hasFill = true;
+                p.fill = 0;
+            } else if (n == "solidFill" || n == "gradFill") {
+                bool found = false;
+                p.fill = ooxml::readFillIn(x, theme, map, &found);
+                p.hasFill = found;
+            } else if (n == "blipFill" || n == "pattFill") {
+                x.skip(); // an image or pattern fill: left unfilled
+            } else if (n == "ln") {
+                if (x.hasAttribute("w"))
+                    p.lineWidth = std::atof(x.attribute("w").c_str());
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    if (x.localName() == "noFill") {
+                        p.hasLine = true;
+                        p.line = 0;
+                    } else if (x.localName() == "solidFill" || x.localName() == "gradFill") {
+                        bool found = false;
+                        p.line = ooxml::readFillIn(x, theme, map, &found);
+                        p.hasLine = found;
+                    } else {
+                        x.skip();
+                    }
+                }
+            }
+        }
+    }
+
+    // At the Start of custGeom: its paths, normalised to 0..1 of the shape's box.
+    static void customGeometry(XmlReader& x, ShapeProps& p)
+    {
+        double pw = 1, ph = 1;
+        std::vector<Point>* current = nullptr;
+        std::string op;
+        std::vector<Point> pts;
+        auto flush = [&]() {
+            if (op.empty() || !current)
+                return;
+            auto norm = [&](Point q) { return Point{float(q.x / pw), float(q.y / ph)}; };
+            if ((op == "moveTo" || op == "lnTo") && !pts.empty()) {
+                if (op == "moveTo") {
+                    if (!current->empty()) {
+                        p.custom.emplace_back();
+                        p.customClosed.push_back(false);
+                        current = &p.custom.back();
+                    }
+                }
+                current->push_back(norm(pts[0]));
+            } else if (op == "cubicBezTo" && pts.size() == 3 && !current->empty()) {
+                const Point a = current->back();
+                const Point b = norm(pts[0]), cc = norm(pts[1]), d = norm(pts[2]);
+                for (int i = 1; i <= 12; ++i) {
+                    const float t = float(i) / 12.0f, u = 1.0f - t;
+                    current->push_back({u * u * u * a.x + 3 * u * u * t * b.x + 3 * u * t * t * cc.x + t * t * t * d.x,
+                                        u * u * u * a.y + 3 * u * u * t * b.y + 3 * u * t * t * cc.y + t * t * t * d.y});
+                }
+            } else if (op == "quadBezTo" && pts.size() == 2 && !current->empty()) {
+                const Point a = current->back();
+                const Point b = norm(pts[0]), d = norm(pts[1]);
+                for (int i = 1; i <= 10; ++i) {
+                    const float t = float(i) / 10.0f, u = 1.0f - t;
+                    current->push_back({u * u * a.x + 2 * u * t * b.x + t * t * d.x, u * u * a.y + 2 * u * t * b.y + t * t * d.y});
+                }
+            }
+            op.clear();
+            pts.clear();
+        };
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End) {
+                if (x.depth() < depth)
+                    break;
+                const std::string_view n = x.localName();
+                if (n == "moveTo" || n == "lnTo" || n == "cubicBezTo" || n == "quadBezTo")
+                    flush();
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "path") {
+                pw = std::max(1.0, std::atof(x.attribute("w").c_str()));
+                ph = std::max(1.0, std::atof(x.attribute("h").c_str()));
+                p.custom.emplace_back();
+                p.customClosed.push_back(false);
+                current = &p.custom.back();
+            } else if (n == "moveTo" || n == "lnTo" || n == "cubicBezTo" || n == "quadBezTo") {
+                op = std::string(n);
+                pts.clear();
+            } else if (n == "pt") {
+                pts.push_back({float(std::atof(x.attribute("x").c_str())), float(std::atof(x.attribute("y").c_str()))});
+            } else if (n == "close" && !p.customClosed.empty()) {
+                p.customClosed.back() = true;
+            } else if (n == "arcTo" && current && !current->empty()) {
+                // An arc: approximated by its end left out (the next segment joins); rare in practice.
+            } else if (n == "gdLst" || n == "avLst" || n == "ahLst" || n == "cxnLst" || n == "rect") {
+                x.skip();
+            }
+        }
+        // Paths written with guide names instead of numbers read as 0: drop degenerate ones.
+        for (std::size_t i = p.custom.size(); i-- > 0;)
+            if (p.custom[i].size() < 2) {
+                p.custom.erase(p.custom.begin() + long(i));
+                p.customClosed.erase(p.customClosed.begin() + long(i));
+            }
+    }
+
+    void readStyleRefs(XmlReader& x, const Context& c, ShapeProps& p)
+    {
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "fillRef" || n == "lnRef" || n == "fontRef") {
+                const int idx = std::atoi(x.attribute("idx").c_str());
+                bool found = false;
+                const std::uint32_t color = ooxml::readFillIn(x, c.master->theme, &c.master->clrMap, &found);
+                if (!found)
+                    continue;
+                if (n == "fillRef" && idx > 0) {
+                    p.styleFill = color;
+                    p.hasStyleFill = true;
+                } else if (n == "lnRef" && idx > 0) {
+                    p.styleLine = color;
+                    p.hasStyleLine = true;
+                } else if (n == "fontRef") {
+                    p.styleFont = color;
+                    p.hasStyleFont = true;
+                }
+            }
+        }
+    }
+
+    void emitGeometry(const ShapeProps& p, Rect r, Page& page)
+    {
+        PathItem path;
+        path.fill = p.hasFill ? p.fill : p.hasStyleFill ? p.styleFill : 0;
+        path.stroke = p.hasLine ? p.line : p.hasStyleLine ? p.styleLine : 0;
+        path.lineWidth = float(std::max(0.25, p.lineWidth / kEmuPerPoint));
+        const std::string& g = p.geometry;
+        const bool line = g == "line" || g.find("Connector") != std::string::npos;
+        if (line) {
+            path.fill = 0;
+            if (!path.stroke)
+                path.stroke = kBlack;
+            float x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+            if (p.flipH)
+                std::swap(x0, x1);
+            if (p.flipV)
+                std::swap(y0, y1);
+            path.subpaths.push_back({{x0, y0}, {x1, y1}});
+            path.closed.push_back(false);
+        } else if (!path.fill && !path.stroke) {
+            return;
+        } else if (g == "custom") {
+            for (std::size_t i = 0; i < p.custom.size(); ++i) {
+                std::vector<Point> pts;
+                for (Point q : p.custom[i]) {
+                    if (p.flipH)
+                        q.x = 1.0f - q.x;
+                    if (p.flipV)
+                        q.y = 1.0f - q.y;
+                    pts.push_back({r.x + q.x * r.w, r.y + q.y * r.h});
+                }
+                path.subpaths.push_back(std::move(pts));
+                path.closed.push_back(p.customClosed[i]);
+            }
+            if (path.subpaths.empty())
+                return;
+        } else {
+            std::vector<Point> pts;
+            if (g == "ellipse" || g == "circle" || g == "donut" || g == "pie" || g == "chord") {
+                flattenEllipse(pts, r);
+            } else if (g == "roundRect" || g == "round2SameRect" || g == "snipRoundRect") {
+                roundedRect(pts, r, std::min(r.w, r.h) * 0.1667f);
+            } else if (g == "triangle") {
+                pts = {{r.x + r.w * 0.5f, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}};
+            } else if (g == "rtTriangle") {
+                pts = {{r.x, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}};
+            } else if (g == "diamond") {
+                pts = {{r.x + r.w * 0.5f, r.y}, {r.x + r.w, r.y + r.h * 0.5f}, {r.x + r.w * 0.5f, r.y + r.h}, {r.x, r.y + r.h * 0.5f}};
+            } else if (g == "parallelogram") {
+                const float k = r.w * 0.25f;
+                pts = {{r.x + k, r.y}, {r.x + r.w, r.y}, {r.x + r.w - k, r.y + r.h}, {r.x, r.y + r.h}};
+            } else if (g == "hexagon") {
+                const float k = r.w * 0.25f;
+                pts = {{r.x + k, r.y}, {r.x + r.w - k, r.y}, {r.x + r.w, r.y + r.h * 0.5f}, {r.x + r.w - k, r.y + r.h}, {r.x + k, r.y + r.h}, {r.x, r.y + r.h * 0.5f}};
+            } else if (g == "chevron" || g == "homePlate") {
+                const float k = std::min(r.w, r.h) * 0.5f;
+                pts = {{r.x, r.y}, {r.x + r.w - k, r.y}, {r.x + r.w, r.y + r.h * 0.5f}, {r.x + r.w - k, r.y + r.h}, {r.x, r.y + r.h}};
+                if (g == "chevron")
+                    pts.push_back({r.x + k, r.y + r.h * 0.5f});
+            } else if (g == "rightArrow") {
+                const float head = std::min(r.w * 0.5f, r.h);
+                pts = {{r.x, r.y + r.h * 0.25f}, {r.x + r.w - head, r.y + r.h * 0.25f}, {r.x + r.w - head, r.y}, {r.x + r.w, r.y + r.h * 0.5f},
+                       {r.x + r.w - head, r.y + r.h}, {r.x + r.w - head, r.y + r.h * 0.75f}, {r.x, r.y + r.h * 0.75f}};
+            } else {
+                pts = {{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}};
+            }
+            path.subpaths.push_back(std::move(pts));
+            path.closed.push_back(true);
+        }
+        page.add(std::move(path));
+    }
+
+    // At the Start of sp / cxnSp.
+    void shape(XmlReader& x, const Context& c, Page& page, const Xf& xf)
+    {
+        ShapeProps p;
+        std::string phType, phIdx;
+        bool isPlaceholder = false;
+        TextBox box;
+        bool hasText = false;
+        const int depth = x.depth();
+        // The text body comes after spPr: read it once the shape's placeholder and box are known.
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "ph") {
+                isPlaceholder = true;
+                phType = x.hasAttribute("type") ? x.attribute("type") : "obj";
+                phIdx = x.attribute("idx");
+                if (c.skipPlaceholders) {
+                    x.skip();
+                    // A master's or layout's placeholder: its prompt text is not slide content.
+                    const int target = depth - 1;
+                    for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;)
+                        if (f == Event::End && x.depth() == target)
+                            break;
+                    return;
+                }
+            } else if (n == "spPr") {
+                readSpPr(x, c, p);
+            } else if (n == "style") {
+                readStyleRefs(x, c, p);
+            } else if (n == "txBody") {
+                hasText = textBody(x, c, phType, isPlaceholder, p, box);
+            }
+        }
+        // Position: its own, else the layout's placeholder, else the master's.
+        Rect r;
+        bool placed = false;
+        if (p.hasXfrm) {
+            r = xf.map(p.x, p.y, p.w, p.h);
+            placed = true;
+        } else if (isPlaceholder) {
+            for (const Template* t : {static_cast<const Template*>(c.layout), static_cast<const Template*>(c.master)}) {
+                if (!t)
+                    continue;
+                const Placeholder* found = nullptr;
+                if (!phIdx.empty()) {
+                    const auto it = t->byIdx.find(phIdx);
+                    if (it != t->byIdx.end() && it->second.hasBox)
+                        found = &it->second;
+                }
+                if (!found) {
+                    const auto it = t->byType.find(phKey(phType));
+                    if (it != t->byType.end() && it->second.hasBox)
+                        found = &it->second;
+                }
+                if (found) {
+                    r = found->box;
+                    placed = true;
+                    if (box.anchor < 0 && found->anchor >= 0)
+                        box.anchor = found->anchor;
+                    break;
+                }
+            }
+        }
+        if (!placed)
+            return;
+        emitGeometry(p, r, page);
+        if (hasText) {
+            box.box = r;
+            if (box.anchor < 0)
+                box.anchor = (phKey(phType) == "title" && phType == "ctrTitle") ? 1 : (phKey(phType) == "title" ? 1 : 0);
+            if ((phType == "title" || phType == "ctrTitle") && title_.empty())
+                for (const TextParagraph& para : box.paragraphs)
+                    for (const TextRun& run : para.runs) {
+                        if (!title_.empty() && run.text == "\n")
+                            title_ += ' ';
+                        else if (run.text != "\n")
+                            title_ += run.text;
+                    }
+            page.add(std::move(box));
+        }
+    }
+
+    const TextStyle& styleFor(const Context& c, const std::string& phType, bool placeholder) const
+    {
+        if (phType == "title" || phType == "ctrTitle")
+            return c.master->title;
+        if (placeholder && (phType == "body" || phType == "obj" || phType == "subTitle"))
+            return c.master->body;
+        return c.master->other;
+    }
+
+    // At the Start of txBody: its paragraphs into `box`. True when it holds any text.
+    bool textBody(XmlReader& x, const Context& c, const std::string& phType, bool placeholder, const ShapeProps& p, TextBox& box)
+    {
+        const TextStyle& style = styleFor(c, phType, placeholder);
+        const bool bodyPh = placeholder && (phType == "body" || phType == "obj");
+        const ooxml::Theme& theme = c.master->theme;
+        const auto* map = &c.master->clrMap;
+        std::string tx1 = "dk1";
+        if (const auto it = map->find("tx1"); it != map->end())
+            tx1 = it->second;
+        const std::uint32_t defaultColor = p.hasStyleFont ? p.styleFont : theme.color(tx1, kBlack);
+        box.anchor = -1;
+        bool any = false;
+        int autoNumber = 0;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "bodyPr") {
+                const std::string a = x.attribute("anchor");
+                if (!a.empty())
+                    box.anchor = a == "ctr" ? 1 : a == "b" ? 2 : 0;
+                auto inset = [&](const char* name, float& v) {
+                    if (x.hasAttribute(name))
+                        v = float(std::atof(x.attribute(name).c_str()) / kEmuPerPoint);
+                };
+                inset("lIns", box.insetL);
+                inset("tIns", box.insetT);
+                inset("rIns", box.insetR);
+                inset("bIns", box.insetB);
+                box.wrap = x.attribute("wrap") != "none";
+                // normAutofit fontScale: the text shrunk to fit
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f == Event::Start && x.localName() == "normAutofit" && x.hasAttribute("fontScale"))
+                        fontScale_ = float(std::atof(x.attribute("fontScale").c_str()) / 100000.0);
+                }
+            } else if (n == "lstStyle") {
+                x.skip();
+            } else if (n == "p") {
+                TextParagraph para;
+                int level = 0;
+                std::string bullet; // as the paragraph says ("none" to remove)
+                bool numbered = false;
+                float endSize = 0.0f;
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    const std::string_view m = x.localName();
+                    if (m == "pPr") {
+                        level = std::clamp(std::atoi(x.attribute("lvl").c_str()), 0, 8);
+                        const std::string a = x.attribute("algn");
+                        para.align = a == "ctr" ? 1 : a == "r" ? 2 : a == "just" || a == "dist" ? 3 : 0;
+                        const int d3 = x.depth();
+                        for (Event g; (g = x.next()) != Event::Eof && g != Event::Error;) {
+                            if (g == Event::End && x.depth() < d3)
+                                break;
+                            if (g != Event::Start)
+                                continue;
+                            const std::string_view k = x.localName();
+                            if (k == "buNone")
+                                bullet = "none";
+                            else if (k == "buChar")
+                                bullet = x.attribute("char");
+                            else if (k == "buAutoNum")
+                                numbered = true;
+                            else if (k == "spcPts" && para.spaceBefore == 0.0f)
+                                para.spaceBefore = float(std::atof(x.attribute("val").c_str()) / 100.0);
+                            else if (k == "spcPct")
+                                para.lineSpacing = std::clamp(float(std::atof(x.attribute("val").c_str()) / 100000.0), 0.5f, 3.0f);
+                            else if (k == "defRPr")
+                                x.skip();
+                        }
+                    } else if (m == "r" || m == "fld") {
+                        TextRun run = textRun(x, style.levels[level], defaultColor, theme, map);
+                        if (!run.text.empty())
+                            para.runs.push_back(std::move(run));
+                    } else if (m == "br") {
+                        TextRun run;
+                        run.text = "\n";
+                        run.size = style.levels[level].size > 0 ? style.levels[level].size : 18.0f;
+                        para.runs.push_back(run);
+                        x.skip();
+                    } else if (m == "endParaRPr") {
+                        if (x.hasAttribute("sz"))
+                            endSize = float(std::atof(x.attribute("sz").c_str()) / 100.0);
+                        x.skip();
+                    }
+                }
+                para.level = level;
+                const LevelStyle& ls = style.levels[level];
+                std::string b = bullet.empty() ? ls.bullet : bullet;
+                if (numbered || (bullet.empty() && b == "auto")) {
+                    para.bullet = std::to_string(++autoNumber) + ".";
+                } else {
+                    autoNumber = 0;
+                    if (!b.empty() && b != "none" && b != "auto" && (bodyPh || !bullet.empty()))
+                        para.bullet = b;
+                }
+                if (!para.runs.empty())
+                    any = true;
+                if (para.runs.empty()) { // an empty line keeps its height
+                    TextRun run;
+                    run.size = endSize > 0 ? endSize : ls.size > 0 ? ls.size : 18.0f;
+                    para.runs.push_back(run);
+                    para.bullet.clear();
+                }
+                if (fontScale_ < 1.0f)
+                    for (TextRun& run : para.runs)
+                        run.size *= fontScale_;
+                box.paragraphs.push_back(std::move(para));
+            }
+        }
+        fontScale_ = 1.0f;
+        return any;
+    }
+
+    // At the Start of a:r / a:fld.
+    TextRun textRun(XmlReader& x, const LevelStyle& level, std::uint32_t defaultColor, const ooxml::Theme& theme,
+                    const std::map<std::string, std::string>* map)
+    {
+        TextRun run;
+        run.size = level.size > 0 ? level.size : 18.0f;
+        run.color = level.hasColor ? level.color : defaultColor;
+        if (level.bold == 1)
+            run.flags |= Bold;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "rPr") {
+                if (x.hasAttribute("sz"))
+                    run.size = std::max(1.0f, float(std::atof(x.attribute("sz").c_str()) / 100.0));
+                if (x.hasAttribute("b"))
+                    run.flags = std::uint8_t(x.attribute("b") == "1" ? run.flags | Bold : run.flags & ~Bold);
+                if (x.attribute("i") == "1")
+                    run.flags |= Italic;
+                if (!x.attribute("u").empty() && x.attribute("u") != "none")
+                    run.flags |= Underline;
+                if (!x.attribute("strike").empty() && x.attribute("strike") != "noStrike")
+                    run.flags |= Strike;
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    const std::string_view m = x.localName();
+                    if (m == "solidFill") {
+                        bool found = false;
+                        const std::uint32_t c = ooxml::readFillIn(x, theme, map, &found);
+                        if (found)
+                            run.color = c;
+                    } else if (m == "latin") {
+                        const std::string face = x.attribute("typeface");
+                        if (face.find("Courier") != std::string::npos || face.find("Consolas") != std::string::npos ||
+                            face.find("Mono") != std::string::npos)
+                            run.flags |= Mono;
+                    } else {
+                        x.skip();
+                    }
+                }
+            } else if (n == "t") {
+                run.text += x.elementText();
+            }
+        }
+        return run;
+    }
+
+    // At the Start of pic.
+    void picture(XmlReader& x, const Context& c, Page& page, const Xf& xf)
+    {
+        ShapeProps p;
+        std::string embed;
+        bool video = false;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "blip")
+                embed = x.attribute("r:embed");
+            else if (n == "spPr")
+                readSpPr(x, c, p);
+            else if (n == "videoFile" || n == "audioFile" || n == "media")
+                video = true;
+        }
+        if (video)
+            ++media_;
+        if (!p.hasXfrm || embed.empty() || !c.rels)
+            return;
+        const auto it = c.rels->find(embed);
+        if (it == c.rels->end() || it->second.external || !addMedia(it->second.target))
+            return;
+        ImageItem img;
+        img.box = xf.map(p.x, p.y, p.w, p.h);
+        img.media = it->second.target;
+        page.add(img);
+        if (p.hasLine && p.line) {
+            ShapeProps outline = p;
+            outline.hasFill = true;
+            outline.fill = 0;
+            outline.geometry = "rect";
+            emitGeometry(outline, img.box, page);
+        }
+    }
+
+    // At the Start of graphicFrame: a table, or a chart / diagram as a labelled box.
+    void frame(XmlReader& x, const Context& c, Page& page, const Xf& xf)
+    {
+        ShapeProps p;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "xfrm") {
+                readXfrm(x, p);
+            } else if (n == "tbl" && p.hasXfrm) {
+                table(x, c, page, xf.map(p.x, p.y, p.w, p.h), xf);
+            } else if ((n == "chart" || n == "relIds" || n == "oleObj") && p.hasXfrm) {
+                const char* label = n == "chart" ? "Chart" : n == "relIds" ? "SmartArt diagram" : "Embedded object";
+                if (n == "chart")
+                    ++charts_;
+                else if (n == "relIds")
+                    ++diagrams_;
+                const Rect r = xf.map(p.x, p.y, p.w, p.h);
+                PathItem frameBox;
+                frameBox.fill = rgba(128, 128, 128, 30);
+                frameBox.stroke = rgba(128, 128, 128, 140);
+                frameBox.subpaths.push_back({{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}});
+                frameBox.closed.push_back(true);
+                page.add(std::move(frameBox));
+                TextBox t;
+                t.box = r;
+                t.anchor = 1;
+                TextParagraph para;
+                para.align = 1;
+                TextRun run;
+                run.text = std::string(label) + " (not shown yet)";
+                run.size = 14.0f;
+                run.color = rgba(110, 110, 110);
+                para.runs.push_back(run);
+                t.paragraphs.push_back(para);
+                page.add(std::move(t));
+                x.skip();
+            }
+        }
+    }
+
+    // At the Start of a:tbl.
+    void table(XmlReader& x, const Context& c, Page& page, Rect r, const Xf& xf)
+    {
+        std::vector<float> columns;
+        std::vector<float> heights;
+        struct CellBox {
+            int row = 0, col = 0, span = 1, rowSpan = 1;
+            bool merged = false;
+            std::uint32_t fill = 0;
+            TextBox text;
+            bool hasText = false;
+        };
+        std::vector<CellBox> cells;
+        int rowIndex = -1, colIndex = 0;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "gridCol") {
+                columns.push_back(float(std::atof(x.attribute("w").c_str()) * xf.sx));
+            } else if (n == "tr") {
+                ++rowIndex;
+                colIndex = 0;
+                heights.push_back(float(std::atof(x.attribute("h").c_str()) * xf.sy));
+            } else if (n == "tc") {
+                CellBox cell;
+                cell.row = rowIndex;
+                cell.col = colIndex;
+                cell.span = std::max(1, std::atoi(x.attribute("gridSpan").c_str()));
+                cell.rowSpan = std::max(1, std::atoi(x.attribute("rowSpan").c_str()));
+                cell.merged = x.attribute("hMerge") == "1" || x.attribute("vMerge") == "1";
+                ++colIndex;
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    if (x.localName() == "txBody") {
+                        ShapeProps none;
+                        cell.hasText = textBody(x, c, "", false, none, cell.text);
+                    } else if (x.localName() == "tcPr") {
+                        const int d3 = x.depth();
+                        for (Event g; (g = x.next()) != Event::Eof && g != Event::Error;) {
+                            if (g == Event::End && x.depth() < d3)
+                                break;
+                            if (g != Event::Start)
+                                continue;
+                            if (x.localName() == "solidFill" && x.depth() == d3 + 1) {
+                                bool found = false;
+                                cell.fill = ooxml::readFillIn(x, c.master->theme, &c.master->clrMap, &found);
+                            } else if (x.depth() == d3 + 1) {
+                                x.skip(); // borders (lnL, lnR, ...): drawn as thin lines below
+                            }
+                        }
+                    }
+                }
+                cells.push_back(std::move(cell));
+            }
+        }
+        if (columns.empty() || heights.empty())
+            return;
+        std::vector<float> xs(columns.size() + 1, r.x), ys(heights.size() + 1, r.y);
+        for (std::size_t i = 0; i < columns.size(); ++i)
+            xs[i + 1] = xs[i] + columns[i];
+        for (std::size_t i = 0; i < heights.size(); ++i)
+            ys[i + 1] = ys[i] + std::max(heights[i], 8.0f);
+        for (CellBox& cell : cells) {
+            if (cell.merged || cell.col >= int(columns.size()))
+                continue;
+            const int c1 = std::min(int(columns.size()), cell.col + cell.span);
+            const int r1 = std::min(int(heights.size()), cell.row + cell.rowSpan);
+            const Rect box{xs[size_t(cell.col)], ys[size_t(cell.row)], xs[size_t(c1)] - xs[size_t(cell.col)], ys[size_t(r1)] - ys[size_t(cell.row)]};
+            PathItem bg;
+            bg.fill = cell.fill;
+            bg.stroke = rgba(160, 160, 160);
+            bg.lineWidth = 0.75f;
+            bg.subpaths.push_back({{box.x, box.y}, {box.x + box.w, box.y}, {box.x + box.w, box.y + box.h}, {box.x, box.y + box.h}});
+            bg.closed.push_back(true);
+            page.add(std::move(bg));
+            if (cell.hasText) {
+                cell.text.box = box;
+                if (cell.text.anchor < 0)
+                    cell.text.anchor = 0;
+                page.add(std::move(cell.text));
+            }
+        }
+    }
+
+    bool addMedia(const std::string& part)
+    {
+        if (doc_->pages.media.count(part))
+            return true;
+        std::optional<std::string> bytes = zip_.read(part, std::size_t(64) << 20);
+        if (!bytes)
+            return false;
+        doc_->pages.media[part] = std::move(*bytes);
+        return true;
+    }
+
+    std::string notesText(const std::string& part)
+    {
+        const std::optional<std::string> xml = zip_.read(part);
+        if (!xml)
+            return {};
+        std::string out;
+        XmlReader x(*xml);
+        bool inBody = false;
+        int spDepth = -1;
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End) {
+                if (x.localName() == "sp" && x.depth() + 1 == spDepth) {
+                    inBody = false;
+                    spDepth = -1;
+                } else if (x.localName() == "p" && inBody && !out.empty() && out.back() != '\n') {
+                    out += '\n';
+                }
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            if (x.localName() == "sp") {
+                spDepth = x.depth();
+            } else if (x.localName() == "ph" && spDepth > 0) {
+                inBody = x.attribute("type") == "body";
+            } else if (x.localName() == "t" && inBody) {
+                out += x.elementText();
+            }
+        }
+        while (!out.empty() && out.back() == '\n')
+            out.pop_back();
+        return out;
+    }
+
+    ooxml::ZipArchive& zip_;
+    ViewerDocument* doc_ = nullptr;
+    std::map<std::string, std::unique_ptr<Master>> masters_;
+    std::map<std::string, std::unique_ptr<Template>> layouts_;
+    std::string title_;
+    float fontScale_ = 1.0f;
+    int charts_ = 0, diagrams_ = 0, media_ = 0;
+};
+
+} // namespace
+
+ViewerDocument readPptx(std::string bytes)
+{
+    ooxml::ZipArchive zip;
+    std::string error;
+    if (!zip.open(std::move(bytes), &error)) {
+        ViewerDocument doc;
+        doc.format = "PowerPoint presentation";
+        doc.error = error;
+        return doc;
+    }
+    return PptxReader(zip).read();
+}
+
+} // namespace enp::model::viewer

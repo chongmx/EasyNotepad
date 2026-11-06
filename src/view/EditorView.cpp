@@ -164,7 +164,7 @@ void squiggle(ImDrawList* dl, float x0, float x1, float y, ImU32 color, float sc
 EditorView::EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
     : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale), layers_(vm, fonts, palette, uiScale),
       data_(vm, fonts, palette, uiScale),
-      library_(vm, palette, uiScale)
+      library_(vm, palette, uiScale), viewer_(vm, fonts, palette, uiScale, images_, emoji_)
 {
     subscriptions_.push_back(vm_.caretRevealRequested.subscribe([this]() { revealCaret_ = true; }));
     subscriptions_.push_back(vm_.focusFindRequested.subscribe([this]() { focusFind_ = true; }));
@@ -367,6 +367,7 @@ void EditorView::pruneClosed()
 {
     data_.releaseClosed(); // a closed document's table or tree goes with it
     library_.releaseClosed();
+    viewer_.releaseClosed();
     // The line layout of the text view is sized by the longest document it has shown: rebuilt for
     // the active one next frame, it should not keep a closed document's size (docs/MEMORY.md 5).
     os::mem::release(rows_);
@@ -538,8 +539,12 @@ void EditorView::render(ImVec2 size, model::Document* shown)
     }
     if (doc->kind != model::FileKind::Text) {
         if (fileImages_.size() > vm_.documents().size() || markdown_.size() > vm_.documents().size() ||
-            library_.entryCount() > vm_.documents().size())
+            library_.entryCount() > vm_.documents().size() || viewer_.entryCount() > vm_.documents().size())
             pruneClosed();
+        if (doc->kind == model::FileKind::Document) { // Word, Excel, PowerPoint, PDF: read and shown
+            viewer_.render(*doc, size);
+            return;
+        }
         if (doc->kind == model::FileKind::Binary) { // a library or program: what it contains
             ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
             const bool shown = library_.render(*doc, size);
@@ -552,6 +557,8 @@ void EditorView::render(ImVec2 size, model::Document* shown)
     }
     if (library_.holds(doc->id))
         library_.release(doc->id); // opened as text: what it contained is freed now
+    if (viewer_.holds(doc->id))
+        viewer_.release(doc->id); // the same for a document the viewer read
     if (auto held = fileImages_.find(doc->id); held != fileImages_.end()) { // opened as text since
         images_.release(held->second.key);
         fileImages_.erase(held);

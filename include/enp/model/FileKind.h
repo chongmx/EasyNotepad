@@ -1,6 +1,7 @@
-// What a file is before it is loaded: text to edit, an image to show, or binary data that must
-// not be poured into a text buffer. Decided from the content (magic numbers, NUL bytes in the
-// first kilobytes) with the extension as a hint.
+// What a file is before it is loaded: text to edit, an image to show, a document to read (Word,
+// Excel, PowerPoint, PDF: model/viewer), or binary data that must not be poured into a text
+// buffer. Decided from the content (magic numbers, NUL bytes in the first kilobytes) with the
+// extension as a hint.
 #pragma once
 
 #include <string>
@@ -8,7 +9,7 @@
 
 namespace enp::model {
 
-enum class FileKind { Text, Image, Binary };
+enum class FileKind { Text, Image, Binary, Document };
 
 struct FileType {
     FileKind kind = FileKind::Text;

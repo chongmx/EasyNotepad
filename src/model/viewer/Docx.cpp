@@ -1,0 +1,720 @@
+// Word (.docx): word/document.xml into the shared flow blocks. Styles give headings (by name or
+// outline level, through basedOn), numbering gives list markers, runs give bold / italic /
+// strike / links, drawings give images; tables keep their cells' text; footnotes and endnotes
+// follow the body as notes. Tracked deletions, field instructions and fallbacks are left out.
+#include "enp/model/viewer/Viewer.h"
+
+#include "Ooxml.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <map>
+#include <set>
+
+namespace enp::model::viewer {
+namespace {
+
+namespace md = markdown;
+using ooxml::XmlReader;
+using Event = XmlReader::Event;
+
+md::Span textSpan(std::string text)
+{
+    md::Span s;
+    s.text = std::move(text);
+    return s;
+}
+
+struct Style {
+    std::string name;    // lower case
+    std::string basedOn;
+    int outline = -1;    // w:outlineLvl (0-based)
+    bool bold = false, italic = false;
+    std::string numId;   // a numbered style
+    int numLevel = 0;
+};
+
+struct Level {
+    std::string format = "decimal"; // bullet, decimal, lowerLetter, upperLetter, lowerRoman, upperRoman, none
+    std::string text = "%1.";
+    int start = 1;
+};
+
+struct Numbering {
+    std::map<std::string, std::map<int, Level>> abstracts; // abstractNumId -> levels
+    std::map<std::string, std::string> nums;               // numId -> abstractNumId
+    std::map<std::string, std::map<int, int>> overrides;   // numId -> level -> start
+    std::map<std::string, std::vector<int>> counters;      // numId -> per level
+
+    const Level* level(const std::string& numId, int ilvl) const
+    {
+        const auto n = nums.find(numId);
+        if (n == nums.end())
+            return nullptr;
+        const auto a = abstracts.find(n->second);
+        if (a == abstracts.end())
+            return nullptr;
+        const auto l = a->second.find(ilvl);
+        return l == a->second.end() ? nullptr : &l->second;
+    }
+};
+
+bool on(const XmlReader& x)
+{
+    const std::string v = x.attribute("w:val");
+    return v.empty() || (v != "0" && v != "false" && v != "off" && v != "none");
+}
+
+std::string roman(int n, bool upper)
+{
+    static const std::pair<int, const char*> kTable[] = {{1000, "m"}, {900, "cm"}, {500, "d"}, {400, "cd"}, {100, "c"}, {90, "xc"},
+                                                         {50, "l"},   {40, "xl"},  {10, "x"},  {9, "ix"},   {5, "v"},   {4, "iv"}, {1, "i"}};
+    std::string out;
+    for (const auto& [value, digits] : kTable)
+        while (n >= value && out.size() < 30) {
+            out += digits;
+            n -= value;
+        }
+    if (upper)
+        for (char& c : out)
+            c = char(c - 'a' + 'A');
+    return out;
+}
+
+std::string counterText(int n, const std::string& format)
+{
+    if (format == "lowerLetter" || format == "upperLetter") {
+        std::string s;
+        const int letter = (n - 1) % 26, repeat = (n - 1) / 26 + 1;
+        s.assign(std::size_t(std::min(repeat, 10)), char((format == "upperLetter" ? 'A' : 'a') + letter));
+        return s;
+    }
+    if (format == "lowerRoman" || format == "upperRoman")
+        return roman(n, format == "upperRoman");
+    return std::to_string(n);
+}
+
+class DocxReader {
+public:
+    explicit DocxReader(ooxml::ZipArchive& zip) : zip_(zip) {}
+
+    ViewerDocument read()
+    {
+        ViewerDocument doc;
+        doc.format = "Word document";
+        main_ = ooxml::mainPart(zip_, "word/document.xml");
+        const std::optional<std::string> xml = zip_.read(main_);
+        if (!xml) {
+            doc.error = "the document part (" + main_ + ") is missing";
+            return doc;
+        }
+        doc_ = &doc;
+        rels_ = ooxml::readRelationships(zip_, main_);
+        readStyles(ooxml::targetOfType(rels_, "styles"));
+        readNumbering(ooxml::targetOfType(rels_, "numbering"));
+        readNotes(ooxml::targetOfType(rels_, "footnotes"), "footnote", footnotes_);
+        readNotes(ooxml::targetOfType(rels_, "endnotes"), "endnote", endnotes_);
+        XmlReader x(*xml);
+        body(x, rels_, main_);
+        if (!x.error().empty() && doc.flow.blocks.empty())
+            doc.error = "the document's XML is broken: " + x.error();
+        // Footnotes and endnotes, in the order they were referenced.
+        if (!noteOrder_.empty()) {
+            md::Block rule;
+            rule.kind = md::BlockKind::Rule;
+            doc.flow.blocks.push_back(rule);
+            for (const auto& [kind, id] : noteOrder_) {
+                const auto& notes = kind == 'f' ? footnotes_ : endnotes_;
+                const auto it = notes.find(id);
+                if (it == notes.end())
+                    continue;
+                md::Block b;
+                b.kind = md::BlockKind::Numbered;
+                b.marker = noteNumbers_[std::string(1, kind) + id] + ".";
+                b.spans = it->second;
+                doc.flow.blocks.push_back(std::move(b));
+            }
+        }
+        if (charts_)
+            doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart" : " charts"));
+        if (textBoxes_)
+            doc.notShown.push_back(std::to_string(textBoxes_) + (textBoxes_ == 1 ? " text box" : " text boxes"));
+        if (comments_)
+            doc.notShown.push_back("comments");
+        if (unresolvedImages_)
+            doc.notShown.push_back(std::to_string(unresolvedImages_) + " images (missing from the file)");
+        for (std::size_t i = 0; i < doc.flow.blocks.size(); ++i)
+            doc.flow.blocks[i].line = int(i);
+        doc.shape = doc.error.empty() ? Shape::Flow : Shape::None;
+        return doc;
+    }
+
+private:
+    // ---- styles and numbering ------------------------------------------------------------------
+    void readStyles(const std::string& part)
+    {
+        if (part.empty())
+            return;
+        const std::optional<std::string> xml = zip_.read(part);
+        if (!xml)
+            return;
+        XmlReader x(*xml);
+        Style* s = nullptr;
+        bool inRpr = false;
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End) {
+                if (x.localName() == "style")
+                    s = nullptr;
+                else if (x.localName() == "rPr")
+                    inRpr = false;
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "style") {
+                s = &styles_[x.attribute("w:styleId")];
+            } else if (!s) {
+                continue;
+            } else if (n == "name") {
+                s->name = x.attribute("w:val");
+                for (char& c : s->name)
+                    c = char(std::tolower(static_cast<unsigned char>(c)));
+            } else if (n == "basedOn") {
+                s->basedOn = x.attribute("w:val");
+            } else if (n == "outlineLvl") {
+                s->outline = std::atoi(x.attribute("w:val").c_str());
+            } else if (n == "rPr") {
+                inRpr = true;
+            } else if (inRpr && n == "b") {
+                s->bold = on(x);
+            } else if (inRpr && n == "i") {
+                s->italic = on(x);
+            } else if (n == "numId") {
+                s->numId = x.attribute("w:val");
+            } else if (n == "ilvl") {
+                s->numLevel = std::atoi(x.attribute("w:val").c_str());
+            }
+        }
+    }
+
+    // A paragraph style's heading level (1-6), through basedOn; 0 when it is not a heading.
+    int headingLevel(const std::string& styleId) const
+    {
+        std::string id = styleId;
+        for (int guard = 0; guard < 16 && !id.empty(); ++guard) {
+            const auto it = styles_.find(id);
+            if (it == styles_.end())
+                break;
+            const Style& s = it->second;
+            if (s.name == "title")
+                return 1;
+            if (s.name == "subtitle")
+                return 2;
+            if (s.name.rfind("heading ", 0) == 0) {
+                const int n = std::atoi(s.name.c_str() + 8);
+                if (n >= 1)
+                    return std::min(n, 6);
+            }
+            if (s.outline >= 0 && s.outline <= 8)
+                return std::min(s.outline + 1, 6);
+            id = s.basedOn;
+        }
+        return 0;
+    }
+
+    const Style* style(const std::string& id) const
+    {
+        const auto it = styles_.find(id);
+        return it == styles_.end() ? nullptr : &it->second;
+    }
+
+    void readNumbering(const std::string& part)
+    {
+        if (part.empty())
+            return;
+        const std::optional<std::string> xml = zip_.read(part);
+        if (!xml)
+            return;
+        XmlReader x(*xml);
+        std::string abstractId, numId;
+        Level* level = nullptr;
+        int overrideLevel = -1;
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End) {
+                const std::string_view n = x.localName();
+                if (n == "abstractNum")
+                    abstractId.clear();
+                else if (n == "num")
+                    numId.clear();
+                else if (n == "lvl")
+                    level = nullptr;
+                else if (n == "lvlOverride")
+                    overrideLevel = -1;
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "abstractNum") {
+                abstractId = x.attribute("w:abstractNumId");
+            } else if (n == "lvl" && !abstractId.empty()) {
+                level = &numbering_.abstracts[abstractId][std::atoi(x.attribute("w:ilvl").c_str())];
+            } else if (n == "numFmt" && level) {
+                level->format = x.attribute("w:val");
+            } else if (n == "lvlText" && level) {
+                level->text = x.attribute("w:val");
+            } else if (n == "start" && level) {
+                level->start = std::atoi(x.attribute("w:val").c_str());
+            } else if (n == "num") {
+                numId = x.attribute("w:numId");
+            } else if (n == "abstractNumId" && !numId.empty()) {
+                numbering_.nums[numId] = x.attribute("w:val");
+            } else if (n == "lvlOverride" && !numId.empty()) {
+                overrideLevel = std::atoi(x.attribute("w:ilvl").c_str());
+            } else if (n == "startOverride" && overrideLevel >= 0) {
+                numbering_.overrides[numId][overrideLevel] = std::atoi(x.attribute("w:val").c_str());
+            }
+        }
+    }
+
+    // The marker of the next item of list numId at ilvl ("3.", "b)", "•"), advancing the counters.
+    std::string nextMarker(const std::string& numId, int ilvl, bool& bullet)
+    {
+        ilvl = std::clamp(ilvl, 0, 8);
+        const Level* lvl = numbering_.level(numId, ilvl);
+        bullet = !lvl || lvl->format == "bullet" || lvl->format == "none";
+        if (bullet)
+            return {};
+        std::vector<int>& c = numbering_.counters[numId];
+        if (c.size() < 9) {
+            c.assign(9, 0);
+        }
+        auto startOf = [&](int level) {
+            const auto o = numbering_.overrides.find(numId);
+            if (o != numbering_.overrides.end()) {
+                const auto l = o->second.find(level);
+                if (l != o->second.end())
+                    return l->second;
+            }
+            const Level* lv = numbering_.level(numId, level);
+            return lv ? lv->start : 1;
+        };
+        c[size_t(ilvl)] = c[size_t(ilvl)] == 0 ? startOf(ilvl) : c[size_t(ilvl)] + 1;
+        for (int deeper = ilvl + 1; deeper < 9; ++deeper)
+            c[size_t(deeper)] = 0;
+        std::string out;
+        const std::string& t = lvl->text;
+        for (std::size_t i = 0; i < t.size(); ++i) {
+            if (t[i] == '%' && i + 1 < t.size() && t[i + 1] >= '1' && t[i + 1] <= '9') {
+                const int which = t[i + 1] - '1';
+                const Level* other = numbering_.level(numId, which);
+                const int value = c[size_t(which)] == 0 ? startOf(which) : c[size_t(which)];
+                out += counterText(value, other ? other->format : "decimal");
+                ++i;
+            } else {
+                out += t[i];
+            }
+        }
+        return out.empty() ? std::to_string(c[size_t(ilvl)]) + "." : out;
+    }
+
+    void readNotes(const std::string& part, std::string_view element, std::map<std::string, md::Spans>& into)
+    {
+        if (part.empty())
+            return;
+        const std::optional<std::string> xml = zip_.read(part);
+        if (!xml)
+            return;
+        const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
+        XmlReader x(*xml);
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start || x.localName() != element)
+                continue;
+            const std::string id = x.attribute("w:id");
+            const std::string type = x.attribute("w:type");
+            if (!type.empty() && type != "normal") { // separators
+                x.skip();
+                continue;
+            }
+            md::Spans spans;
+            const int depth = x.depth();
+            for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                if (f == Event::End && x.depth() < depth)
+                    break;
+                if (f == Event::Start && x.localName() == "p") {
+                    md::Block p = paragraph(x, rels, part, nullptr);
+                    if (!spans.empty() && !p.spans.empty())
+                        spans.push_back(textSpan(" "));
+                    for (md::Span& s : p.spans)
+                        spans.push_back(std::move(s));
+                }
+            }
+            into[id] = std::move(spans);
+        }
+    }
+
+    // ---- the body ----------------------------------------------------------------------------
+    void body(XmlReader& x, const ooxml::Relationships& rels, const std::string& part)
+    {
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "p") {
+                std::vector<md::Block> extra;
+                md::Block b = paragraph(x, rels, part, &extra);
+                push(std::move(b));
+                for (md::Block& more : extra)
+                    push(std::move(more));
+            } else if (n == "tbl") {
+                table(x, rels, part);
+            } else if (n == "sectPr" || n == "Fallback") {
+                x.skip();
+            }
+            // body, sdt, sdtContent, customXml, AlternateContent/Choice: descended into
+        }
+    }
+
+    void push(md::Block b)
+    {
+        if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
+            return; // empty paragraphs are spacing in Word; the renderer spaces blocks itself
+        doc_->flow.blocks.push_back(std::move(b));
+    }
+
+    static void appendText(md::Spans& spans, std::string_view text, unsigned style, const std::string& url)
+    {
+        if (text.empty())
+            return;
+        if (!spans.empty() && spans.back().style == style && spans.back().url == url && !(style & md::Image)) {
+            spans.back().text += text;
+            return;
+        }
+        md::Span s;
+        s.text = std::string(text);
+        s.style = style;
+        s.url = url;
+        spans.push_back(std::move(s));
+    }
+
+    // At the Start of w:p: the paragraph as a block (heading, list item or paragraph). Images in
+    // it stay inline as Image spans. `extra`: blocks that follow it (none yet).
+    md::Block paragraph(XmlReader& x, const ooxml::Relationships& rels, const std::string& part, std::vector<md::Block>* extra)
+    {
+        (void)extra;
+        md::Block b;
+        std::string styleId, numId;
+        int ilvl = -1, outline = -1;
+        bool hasNumPr = false;
+        md::Spans& spans = b.spans;
+        std::string link;    // the hyperlink being read
+        int linkDepth = -1;
+        bool inField = false; // between fldChar begin and separate: the field's instruction
+        unsigned runStyle = 0;
+        bool inRpr = false, inPpr = false;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End) {
+                if (x.depth() < depth)
+                    break;
+                const std::string_view n = x.localName();
+                if (n == "hyperlink" && x.depth() + 1 == linkDepth) {
+                    link.clear();
+                    linkDepth = -1;
+                } else if (n == "rPr") {
+                    inRpr = false;
+                } else if (n == "pPr") {
+                    inPpr = false;
+                }
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (inPpr) {
+                if (n == "pStyle")
+                    styleId = x.attribute("w:val");
+                else if (n == "numPr")
+                    hasNumPr = true;
+                else if (n == "ilvl")
+                    ilvl = std::atoi(x.attribute("w:val").c_str());
+                else if (n == "numId")
+                    numId = x.attribute("w:val");
+                else if (n == "outlineLvl")
+                    outline = std::atoi(x.attribute("w:val").c_str());
+                else if (n == "rPr" || n == "sectPr" || n == "pPrChange")
+                    x.skip(); // the paragraph mark's format; a section break; a tracked format change
+                continue;
+            }
+            if (inRpr) {
+                if (n == "b")
+                    runStyle = on(x) ? (runStyle | md::Bold) : (runStyle & ~unsigned(md::Bold));
+                else if (n == "i")
+                    runStyle = on(x) ? (runStyle | md::Italic) : (runStyle & ~unsigned(md::Italic));
+                else if (n == "strike" || n == "dstrike")
+                    runStyle = on(x) ? (runStyle | md::Strike) : (runStyle & ~unsigned(md::Strike));
+                else if (n == "rStyle") {
+                    const Style* rs = style(x.attribute("w:val"));
+                    if (rs && rs->bold)
+                        runStyle |= md::Bold;
+                    if (rs && rs->italic)
+                        runStyle |= md::Italic;
+                    if (rs && (rs->name.find("code") != std::string::npos || rs->name == "html code"))
+                        runStyle |= md::Code;
+                } else if (n == "rFonts") {
+                    const std::string font = x.attribute("w:ascii");
+                    if (font.find("Courier") != std::string::npos || font.find("Consolas") != std::string::npos ||
+                        font.find("Mono") != std::string::npos)
+                        runStyle |= md::Code;
+                } else if (n == "rPrChange") {
+                    x.skip();
+                }
+                continue;
+            }
+            if (n == "pPr") {
+                inPpr = true;
+            } else if (n == "r") {
+                runStyle = 0;
+            } else if (n == "rPr") {
+                inRpr = true;
+            } else if (n == "t") {
+                const std::string text = x.elementText();
+                if (!inField)
+                    appendText(spans, text, runStyle | (link.empty() ? 0u : unsigned(md::Link)), link);
+            } else if (n == "tab" || n == "ptab") {
+                if (!inField)
+                    appendText(spans, "    ", runStyle, link);
+            } else if (n == "br" || n == "cr") {
+                const std::string type = x.attribute("w:type");
+                if (type != "page" && type != "column")
+                    appendText(spans, " ", runStyle, link);
+            } else if (n == "noBreakHyphen") {
+                appendText(spans, "-", runStyle, link);
+            } else if (n == "sym") {
+                appendText(spans, "\xE2\x96\xA1", runStyle, link); // a symbol-font glyph: a box
+            } else if (n == "fldChar") {
+                const std::string type = x.attribute("w:fldCharType");
+                if (type == "begin")
+                    inField = true;
+                else if (type == "separate" || type == "end")
+                    inField = false;
+            } else if (n == "instrText" || n == "delText" || n == "del" || n == "moveFrom" || n == "Fallback" ||
+                       n == "commentRangeStart" || n == "commentRangeEnd") {
+                x.skip();
+            } else if (n == "commentReference") {
+                ++comments_;
+            } else if (n == "hyperlink") {
+                const std::string id = x.attribute("r:id");
+                const auto it = rels.find(id);
+                if (it != rels.end())
+                    link = it->second.target;
+                else if (!x.attribute("w:anchor").empty())
+                    link = "#" + x.attribute("w:anchor");
+                linkDepth = x.depth();
+            } else if (n == "footnoteReference" || n == "endnoteReference") {
+                const char kind = n == "footnoteReference" ? 'f' : 'e';
+                const std::string id = x.attribute("w:id");
+                const std::string key = std::string(1, kind) + id;
+                if (!noteNumbers_.count(key)) {
+                    noteNumbers_[key] = std::to_string(noteOrder_.size() + 1);
+                    noteOrder_.push_back({kind, id});
+                }
+                appendText(spans, "[" + noteNumbers_[key] + "]", runStyle, {});
+            } else if (n == "drawing" || n == "pict" || n == "object") {
+                drawing(x, rels, spans);
+            }
+        }
+
+        // Heading, list item or paragraph.
+        const Style* ps = style(styleId);
+        int heading = headingLevel(styleId);
+        if (outline >= 0 && outline <= 8)
+            heading = std::min(outline + 1, 6);
+        if (!hasNumPr && ps && !ps->numId.empty()) {
+            numId = ps->numId;
+            if (ilvl < 0)
+                ilvl = ps->numLevel;
+            hasNumPr = true;
+        }
+        if (heading > 0 && !spans.empty()) {
+            b.kind = md::BlockKind::Heading;
+            b.level = heading;
+            for (md::Span& s : spans)
+                s.style &= ~unsigned(md::Bold); // headings are drawn bold anyway
+        } else if (hasNumPr && !numId.empty() && numId != "0" && !spans.empty()) {
+            bool bullet = false;
+            const std::string marker = nextMarker(numId, std::max(0, ilvl), bullet);
+            b.kind = bullet ? md::BlockKind::Bullet : md::BlockKind::Numbered;
+            b.level = std::clamp(ilvl, 0, 8);
+            b.marker = marker;
+        } else if (ps && (ps->name.find("quote") != std::string::npos)) {
+            b.quote = 1;
+        } else if (ps && (ps->bold || ps->italic)) {
+            for (md::Span& s : spans) {
+                if (ps->bold)
+                    s.style |= md::Bold;
+                if (ps->italic)
+                    s.style |= md::Italic;
+            }
+        }
+        return b;
+    }
+
+    // At the Start of w:drawing / w:pict / w:object: its image (blip or VML imagedata) as an
+    // Image span; charts and text boxes are counted.
+    void drawing(XmlReader& x, const ooxml::Relationships& rels, md::Spans& spans)
+    {
+        std::string alt, embed;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "docPr") {
+                alt = x.attribute("descr");
+                if (alt.empty())
+                    alt = x.attribute("title");
+            } else if (n == "blip" && embed.empty()) {
+                embed = x.attribute("r:embed");
+            } else if (n == "imagedata" && embed.empty()) {
+                embed = x.attribute("r:id");
+            } else if (n == "chart") {
+                ++charts_;
+            } else if (n == "txbxContent") {
+                ++textBoxes_;
+                x.skip();
+            }
+        }
+        if (embed.empty())
+            return;
+        ++images_;
+        const auto it = rels.find(embed);
+        if (it == rels.end() || it->second.external) {
+            ++unresolvedImages_;
+            return;
+        }
+        const std::string& target = it->second.target;
+        if (!doc_->flow.media.count(target)) {
+            std::optional<std::string> bytes = zip_.read(target, std::size_t(64) << 20);
+            if (!bytes) {
+                ++unresolvedImages_;
+                return;
+            }
+            doc_->flow.media[target] = std::move(*bytes);
+        }
+        md::Span s;
+        s.style = md::Image;
+        s.text = alt.empty() ? "image" : alt;
+        s.url = target;
+        spans.push_back(std::move(s));
+    }
+
+    // At the Start of w:tbl: a table block of the cells' text (nested tables flattened into their cell).
+    void table(XmlReader& x, const ooxml::Relationships& rels, const std::string& part)
+    {
+        md::Block t;
+        t.kind = md::BlockKind::Table;
+        const int depth = x.depth();
+        std::vector<md::Spans>* row = nullptr;
+        md::Spans* cell = nullptr;
+        int span = 1;
+        std::vector<md::Block> images; // images in cells: shown after the table
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End) {
+                if (x.depth() < depth)
+                    break;
+                const std::string_view n = x.localName();
+                if (n == "tc" && row && x.depth() == depth + 1) {
+                    for (int i = 1; i < span && row->size() < 64; ++i)
+                        row->emplace_back();
+                    cell = nullptr;
+                } else if (n == "tr" && x.depth() == depth) {
+                    row = nullptr;
+                }
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "tr" && x.depth() == depth + 1) {
+                t.rows.emplace_back();
+                row = &t.rows.back();
+            } else if (n == "tc" && row && x.depth() == depth + 2) {
+                row->emplace_back();
+                cell = &row->back();
+                span = 1;
+            } else if (n == "gridSpan") {
+                span = std::clamp(std::atoi(x.attribute("w:val").c_str()), 1, 64);
+            } else if (n == "p" && cell) {
+                md::Block p = paragraph(x, rels, part, nullptr);
+                if (!p.marker.empty())
+                    p.spans.insert(p.spans.begin(), textSpan(p.marker + " "));
+                else if (p.kind == md::BlockKind::Bullet)
+                    p.spans.insert(p.spans.begin(), textSpan("\xE2\x80\xA2 "));
+                md::Spans kept;
+                for (md::Span& s : p.spans) {
+                    if (s.style & md::Image) { // the renderer's table cells hold text: the image follows the table
+                        md::Block img;
+                        img.kind = md::BlockKind::Paragraph;
+                        img.spans.push_back(std::move(s));
+                        images.push_back(std::move(img));
+                    } else {
+                        kept.push_back(std::move(s));
+                    }
+                }
+                if (!cell->empty() && !kept.empty())
+                    cell->push_back(textSpan(" "));
+                for (md::Span& s : kept)
+                    cell->push_back(std::move(s));
+            } else if (n == "tblPr" || n == "tblGrid" || n == "trPr" || n == "tcPr") {
+                if (n != "tcPr")
+                    x.skip();
+            }
+        }
+        std::size_t columns = 0;
+        for (const auto& r : t.rows)
+            columns = std::max(columns, r.size());
+        for (auto& r : t.rows)
+            r.resize(columns);
+        t.align.assign(columns, -1);
+        if (!t.rows.empty() && columns > 0) {
+            if (t.rows.size() == 1) // the renderer's first row is the header: a one-row table gets an empty body
+                t.rows.emplace_back(columns);
+            doc_->flow.blocks.push_back(std::move(t));
+        }
+        for (md::Block& img : images)
+            doc_->flow.blocks.push_back(std::move(img));
+    }
+
+    ooxml::ZipArchive& zip_;
+    std::string main_;
+    ooxml::Relationships rels_;
+    std::map<std::string, Style> styles_;
+    Numbering numbering_;
+    std::map<std::string, md::Spans> footnotes_, endnotes_;
+    std::vector<std::pair<char, std::string>> noteOrder_;
+    std::map<std::string, std::string> noteNumbers_;
+    ViewerDocument* doc_ = nullptr;
+    int charts_ = 0, textBoxes_ = 0, comments_ = 0, images_ = 0, unresolvedImages_ = 0;
+};
+
+} // namespace
+
+ViewerDocument readDocx(std::string bytes)
+{
+    ooxml::ZipArchive zip;
+    std::string error;
+    if (!zip.open(std::move(bytes), &error)) {
+        ViewerDocument doc;
+        doc.format = "Word document";
+        doc.error = error;
+        return doc;
+    }
+    return DocxReader(zip).read();
+}
+
+} // namespace enp::model::viewer
