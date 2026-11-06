@@ -99,6 +99,17 @@ public:
     Property<std::string> statusText{"Ready"};
 
     Property<bool> darkTheme{true};
+    Property<bool> enhancedUi{false}; // glowing hints and hover, as in a game (UiStyle.h)
+    // The enhanced UI's parameters (Preferences > Enhanced UI; view/UiStyle.h's Effects).
+    Property<float> glowStrength{1.0f};   // every glow's intensity, 0..2
+    Property<float> glowReach{12.0f};     // how far a hint's glow reaches, pixels at 100%
+    Property<float> iconLight{1.0f};      // the light in a lit icon, 0..2
+    Property<bool> glowBreathes{true};    // glows swell and ebb slowly
+    Property<float> breathDepth{0.25f};   // by this share of their intensity
+    Property<float> breathSeconds{3.0f};  // one breath
+    Property<float> glowFadeIn{0.12f};    // seconds a control takes to light up
+    Property<float> glowFadeOut{0.28f};   // and to go dark
+    Property<int> glowColor{0};           // ImGui's packed colour; 0: the theme's accent
     Property<bool> showExplorer{true};
     Property<bool> slimRibbon{false}; // icons only, one row: more room for the work
     // Developer and power-user pages (the Engine lab). Turned on by tapping the version in About

@@ -21,7 +21,7 @@ enum class CommandId {
     // View
     ToggleExplorer, TogglePanel, ToggleAgentPanel, ToggleMaximizePanel, ToggleSlimRibbon,
     ToggleWordWrap, ToggleWhitespace, ToggleLineNumbers, ToggleIndentGuides, ToggleMarkdownView,
-    ZoomIn, ZoomOut, ZoomReset, ToggleTheme, SyntaxColors,
+    ZoomIn, ZoomOut, ZoomReset, ToggleTheme, ToggleEnhancedUi, SyntaxColors,
     // Reading
     DetailFull, DetailBalanced, DetailOverview, DetailOutline,
     FoldAll, UnfoldAll, ToggleFold, ToggleLayersMap, ShowLayers, ShowMinimap, SummarizeFile,

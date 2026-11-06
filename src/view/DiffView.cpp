@@ -1,6 +1,7 @@
 #include "enp/view/DiffView.h"
 
 #include "enp/view/PanelFrame.h"
+#include "enp/view/UiStyle.h"
 
 #include <algorithm>
 #include <cmath>
@@ -115,7 +116,7 @@ void renderSideBySideDiff(const char* id, const std::vector<model::DiffRow>& row
                     dl->AddRectFilled(p, ImVec2(p.x + width, p.y + lineH), palette.accentSoft);
                     dl->AddRectFilled(p, ImVec2(p.x + 3.0f * uiScale, p.y + lineH), palette.accent);
                 }
-                ImGui::SetItemTooltip("Click to choose this line, Shift-click a range, double-click the whole change");
+                ui::itemTooltip("Click to choose this line, Shift-click a range, double-click the whole change");
                 ImGui::PopID();
             } else
                 ImGui::Dummy(ImVec2(width, lineH));

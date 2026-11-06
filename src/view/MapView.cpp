@@ -4,6 +4,7 @@
 #include "enp/view/PanelFrame.h"
 
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -437,7 +438,7 @@ void MapView::render(ImVec2 size)
     }
     if (hovered >= 0) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        if (const LogicalNode* n = map.find(boxes_[size_t(hovered)].id); n && ImGui::BeginTooltip()) {
+        if (const LogicalNode* n = map.find(boxes_[size_t(hovered)].id); n && ui::beginTooltip()) {
             ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
             ImGui::TextDisabled("%s", model::logicalKindName(n->kind));
             ImGui::SameLine();
@@ -451,7 +452,7 @@ void MapView::render(ImVec2 size)
                                     n->code[k].startLine >= 0 ? (":" + std::to_string(n->code[k].startLine + 1)).c_str() : "");
             ImGui::TextDisabled(!n->children.empty() ? "Click to zoom in." : n->target.empty() ? "Click to open the code." : "Click to see the component.");
             ImGui::PopTextWrapPos();
-            ImGui::EndTooltip();
+            ui::endTooltip();
         }
     }
     if (boxes_.empty()) {
@@ -559,7 +560,7 @@ void MapView::renderHeader(float width)
         if (ImGui::InvisibleButton("##toCode", ImVec2(tw, pillH)))
             vm_.execute(viewmodel::CommandId::ShowCodeView);
         const bool hovered = ImGui::IsItemHovered();
-        ImGui::SetItemTooltip("Back to the code (the map stays where you left it)");
+        ui::itemTooltip("Back to the code (the map stays where you left it)");
         registerLastItem("map-to-code", "button", "Code", [this]() { vm_.execute(viewmodel::CommandId::ShowCodeView); });
         dl->AddRect(ImVec2(x, y), ImVec2(x + tw, y + pillH), hovered ? palette_.accent : palette_.border, 5.0f * s_);
         const ImVec2 ts = ImGui::CalcTextSize(label);
@@ -591,7 +592,7 @@ void MapView::renderHeader(float width)
         const bool active = logic.lens.get() == l.lens;
         const bool hovered = ImGui::IsItemHovered();
         if (l.lens == MapLens::Features && !features)
-            ImGui::SetItemTooltip("No features yet: Dissect asks the agent to find them");
+            ui::itemTooltip("No features yet: Dissect asks the agent to find them");
         registerLastItem(std::string("map-lens:") + (l.lens == MapLens::Features ? "Features" : "Architecture"), "tab", l.label,
                          [&logic, lens = l.lens]() { logic.lens.set(lens); });
         if (active)
@@ -634,7 +635,7 @@ void MapView::renderHeader(float width)
     ImGui::SetCursorScreenPos(ImVec2(rx, y));
     if (ImGui::InvisibleButton("##mapFit", ImVec2(fitW, pillH)))
         needsFit_ = true;
-    ImGui::SetItemTooltip("Fit to view");
+    ui::itemTooltip("Fit to view");
     if (ImGui::IsItemHovered())
         dl->AddRectFilled(ImVec2(rx, y), ImVec2(rx + fitW, y + pillH), palette_.hover, 5.0f * s_);
     const ImVec2 fs = ImGui::CalcTextSize(fitLabel);
@@ -644,7 +645,7 @@ void MapView::renderHeader(float width)
     if (ImGui::InvisibleButton("##dissect", ImVec2(dissectW, pillH)) && !busy)
         vm_.execute(viewmodel::CommandId::DissectProject);
     const bool dissectHovered = ImGui::IsItemHovered();
-    ImGui::SetItemTooltip("Ask the agent (%s) to dissect the project into features and flows, and refine every summary",
+    ui::itemTooltip("Ask the agent (%s) to dissect the project into features and flows, and refine every summary",
                           logic.agentCommand().c_str());
     registerLastItem("command:DissectProject", "button", "Dissect", [this]() { vm_.execute(viewmodel::CommandId::DissectProject); }, !busy);
     dl->AddRectFilled(ImVec2(rx, y), ImVec2(rx + dissectW, y + pillH),

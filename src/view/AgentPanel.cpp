@@ -3,6 +3,7 @@
 #include "enp/view/DiffView.h"
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "enp/os/Os.h"
 
@@ -80,7 +81,7 @@ void AgentPanel::renderHeader(bool compact)
     ImGui::SetNextItemWidth(choiceW);
     if (ImGui::Combo("##agentChoice", &choice, agent.choiceNames().data(), int(agent.choiceNames().size())))
         agent.agentChoice.set(choice);
-    ImGui::SetItemTooltip("Who answers:\nAuto: the local model for quick questions about the code, Claude Code for the rest\n"
+    ui::itemTooltip("Who answers:\nAuto: the local model for quick questions about the code, Claude Code for the rest\n"
                           "Claude: always Claude Code\nLocal: always the model on this device (offline, free)");
     registerLastItem("agent-choice", "button", "Who answers", nullptr);
     ImGui::SameLine();
@@ -90,13 +91,13 @@ void AgentPanel::renderHeader(bool compact)
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::Combo("##model", &model, agent.modelNames().data(), int(agent.modelNames().size())))
         agent.modelIndex.set(model);
-    ImGui::SetItemTooltip(!agent.live() ? "Model (sample data)" : vm_.agentCanStream() ? "Model for the next prompt (Default: your Claude Code setting)" : "Model (chosen by the agent CLI)");
+    ui::itemTooltip(!agent.live() ? "Model (sample data)" : vm_.agentCanStream() ? "Model for the next prompt (Default: your Claude Code setting)" : "Model (chosen by the agent CLI)");
     ImGui::SameLine();
     int autonomy = agent.autonomyIndex.get();
     ImGui::SetNextItemWidth(comboW);
     if (ImGui::Combo("##autonomy", &autonomy, agent.autonomyNames().data(), int(agent.autonomyNames().size())))
         agent.autonomyIndex.set(autonomy);
-    ImGui::SetItemTooltip("Edits files: the agent changes files directly (the editor reloads them).\nPlan only: it reads and proposes, and changes nothing.");
+    ui::itemTooltip("Edits files: the agent changes files directly (the editor reloads them).\nPlan only: it reads and proposes, and changes nothing.");
     ImGui::EndDisabled();
     ImGui::SameLine();
     const bool setupOpen = agent.showSetup.get();
@@ -109,7 +110,7 @@ void AgentPanel::renderHeader(bool compact)
     if (setupOpen)
         ImGui::PopStyleColor();
     registerLastItem("agent-setup", "button", "Agent setup", [&agent]() { agent.showSetup.set(!agent.showSetup.get()); });
-    ImGui::SetItemTooltip("Agent setup: install Claude Code, log in, choose the agent");
+    ui::itemTooltip("Agent setup: install Claude Code, log in, choose the agent");
     if (!compact) {
         // At the right of the row, or on a row of its own when the panel is narrow.
         const float newChatW = ImGui::CalcTextSize(ICON_FA_PLUS " New chat").x + ImGui::GetStyle().FramePadding.x * 2.0f;
@@ -234,7 +235,7 @@ void AgentPanel::renderMessages(float height)
         if (ImGui::SmallButton(ICON_FA_ROBOT "  Ask Claude instead"))
             vm_.agent().askClaudeInstead(index);
         registerLastItem("agent-ask-claude", "button", "Ask Claude instead", [this, index]() { vm_.agent().askClaudeInstead(index); });
-        ImGui::SetItemTooltip("Send the same question to Claude Code");
+        ui::itemTooltip("Send the same question to Claude Code");
         ImGui::Spacing();
     }
     if (agent.busy.get()) {
@@ -286,7 +287,7 @@ void AgentPanel::renderSetup(float width)
         ImGui::SameLine(ImGui::GetCursorPosX() + inner - ImGui::GetFrameHeight());
         if (ImGui::SmallButton(ICON_FA_XMARK "##closeSetup"))
             agent.showSetup.set(false);
-        ImGui::SetItemTooltip("Close");
+        ui::itemTooltip("Close");
     }
 
     // Where things stand.
@@ -348,7 +349,7 @@ void AgentPanel::renderSetup(float width)
         if (agent.needsLogin())
             ImGui::PopStyleColor();
         registerLastItem("agent-setup-login", "button", "Log in to Claude Code", [this]() { vm_.loginAgent(); });
-        ImGui::SetItemTooltip(setup.available ? "Starts claude in the terminal: follow its sign-in steps (a browser opens), then type /exit"
+        ui::itemTooltip(setup.available ? "Starts claude in the terminal: follow its sign-in steps (a browser opens), then type /exit"
                                               : "Install Claude Code first");
         sameLineIfFits(ICON_FA_ROTATE " Check again");
     }
@@ -359,7 +360,7 @@ void AgentPanel::renderSetup(float width)
         sameLineIfFits(ICON_FA_UP_RIGHT_FROM_SQUARE " Setup guide");
         if (ImGui::Button(ICON_FA_UP_RIGHT_FROM_SQUARE " Setup guide"))
             vm_.openLink(viewmodel::NotepadViewModel::kAgentSetupUrl);
-        ImGui::SetItemTooltip("%s", viewmodel::NotepadViewModel::kAgentSetupUrl);
+        ui::itemTooltip("%s", viewmodel::NotepadViewModel::kAgentSetupUrl);
     }
 
     renderLocalSetup(inner);
@@ -375,12 +376,12 @@ void AgentPanel::renderSetup(float width)
     editingCommand_ = ImGui::IsItemActive();
     if (ImGui::IsItemDeactivatedAfterEdit())
         agent.command.set(commandEdit_);
-    ImGui::SetItemTooltip("Leave empty for Claude Code. Any other command gets the prompt on stdin and answers on stdout\n"
+    ui::itemTooltip("Leave empty for Claude Code. Any other command gets the prompt on stdin and answers on stdout\n"
                           "(one answer at a time, without streaming or app control).");
     bool control = agent.appControl.get();
     if (ImGui::Checkbox("Let the agent point at and click things in this window", &control))
         agent.appControl.set(control);
-    ImGui::SetItemTooltip("Gives Claude Code this app's MCP tools. It uses them when you ask it to show or do something in the app,\n"
+    ui::itemTooltip("Gives Claude Code this app's MCP tools. It uses them when you ask it to show or do something in the app,\n"
                           "with its own glowing pointer: your mouse is never moved.");
 
     ImGui::PopTextWrapPos();
@@ -440,7 +441,7 @@ void AgentPanel::renderLocalSetup(float inner)
             sameLineIfFits(ICON_FA_FILE_IMPORT " Import file...");
             if (ImGui::Button(ICON_FA_FILE_IMPORT " Import file..."))
                 lab.importFile(Lab::Which::Model);
-            ImGui::SetItemTooltip("Pick the file if you downloaded it elsewhere (for example in the browser)");
+            ui::itemTooltip("Pick the file if you downloaded it elsewhere (for example in the browser)");
         }
     }
     if (!lab.notice().empty() && lab.noticeIsError())
@@ -448,7 +449,7 @@ void AgentPanel::renderLocalSetup(float inner)
     bool fallback = agent.localFallback.get();
     if (ImGui::Checkbox("Fall back to the local model", &fallback))
         agent.localFallback.set(fallback);
-    ImGui::SetItemTooltip("When Claude Code is not installed, not logged in, offline or fails, the local model answers instead");
+    ui::itemTooltip("When Claude Code is not installed, not logged in, offline or fails, the local model answers instead");
     ImGui::TextDisabled("Who answers is chosen at the top of the panel: Auto, Claude or Local.");
 }
 
@@ -460,7 +461,7 @@ void AgentPanel::renderComposer()
         ImGui::PushFont(nullptr, Fonts::kUiSize * 0.85f);
         ImGui::TextColored(col(palette_.textDim), ICON_FA_FILE_CODE " %s", context.c_str());
         ImGui::PopFont();
-        ImGui::SetItemTooltip("Context sent with the prompt: the active file and selected lines");
+        ui::itemTooltip("Context sent with the prompt: the active file and selected lines");
     }
     if (focusPrompt_) {
         ImGui::SetKeyboardFocusHere();
@@ -483,14 +484,14 @@ void AgentPanel::renderComposer()
         if (ImGui::Button(ICON_FA_STOP "##stop", ImVec2(buttonW, inputH)))
             vm_.execute(CommandId::StopAgent);
         ImGui::PopStyleColor();
-        ImGui::SetItemTooltip("Stop the agent");
+        ui::itemTooltip("Stop the agent");
     } else {
         ImGui::BeginDisabled(prompt_.empty());
         ImGui::PushStyleColor(ImGuiCol_Button, col(palette_.accent));
         const bool clicked = ImGui::Button(ICON_FA_PAPER_PLANE "##send", ImVec2(buttonW, inputH));
         ImGui::PopStyleColor();
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Send (Enter)");
+        ui::itemTooltip("Send (Enter)");
         if ((send || clicked) && !prompt_.empty()) {
             agent.submitPrompt(prompt_, context);
             prompt_.clear();
@@ -600,7 +601,7 @@ void AgentPanel::renderChangePreview(ImVec2 size)
     ImGui::SameLine(0.0f, 4.0f * s_);
     if (ImGui::Button(ICON_FA_FILE_CODE " Open"))
         vm_.openFile(change->path);
-    ImGui::SetItemTooltip("Open the file in the editor");
+    ui::itemTooltip("Open the file in the editor");
 
     const float used = ImGui::GetCursorPosY() - startY;
     renderSideBySideDiff("##changeDiff", change->diff, fonts_, palette_, vm_.zoom.get(), s_,

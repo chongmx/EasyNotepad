@@ -1,6 +1,7 @@
 #include "enp/view/TerminalView.h"
 
 #include "enp/view/PanelFrame.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -130,12 +131,12 @@ void TerminalView::renderList(float width, float height)
         if (ImGui::Selectable(label.c_str(), i == vm_.activeIndex.get(), ImGuiSelectableFlags_AllowOverlap))
             vm_.activate(i);
         if (!t.screen.title().empty())
-            ImGui::SetItemTooltip("%s", t.screen.title().c_str());
+            ui::itemTooltip("%s", t.screen.title().c_str());
         if (ImGui::IsItemHovered() || i == vm_.activeIndex.get()) {
             ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - ImGui::GetFrameHeight());
             if (ImGui::SmallButton(ICON_FA_TRASH_CAN "##kill"))
                 closeIndex = i;
-            ImGui::SetItemTooltip("Kill terminal");
+            ui::itemTooltip("Kill terminal");
         }
         ImGui::PopID();
     }

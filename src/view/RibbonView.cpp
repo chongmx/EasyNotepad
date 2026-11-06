@@ -3,6 +3,7 @@
 
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 #include "enp/os/Memory.h"
 
 #include "IconsFontAwesome6.h"
@@ -142,7 +143,7 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
         {"Display", {C::ToggleLineNumbers, C::ToggleWhitespace, C::ToggleIndentGuides, C::ToggleWordWrap, C::ToggleMarkdownView},
          {C::ShowLayers, C::ShowMinimap, C::ToggleLayersMap}},
         {"Zoom", {C::ZoomIn, C::ZoomOut, C::ZoomReset}, {}},
-        {"Theme", {C::ToggleTheme, C::SyntaxColors}, {}},
+        {"Theme", {C::ToggleTheme, C::ToggleEnhancedUi, C::SyntaxColors}, {}},
     };
     static const std::vector<Tab> codeTabs = {
         {"Home",
@@ -397,29 +398,43 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool agent = vm_.workspace.get() == WorkspaceMode::Agent;
     ImGui::InvisibleButton("##workspace", ImVec2(width, height));
-    registerLastItem("workspace", "button", agent ? "Agent workspace" : "Code workspace",
-                     [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); });
     const bool hovered = ImGui::IsItemHovered();
+    // Enhanced UI: the big button lights its symbol and its name, not its whole box.
+    const float light = ui::hoverLight(ImGui::GetItemID(), hovered);
+    registerLastItem("workspace", "button", agent ? "Agent workspace" : "Code workspace",
+                     [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); }, true, false);
     if (ImGui::IsItemClicked())
         ImGui::OpenPopup("##workspacePopup");
     if (hovered)
-        ImGui::SetItemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
+        ui::itemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
 
     const float pad = 6.0f * s_;
-    if (hovered)
+    if (hovered && !ui::enhanced()) // the enhanced UI lights the symbol and the name instead
         dl->AddRectFilled(ImVec2(p.x + pad, p.y + pad), ImVec2(p.x + width - pad, p.y + height - pad), palette_.hover, 6.0f * s_);
 
-    const ImU32 modeColor = agent ? palette_.modeAgent : palette_.modeCode;
+    const ImU32 baseColor = agent ? palette_.modeAgent : palette_.modeCode;
+    const ImU32 modeColor = ui::lit(baseColor, light);
     const char* icon = commandIcon(agent ? CommandId::SwitchToAgentMode : CommandId::SwitchToCodeMode);
     const char* name = agent ? "Agent" : "Code";
+    // The symbol with a light shining in it, the name with a glow in its shape.
+    auto symbol = [&](ImVec2 at, ImVec2 size, float fontSize) {
+        ui::iconLight(dl, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), size.y * 0.95f, baseColor, light);
+        drawText(dl, at, modeColor, icon, fontSize);
+    };
+    auto glowingText = [&](ImVec2 at, ImU32 color, const char* text, float fontSize) {
+        ImGui::PushFont(nullptr, fontSize);
+        ui::textGlow(dl, at, text, light);
+        ImGui::PopFont();
+        drawText(dl, at, color, text, fontSize);
+    };
     if (slim()) { // the icon over "Code ▾"
         const std::string caption = std::string(name) + " " ICON_FA_CARET_DOWN;
         const ImVec2 iconSize = textSize(icon, 20.0f);
         const ImVec2 captionSize = textSize(caption.c_str(), kLabelSize);
         float y = p.y + (height - iconSize.y - captionSize.y - 3.0f * s_) * 0.5f;
-        drawText(dl, ImVec2(p.x + (width - iconSize.x) * 0.5f, y), modeColor, icon, 20.0f);
+        symbol(ImVec2(p.x + (width - iconSize.x) * 0.5f, y), iconSize, 20.0f);
         y += iconSize.y + 3.0f * s_;
-        drawText(dl, ImVec2(p.x + (width - captionSize.x) * 0.5f, y), palette_.text, caption.c_str(), kLabelSize);
+        glowingText(ImVec2(p.x + (width - captionSize.x) * 0.5f, y), palette_.text, caption.c_str(), kLabelSize);
         ImGui::SetNextWindowPos(ImVec2(p.x + pad, p.y + height));
         renderWorkspacePopup();
         return;
@@ -429,9 +444,9 @@ void RibbonView::renderWorkspaceBlock(float width, float height)
     const char* sub = "Workspace " ICON_FA_CARET_DOWN;
     const ImVec2 subSize = textSize(sub, kCaptionSize);
     float y = p.y + (height - iconSize.y - nameSize.y - subSize.y - 6.0f * s_) * 0.5f;
-    drawText(dl, ImVec2(p.x + (width - iconSize.x) * 0.5f, y), modeColor, icon, 26.0f);
+    symbol(ImVec2(p.x + (width - iconSize.x) * 0.5f, y), iconSize, 26.0f);
     y += iconSize.y + 4.0f * s_;
-    drawText(dl, ImVec2(p.x + (width - nameSize.x) * 0.5f, y), palette_.text, name, 15.0f);
+    glowingText(ImVec2(p.x + (width - nameSize.x) * 0.5f, y), palette_.text, name, 15.0f);
     y += nameSize.y + 2.0f * s_;
     drawText(dl, ImVec2(p.x + (width - subSize.x) * 0.5f, y), palette_.textDim, sub, kCaptionSize);
 
@@ -507,7 +522,7 @@ void RibbonView::renderTabRow(float width)
             shownTab_ = i;
         }
         registerLastItem(std::string("ribbon-tab:") + tab.name, "tab", tab.name, [this, i]() { selectedTab() = i; });
-        ImGui::SetItemTooltip("Right-click to hide or move this tab");
+        ui::itemTooltip("Right-click to hide or move this tab");
         if (ImGui::BeginPopupContextItem("##tabMenu")) {
             tabMenu(mode, l, i);
             ImGui::EndPopup();
@@ -535,7 +550,7 @@ void RibbonView::renderTabRow(float width)
             dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), palette_.hover, 5.0f * s_);
         dl->AddText(ImVec2(x + 4.0f * s_ + 9.0f * s_, start.y + (pillH - ImGui::GetTextLineHeight()) * 0.5f),
                     hovered ? palette_.text : palette_.textFaint, label);
-        ImGui::SetItemTooltip("Customize the ribbon: show, hide and arrange its tabs, pin commands, add your own actions");
+        ui::itemTooltip("Customize the ribbon: show, hide and arrange its tabs, pin commands, add your own actions");
         registerLastItem("ribbon-customize", "button", "Customize the ribbon", [this]() { customizeRequested_ = true; });
         x += w + 8.0f * s_;
     }
@@ -604,7 +619,7 @@ void RibbonView::renderCommandSearch(float width)
             vm_.execute(id);
             search_.clear();
         }
-        ImGui::SetItemTooltip("%s", info.tooltip);
+        ui::itemTooltip("%s", info.tooltip);
     }
     searchFocused_ = ImGui::IsWindowHovered() && !search_.empty();
     ImGui::End();
@@ -644,7 +659,7 @@ void RibbonView::renderGroups(const Tab& tab)
                 const ImVec2 caretSize = textSize(ICON_FA_CARET_DOWN, kCaptionSize);
                 drawText(dl, ImVec2(ImGui::GetItemRectMin().x + (13.0f * s_ - caretSize.x) * 0.5f, top + (kSlimButtonHeight * s_ - caretSize.y) * 0.5f),
                          hovered ? palette_.text : palette_.textFaint, ICON_FA_CARET_DOWN, kCaptionSize);
-                ImGui::SetItemTooltip("More: %s", group.name);
+                ui::itemTooltip("More: %s", group.name);
                 const float caretRight = ImGui::GetItemRectMax().x;
                 moreMenu(group, ImVec2(x0, top + kSlimButtonHeight * s_ + 2.0f * s_));
                 x1 = caretRight;
@@ -714,7 +729,7 @@ void RibbonView::tabMenu(int mode, const Layout& l, int shownIndex)
     if (ImGui::MenuItem(ICON_FA_EYE_SLASH "  Hide this tab", nullptr, false, count > 1))
         queueTabEdit(TabEdit::Hide, mode, name);
     if (count <= 1)
-        ImGui::SetItemTooltip("At least one tab stays visible");
+        ui::itemTooltip("At least one tab stays visible");
     if (ImGui::MenuItem(ICON_FA_ARROW_LEFT "  Move left", nullptr, false, shownIndex > 0))
         queueTabEdit(TabEdit::StepAmongShown, mode, name, 0, -1);
     if (ImGui::MenuItem(ICON_FA_ARROW_RIGHT "  Move right", nullptr, false, shownIndex + 1 < count))
@@ -776,7 +791,7 @@ void RibbonView::renderCustomizeDialog()
         if (ImGui::Button(customizeMode_ == 1 ? ICON_FA_ROTATE_LEFT "  Restore default Agent tabs" : ICON_FA_ROTATE_LEFT "  Restore default Code tabs"))
             vm_.restoreRibbonTabs(mode);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip(custom ? "Every tab of this workspace, shown, in the original order" : "The tabs are already as they came");
+        ui::itemTooltip(custom ? "Every tab of this workspace, shown, in the original order" : "The tabs are already as they came");
         registerLastItem("customize-ribbon:restore", "button", "Restore default tabs", [this, mode]() { vm_.restoreRibbonTabs(mode); }, custom);
     } else if (customizeSection_ == 1) {
         const bool any = !vm_.pinnedCommands().empty();
@@ -884,7 +899,7 @@ void RibbonView::renderTabsSection()
             queueTabEdit(show ? TabEdit::Show : TabEdit::Hide, mode, t.name);
         ImGui::EndDisabled();
         if (last)
-            ImGui::SetItemTooltip("At least one tab stays visible");
+            ui::itemTooltip("At least one tab stays visible");
         registerLastItem("customize-ribbon:show:" + t.name, "checkbox", (t.visible ? "Hide " : "Show ") + t.name,
                          [this, mode, name = t.name, visibleNow = t.visible]() {
                              queueTabEdit(visibleNow ? TabEdit::Hide : TabEdit::Show, mode, name);
@@ -907,7 +922,7 @@ void RibbonView::renderTabsSection()
         if (ImGui::Button(ICON_FA_ARROW_UP "##up"))
             queueTabEdit(TabEdit::Step, mode, {}, p, -1);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Move up (earlier on the ribbon)");
+        ui::itemTooltip("Move up (earlier on the ribbon)");
         registerLastItem("customize-ribbon:up:" + t.name, "button", "Move " + t.name + " up",
                          [this, mode, p]() { queueTabEdit(TabEdit::Step, mode, {}, p, -1); }, p > 0);
         ImGui::SameLine(0.0f, 2.0f * s_);
@@ -915,7 +930,7 @@ void RibbonView::renderTabsSection()
         if (ImGui::Button(ICON_FA_ARROW_DOWN "##down"))
             queueTabEdit(TabEdit::Step, mode, {}, p, +1);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Move down (later on the ribbon)");
+        ui::itemTooltip("Move down (later on the ribbon)");
         registerLastItem("customize-ribbon:down:" + t.name, "button", "Move " + t.name + " down",
                          [this, mode, p]() { queueTabEdit(TabEdit::Step, mode, {}, p, +1); }, p + 1 < n);
         ImGui::PopID();
@@ -962,7 +977,7 @@ void RibbonView::renderPinnedSection()
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_FA_XMARK "##unpin"))
                 unpinId = id;
-            ImGui::SetItemTooltip("Unpin");
+            ui::itemTooltip("Unpin");
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -1030,7 +1045,7 @@ void RibbonView::renderActionsSection()
             ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton(ICON_FA_TRASH_CAN "##remove"))
                 remove = i;
-            ImGui::SetItemTooltip("Remove");
+            ui::itemTooltip("Remove");
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -1072,6 +1087,14 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
         dl->AddRectFilled(p, q, palette_.accentSoft, 6.0f * s_);
     if (hovered && enabled)
         dl->AddRectFilled(p, q, held ? fade(palette_.hover, 2.0f) : palette_.hover, 6.0f * s_);
+    // Enhanced UI: as the button lights up, a light shines in its icon (a richer colour, a soft glow).
+    const float light = enabled ? ui::light(ImGui::GetItemID()) : 0.0f;
+    if (light > 0.0f) {
+        const ImVec2 iconSize = textSize(icon, small ? kSlimIconSize : Fonts::kRibbonIconSize);
+        const ImVec2 iconCenter(p.x + w * 0.5f, small ? p.y + h * 0.5f : p.y + 5.0f * s_ + iconSize.y * 0.5f);
+        ui::iconLight(dl, iconCenter, iconSize.y * 0.95f, tint, light);
+        tint = ui::lit(tint, light);
+    }
 
     if (small) {
         const ImVec2 iconSize = textSize(icon, kSlimIconSize);
@@ -1081,14 +1104,19 @@ bool RibbonView::drawButton(const char* id, const char* icon, const char* label,
         const ImVec2 iconSize = textSize(icon, Fonts::kRibbonIconSize);
         drawText(dl, ImVec2(p.x + (w - iconSize.x) * 0.5f, p.y + 5.0f * s_), enabled ? tint : fade(tint, 0.35f), icon,
                  Fonts::kRibbonIconSize);
-        drawText(dl, ImVec2(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_),
-                 enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
+        const ImVec2 labelAt(p.x + (w - labelSize.x) * 0.5f, q.y - labelSize.y - 5.0f * s_);
+        if (light > 0.0f) {
+            ImGui::PushFont(nullptr, kLabelSize);
+            ui::textGlow(dl, labelAt, label, light);
+            ImGui::PopFont();
+        }
+        drawText(dl, labelAt, enabled ? palette_.text : palette_.textFaint, label, kLabelSize);
     }
 
-    if (hovered && ImGui::BeginTooltip()) {
+    if (hovered && ui::beginTooltip()) {
         ImGui::TextUnformatted(tooltip);
         ImGui::TextDisabled("%s", detail);
-        ImGui::EndTooltip();
+        ui::endTooltip();
     }
     return clicked && enabled;
 }
@@ -1139,7 +1167,7 @@ void RibbonView::renderSizeToggle(ImVec2 topLeft)
     const ImVec2 iconSize = textSize(icon, iconPx);
     drawText(dl, ImVec2(topLeft.x + (size.x - iconSize.x) * 0.5f, topLeft.y + (size.y - iconSize.y) * 0.5f),
              hovered ? palette_.text : palette_.textFaint, icon, iconPx);
-    ImGui::SetItemTooltip(slim() ? "Full ribbon (Ctrl+F1)" : "Slim ribbon: icons only, more room for your work (Ctrl+F1)");
+    ui::itemTooltip(slim() ? "Full ribbon (Ctrl+F1)" : "Slim ribbon: icons only, more room for your work (Ctrl+F1)");
 }
 
 void RibbonView::groupCaption(const Group& group, float x0, float x1, float y)

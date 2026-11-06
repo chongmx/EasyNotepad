@@ -4,6 +4,7 @@
 #include "enp/view/Fit.h"
 #include "enp/view/Icons.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -103,10 +104,10 @@ void ReviewPanel::renderToolChips()
                 vm_.execute(run);
             ImGui::EndPopup();
         }
-        if (ImGui::BeginItemTooltip()) {
+        if (ui::beginItemTooltip()) {
             ImGui::TextUnformatted(model::reviewToolDescription(tool));
             ImGui::TextDisabled("Click to filter, right-click to run");
-            ImGui::EndTooltip();
+            ui::endTooltip();
         }
         ImGui::PopID();
     }
@@ -175,7 +176,7 @@ void ReviewPanel::renderProblems()
             review.openFinding(index);
         ImGui::SameLine(0.0f, 0.0f);
         ImGui::TextColored(col(severityColor(f.severity, palette_)), "%s", severityIcon(f.severity));
-        ImGui::SetItemTooltip("%s", model::severityName(f.severity));
+        ui::itemTooltip("%s", model::severityName(f.severity));
         ImGui::TableSetColumnIndex(1);
         ImGui::TextDisabled("%s", model::reviewToolName(f.tool));
         ImGui::TableSetColumnIndex(2);
@@ -189,12 +190,12 @@ void ReviewPanel::renderProblems()
             ImGui::TextUnformatted(f.message.c_str());
         if (narrow)
             ImGui::PopTextWrapPos();
-        ImGui::SetItemTooltip("%s\n%s", f.rule.c_str(), f.message.c_str());
+        ui::itemTooltip("%s\n%s", f.rule.c_str(), f.message.c_str());
         ImGui::TableSetColumnIndex(4);
         bool resolved = f.resolved;
         if (ImGui::Checkbox("##resolved", &resolved))
             review.setResolved(index, resolved);
-        ImGui::SetItemTooltip("Mark as resolved");
+        ui::itemTooltip("Mark as resolved");
         ImGui::PopID();
     }
     ImGui::EndTable();
@@ -254,7 +255,7 @@ void ReviewPanel::renderDiff()
                 git.applyRows(chosen_, Rows::Discard);
                 chosen_.assign(chosen_.size(), false);
             }
-            ImGui::SetItemTooltip("Take the chosen changes out of the file (save the file first if it is open with edits)");
+            ui::itemTooltip("Take the chosen changes out of the file (save the file first if it is open with edits)");
         }
         ImGui::EndDisabled();
         fit::sameLineIfFitsButton("All", true);
@@ -293,7 +294,7 @@ void ReviewPanel::renderComments()
         bool resolved = c.resolved;
         if (ImGui::Checkbox("##resolved", &resolved))
             review.setCommentResolved(i, resolved);
-        ImGui::SetItemTooltip("Resolved");
+        ui::itemTooltip("Resolved");
         ImGui::SameLine();
         ImGui::TextColored(col(c.author == "Agent" ? palette_.modeAgent : palette_.text), "%s", c.author.c_str());
         ImGui::SameLine();

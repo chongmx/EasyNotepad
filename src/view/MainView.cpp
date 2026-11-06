@@ -12,6 +12,7 @@
 #include "enp/view/Icons.h"
 #include "enp/view/SyntaxColors.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 #include "enp/viewmodel/DummyData.h"
 
 #include "IconsFontAwesome6.h"
@@ -200,6 +201,21 @@ MainView::~MainView()
 void MainView::render()
 {
     UiAutomation::instance().beginFrame();
+    UiAutomation::instance().applyHover();
+    {
+        // The look of hints and hover for this frame.
+        ui::Effects fx;
+        fx.strength = vm_.glowStrength.get();
+        fx.reach = vm_.glowReach.get();
+        fx.iconLight = vm_.iconLight.get();
+        fx.breathe = vm_.glowBreathes.get();
+        fx.breathDepth = vm_.breathDepth.get();
+        fx.breathSeconds = vm_.breathSeconds.get();
+        fx.fadeIn = vm_.glowFadeIn.get();
+        fx.fadeOut = vm_.glowFadeOut.get();
+        fx.color = ImU32(vm_.glowColor.get());
+        ui::configure(vm_.enhancedUi.get(), fx, palette_, s_);
+    }
     emoji_.frame(ImGui::GetTime());
     touch::update(s_); // a finger drags content (before the UI: it may cancel the press)
     terminalView_.setBlinkCursor(vm_.blinkCaret.get());
@@ -434,7 +450,7 @@ bool MainView::flatButton(const char* label, const char* tooltip, bool enabled, 
     ImGui::EndDisabled();
     ImGui::PopStyleColor(2);
     if (tooltip)
-        ImGui::SetItemTooltip("%s", tooltip);
+        ui::itemTooltip("%s", tooltip);
     return clicked;
 }
 
@@ -450,7 +466,7 @@ bool MainView::flatIconButton(const char* label, const char* tooltip, float size
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar();
     if (tooltip)
-        ImGui::SetItemTooltip("%s", tooltip);
+        ui::itemTooltip("%s", tooltip);
     return clicked;
 }
 
@@ -598,7 +614,7 @@ void MainView::renderTopBar()
     ImGui::SameLine(0.0f, 8.0f * s_);
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%s", version);
-    ImGui::SetItemTooltip(ENP_RELEASE ? "EasyNotepad " ENP_VERSION_FULL " (release, commit " ENP_COMMIT ")"
+    ui::itemTooltip(ENP_RELEASE ? "EasyNotepad " ENP_VERSION_FULL " (release, commit " ENP_COMMIT ")"
                                       : "EasyNotepad " ENP_VERSION_FULL " (development build)");
     registerLastItem("version", "text", "EasyNotepad " ENP_VERSION_FULL, nullptr);
 
@@ -712,7 +728,7 @@ float MainView::renderDocumentTabs(float x0, float x1, float y, float height)
             documentList_.requestMenu(i);
         }
         if (hovered && !dragging)
-            ImGui::SetItemTooltip("%s%s", doc.path.empty() ? doc.title.c_str() : doc.path.c_str(),
+            ui::itemTooltip("%s%s", doc.path.empty() ? doc.title.c_str() : doc.path.c_str(),
                                   doc.modified ? "\n(unsaved changes)" : "");
         if (active || dragging) {
             dl->AddRectFilled(min, max, palette_.ribbonBg, kRounding * s_, ImDrawFlags_RoundTop);
@@ -1313,7 +1329,7 @@ void MainView::renderSaveChangesPrompt()
         ImGui::IsKeyPressed(ImGuiKey_Enter))
         choice = Choice::Save;
     if (!inPlace)
-        ImGui::SetItemTooltip("Untitled: choose where to save it; it closes once saved");
+        ui::itemTooltip("Untitled: choose where to save it; it closes once saved");
     registerLastItem("dialog:save-changes:save", "button", "Save", [this]() { vm_.resolvePendingClose(Choice::Save); });
     ImGui::SameLine();
     if (ImGui::Button("Don't Save", ImVec2(110.0f * s_, 0.0f)))
@@ -1360,7 +1376,7 @@ void MainView::renderCloseFolderPrompt()
         choice = Choice::Save;
     ImGui::EndDisabled();
     if (!allSavable)
-        ImGui::SetItemTooltip("Untitled documents need Save As first");
+        ui::itemTooltip("Untitled documents need Save As first");
     registerLastItem("dialog:close-folder:save", "button", "Save All and Close", [this]() { vm_.resolveCloseFolder(Choice::Save); }, allSavable);
     ImGui::SameLine();
     if (ImGui::Button("Close Without Saving"))
@@ -1407,7 +1423,7 @@ void MainView::renderQuitPrompt()
         choice = Choice::Save;
     ImGui::EndDisabled();
     if (!allSavable)
-        ImGui::SetItemTooltip("Untitled documents need Save As first");
+        ui::itemTooltip("Untitled documents need Save As first");
     registerLastItem("dialog:quit:save", "button", "Save All and Quit", [this]() { vm_.resolveQuit(Choice::Save); }, allSavable);
     ImGui::SameLine();
     if (ImGui::Button("Quit Without Saving"))
@@ -1452,6 +1468,7 @@ void MainView::renderAllTabsPopup()
 float MainView::renderWindowButtons(float right, float y, float height)
 {
     // Minimize, maximize/restore and close, drawn as thin line glyphs like the OS caption buttons.
+    // No hints: at the window's edge they would hang outside it, and the glyphs say it all.
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float w = 46.0f * s_;
     const float g = 5.0f * s_; // glyph half-size
@@ -1474,7 +1491,6 @@ float MainView::renderWindowButtons(float right, float y, float height)
         const ImVec2 m(std::floor(x + w * 0.5f) + 0.5f, std::floor(y + height * 0.5f) + 0.5f);
         if (i == 0) {
             dl->AddLine(ImVec2(m.x - g, m.y), ImVec2(m.x + g, m.y), c, thickness);
-            ImGui::SetItemTooltip("Minimize");
             if (clicked)
                 frame_->minimize();
         } else if (i == 1) {
@@ -1488,13 +1504,11 @@ float MainView::renderWindowButtons(float right, float y, float height)
             } else {
                 dl->AddRect(ImVec2(m.x - g, m.y - g), ImVec2(m.x + g, m.y + g), c, 0.0f, thickness);
             }
-            ImGui::SetItemTooltip(maximized ? "Restore" : "Maximize");
             if (clicked)
                 frame_->toggleMaximize();
         } else {
             dl->AddLine(ImVec2(m.x - g, m.y - g), ImVec2(m.x + g, m.y + g), c, thickness);
             dl->AddLine(ImVec2(m.x - g, m.y + g), ImVec2(m.x + g, m.y - g), c, thickness);
-            ImGui::SetItemTooltip("Close");
             if (clicked)
                 vm_.requestQuit(); // unsaved documents are asked about first
         }
@@ -1541,7 +1555,7 @@ void MainView::renderWorkspaceSwitch()
     registerLastItem("workspace-switch", "button", std::string(commandInfo(current->command).label) + " workspace",
                      [this]() { vm_.execute(CommandId::ToggleWorkspaceMode); });
     if (iconHovered)
-        ImGui::SetTooltip("%s workspace: click for the next one (%s)", commandInfo(current->command).label,
+        ui::tooltip("%s workspace: click for the next one (%s)", commandInfo(current->command).label,
                           commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
     // The chevron, right against it: the list of workspaces.
     ImGui::SameLine(0.0f, 0.0f);
@@ -1551,7 +1565,7 @@ void MainView::renderWorkspaceSwitch()
     openWorkspaceMenu_ = false;
     registerLastItem("workspace-menu", "button", "Workspaces", [this]() { openWorkspaceMenu_ = true; });
     if (chevronHovered)
-        ImGui::SetTooltip("Workspaces");
+        ui::tooltip("Workspaces");
 
     // One rounded block, each half lit on its own when hovered.
     const ImVec2 end(at.x + size + chevronW, at.y + size);
@@ -1643,9 +1657,9 @@ void MainView::renderLayoutToggles()
                 dl->AddRectFilled(a, b, palette_.hover, 4.0f * s_);
             const viewmodel::CommandInfo& info = commandInfo(t.id);
             if (enabled)
-                ImGui::SetTooltip("%s (%s)", info.tooltip, info.shortcut);
+                ui::tooltip("%s (%s)", info.tooltip, info.shortcut);
             else
-                ImGui::SetTooltip("%s: in the Code workspace", info.tooltip);
+                ui::tooltip("%s: in the Code workspace", info.tooltip);
         }
         if (clicked && enabled)
             vm_.execute(t.id);
@@ -1878,7 +1892,7 @@ void MainView::renderEditors(ImVec2 size)
                 splitRatio_ = 0.5f; // halves again
                 vm_.settings().markDirty();
             }
-            ImGui::SetItemTooltip("Drag to resize the columns; double-click for halves");
+            ui::itemTooltip("Drag to resize the columns; double-click for halves");
             ImGui::SameLine(0.0f, 0.0f);
         }
         EditorView& view = c == 0 ? editor_ : second;
@@ -2255,7 +2269,7 @@ void MainView::renderPanelActions(float left, float right, float y, float height
                 vm_.showPanelTab(viewmodel::PanelTab::Terminal);
                 terminal.newTerminal(i);
             }
-            ImGui::SetItemTooltip("%s", shells[size_t(i)].command.c_str());
+            ui::itemTooltip("%s", shells[size_t(i)].command.c_str());
             ImGui::PopID();
         }
         ImGui::EndPopup();
@@ -2440,7 +2454,7 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
         const float w = ImGui::CalcTextSize(letter).x;
         dl->AddText(ImVec2(right - w, yc - ImGui::GetTextLineHeight() * 0.5f), gitColor, letter);
         if (rowHovered)
-            ImGui::SetTooltip("%s\n%s", item.path.c_str(), gitStatus == 'U' ? "Untracked: new, not in git yet" : gitStatus == 'A' ? "Added"
+            ui::tooltip("%s\n%s", item.path.c_str(), gitStatus == 'U' ? "Untracked: new, not in git yet" : gitStatus == 'A' ? "Added"
                                                        : gitStatus == 'D' ? "Deleted" : gitStatus == '!' ? "Merge conflict" : "Modified since the last commit");
         right -= w + 6.0f * s_;
     }
@@ -2464,7 +2478,7 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
         dl->AddText(ImVec2(nameX, textY), gitColor && !selected ? gitColor : openDoc || selected ? palette_.text : palette_.textDim,
                     name.c_str());
         if (name != item.name && rowHovered)
-            ImGui::SetTooltip("%s", item.path.c_str());
+            ui::tooltip("%s", item.path.c_str());
     }
     if (openDoc) {
         // On the right: a close button on hover, else the unsaved dot.
@@ -2483,7 +2497,7 @@ void MainView::renderExplorerItem(const viewmodel::ExplorerItem& item)
             const ImU32 color = closeHovered ? palette_.text : palette_.textFaint;
             dl->AddLine(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), color, 1.5f * s_);
             dl->AddLine(ImVec2(c.x - r, c.y + r), ImVec2(c.x + r, c.y - r), color, 1.5f * s_);
-            ImGui::SetItemTooltip("Close");
+            ui::itemTooltip("Close");
         } else if (openDoc->modified) {
             dl->AddCircleFilled(c, 3.5f * s_, palette_.accent);
         }
@@ -2579,7 +2593,7 @@ void MainView::renderExplorer()
                     ImGui::PushID(path.c_str());
                     if (ImGui::Selectable((ICON_FA_FOLDER "  " + path.substr(path.find_last_of('/') + 1)).c_str()))
                         vm_.openRecent(path);
-                    ImGui::SetItemTooltip("%s", path.c_str());
+                    ui::itemTooltip("%s", path.c_str());
                     ImGui::PopID();
                 }
             }
@@ -2833,7 +2847,7 @@ void MainView::renderStatusBar()
     ImGui::SetCursorScreenPos(bMin);
     if (ImGui::InvisibleButton("##modeBadge", ImVec2(bMax.x - bMin.x, bMax.y - bMin.y)))
         vm_.execute(CommandId::ToggleWorkspaceMode);
-    ImGui::SetItemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
+    ui::itemTooltip("Switch workspace (%s)", commandInfo(CommandId::ToggleWorkspaceMode).shortcut);
     dl->AddRectFilled(bMin, bMax, withAlpha(modeColor, ImGui::IsItemHovered() ? 70 : 40), 4.0f * s_);
     dl->AddText(ImVec2(bMin.x + 7.0f * s_, textY), modeColor, badge);
 
@@ -2851,7 +2865,7 @@ void MainView::renderStatusBar()
         ImGui::SetCursorScreenPos(gMin);
         if (ImGui::InvisibleButton("##branchChip", ImVec2(gMax.x - gMin.x, gMax.y - gMin.y)))
             gitView_.openBranchPicker(ImVec2(gMin.x, origin.y), true);
-        ImGui::SetItemTooltip("Branches: switch, create, merge");
+        ui::itemTooltip("Branches: switch, create, merge");
         registerLastItem("status:branch", "button", "Branches", [this]() { vm_.execute(CommandId::GitBranches); });
         if (ImGui::IsItemHovered())
             dl->AddRectFilled(gMin, gMax, palette_.hover);
@@ -2872,7 +2886,7 @@ void MainView::renderStatusBar()
         ImGui::SetCursorScreenPos(dMin);
         if (ImGui::InvisibleButton("##demoBadge", ImVec2(dMax.x - dMin.x, dMax.y - dMin.y)))
             vm_.execute(CommandId::GitGuide);
-        ImGui::SetItemTooltip(learning ? "Learn Git is running on made-up files and branches; your real project is not touched."
+        ui::itemTooltip(learning ? "Learn Git is running on made-up files and branches; your real project is not touched."
                                        : "No folder is open, so the Git views show made-up data. Click to learn git with it.");
         registerLastItem("status:demo", "button", "Demo data", [this]() { vm_.execute(CommandId::GitGuide); });
         dl->AddRectFilled(dMin, dMax, withAlpha(demoColor, ImGui::IsItemHovered() ? 70 : 40), 4.0f * s_);
@@ -2990,7 +3004,7 @@ void MainView::renderStatusBar()
         const float mouseX = ImGui::GetIO().MousePos.x;
         const bool rightHalf = mouseX > origin.x + width * 0.5f;
         ImGui::SetNextWindowPos(ImVec2(mouseX, origin.y - 4.0f * s_), ImGuiCond_Always, ImVec2(rightHalf ? 1.0f : 0.0f, 1.0f));
-        ImGui::SetTooltip("%s", text.c_str());
+        ui::tooltip("%s", text.c_str());
     };
 
     // Fit: drop the least important segments until the rest leave room for the badges and a
@@ -3160,10 +3174,14 @@ void MainView::renderPreferencesPopup()
     };
     ImGui::TextDisabled("APPEARANCE");
     toggle("Dark theme", vm_.darkTheme);
+    toggle("Enhanced UI", vm_.enhancedUi);
+    ui::itemTooltip("%s", "Hints without a box: glowing text. A glow under the button the pointer is on, as in a game.");
     float zoom = vm_.zoom.get() * 100.0f;
     ImGui::SetNextItemWidth(220.0f * s_);
     if (ImGui::SliderFloat("Editor zoom", &zoom, 50.0f, 300.0f, "%.0f%%"))
         vm_.zoom.set(std::round(zoom / 10.0f) / 10.0f);
+    ImGui::Spacing();
+    renderEnhancedUiSettings();
     ImGui::Spacing();
     ImGui::TextDisabled("EDITOR");
     toggle("Line numbers", vm_.showLineNumbers);
@@ -3174,7 +3192,7 @@ void MainView::renderPreferencesPopup()
     ImGui::Spacing();
     ImGui::TextDisabled("EXPLORER");
     toggle("Show hidden files and folders", vm_.showHiddenFiles);
-    ImGui::SetItemTooltip("%s", "Dot files and folders such as .github and .gitignore (and, on Windows, hidden ones). The .git folder never shows.");
+    ui::itemTooltip("%s", "Dot files and folders such as .github and .gitignore (and, on Windows, hidden ones). The .git folder never shows.");
     ImGui::Spacing();
     ImGui::TextDisabled("INDENTATION");
     {
@@ -3191,7 +3209,7 @@ void MainView::renderPreferencesPopup()
             default: vm_.setPreferredIndent(std::nullopt); break;
             }
         }
-        ImGui::SetItemTooltip("For new files and files with nothing indented yet; indented files keep their own style");
+        ui::itemTooltip("For new files and files with nothing indented yet; indented files keep their own style");
     }
     ImGui::Spacing();
     ImGui::TextDisabled("PERFORMANCE");
@@ -3206,7 +3224,7 @@ void MainView::renderPreferencesPopup()
         ImGui::SetNextItemWidth(220.0f * s_);
         if (ImGui::Combo("Max redraw rate", &current, labels, 4))
             vm_.maxFramesPerSecond.set(options[current]);
-        ImGui::SetItemTooltip("While something moves (typing, scrolling, a terminal program). When nothing changes the app does not redraw at all.");
+        ui::itemTooltip("While something moves (typing, scrolling, a terminal program). When nothing changes the app does not redraw at all.");
     }
     toggle("Blinking caret (off: an idle app does not redraw at all)", vm_.blinkCaret);
     ImGui::Spacing();
@@ -3222,7 +3240,7 @@ void MainView::renderPreferencesPopup()
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_SLIDERS "  IntelliSense..."))
         openIntellisenseSettings_ = true;
-    ImGui::SetItemTooltip("Suggestions, the model that writes code from comments (local or online), C/C++ standards and include folders");
+    ui::itemTooltip("Suggestions, the model that writes code from comments (local or online), C/C++ standards and include folders");
     ImGui::Spacing();
     ImGui::TextDisabled(vm_.settingsPath().empty() ? "Settings last for this session." : "Settings are saved automatically.");
     if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -3269,9 +3287,9 @@ void MainView::renderIntellisenseSettingsPopup()
 
     ImGui::TextDisabled("SUGGESTIONS");
     toggle("Suggest names while typing", is.autoComplete);
-    ImGui::SetItemTooltip("After two letters, \".\", \"->\" or \"::\". Ctrl+Space shows them anyway.");
+    ui::itemTooltip("After two letters, \".\", \"->\" or \"::\". Ctrl+Space shows them anyway.");
     toggle("Code suggestions from comments", is.aiSuggestions);
-    ImGui::SetItemTooltip("Write a comment saying what the code should do, then press Enter and wait a moment, or press "
+    ui::itemTooltip("Write a comment saying what the code should do, then press Enter and wait a moment, or press "
                           "Ctrl+Shift+Space. The model below writes the code; Enter or Tab inserts it, Esc stops it.");
 
     ImGui::Spacing();
@@ -3336,14 +3354,14 @@ void MainView::renderIntellisenseSettingsPopup()
         }
     };
     standardCombo("C++ standard", is.cppStandard, false);
-    ImGui::SetItemTooltip("Which library names and keywords are suggested in C++ files. From the project: CMAKE_CXX_STANDARD, "
+    ui::itemTooltip("Which library names and keywords are suggested in C++ files. From the project: CMAKE_CXX_STANDARD, "
                           "cxx_std_NN or -std=c++NN in CMakeLists.txt, meson.build or a Makefile; else C++17.");
     standardCombo("C standard", is.cStandard, true);
-    ImGui::SetItemTooltip("The same for .c files (CMAKE_C_STANDARD, c_std_NN, -std=cNN; else C17).");
+    ui::itemTooltip("The same for .c files (CMAKE_C_STANDARD, c_std_NN, -std=cNN; else C17).");
     ImGui::SetNextItemWidth(fieldW);
     if (ImGui::InputTextWithHint("Include folders", "include;src;third_party/lib/include", &editIncludeFolders_))
         is.includeFolders.set(editIncludeFolders_);
-    ImGui::SetItemTooltip("Workspace folders, separated by ';', where #include looks for headers (after the file's own "
+    ui::itemTooltip("Workspace folders, separated by ';', where #include looks for headers (after the file's own "
                           "folder; include/ and src/ are always tried). The names of included headers are suggested first, "
                           "and a name from a header that is not included says which #include it needs.");
 
@@ -3401,6 +3419,59 @@ const char* colorSample(model::Language language)
 
 } // namespace
 
+void MainView::renderEnhancedUiSettings()
+{
+    // The enhanced look's parameters: shown always, usable when it is on.
+    ImGui::TextDisabled("ENHANCED UI");
+    const bool on = vm_.enhancedUi.get();
+    ImGui::BeginDisabled(!on);
+    // `scale` shows the value as the user reads it (percent, milliseconds).
+    auto slider = [this](const char* label, viewmodel::Property<float>& property, float scale, float min, float max,
+                         const char* format, const char* tip) {
+        float value = property.get() * scale;
+        ImGui::SetNextItemWidth(220.0f * s_);
+        if (ImGui::SliderFloat(label, &value, min, max, format, ImGuiSliderFlags_AlwaysClamp))
+            property.set(value / scale);
+        ui::itemTooltip("%s", tip);
+    };
+    slider("Glow intensity", vm_.glowStrength, 100.0f, 0.0f, 200.0f, "%.0f%%", "How strong every glow is: hints, buttons and labels");
+    slider("Glow reach", vm_.glowReach, 1.0f, 4.0f, 24.0f, "%.0f px", "How far a hint's glow spreads from its text");
+    slider("Icon light", vm_.iconLight, 100.0f, 0.0f, 200.0f, "%.0f%%", "The light shining in an icon whose button is lit");
+    slider("Fade in", vm_.glowFadeIn, 1000.0f, 0.0f, 600.0f, "%.0f ms", "How long a control takes to light up under the pointer");
+    slider("Fade out", vm_.glowFadeOut, 1000.0f, 0.0f, 1500.0f, "%.0f ms", "How long it takes to go dark once the pointer leaves");
+    bool breathe = vm_.glowBreathes.get();
+    if (ImGui::Checkbox("Breathing glow", &breathe))
+        vm_.glowBreathes.set(breathe);
+    ui::itemTooltip("%s", "Glows swell and ebb slowly. The app redraws while something glows.");
+    ImGui::BeginDisabled(!breathe);
+    slider("Breath depth", vm_.breathDepth, 100.0f, 0.0f, 60.0f, "%.0f%%", "How much the glow swells and ebbs");
+    slider("Breath length", vm_.breathSeconds, 1.0f, 1.0f, 8.0f, "%.1f s", "One breath, in seconds");
+    ImGui::EndDisabled();
+    bool accent = vm_.glowColor.get() == 0;
+    if (ImGui::Checkbox("Glow in the theme's accent", &accent))
+        vm_.glowColor.set(accent ? 0 : int(palette_.accent | IM_COL32_A_MASK));
+    if (!accent) {
+        ImGui::SameLine();
+        ImVec4 color = ImGui::ColorConvertU32ToFloat4(ImU32(vm_.glowColor.get()));
+        if (ImGui::ColorEdit3("##glowColor", &color.x, ImGuiColorEditFlags_NoInputs))
+            vm_.glowColor.set(int(ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, 1.0f))));
+        ui::itemTooltip("%s", "The glows' colour");
+    }
+    if (ImGui::Button("Restore the defaults")) {
+        const ui::Effects defaults;
+        vm_.glowStrength.set(defaults.strength);
+        vm_.glowReach.set(defaults.reach);
+        vm_.iconLight.set(defaults.iconLight);
+        vm_.glowFadeIn.set(defaults.fadeIn);
+        vm_.glowFadeOut.set(defaults.fadeOut);
+        vm_.glowBreathes.set(defaults.breathe);
+        vm_.breathDepth.set(defaults.breathDepth);
+        vm_.breathSeconds.set(defaults.breathSeconds);
+        vm_.glowColor.set(int(defaults.color));
+    }
+    ImGui::EndDisabled();
+}
+
 void MainView::renderSyntaxColorsPopup()
 {
     if (openSyntaxColors_) {
@@ -3438,7 +3509,7 @@ void MainView::renderSyntaxColorsPopup()
             syntaxColorsLanguage_ = index;
         ImGui::PopID();
         if (custom)
-            ImGui::SetItemTooltip("Has custom colours");
+            ui::itemTooltip("Has custom colours");
     };
     languageRow(-1, ICON_FA_LAYER_GROUP "  All languages", viewmodel::NotepadViewModel::kAllLanguages);
     ImGui::Separator();

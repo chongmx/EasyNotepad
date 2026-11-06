@@ -2,6 +2,7 @@
 
 #include "enp/model/Language.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -116,7 +117,7 @@ int DocumentListView::render(const char* id, const std::string& filter, Options 
             dl->AddText(ImVec2(x + ImGui::CalcTextSize(doc.title.c_str()).x + 8.0f * s_, textY), palette_.textFaint, folder.c_str());
         dl->PopClipRect();
         if (hovered && !closeHovered)
-            ImGui::SetItemTooltip("%s%s", doc.path.empty() ? doc.title.c_str() : doc.path.c_str(), doc.modified ? "\n(unsaved changes)" : "");
+            ui::itemTooltip("%s%s", doc.path.empty() ? doc.title.c_str() : doc.path.c_str(), doc.modified ? "\n(unsaved changes)" : "");
         ImGui::SetCursorScreenPos(ImVec2(min.x, max.y));
         ImGui::PopID();
     }

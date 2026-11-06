@@ -412,6 +412,7 @@ add_library(enp_view STATIC
     src/view/ReviewPanel.cpp
     src/view/TerminalView.cpp
     src/view/UiAutomation.cpp
+    src/view/UiStyle.cpp
     src/view/LayersView.cpp
     src/view/MapView.cpp
     src/view/SyntaxColors.cpp

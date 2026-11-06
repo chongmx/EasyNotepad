@@ -64,6 +64,7 @@ CommandInfo makeInfo(CommandId id)
     case CommandId::ZoomOut: return {"Zoom Out", "Decrease the text size", "Ctrl+-"};
     case CommandId::ZoomReset: return {"100%", "Restore the default text size", "Ctrl+0"};
     case CommandId::ToggleTheme: return {"Theme", "Switch between dark and light theme", ""};
+    case CommandId::ToggleEnhancedUi: return {"Enhanced UI", "Glowing hints and a glow under the pointer, as in a game; off: plain hints", ""};
     case CommandId::SyntaxColors: return {"Colours", "Customize the syntax colours of every language", ""};
     case CommandId::ChooseLanguage: return {"Language", "Choose the document's language: colouring, folding and indentation", ""};
 
@@ -251,6 +252,7 @@ const char* commandKey(CommandId id)
     case CommandId::ZoomOut: return "ZoomOut";
     case CommandId::ZoomReset: return "ZoomReset";
     case CommandId::ToggleTheme: return "ToggleTheme";
+    case CommandId::ToggleEnhancedUi: return "ToggleEnhancedUi";
     case CommandId::SyntaxColors: return "SyntaxColors";
     case CommandId::ChooseLanguage: return "ChooseLanguage";
     case CommandId::DetailFull: return "DetailFull";

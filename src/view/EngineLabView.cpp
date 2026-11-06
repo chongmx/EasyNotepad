@@ -2,6 +2,7 @@
 
 #include "enp/view/Fit.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -128,7 +129,7 @@ void EngineLabView::render(bool fullScreen, ImVec2 areaMin, ImVec2 areaMax)
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_XMARK "##notice"))
             lab().clearNotice();
-        ImGui::SetItemTooltip("Dismiss");
+        ui::itemTooltip("Dismiss");
     }
     ImGui::Separator();
     ImGui::BeginChild("##lab-body", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
@@ -262,7 +263,7 @@ void EngineLabView::renderFile(Which which)
         if (lab().waitingForWifi()) {
             if (ImGui::Button(ICON_FA_SIGNAL "  Use mobile data"))
                 lab().useMobileData();
-            ImGui::SetItemTooltip("Start again on mobile data (asks first)");
+            ui::itemTooltip("Start again on mobile data (asks first)");
             registerLastItem(std::string("engine-lab:") + id + ":mobile-data", "button", "Use mobile data", [this]() { lab().useMobileData(); });
             fit::sameLineIfFitsButton("Stop download");
         }
@@ -292,7 +293,7 @@ void EngineLabView::renderFile(Which which)
             if (ImGui::Button(ICON_FA_FILE_IMPORT "  Import file..."))
                 lab().importFile(which);
             ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Pick the file (e.g. downloaded in the browser); it is copied into the app");
+            ui::itemTooltip("Pick the file (e.g. downloaded in the browser); it is copied into the app");
             registerLastItem(std::string("engine-lab:") + id + ":import", "button", "Import file",
                              [this, which]() { lab().importFile(which); }, !busy);
         }
@@ -341,7 +342,7 @@ void EngineLabView::renderRun()
         l.useGpu.set(gpu);
     ImGui::EndDisabled();
     if (!hasGpu && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("No GPU backend in this build yet.");
+        ui::tooltip("No GPU backend in this build yet.");
     int tokens = l.generateTokens.get();
     ImGui::SetNextItemWidth(fit::itemWidth(220.0f * s_, 120.0f * s_));
     if (ImGui::SliderInt("Tokens to generate", &tokens, 32, 512))

@@ -6,6 +6,25 @@ its release notes on GitHub.
 
 ## [1.2.0] - unreleased
 
+### Added
+- **Enhanced UI** (Preferences, or View > Theme): hints without a box, as translucent text with a glow
+  in its shape, and a glow around the button, tab or toggle under the pointer, as in a game.
+  The glow fades in and out and away from the control; a ribbon icon lights up from within (a
+  richer colour, a soft light behind it) and its name glows; the big workspace button lights only
+  its symbol and name. The glows breathe, swelling and ebbing slowly. Hints fade in, rising into
+  place. Preferences > Enhanced UI sets the glow's intensity, reach and colour, the icon light,
+  the fade times and the breathing.
+- Agents can rest the pointer on a control (`hover`) to see its hover effect and hint, without
+  moving the mouse.
+
+### Changed
+- Hints are a rounded, semi-transparent box without a border; a long hint wraps (about 55
+  characters a line). The minimize, maximize and close buttons have no hint.
+
+### Fixed
+- Hints opened from the ribbon (and other places without padding) had their text touching the
+  edges of a box too small for it.
+
 ## [1.1.0] - 2026-11-06
 
 ### Added

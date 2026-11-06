@@ -5,6 +5,7 @@
 #include "enp/model/Language.h"
 #include "enp/view/CodeGrid.h"
 #include "enp/view/MathView.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -141,7 +142,7 @@ private:
             dl_->AddText(st_.ui, small, ImVec2(x_ + pad, top + pad + lineH_), st_.palette->textFaint, detail.c_str());
             dl_->PopClipRect();
             if (!span.url.empty() && ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(a, b))
-                ImGui::SetTooltip("%s", span.url.c_str());
+                ui::tooltip("%s", span.url.c_str());
         }
         x_ = left_;
         y_ = top + h + 4.0f * st_.s;
@@ -646,7 +647,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                         ICON_FA_COPY);
             if (over) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                ImGui::SetTooltip("Copy");
+                ui::tooltip("Copy");
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                     ImGui::SetClipboardText(block.code.c_str());
             }
@@ -739,7 +740,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
             for (const LinkHit& hit : links)
                 if (ImGui::IsMouseHoveringRect(hit.min, hit.max)) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                    ImGui::SetTooltip("%s", hit.url.c_str());
+                    ui::tooltip("%s", hit.url.c_str());
                     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && ImGui::GetIO().MouseDragMaxDistanceSqr[0] < 16.0f && onLink)
                         onLink(hit.url);
                     break;

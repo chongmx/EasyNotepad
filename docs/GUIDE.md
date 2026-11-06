@@ -164,6 +164,13 @@ recolours keywords, strings, comments, keys, tags, columns and the rest, for all
 or for one language, separately for the dark and light themes, with a live preview. Your colours
 are saved in `settings.json` in the app's data folder.
 
+**Enhanced UI** (Preferences, or the wand in View > Theme) gives the app a game-like look: hints
+have no box, only translucent text with a glow in its shape, and the button, tab or toggle under the
+pointer glows, breathing slowly. Its section in Preferences sets the glow's intensity, how far it
+reaches and its colour, the light in icons, how fast controls light up and go dark, and the
+breathing (on or off, how deep, how long). Off, hints are a rounded, semi-transparent box
+without a border.
+
 ## A ribbon you can make your own
 
 Commands are organised in a flat ribbon (Home, Read, Edit, Review, View, Document, Tools; in the Agent
@@ -187,7 +194,7 @@ claude mcp add easynotepad -- "/path/to/EasyNotepad" --mcp
 ```
 
 The connector is a command-line program: `EasyNotepad --mcp`. Its tools include `get_state`,
-`list_elements`, `click`, `point`, `open_file`, `read_document`, `set_language`, `search_files`, `read_terminal`, `send_keys`, `read_outline`, `set_detail_level`,
+`list_elements`, `click`, `point`, `hover`, `open_file`, `read_document`, `set_language`, `search_files`, `read_terminal`, `send_keys`, `read_outline`, `set_detail_level`,
 `execute_command`, `type_text`, `run_in_terminal` and `screenshot`. `screenshot` returns a PNG of the app
 window as drawn now, whatever covers it on screen and even while it is minimized (the app draws the frame
 again off screen and reads it back; `path` also saves it). It talks to the running app over a local-only

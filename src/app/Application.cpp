@@ -4,6 +4,8 @@
 
 #include "enp/services/ImageEncoder.h"
 #include "enp/view/TouchScroll.h"
+#include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "enp/os/Fs.h"
 #include "enp/os/Memory.h"
@@ -273,6 +275,8 @@ bool Application::animating() const
     return vm.agent().busy.get() || vm.tourRunning() || vm.agentPointer.get().visible || view::touch::gliding() ||
            const_cast<viewmodel::NotepadViewModel&>(vm).logicalMap().analyzing.get() ||
            const_cast<viewmodel::NotepadViewModel&>(vm).findInFiles().running.get() || // its progress bar moves
+           view::UiAutomation::instance().hovering() || // the hover tool
+           view::ui::animating() ||                     // a hint or a glow fading
            trimFrames_ > 0 || lateTrimAt_ > 0.0;
 }
 

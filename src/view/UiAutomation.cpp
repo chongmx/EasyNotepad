@@ -1,8 +1,10 @@
 #include "enp/view/UiAutomation.h"
 
 #include "enp/os/Memory.h"
+#include "enp/view/UiStyle.h"
 
 #include <algorithm>
+#include <cfloat>
 
 namespace enp::view {
 
@@ -70,7 +72,27 @@ bool registerWindowClose(const std::string& id, const std::string& label)
     return true;
 }
 
-void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate, bool enabled)
+void UiAutomation::hover(ImVec2 at, double seconds)
+{
+    hoverAt_ = at;
+    hoverUntil_ = ImGui::GetTime() + std::max(0.1, seconds);
+}
+
+void UiAutomation::applyHover()
+{
+    if (hoverUntil_ <= 0.0)
+        return;
+    ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::GetTime() < hoverUntil_) {
+        io.AddMousePosEvent(hoverAt_.x, hoverAt_.y); // read at the next frame's start
+        return;
+    }
+    hoverUntil_ = 0.0;
+    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); // gone: until the real mouse moves
+}
+
+void registerLastItem(std::string id, std::string role, std::string label, std::function<void()> activate, bool enabled,
+                      bool boxGlow)
 {
     UiElement e;
     e.id = std::move(id);
@@ -80,6 +102,11 @@ void registerLastItem(std::string id, std::string role, std::string label, std::
     e.max = ImGui::GetItemRectMax();
     e.enabled = enabled;
     e.activate = std::move(activate);
+    // The enhanced UI lights the control under the pointer (ImGui knows it is this item, not one
+    // under a popup that covers it), fading in, and out once the pointer leaves.
+    if (boxGlow && ui::enhanced() && (e.role == "button" || e.role == "tab" || e.role == "toggle" || e.role == "checkbox"))
+        ui::hoverGlow(ImGui::GetWindowDrawList(), ImGui::GetItemID(), enabled && ImGui::IsItemHovered(), e.min, e.max,
+                      5.0f * ImGui::GetStyle().FontScaleDpi);
     UiAutomation::instance().add(std::move(e));
 }
 

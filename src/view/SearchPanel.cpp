@@ -1,6 +1,7 @@
 #include "enp/view/SearchPanel.h"
 
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
@@ -24,7 +25,7 @@ void SearchPanel::render()
     // Query row: replace toggle, query, options, include filter.
     if (ImGui::Button(showReplace_ ? ICON_FA_CHEVRON_DOWN : ICON_FA_CHEVRON_RIGHT))
         showReplace_ = !showReplace_;
-    ImGui::SetItemTooltip("Replace in files");
+    ui::itemTooltip("Replace in files");
     ImGui::SameLine();
     const float optionsW = 3.0f * (ImGui::GetFrameHeight() + 4.0f * s_);
     // Narrow (a phone): the file filter gets a line of its own under the query.
@@ -46,7 +47,7 @@ void SearchPanel::render()
             run = true;
         }
         ImGui::PopStyleColor();
-        ImGui::SetItemTooltip("%s", tip);
+        ui::itemTooltip("%s", tip);
         registerLastItem(id, "button", tip, [&value, this]() { value = !value; vm_.findInFiles().search(); });
     };
     toggle("Aa", "Match case", find.options.matchCase, "search:match-case");
@@ -72,7 +73,7 @@ void SearchPanel::render()
             find.folder.clear();
             run = !find.query.empty();
         }
-        ImGui::SetItemTooltip("Search every file again");
+        ui::itemTooltip("Search every file again");
         registerLastItem("search:folder-clear", "button", "Search every file", nullptr);
     }
     if (showReplace_) {

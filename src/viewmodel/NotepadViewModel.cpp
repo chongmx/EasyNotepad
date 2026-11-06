@@ -2061,6 +2061,16 @@ void NotepadViewModel::setSettingsPath(const std::string& path)
 void NotepadViewModel::bindSettings()
 {
     settings_.bind("view.darkTheme", darkTheme);
+    settings_.bind("view.enhancedUi", enhancedUi);
+    settings_.bind("enhancedUi.strength", glowStrength);
+    settings_.bind("enhancedUi.reach", glowReach);
+    settings_.bind("enhancedUi.iconLight", iconLight);
+    settings_.bind("enhancedUi.breathe", glowBreathes);
+    settings_.bind("enhancedUi.breathDepth", breathDepth);
+    settings_.bind("enhancedUi.breathSeconds", breathSeconds);
+    settings_.bind("enhancedUi.fadeIn", glowFadeIn);
+    settings_.bind("enhancedUi.fadeOut", glowFadeOut);
+    settings_.bind("enhancedUi.color", glowColor);
     settings_.bind("view.workspace", workspace);
     settings_.bind("view.showExplorer", showExplorer);
     settings_.bind("view.slimRibbon", slimRibbon);
