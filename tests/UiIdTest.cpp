@@ -991,6 +991,61 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // Hints stay inside the app's window, near its edges too (with multi-viewports a hint over the
+        // edge would become an OS window of its own, its transparent background black): every title
+        // bar control hovered, in both looks, its hint inside the display and on the main viewport.
+        for (const bool enhanced : {false, true}) {
+            h.setContext(enhanced ? "title bar hints (enhanced UI)" : "title bar hints");
+            const bool before = h.vm().enhancedUi.get();
+            h.vm().enhancedUi.set(enhanced);
+            h.settle();
+            std::vector<ImVec2> spots;
+            for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                if (e.max.y <= 60.0f && e.max.x > e.min.x)
+                    spots.push_back(ImVec2((e.min.x + e.max.x) * 0.5f, (e.min.y + e.max.y) * 0.5f));
+            for (const ImVec2& at : spots) {
+                for (int i = 0; i < 40; ++i) // past the hover delay
+                    h.frame(at);
+                for (const ImGuiWindow* w : GImGui->Windows) {
+                    if (!w->Active || !(w->Flags & ImGuiWindowFlags_Tooltip))
+                        continue;
+                    const bool inside = w->Pos.x >= -0.5f && w->Pos.y >= -0.5f && w->Pos.x + w->Size.x <= kWidth + 0.5f &&
+                                        w->Pos.y + w->Size.y <= kHeight + 0.5f;
+                    if (!inside || w->Viewport != ImGui::GetMainViewport())
+                        std::printf("  FAILED hint at (%.0f, %.0f) over the window's edge: (%.0f, %.0f) %.0f x %.0f (%s)\n", at.x, at.y, w->Pos.x,
+                                    w->Pos.y, w->Size.x, w->Size.y, enhanced ? "enhanced" : "plain"),
+                            ++checksFailed;
+                }
+            }
+            h.vm().enhancedUi.set(before);
+            h.settle();
+        }
+
+        // Preferences: its title bar's x closes it when clicked with the mouse, in the plain look and
+        // the enhanced one.
+        for (const bool enhanced : {false, true}) {
+            h.setContext(enhanced ? "preferences close button (enhanced UI)" : "preferences close button");
+            const bool before = h.vm().enhancedUi.get();
+            h.vm().enhancedUi.set(enhanced);
+            h.vm().execute(viewmodel::CommandId::Preferences);
+            h.settle();
+            h.settle();
+            const view::UiElement* close = view::UiAutomation::instance().find("dialog:preferences:close");
+            if (!close || !ImGui::IsPopupOpen("Preferences", ImGuiPopupFlags_AnyPopupId)) {
+                std::printf("  FAILED preferences did not open (%s)\n", enhanced ? "enhanced" : "plain"), ++checksFailed;
+            } else {
+                const ImVec2 at((close->min.x + close->max.x) * 0.5f, (close->min.y + close->max.y) * 0.5f);
+                h.click(at);
+                h.settle();
+                if (view::UiAutomation::instance().find("dialog:preferences:close"))
+                    std::printf("  FAILED preferences: a click on its x at (%.0f, %.0f) did not close it (%s)\n", at.x, at.y,
+                                enhanced ? "enhanced" : "plain"),
+                        ++checksFailed;
+            }
+            h.vm().enhancedUi.set(before);
+            h.settle();
+        }
+
         // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,
         // sheets and zoom gone through; everything it read and every picture it decoded must go
         // when it is opened as text, and when it closes.

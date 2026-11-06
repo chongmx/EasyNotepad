@@ -143,6 +143,8 @@ private:
     float s_;
     IWindowFrame* frame_;
     std::vector<ScreenRect> dragRegions_;
+    std::vector<ScreenRect> dragScratch_; // reused by publishDragRegions()
+    void publishDragRegions();
     Palette palette_;
     EmojiCache emoji_; // emoji pictures for rendered Markdown, shared by the editor and the agent chat
     RibbonView ribbon_;

@@ -214,6 +214,7 @@ void MainView::render()
         fx.fadeIn = vm_.glowFadeIn.get();
         fx.fadeOut = vm_.glowFadeOut.get();
         fx.color = ImU32(vm_.glowColor.get());
+        fx.hiddenHints = unsigned(vm_.hiddenHints.get());
         ui::configure(vm_.enhancedUi.get(), fx, palette_, s_);
     }
     emoji_.frame(ImGui::GetTime());
@@ -240,14 +241,26 @@ void MainView::render()
 
     handleShortcuts();
     if (layout_ != Layout::Desktop) {
-        renderCompactTopBar();
-        if (compactRibbon_)
+        {
+            ui::HintScope hints(ui::HintArea::TitleBar);
+            renderCompactTopBar();
+        }
+        if (compactRibbon_) {
+            ui::HintScope hints(ui::HintArea::Ribbon);
             ribbon_.render();
+        }
         const ImVec2 avail = ImGui::GetContentRegionAvail();
+        ui::HintScope hints(ui::HintArea::Panels); // the editor inside sets its own
         renderCompactScreen(avail);
     } else {
-    renderTopBar();
-    ribbon_.render();
+    {
+        ui::HintScope hints(ui::HintArea::TitleBar);
+        renderTopBar();
+    }
+    {
+        ui::HintScope hints(ui::HintArea::Ribbon);
+        ribbon_.render();
+    }
 
     const float statusH = kStatusBarHeight * s_;
     const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -257,13 +270,19 @@ void MainView::render()
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    if (vm_.workspace.get() == WorkspaceMode::Agent)
-        renderAgentWorkspace();
-    else
-        renderCodeWorkspace();
+    {
+        ui::HintScope hints(ui::HintArea::Panels); // the editor inside sets its own
+        if (vm_.workspace.get() == WorkspaceMode::Agent)
+            renderAgentWorkspace();
+        else
+            renderCodeWorkspace();
+    }
     map_.releaseIfMapGone(); // whichever view is shown: the closed folder's map layout goes with it
     ImGui::EndChild();
-    renderStatusBar();
+    {
+        ui::HintScope hints(ui::HintArea::StatusBar);
+        renderStatusBar();
+    }
     }
 
     renderGoToLinePopup();
@@ -285,12 +304,55 @@ void MainView::render()
     renderAboutPopup();
     renderShortcutsDialog();
     engineLab_.render(layout_ != Layout::Desktop, pos, ImVec2(pos.x + size.x, pos.y + size.y));
+    publishDragRegions();
     handleCaptionMouse();
     ImGui::End();
     UiAutomation::instance().endFrame();
     agentCursor_.render(); // on top of everything, using this frame's element positions
     if (layout_ != Layout::Desktop)
         keepWindowsOnScreen();
+}
+
+// Menus, dialogs and floating windows over the title bar take its clicks: what they cover is cut
+// out of the drag regions before they go to the window frame. Without this a dialog tall enough to
+// reach the title bar could not be closed: a press on its x there started a window drag instead.
+void MainView::publishDragRegions()
+{
+    const ImGuiWindow* host = ImGui::GetCurrentWindow();
+    const ImGuiContext& g = *GImGui;
+    for (const ImGuiWindow* w : g.Windows) {
+        if (!w->Active || w->Hidden || w == host || w->Viewport != host->Viewport ||
+            (w->Flags & (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_Tooltip)))
+            continue;
+        const ImVec2 a = w->Pos, b(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y);
+        dragScratch_.clear();
+        for (const ScreenRect& r : dragRegions_) {
+            if (b.x <= r.min.x || a.x >= r.max.x || b.y <= r.min.y || a.y >= r.max.y) {
+                dragScratch_.push_back(r); // not covered
+                continue;
+            }
+            // The parts of r around the window: above, below, left and right of it.
+            const float top = std::max(r.min.y, a.y), bottom = std::min(r.max.y, b.y);
+            if (a.y > r.min.y)
+                dragScratch_.push_back({r.min, ImVec2(r.max.x, a.y)});
+            if (b.y < r.max.y)
+                dragScratch_.push_back({ImVec2(r.min.x, b.y), r.max});
+            if (a.x > r.min.x)
+                dragScratch_.push_back({ImVec2(r.min.x, top), ImVec2(a.x, bottom)});
+            if (b.x < r.max.x)
+                dragScratch_.push_back({ImVec2(b.x, top), ImVec2(r.max.x, bottom)});
+        }
+        dragRegions_.swap(dragScratch_);
+    }
+    if (!frame_)
+        return;
+    const ImVec2 o = ImGui::GetMainViewport()->Pos;
+    dragScratch_.assign(dragRegions_.begin(), dragRegions_.end());
+    for (ScreenRect& r : dragScratch_) {
+        r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
+        r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
+    }
+    frame_->setDragRegions(dragScratch_);
 }
 
 // ---- Input --------------------------------------------------------------------------------------
@@ -565,16 +627,7 @@ void MainView::renderTopBar()
     // right-hand controls.
     dragRegions_.push_back({ImVec2(tabsX0, origin.y), ImVec2(tabsX1, origin.y + 5.0f * s_)});
     dragRegions_.push_back({ImVec2(tabsX1 + 4.0f * s_, origin.y), ImVec2(rightX - 4.0f * s_, origin.y + h)});
-    if (frame_)
-    {
-        const ImVec2 o = ImGui::GetMainViewport()->Pos;
-        std::vector<ScreenRect> local = dragRegions_;
-        for (ScreenRect& r : local) {
-            r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
-            r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
-        }
-        frame_->setDragRegions(local);
-    }
+    // Handed to the window frame at the end of the frame, without what popups cover (publishDragRegions).
 
     ImGui::SetCursorScreenPos(ImVec2(rightX, y));
     renderLayoutToggles();
@@ -951,15 +1004,7 @@ void MainView::renderCompactTopBar()
         openAllTabs_ = false;
     }
     renderAllTabsPopup(); // (in this ID scope, where it is opened)
-    if (frame_) {
-        const ImVec2 o = ImGui::GetMainViewport()->Pos;
-        std::vector<ScreenRect> local = dragRegions_;
-        for (ScreenRect& r : local) {
-            r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
-            r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
-        }
-        frame_->setDragRegions(local);
-    }
+    // Handed to the window frame at the end of the frame, without what popups cover (publishDragRegions).
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(width, h));
     ImGui::PopID();
@@ -998,14 +1043,16 @@ void MainView::renderCompactScreen(ImVec2 size)
         renderExplorer();
         endPanel();
         break;
-    case Screen::Editor:
+    case Screen::Editor: {
         beginPanel("##editorPanel", nullptr, inner);
+        ui::HintScope editorHints(ui::HintArea::Editor);
         if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
             map_.render(ImGui::GetContentRegionAvail());
         else
             editor_.render(ImGui::GetContentRegionAvail());
         endPanel();
         break;
+    }
     case Screen::Agent: {
         const char* busy = vm_.agent().busy.get() ? "working..." : nullptr;
         beginPanel("##agentSide", ICON_FA_ROBOT "  Agent", inner, busy);
@@ -2001,10 +2048,12 @@ void MainView::renderCodeWorkspace()
     const float sideW = side ? agentSideWidth_ + gap : 0.0f;
     const float editorW = std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - sideW);
     beginPanel("##editorPanel", nullptr, ImVec2(editorW, topH));
-    if (vm_.editorMode.get() == viewmodel::EditorMode::Map) {
-        map_.render(ImGui::GetContentRegionAvail());
-    } else {
-        renderEditors(ImGui::GetContentRegionAvail());
+    {
+        ui::HintScope hints(ui::HintArea::Editor);
+        if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
+            map_.render(ImGui::GetContentRegionAvail());
+        else
+            renderEditors(ImGui::GetContentRegionAvail());
     }
     endPanel();
     if (side) {
@@ -3470,6 +3519,17 @@ void MainView::renderEnhancedUiSettings()
         vm_.glowColor.set(int(defaults.color));
     }
     ImGui::EndDisabled();
+    // Floating hints, area by area (in both looks, so usable with the enhanced UI off too).
+    ImGui::Spacing();
+    ImGui::TextDisabled("Floating hints in:");
+    const unsigned hidden = unsigned(vm_.hiddenHints.get());
+    for (unsigned a = 0; a < unsigned(ui::HintArea::Count); ++a) {
+        bool shown = ((hidden >> a) & 1u) == 0;
+        if (a % 2 == 1)
+            ImGui::SameLine(230.0f * s_);
+        if (ImGui::Checkbox(ui::hintAreaName(ui::HintArea(a)), &shown))
+            vm_.hiddenHints.set(int(shown ? hidden & ~(1u << a) : hidden | (1u << a)));
+    }
 }
 
 void MainView::renderSyntaxColorsPopup()

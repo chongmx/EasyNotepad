@@ -2089,6 +2089,7 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.enhancedUi", enhancedUi);
     settings_.bind("enhancedUi.strength", glowStrength);
     settings_.bind("enhancedUi.reach", glowReach);
+    settings_.bind("enhancedUi.hiddenHints", hiddenHints);
     settings_.bind("enhancedUi.iconLight", iconLight);
     settings_.bind("enhancedUi.breathe", glowBreathes);
     settings_.bind("enhancedUi.breathDepth", breathDepth);

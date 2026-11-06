@@ -105,6 +105,7 @@ public:
     // The enhanced UI's parameters (Preferences > Enhanced UI; view/UiStyle.h's Effects).
     Property<float> glowStrength{1.0f};   // every glow's intensity, 0..2
     Property<float> glowReach{12.0f};     // how far a hint's glow reaches, pixels at 100%
+    Property<int> hiddenHints{0};         // a bit per area (view/UiStyle.h HintArea): no floating hints there
     Property<float> iconLight{1.0f};      // the light in a lit icon, 0..2
     Property<bool> glowBreathes{true};    // glows swell and ebb slowly
     Property<float> breathDepth{0.25f};   // by this share of their intensity

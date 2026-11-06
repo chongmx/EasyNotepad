@@ -3,6 +3,7 @@
 #include "enp/os/Memory.h"
 #include "enp/view/PanelFrame.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 
@@ -233,7 +234,7 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
             at += std::size_t(std::snprintf(label_ + at, sizeof(label_) - at, "%s%s", i ? ", " : "", d.notShown[i].c_str()));
         ImGui::SameLine();
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconOrange), ICON_FA_CIRCLE_INFO);
-        ImGui::SetItemTooltip("%s", label_);
+        ui::itemTooltip("%s", label_);
     }
     const float button = ImGui::CalcTextSize(ICON_FA_FILE_LINES "  Open as text").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     ImGui::SameLine(std::max(ImGui::GetCursorPosX(), width - button + ImGui::GetStyle().WindowPadding.x));
