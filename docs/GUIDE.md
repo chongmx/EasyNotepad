@@ -166,7 +166,10 @@ are saved in `settings.json` in the app's data folder.
 
 **Enhanced UI** (Preferences, or the wand in View > Theme) gives the app a game-like look: hints
 have no box, only translucent text with a glow in its shape, and the button, tab or toggle under the
-pointer glows. Off, hints are a rounded, semi-transparent box without a border.
+pointer glows, breathing slowly. Its section in Preferences sets the glow's intensity, how far it
+reaches and its colour, the light in icons, how fast controls light up and go dark, and the
+breathing (on or off, how deep, how long). Off, hints are a rounded, semi-transparent box
+without a border.
 
 ## A ribbon you can make your own
 

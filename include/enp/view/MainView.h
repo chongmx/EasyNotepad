@@ -115,6 +115,7 @@ private:
     void renderGoToLinePopup();
     void renderCommentPopup();
     void renderPreferencesPopup();
+    void renderEnhancedUiSettings(); // a section of Preferences
     void renderSyntaxColorsPopup();
     // IntelliSense: suggestions, the model for code suggestions (local or online), the C and C++
     // standards and include folders.

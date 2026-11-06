@@ -202,7 +202,20 @@ void MainView::render()
 {
     UiAutomation::instance().beginFrame();
     UiAutomation::instance().applyHover();
-    ui::configure(vm_.enhancedUi.get(), palette_, s_); // the look of hints and hover for this frame
+    {
+        // The look of hints and hover for this frame.
+        ui::Effects fx;
+        fx.strength = vm_.glowStrength.get();
+        fx.reach = vm_.glowReach.get();
+        fx.iconLight = vm_.iconLight.get();
+        fx.breathe = vm_.glowBreathes.get();
+        fx.breathDepth = vm_.breathDepth.get();
+        fx.breathSeconds = vm_.breathSeconds.get();
+        fx.fadeIn = vm_.glowFadeIn.get();
+        fx.fadeOut = vm_.glowFadeOut.get();
+        fx.color = ImU32(vm_.glowColor.get());
+        ui::configure(vm_.enhancedUi.get(), fx, palette_, s_);
+    }
     emoji_.frame(ImGui::GetTime());
     touch::update(s_); // a finger drags content (before the UI: it may cancel the press)
     terminalView_.setBlinkCursor(vm_.blinkCaret.get());
@@ -3168,6 +3181,8 @@ void MainView::renderPreferencesPopup()
     if (ImGui::SliderFloat("Editor zoom", &zoom, 50.0f, 300.0f, "%.0f%%"))
         vm_.zoom.set(std::round(zoom / 10.0f) / 10.0f);
     ImGui::Spacing();
+    renderEnhancedUiSettings();
+    ImGui::Spacing();
     ImGui::TextDisabled("EDITOR");
     toggle("Line numbers", vm_.showLineNumbers);
     toggle("Indent guides", vm_.showIndentGuides);
@@ -3403,6 +3418,59 @@ const char* colorSample(model::Language language)
 }
 
 } // namespace
+
+void MainView::renderEnhancedUiSettings()
+{
+    // The enhanced look's parameters: shown always, usable when it is on.
+    ImGui::TextDisabled("ENHANCED UI");
+    const bool on = vm_.enhancedUi.get();
+    ImGui::BeginDisabled(!on);
+    // `scale` shows the value as the user reads it (percent, milliseconds).
+    auto slider = [this](const char* label, viewmodel::Property<float>& property, float scale, float min, float max,
+                         const char* format, const char* tip) {
+        float value = property.get() * scale;
+        ImGui::SetNextItemWidth(220.0f * s_);
+        if (ImGui::SliderFloat(label, &value, min, max, format, ImGuiSliderFlags_AlwaysClamp))
+            property.set(value / scale);
+        ui::itemTooltip("%s", tip);
+    };
+    slider("Glow intensity", vm_.glowStrength, 100.0f, 0.0f, 200.0f, "%.0f%%", "How strong every glow is: hints, buttons and labels");
+    slider("Glow reach", vm_.glowReach, 1.0f, 4.0f, 24.0f, "%.0f px", "How far a hint's glow spreads from its text");
+    slider("Icon light", vm_.iconLight, 100.0f, 0.0f, 200.0f, "%.0f%%", "The light shining in an icon whose button is lit");
+    slider("Fade in", vm_.glowFadeIn, 1000.0f, 0.0f, 600.0f, "%.0f ms", "How long a control takes to light up under the pointer");
+    slider("Fade out", vm_.glowFadeOut, 1000.0f, 0.0f, 1500.0f, "%.0f ms", "How long it takes to go dark once the pointer leaves");
+    bool breathe = vm_.glowBreathes.get();
+    if (ImGui::Checkbox("Breathing glow", &breathe))
+        vm_.glowBreathes.set(breathe);
+    ui::itemTooltip("%s", "Glows swell and ebb slowly. The app redraws while something glows.");
+    ImGui::BeginDisabled(!breathe);
+    slider("Breath depth", vm_.breathDepth, 100.0f, 0.0f, 60.0f, "%.0f%%", "How much the glow swells and ebbs");
+    slider("Breath length", vm_.breathSeconds, 1.0f, 1.0f, 8.0f, "%.1f s", "One breath, in seconds");
+    ImGui::EndDisabled();
+    bool accent = vm_.glowColor.get() == 0;
+    if (ImGui::Checkbox("Glow in the theme's accent", &accent))
+        vm_.glowColor.set(accent ? 0 : int(palette_.accent | IM_COL32_A_MASK));
+    if (!accent) {
+        ImGui::SameLine();
+        ImVec4 color = ImGui::ColorConvertU32ToFloat4(ImU32(vm_.glowColor.get()));
+        if (ImGui::ColorEdit3("##glowColor", &color.x, ImGuiColorEditFlags_NoInputs))
+            vm_.glowColor.set(int(ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, 1.0f))));
+        ui::itemTooltip("%s", "The glows' colour");
+    }
+    if (ImGui::Button("Restore the defaults")) {
+        const ui::Effects defaults;
+        vm_.glowStrength.set(defaults.strength);
+        vm_.glowReach.set(defaults.reach);
+        vm_.iconLight.set(defaults.iconLight);
+        vm_.glowFadeIn.set(defaults.fadeIn);
+        vm_.glowFadeOut.set(defaults.fadeOut);
+        vm_.glowBreathes.set(defaults.breathe);
+        vm_.breathDepth.set(defaults.breathDepth);
+        vm_.breathSeconds.set(defaults.breathSeconds);
+        vm_.glowColor.set(int(defaults.color));
+    }
+    ImGui::EndDisabled();
+}
 
 void MainView::renderSyntaxColorsPopup()
 {

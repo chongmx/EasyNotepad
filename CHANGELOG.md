@@ -11,7 +11,9 @@ its release notes on GitHub.
   in its shape, and a glow around the button, tab or toggle under the pointer, as in a game.
   The glow fades in and out and away from the control; a ribbon icon lights up from within (a
   richer colour, a soft light behind it) and its name glows; the big workspace button lights only
-  its symbol and name. Hints fade in, rising into place.
+  its symbol and name. The glows breathe, swelling and ebbing slowly. Hints fade in, rising into
+  place. Preferences > Enhanced UI sets the glow's intensity, reach and colour, the icon light,
+  the fade times and the breathing.
 - Agents can rest the pointer on a control (`hover`) to see its hover effect and hint, without
   moving the mouse.
 

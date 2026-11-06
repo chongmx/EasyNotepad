@@ -18,14 +18,15 @@ struct Look {
     float s = 1.0f;
     ImU32 box = IM_COL32(37, 41, 47, 224); // the normal hint's box
     ImU32 glow = IM_COL32(59, 130, 246, 255);
+    Effects fx;
+    float breath = 1.0f; // this frame's share of the glows' intensity: 1 - depth .. 1 + depth
+    float pulse = 1.0f;  // strength x breath: what every glow's alpha is multiplied by
 };
 Look look;
 
-// Fades, in seconds.
-constexpr float kLightIn = 0.12f;
-constexpr float kLightOut = 0.28f;
+// The hint's fade in, in seconds, and its width in ems (wider hints wrap).
 constexpr float kHintIn = 0.14f;
-constexpr float kHintWidth = 26.0f; // in ems: wider hints wrap
+constexpr float kHintWidth = 26.0f;
 
 // How lit a control is: a fixed set of slots (no allocation per frame), one per control that is
 // lit or fading; a control gone from the screen frees its slot.
@@ -96,7 +97,8 @@ float updateLight(ImGuiID id, bool hovered)
             return 0.0f;
     }
     if (light->frame != frame) {
-        light->progress = std::clamp(light->progress + (hovered ? step() / kLightIn : -step() / kLightOut), 0.0f, 1.0f);
+        const float seconds = std::max(0.01f, hovered ? look.fx.fadeIn : look.fx.fadeOut);
+        light->progress = std::clamp(light->progress + (hovered ? step() : -step()) / seconds, 0.0f, 1.0f);
         light->frame = frame;
         light->hovered = hovered;
     }
@@ -163,20 +165,63 @@ void copyUnder(ImDrawList* dl, int first, int count, unsigned vtxOffset, ImVec2 
         dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
 }
 
+// Whether the content [first, first + count) is quads of four vertices, each an upright rectangle:
+// glyphs (and plain rectangles), which copyGrown can enlarge.
+bool allQuads(const ImDrawList* dl, int first, int count)
+{
+    if (count % 4 != 0)
+        return false;
+    for (int q = first; q < first + count; q += 4) {
+        const ImDrawVert* v = dl->VtxBuffer.Data + q;
+        if (v[0].pos.y != v[1].pos.y || v[2].pos.y != v[3].pos.y || v[0].pos.x != v[3].pos.x || v[1].pos.x != v[2].pos.x)
+            return false;
+    }
+    return true;
+}
+
+// As copyUnder, with every quad grown by `grow` pixels on each side and its texture stretched over
+// it: a glyph becomes a larger, softer version of itself (the texture is filtered), with no grain.
+void copyGrown(ImDrawList* dl, int first, int count, unsigned vtxOffset, float grow, ImU32 color)
+{
+    dl->PrimReserve(indices.Size, count);
+    const unsigned base = dl->_VtxCurrentIdx;
+    const float alpha = float((color >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f;
+    for (int q = 0; q < count; q += 4) {
+        ImDrawVert quad[4];
+        for (int k = 0; k < 4; ++k)
+            quad[k] = dl->VtxBuffer.Data[first + q + k];
+        const float cx = (quad[0].pos.x + quad[1].pos.x) * 0.5f, cy = (quad[0].pos.y + quad[2].pos.y) * 0.5f;
+        for (const ImDrawVert& v : quad) {
+            const float a = float((v.col >> IM_COL32_A_SHIFT) & 0xFF) * alpha;
+            dl->PrimWriteVtx(ImVec2(v.pos.x + (v.pos.x < cx ? -grow : grow), v.pos.y + (v.pos.y < cy ? -grow : grow)), v.uv,
+                             (color & ~IM_COL32_A_MASK) | (ImU32(a + 0.5f) << IM_COL32_A_SHIFT));
+        }
+    }
+    for (const ImDrawIdx i : indices)
+        dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
+}
+
 // The enhanced hint: the content (channel 1) a little translucent; under it (channel 0) a glow in
-// the accent, no outline: blurs of the glyphs, drawn as copies of them spread over a disc (a
-// sunflower pattern, so no direction has a gap) with Gaussian weights, which add up to the text's
-// shape fading outwards. Content that is not one draw command
-// (an image, a clipped child), or too much of it, gets the normal box instead.
+// the accent, no outline, in three layers. Far out, the glyphs grown larger and larger, fainter
+// and fainter (smooth: each is its glyph stretched). Closer in, blurs of the glyphs: copies spread
+// over a disc (a sunflower pattern, so no direction has a gap) with Gaussian weights. Together they
+// keep the text's shape and fade outwards. Content that is not one draw command (an image, a
+// clipped child), or too much of it, gets the normal box instead.
 void glowContent(ImDrawList* dl, int first)
 {
     constexpr int kInner = 16;      // copies of the close glow
     constexpr int kMaxGlow = 40;    // copies of the wide glow
     constexpr int kMinGlow = 12;    // fewer looks grainy: a box instead
     constexpr float kSpread = 6.0f; // the wide glow's radius, in pixels at 100%
+    // The far glow: glyphs grown by these shares of the reach, at these strengths.
+    static constexpr float kGrow[] = {0.25f, 0.46f, 0.71f, 1.0f}; // shares of the reach
+    static constexpr float kGrowAlpha[] = {0.10f, 0.07f, 0.045f, 0.025f};
+    constexpr int kFarLayers = int(sizeof(kGrow) / sizeof(kGrow[0]));
     const int count = dl->VtxBuffer.Size - first;
     // One draw list holds at most 64K vertices: a long hint gets fewer copies.
-    const int glowCopies = count > 0 ? std::min(kMaxGlow, 60000 / count - 1 - kInner) : 0;
+    const int budget = count > 0 ? 60000 / count - 1 - kInner - kFarLayers : 0;
+    const int glowCopies = std::min(kMaxGlow, budget);
+    const bool far = allQuads(dl, first, count);
     int commands = 0;
     unsigned vtxOffset = 0;
     for (const ImDrawCmd& c : dl->CmdBuffer)
@@ -198,23 +243,28 @@ void glowContent(ImDrawList* dl, int first)
     dl->ChannelsSetCurrent(0);
     if (glow) {
         const float s = look.s, spread = kSpread * s;
-        // The glow reaches past the content's clip rect (half the padding): clip to the window.
+        // The glow reaches past the content's clip rect (half the padding) and past the window: its
+        // faint end is clipped only well away from the text.
         const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
-        dl->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), false);
+        const float reach = std::max(2.0f, look.fx.reach) * s, margin = reach;
+        dl->PushClipRect(ImVec2(pos.x - margin, pos.y - margin), ImVec2(pos.x + size.x + margin, pos.y + size.y + margin), false);
         constexpr float kGolden = 2.39996323f; // radians between neighbours in a sunflower
-        // Two layers of glow in the accent, both blurs of the glyphs: a wide soft one, and a close,
-        // denser one that sets the text off from what lies under it.
-        auto blur = [&](int copies, float radius, float strength) {
-            const float sig = radius * 0.42f;
+        // Outermost first: the far glow, a wide soft blur, and a close, denser one that sets the text
+        // off from what lies under it.
+        if (far)
+            for (int i = kFarLayers - 1; i >= 0; --i)
+                copyGrown(dl, first, count, vtxOffset, kGrow[i] * reach, withAlpha(look.glow, kGrowAlpha[i] * look.pulse));
+        auto blur = [&](int copies, float radius, float strength, float softness) {
+            const float sig = radius * softness;
             for (int i = 0; i < copies; ++i) {
                 const float r = radius * std::sqrt((float(i) + 0.5f) / float(copies));
                 const float a = float(i) * kGolden;
                 const float weight = std::exp(-0.5f * (r / sig) * (r / sig));
-                copyUnder(dl, first, count, vtxOffset, ImVec2(std::cos(a) * r, std::sin(a) * r), withAlpha(look.glow, strength * weight));
+                copyUnder(dl, first, count, vtxOffset, ImVec2(std::cos(a) * r, std::sin(a) * r), withAlpha(look.glow, strength * look.pulse * weight));
             }
         };
-        blur(glowCopies, spread, 0.09f);
-        blur(kInner, 2.2f * s, 0.16f);
+        blur(glowCopies, spread, 0.09f, 0.42f);
+        blur(kInner, 2.2f * s, 0.16f, 0.42f);
         dl->PopClipRect();
     } else {
         const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
@@ -248,13 +298,21 @@ void textTooltip(ImGuiTooltipFlags flags, const char* fmt, va_list args)
 
 } // namespace
 
-void configure(bool enhanced, const Palette& palette, float scale)
+void configure(bool enhanced, const Effects& effects, const Palette& palette, float scale)
 {
     look.enhanced = enhanced;
     look.s = scale;
+    look.fx = effects;
     const ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_PopupBg];
     look.box = ImGui::GetColorU32(ImVec4(bg.x, bg.y, bg.z, 0.88f));
-    look.glow = palette.accent;
+    look.glow = effects.color != 0 ? (effects.color | IM_COL32_A_MASK) : palette.accent;
+    // Breathing: the glows swell and ebb on a slow sine.
+    look.breath = 1.0f;
+    if (effects.breathe && effects.breathDepth > 0.0f) {
+        const double phase = ImGui::GetTime() * 6.283185307 / std::max(0.5, double(effects.breathSeconds));
+        look.breath = 1.0f + std::clamp(effects.breathDepth, 0.0f, 1.0f) * float(std::sin(phase));
+    }
+    look.pulse = std::max(0.0f, effects.strength) * look.breath;
 }
 
 bool enhanced() { return look.enhanced; }
@@ -264,8 +322,13 @@ bool animating()
     const int frame = ImGui::GetFrameCount();
     if (hintFade < 1.0f && hintFrame >= frame - 1)
         return true;
+    // A breathing glow on screen (a hint, or a control lit or fading) needs every frame.
+    const bool breathing = look.enhanced && look.fx.breathe && look.fx.breathDepth > 0.0f;
+    if (breathing && hintFrame >= frame - 1)
+        return true;
     for (const Light& l : lights)
-        if (l.id != 0 && l.frame >= frame - 1 && (l.hovered ? l.progress < 1.0f : l.progress > 0.0f))
+        if (l.id != 0 && l.frame >= frame - 1 && (breathing ? l.progress > 0.0f || l.hovered
+                                                            : l.hovered ? l.progress < 1.0f : l.progress > 0.0f))
             return true;
     return false;
 }
@@ -324,16 +387,16 @@ void hoverGlow(ImDrawList* dl, ImGuiID id, bool hovered, ImVec2 min, ImVec2 max,
     for (int i = kRings; i >= 1; --i) {
         const float g = float(i) * s;
         const float t = 1.0f - (float(i) - 0.5f) / float(kRings);
-        dl->AddRect(ImVec2(min.x - g, min.y - g), ImVec2(max.x + g, max.y + g), withAlpha(look.glow, amount * 0.30f * t * t),
+        dl->AddRect(ImVec2(min.x - g, min.y - g), ImVec2(max.x + g, max.y + g), withAlpha(look.glow, amount * look.pulse * 0.30f * t * t),
                     rounding + g, 1.0f * s);
     }
-    dl->AddRectFilled(min, max, withAlpha(look.glow, amount * 0.10f), rounding);
+    dl->AddRectFilled(min, max, withAlpha(look.glow, amount * look.pulse * 0.10f), rounding);
     const float inset = rounding * 0.6f, mid = (min.y + max.y) * 0.5f;
     if (max.x - min.x > inset * 2.0f)
         dl->AddRectFilledMultiColor(ImVec2(min.x + inset, min.y + 1.0f * s), ImVec2(max.x - inset, mid),
                                     IM_COL32(255, 255, 255, int(amount * 22.0f)), IM_COL32(255, 255, 255, int(amount * 22.0f)),
                                     IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
-    dl->AddRect(min, max, withAlpha(look.glow, amount * 0.85f), rounding, 1.2f * s);
+    dl->AddRect(min, max, withAlpha(look.glow, amount * std::min(1.0f, look.pulse) * 0.85f), rounding, 1.2f * s);
 }
 
 float hoverLight(ImGuiID id, bool hovered) { return look.enhanced ? updateLight(id, hovered) : 0.0f; }
@@ -350,7 +413,7 @@ void textGlow(ImDrawList* dl, ImVec2 pos, const char* text, float amount)
         const float r = spread * std::sqrt((float(i) + 0.5f) / float(kCopies));
         const float a = float(i) * kGolden;
         const float weight = std::exp(-0.5f * (r / sigma) * (r / sigma));
-        dl->AddText(ImVec2(pos.x + std::cos(a) * r, pos.y + std::sin(a) * r), withAlpha(look.glow, amount * 0.11f * weight), text);
+        dl->AddText(ImVec2(pos.x + std::cos(a) * r, pos.y + std::sin(a) * r), withAlpha(look.glow, amount * look.pulse * 0.11f * weight), text);
     }
 }
 
@@ -364,6 +427,7 @@ float light(ImGuiID id)
 
 ImU32 lit(ImU32 tint, float amount)
 {
+    amount *= std::max(0.0f, look.fx.iconLight) * look.breath;
     if (amount <= 0.0f)
         return tint;
     const ImVec4 c = ImGui::ColorConvertU32ToFloat4(tint);
@@ -383,9 +447,11 @@ void iconLight(ImDrawList* dl, ImVec2 center, float radius, ImU32 tint, float am
     // Discs of the icon's colour, smaller and smaller: their overlaps make a light that is brightest
     // in the middle and fades to nothing at `radius`.
     constexpr int kDiscs = 8;
+    const ImU32 color = lit(tint, amount);
+    const float alpha = amount * std::max(0.0f, look.fx.iconLight) * look.breath * 0.045f;
     for (int i = 0; i < kDiscs; ++i) {
         const float r = radius * (1.0f - float(i) / float(kDiscs));
-        dl->AddCircleFilled(center, r, withAlpha(lit(tint, amount), amount * 0.045f), 32);
+        dl->AddCircleFilled(center, r, withAlpha(color, alpha), 32);
     }
 }
 
