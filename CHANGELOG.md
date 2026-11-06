@@ -4,6 +4,8 @@ What changed in each release of EasyNotepad. The version is in the `VERSION` fil
 [docs/RELEASING.md](docs/RELEASING.md) for how a release is made. The section of a release is
 its release notes on GitHub.
 
+## [1.2.0] - unreleased
+
 ## [1.1.0] - 2026-11-06
 
 ### Added
