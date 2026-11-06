@@ -391,8 +391,8 @@ void NotepadViewModel::initCommands()
 
     set(C::SwitchToAgentMode, [this]() { workspace.set(WorkspaceMode::Agent); });
     set(C::SwitchToCodeMode, [this]() { workspace.set(WorkspaceMode::Code); });
-    set(C::ToggleWorkspaceMode, [this]() {
-        workspace.set(workspace.get() == WorkspaceMode::Agent ? WorkspaceMode::Code : WorkspaceMode::Agent);
+    set(C::ToggleWorkspaceMode, [this]() { // the next workspace (with two: the other one)
+        workspace.set(WorkspaceMode((int(workspace.get()) + 1) % kWorkspaceModeCount));
     });
 
     set(C::StartRecording, [this]() {

@@ -74,6 +74,14 @@ private:
     // Returns the right edge of the last tab (including the "+" button).
     float renderDocumentTabs(float x0, float x1, float y, float height);
     float renderWindowButtons(float right, float y, float height); // returns the left edge
+    // VS Code's layout buttons: a window outline with its left, bottom or right pane filled while
+    // that pane is shown. Toggles the explorer, the bottom panel and the agent panel.
+    void renderLayoutToggles();
+    float layoutTogglesWidth() const;
+    // The current workspace's icon (a click goes on to the next workspace) and, right against it,
+    // a chevron opening the list of workspaces.
+    void renderWorkspaceSwitch();
+    float workspaceChevronWidth() const;
     void handleCaptionMouse();
     void renderCodeWorkspace();
     void renderAgentWorkspace();
@@ -233,6 +241,7 @@ private:
     std::string shortcutsNeedle_; // the filter in lower case
     int versionTaps_ = 0; // About: seven taps on the version turn on developer mode
     bool openHelpMenu_ = false; // requested by an agent
+    bool openWorkspaceMenu_ = false; // requested by an agent
     bool quitRequested_ = false;
     std::vector<bool> panelHasHeader_; // beginPanel() nesting
     std::vector<viewmodel::Subscription> subscriptions_;

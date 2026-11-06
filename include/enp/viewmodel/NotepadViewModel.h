@@ -43,6 +43,7 @@ enum class EditorMode { Code, Map };
 
 // Agent: describe goals, the agent edits, you review. Code: classic manual editor.
 enum class WorkspaceMode { Agent, Code };
+constexpr int kWorkspaceModeCount = 2; // ToggleWorkspaceMode goes through them in this order, and around
 enum class ClipboardAction { Cut, Copy, Paste };
 // Tabs of the bottom panel (VS Code's "Panel").
 enum class PanelTab { Problems, Diff, Comments, Checklist, Terminal, Search, History, Status }; // append only: saved as numbers

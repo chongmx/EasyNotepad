@@ -49,6 +49,7 @@ FindInFilesViewModel::FindInFilesViewModel(NotepadViewModel& owner, interfaces::
 FindInFilesViewModel::~FindInFilesViewModel()
 {
     *alive_ = false;
+    cancelRunning();
 }
 
 std::vector<FindInFilesViewModel::Source> FindInFilesViewModel::collect() const
@@ -82,10 +83,16 @@ std::vector<FindInFilesViewModel::Source> FindInFilesViewModel::collect() const
 }
 
 FindInFilesViewModel::Outcome FindInFilesViewModel::run(const std::vector<Source>& sources, const std::string& query,
-                                                        const model::SearchOptions& options, interfaces::IFileService* files)
+                                                        const model::SearchOptions& options, interfaces::IFileService* files,
+                                                        Progress* progress)
 {
     Outcome out;
     for (const Source& source : sources) {
+        if (progress) {
+            if (progress->cancel.load(std::memory_order_relaxed))
+                return out; // superseded: nobody takes this outcome
+            progress->done.fetch_add(1, std::memory_order_relaxed);
+        }
         std::string text;
         if (source.hasText) {
             text = source.text;
@@ -134,7 +141,15 @@ void FindInFilesViewModel::apply(Outcome outcome)
     filesSearched_ = outcome.files;
     truncated_ = outcome.truncated;
     error.set(outcome.error);
+    progress_.reset();
     running.set(false);
+}
+
+void FindInFilesViewModel::cancelRunning()
+{
+    if (progress_)
+        progress_->cancel = true;
+    progress_.reset();
 }
 
 void FindInFilesViewModel::search()
@@ -144,11 +159,15 @@ void FindInFilesViewModel::search()
         return;
     }
     const int generation = ++generation_;
+    cancelRunning();
     running.set(true);
     std::vector<Source> sources = collect();
+    progress_ = std::make_shared<Progress>();
+    progress_->total = int(sources.size());
     std::weak_ptr<bool> alive = alive_;
-    os::dispatch::runAsync([this, alive, generation, sources = std::move(sources), q = query, o = options, files = files_]() {
-        Outcome outcome = run(sources, q, o, files);
+    os::dispatch::runAsync([this, alive, generation, progress = progress_, sources = std::move(sources), q = query, o = options,
+                            files = files_]() {
+        Outcome outcome = run(sources, q, o, files, progress.get());
         os::dispatch::postToMain([this, alive, generation, outcome = std::move(outcome)]() mutable {
             if (alive.expired() || generation != generation_)
                 return; // superseded by a newer search
@@ -161,6 +180,7 @@ void FindInFilesViewModel::searchNow()
 {
     os::mem::Scope scope("find");
     ++generation_;
+    cancelRunning();
     if (query.empty()) {
         clear();
         return;
@@ -171,6 +191,7 @@ void FindInFilesViewModel::searchNow()
 void FindInFilesViewModel::clear()
 {
     ++generation_;
+    cancelRunning();
     os::mem::release(results_); // not clear(): the storage goes too (docs/MEMORY.md)
     hitCount_ = filesSearched_ = 0;
     truncated_ = false;

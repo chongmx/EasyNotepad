@@ -19,12 +19,19 @@ its release notes on GitHub.
   Visual Studio solutions open as a workspace.
 - **Rendered Markdown**: a ruler along the top sets the text width (double-click restores it).
 - Maximize the bottom panel with Ctrl+Shift+J.
+- **Layout buttons** in the title bar, as in VS Code: show or hide the explorer, the bottom panel
+  and the agent panel.
+- Find in Files shows its progress (files searched of files to search); a new search or a
+  clear stops the one still running.
+- The mouse wheel scrolls the ribbon and its tab row sideways when they do not fit.
 - The version of a build: the title bar says `v1.1.0`, or `v1.1.0-dev` for a build that is not
   the release; About shows the commit, with a button to copy it for a bug report. The Windows
   executable carries its version (Properties > Details).
 
 ### Changed
 - Toggle line comment is Ctrl+/ (was Ctrl+Q).
+- The workspace switch in the title bar is one icon: a click goes on to the next workspace, the
+  chevron beside it lists them all.
 
 ### Fixed
 - Windows: memory no longer grows while the app sits idle behind other windows, or when the
