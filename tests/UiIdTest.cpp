@@ -12,6 +12,7 @@
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
+#include "enp/view/MathView.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/DummyData.h"
 #include "enp/viewmodel/NotepadViewModel.h"
@@ -665,6 +666,50 @@ int main(int argc, char** argv)
                 h.vm().closeDocument(h.vm().activeIndex.get());
                 h.settle();
                 h.view().compactCaches();
+                h.settle();
+            }
+
+            // Display math: \\ makes rows and the environments lay out their columns; a formula too
+            // wide for its block breaks into lines before an operator instead of shrinking on one line.
+            h.setContext("rendered Markdown math on several lines");
+            {
+                auto expect = [&](bool ok, const char* what) {
+                    if (!ok)
+                        std::printf("  FAILED math lines: %s\n", what), ++checksFailed;
+                };
+                view::MathStyle ms;
+                ms.font = ImGui::GetIO().Fonts->Fonts[0];
+                ms.size = 16.0f;
+                ms.display = true;
+                const view::MathBox one = view::measureMath(model::math::parse("a = b"), ms);
+                const view::MathBox two = view::measureMath(model::math::parse("a = b \\\\ c = d"), ms);
+                const view::MathBox al = view::measureMath(model::math::parse("\\begin{aligned} a &= b \\\\ cc &= d \\end{aligned}"), ms);
+                expect(two.height() > one.height() * 1.8f && two.width < one.width * 1.2f, "\\\\ should start a new line");
+                expect(al.height() > one.height() * 1.8f, "aligned should lay out its rows");
+                const view::MathBox pm = view::measureMath(model::math::parse("\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\\\ 5 & 6 \\end{pmatrix}"), ms);
+                expect(pm.height() > one.height() * 2.5f, "a matrix should be as tall as its rows");
+                std::string longSum = "S = a_1";
+                for (int i = 2; i <= 40; ++i)
+                    longSum += " + a_{" + std::to_string(i) + "}";
+                const model::math::Node sum = model::math::parse(longSum);
+                const view::MathBox flat = view::measureMath(sum, ms);
+                const view::MathBox wrapped = view::measureMath(sum, ms, 300.0f);
+                expect(flat.width > 300.0f && wrapped.width <= 300.0f, "a long formula should break to fit its width");
+                expect(wrapped.height() > flat.height() * 2.0f, "a long formula should take several lines");
+                expect(view::measureMath(model::math::parse("a = b"), ms, 300.0f).width == one.width, "a short formula should not change");
+
+                // In the app: such formulas drawn without ImGui errors, in a narrow window too.
+                h.vm().newDocument();
+                if (model::Document* doc = h.vm().activeDocument()) {
+                    doc->buffer.setText("# Math\n\n$$\n\\begin{aligned}\nf(x) &= (x+1)^2 \\\\\n&= x^2 + 2x + 1\n\\end{aligned}\n$$\n\n"
+                                        "$$ |x| = \\begin{cases} x & x \\ge 0 \\\\ -x & \\text{otherwise} \\end{cases} $$\n\n"
+                                        "$$ A = \\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix} $$\n\n$$ " + longSum + " $$\n");
+                    doc->language = model::Language::Markdown;
+                    doc->rendered = true;
+                }
+                h.settle();
+                h.sweep(0.0f, 0.0f, kWidth, kHeight);
+                h.vm().closeDocument(h.vm().activeIndex.get());
                 h.settle();
             }
 

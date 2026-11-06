@@ -148,6 +148,35 @@ private:
         lineEmpty_ = true;
     }
 
+    // $$...$$ within a paragraph: display math on lines of its own, centred, as a math block draws it.
+    void displayMath(const md::Span& span)
+    {
+        if (!st_.math)
+            return;
+        const model::math::Node& node = st_.formula(span.text);
+        MathStyle ms;
+        ms.font = st_.ui;
+        ms.size = size_ * 1.1f;
+        ms.scale = st_.s;
+        ms.color = color_;
+        ms.display = true;
+        const float width = right_ - left_;
+        MathBox box = measureMath(node, ms, width);
+        if (box.width > width && box.width > 0.0f) {
+            ms.size *= width / box.width;
+            box = measureMath(node, ms, width);
+        }
+        if (x_ > left_ || lineEmpty_)
+            newline(), lineEmpty_ = false;
+        const float pad = 6.0f * st_.s;
+        const float top = y_ + pad;
+        if (draw_)
+            drawMath(dl_, node, ImVec2(left_ + (width - box.width) * 0.5f, top + box.ascent), ms, width);
+        x_ = left_;
+        y_ = top + box.height() + pad;
+        lineEmpty_ = true;
+    }
+
     // Inline math, on the text's baseline; a formula taller than the line (a fraction) shrinks to it.
     void math(const md::Span& span)
     {
@@ -245,7 +274,10 @@ private:
             return;
         }
         if (span.style & md::Math) {
-            math(span);
+            if (span.style & md::Display)
+                displayMath(span);
+            else
+                math(span);
             return;
         }
         if (lineEmpty_ && !span.text.empty())
@@ -482,7 +514,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         break;
     }
     case md::BlockKind::Math: {
-        // Display math: centred, a little larger, limits above and below the big operators.
+        // Display math: centred, a little larger, limits above and below the big operators; too wide,
+        // broken into lines, and only what cannot break shrunk.
         const model::math::Node& node = st.formula(block.code);
         MathStyle ms;
         ms.font = st.ui;
@@ -490,15 +523,16 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         ms.scale = st.s;
         ms.color = textColor;
         ms.display = true;
-        MathBox box = measureMath(node, ms);
-        if (box.width > right - left && box.width > 0.0f) {
-            ms.size *= (right - left) / box.width;
-            box = measureMath(node, ms);
+        const float width = right - left;
+        MathBox box = measureMath(node, ms, width);
+        if (box.width > width && box.width > 0.0f) {
+            ms.size *= width / box.width;
+            box = measureMath(node, ms, width);
         }
         const float pad = 6.0f * st.s;
         height = box.height() + pad * 2.0f;
         if (draw)
-            drawMath(dl, node, ImVec2(left + (right - left - box.width) * 0.5f, at.y + pad + box.ascent), ms);
+            drawMath(dl, node, ImVec2(left + (width - box.width) * 0.5f, at.y + pad + box.ascent), ms, width);
         break;
     }
     case md::BlockKind::Rule:

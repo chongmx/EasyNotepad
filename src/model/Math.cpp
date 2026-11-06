@@ -42,6 +42,17 @@ constexpr Symbol kBinary[] = {
     {"models", "⊨"}, {"prec", "≺"}, {"succ", "≻"}, {"ast", "∗"}, {"star", "⋆"}, {"circ", "∘"},
 };
 
+// The binary symbols above that are operators; the rest are relations.
+constexpr const char* kOperatorGlyphs[] = {"×", "·", "÷", "±", "∓", "∪", "∩", "∖", "∧", "∨", "⊕", "⊗", "⊖", "∗", "⋆", "∘"};
+
+bool isRelation(std::string_view glyph)
+{
+    for (const char* op : kOperatorGlyphs)
+        if (glyph == op)
+            return false;
+    return true;
+}
+
 struct Operator {
     const char* command;
     const char* glyph;
@@ -104,11 +115,8 @@ class Parser {
 public:
     explicit Parser(std::string_view s) : s_(s) {}
 
-    Node run()
-    {
-        Node r = parseRow(nullptr);
-        return simplify(std::move(r));
-    }
+    // A formula with \\ or & at the top level is a table (an align without the environment).
+    Node run() { return parseTable(true); }
 
 private:
     std::string_view s_;
@@ -121,8 +129,126 @@ private:
             ++i_;
     }
 
-    // Items until `}` (consumed when `closer` is "}"), a \right, or the end.
-    Node parseRow(const char* closer)
+    bool atRowBreak() const { return s_.substr(i_, 2) == "\\\\"; }
+
+    // Rows split by \\ and cells by &, until \end{...} (consumed) or, at the top level, the end
+    // (a stray \end there is dropped). One cell alone is that cell.
+    Node parseTable(bool top)
+    {
+        Node table;
+        table.kind = Node::Kind::Table;
+        Node cells = row(), cell = row();
+        auto endRow = [&] {
+            cells.children.push_back(simplify(std::move(cell)));
+            cell = row();
+            table.children.push_back(std::move(cells));
+            cells = row();
+        };
+        for (;;) {
+            Node part = parseRow(nullptr, true);
+            for (Node& n : part.children)
+                cell.children.push_back(std::move(n));
+            if (i_ >= s_.size()) {
+                endRow();
+                break;
+            }
+            if (at('&')) {
+                ++i_;
+                cells.children.push_back(simplify(std::move(cell)));
+                cell = row();
+            } else if (atRowBreak()) {
+                i_ += 2;
+                skipSpaces();
+                if (at('[')) { // \\[2pt]: extra space, not drawn
+                    const size_t end = s_.find(']', i_);
+                    i_ = end == std::string_view::npos ? s_.size() : end + 1;
+                }
+                endRow();
+            } else { // \end
+                i_ += 4;
+                argumentText();
+                if (!top) {
+                    endRow();
+                    break;
+                }
+            }
+        }
+        // A last \\ makes no row of its own.
+        if (table.children.size() > 1) {
+            const Node& last = table.children.back();
+            if (last.children.size() == 1 && last.children[0].kind == Node::Kind::Row && last.children[0].children.empty())
+                table.children.pop_back();
+        }
+        if (table.children.size() == 1 && table.children[0].children.size() == 1)
+            return std::move(table.children[0].children[0]);
+        return table;
+    }
+
+    // \begin{env}: its rows and columns, fenced as the environment is (pmatrix in parentheses,
+    // cases with a brace on the left).
+    Node parseEnvironment(const std::string& env)
+    {
+        std::string align = "c", left, right;
+        bool pairs = false, display = false;
+        if (env == "array" || env == "subarray") {
+            align.clear();
+            for (char ch : argumentText())
+                if (ch == 'l' || ch == 'c' || ch == 'r')
+                    align += ch;
+            if (align.empty())
+                align = "c";
+        } else if (env == "aligned" || env == "align" || env == "align*" || env == "split" || env == "flalign" ||
+                   env == "flalign*" || env == "alignat" || env == "alignat*" || env == "alignedat") {
+            if (env.compare(0, 7, "alignat") == 0 || env == "alignedat")
+                argumentText(); // the number of column pairs
+            align = "rl";
+            pairs = display = true;
+        } else if (env == "eqnarray" || env == "eqnarray*") {
+            align = "rcl";
+            display = true;
+        } else if (env == "cases" || env == "dcases") {
+            align = "l";
+            left = "{";
+            display = env == "dcases";
+        } else if (env == "rcases") {
+            align = "l";
+            right = "}";
+        } else if (env == "pmatrix") {
+            left = "(", right = ")";
+        } else if (env == "bmatrix") {
+            left = "[", right = "]";
+        } else if (env == "Bmatrix") {
+            left = "{", right = "}";
+        } else if (env == "vmatrix") {
+            left = "|", right = "|";
+        } else if (env == "Vmatrix") {
+            left = "‖", right = "‖";
+        } else if (env != "matrix" && env != "smallmatrix") { // gather, equation, multline and the unknown
+            display = true;
+        }
+        Node body = parseTable(false);
+        if (body.kind != Node::Kind::Table) { // one cell: a table of it, so a matrix stays a matrix
+            Node t;
+            t.kind = Node::Kind::Table;
+            t.children.push_back(row({std::move(body)}));
+            body = std::move(t);
+        }
+        body.text = align;
+        body.pairs = pairs;
+        body.display = display;
+        if (left.empty() && right.empty())
+            return body;
+        Node f;
+        f.kind = Node::Kind::Fenced;
+        f.text = left;
+        f.text2 = right;
+        f.children.push_back(std::move(body));
+        return f;
+    }
+
+    // Items until `}` (consumed when `closer` is "}"), a \right, \end, or the end; in a `cell` of a
+    // table also until & or \\.
+    Node parseRow(const char* closer, bool cell = false)
     {
         Node r = row();
         while (i_ < s_.size()) {
@@ -139,7 +265,9 @@ private:
             }
             if (closer && std::strcmp(closer, "right") == 0 && s_.substr(i_, 6) == "\\right")
                 return r;
-            if (s_.substr(i_, 4) == "\\end") // \end{...}: ends the row (matrices are not laid out)
+            if (s_.substr(i_, 4) == "\\end")
+                return r;
+            if (cell && (at('&') || atRowBreak()))
                 return r;
             if (at('^') || at('_')) {
                 // Scripts attach to the item before (an empty base when there is none).
@@ -207,6 +335,7 @@ private:
         n = std::min(n, s_.size() - i_);
         Node t = text(std::string(s_.substr(i_, n)), true);
         t.binary = std::string_view("+-=<>*/").find(c) != std::string_view::npos && n == 1;
+        t.relation = std::string_view("=<>").find(c) != std::string_view::npos && n == 1;
         i_ += n;
         return t;
     }
@@ -278,12 +407,26 @@ private:
             if (name == sp.command)
                 return space(sp.em);
         if (name == "\\")
-            return space(0.5f); // a line break: shown as a gap
+            return space(0.5f); // a line break inside a group (\substack{a \\ b}): shown as a gap
         if (name == "frac" || name == "dfrac" || name == "tfrac") {
             Node f;
             f.kind = Node::Kind::Frac;
             f.children.push_back(argument());
             f.children.push_back(argument());
+            return f;
+        }
+        if (name == "binom" || name == "dbinom" || name == "tbinom") { // n over k in parentheses
+            Node t;
+            t.kind = Node::Kind::Table;
+            t.text = "c";
+            t.display = name == "dbinom";
+            t.children.push_back(row({argument()}));
+            t.children.push_back(row({argument()}));
+            Node f;
+            f.kind = Node::Kind::Fenced;
+            f.text = "(";
+            f.text2 = ")";
+            f.children.push_back(std::move(t));
             return f;
         }
         if (name == "sqrt") {
@@ -339,10 +482,8 @@ private:
         }
         if (name == "right") // without a \left: the delimiter itself
             return text(delimiter(), true);
-        if (name == "begin") {
-            const std::string env = argumentText();
-            return text("[" + env + "]", true);
-        }
+        if (name == "begin")
+            return parseEnvironment(argumentText());
         if (name == "end") {
             argumentText();
             return row();
@@ -373,6 +514,7 @@ private:
             if (name == sym.command) {
                 Node n = text(sym.glyph, true);
                 n.binary = true;
+                n.relation = isRelation(sym.glyph);
                 return n;
             }
         for (const Symbol& sym : kSymbols)
@@ -446,6 +588,18 @@ void plain(const Node& n, std::string& out)
         out += n.text;
         plain(n.children[0], out);
         out += n.text2;
+        break;
+    case Node::Kind::Table:
+        for (size_t r = 0; r < n.children.size(); ++r) {
+            if (r > 0)
+                out += " \\\\ ";
+            const Node& cells = n.children[r];
+            for (size_t j = 0; j < cells.children.size(); ++j) {
+                if (j > 0)
+                    out += " & ";
+                plain(cells.children[j], out);
+            }
+        }
         break;
     }
 }

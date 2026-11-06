@@ -2025,6 +2025,51 @@ TEST(latex_formulas_parse_into_a_layout_tree)
     CHECK_EQ(mt::plainText(mt::parse("\\int_0^1 f(x)\\,dx")), std::string("∫_{0}^{1}f(x) dx"));
 }
 
+TEST(latex_line_breaks_and_environments_lay_out_rows_and_columns)
+{
+    namespace mt = model::math;
+    namespace md = model::markdown;
+    using K = mt::Node::Kind;
+    // \\ and & at the top level: rows and columns (it used to be one line, \\ a gap, & a glyph).
+    const mt::Node top = mt::parse("a &= b + c \\\\\n d &= e");
+    CHECK(top.kind == K::Table && top.children.size() == 2);
+    CHECK(top.children[0].children.size() == 2 && top.children[1].children.size() == 2);
+    CHECK_EQ(mt::plainText(top), std::string("a & =b+c \\\\ d & =e"));
+    // A last \\ and \\[4pt] make no rows of their own.
+    CHECK(mt::parse("x \\\\[4pt] y \\\\").children.size() == 2);
+    // No \\ or &: not a table.
+    CHECK(mt::parse("x = 1").kind == K::Row);
+    const mt::Node al = mt::parse("\\begin{aligned} f(x) &= x^2 \\\\ &= x \\cdot x \\end{aligned}");
+    CHECK(al.kind == K::Table && al.pairs && al.display && al.children.size() == 2);
+    CHECK(al.children[1].children.size() == 2 && al.children[1].children[0].kind == K::Row &&
+          al.children[1].children[0].children.empty());
+    const mt::Node pm = mt::parse("\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}");
+    CHECK(pm.kind == K::Fenced && pm.text == "(" && pm.text2 == ")" && pm.children[0].kind == K::Table);
+    CHECK(pm.children[0].children.size() == 2 && pm.children[0].children[1].children.size() == 2 && !pm.children[0].display);
+    CHECK_EQ(mt::plainText(pm), std::string("(1 & 2 \\\\ 3 & 4)"));
+    const mt::Node cases = mt::parse("|x| = \\begin{cases} x & x \\ge 0 \\\\ -x & \\text{otherwise} \\end{cases} + 1");
+    CHECK(cases.kind == K::Row && cases.children.size() == 7);
+    const mt::Node& brace = cases.children[4];
+    CHECK(brace.kind == K::Fenced && brace.text == "{" && brace.text2.empty());
+    CHECK(brace.children[0].kind == K::Table && brace.children[0].text == "l" && brace.children[0].children.size() == 2);
+    const mt::Node arr = mt::parse("\\begin{array}{|l|cr|} a & b & c \\end{array}");
+    CHECK(arr.kind == K::Table && arr.text == "lcr" && arr.children.size() == 1 && arr.children[0].children.size() == 3);
+    // A matrix of one cell stays a matrix; an \end missing or stray does not break it.
+    CHECK(mt::parse("\\begin{bmatrix} 1 \\end{bmatrix}").children[0].kind == K::Table);
+    CHECK(mt::parse("\\begin{matrix} a & b").kind == K::Table);
+    CHECK_EQ(mt::plainText(mt::parse("a \\end{x} b")), std::string("ab"));
+    // Relations are marked: a long formula breaks before one first, its later lines indented to it.
+    const mt::Node sum = mt::parse("a = b + c \\times d");
+    CHECK(sum.children[1].relation && sum.children[3].binary && !sum.children[3].relation && !sum.children[5].relation);
+    CHECK(mt::parse("a \\le b").children[1].relation);
+    // \binom: n over k in parentheses.
+    CHECK_EQ(mt::plainText(mt::parse("\\binom{n}{k}")), std::string("(n \\\\ k)"));
+    // $$...$$ within a paragraph: display math, its source whole.
+    const md::Spans spans = md::parseInline("Cases: $$ |x| = \\begin{cases} x \\\\ -x \\end{cases} $$ end");
+    CHECK(spans.size() == 3 && spans[1].style == (md::Math | md::Display));
+    CHECK(spans.size() == 3 && spans[1].text == "|x| = \\begin{cases} x \\\\ -x \\end{cases}" && spans[2].text == "end");
+}
+
 TEST(file_types_are_detected_before_loading_and_images_decode)
 {
     using model::FileKind;

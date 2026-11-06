@@ -188,6 +188,14 @@ public:
             } else if (c == '&') {
                 const size_t next = entity(text_, i, buffer_);
                 i = next == i ? (buffer_ += c, i + 1) : next;
+            } else if (c == '$' && i + 1 < text_.size() && text_[i + 1] == '$' && text_.find("$$", i + 2) != std::string_view::npos) {
+                // $$...$$ within a paragraph: display math, on lines of its own.
+                const size_t end = text_.find("$$", i + 2);
+                flush();
+                spans_.push_back({std::string(trim(text_.substr(i + 2, end - i - 2))), style_ | Math | Display, {}, {}});
+                i = end + 2;
+                while (i < text_.size() && text_[i] == ' ') // the text after starts a line
+                    ++i;
             } else if (c == '$') {
                 std::string source;
                 const size_t next = inlineMath(text_, i, source);

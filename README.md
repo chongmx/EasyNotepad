@@ -78,8 +78,9 @@ emphasis, code with syntax colours, lists and task lists, quotes, tables, links,
 (`![alt](path)`, `<img src>`, data URLs; PNG, JPEG, GIF, BMP, TGA, PSD, PNM), HTML character
 references (`&copy;`, `&rarr;`, `&#x3B1;`), and **LaTeX math**: `$...$` and `\(...\)` inline,
 `$$...$$` and `\[...\]` as display blocks, with fractions, roots, scripts, sums and integrals
-with limits, Greek letters, the usual symbols and relations, `\left(...\right)`, `\text{}`
-and accents. Images are decoded once, shared by the documents that show them, and freed with the
+with limits, Greek letters, the usual symbols and relations, `\left(...\right)`, `\text{}`,
+accents, `\binom`, and several lines: `\\` and `&`, `aligned`, `cases`, the matrices and `array`;
+a display formula too long for the page breaks before an operator. Images are decoded once, shared by the documents that show them, and freed with the
 last one.
 
 **Emoji** render in colour in rendered Markdown and the agent chat, following Unicode's emoji rules

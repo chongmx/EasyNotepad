@@ -1,5 +1,6 @@
 // A LaTeX formula read into a tree for drawing: $x^2$, \frac{a}{b}, \sqrt[n]{x}, \sum_{i=0}^{n},
-// Greek letters and the common symbols, \left( \right), \text{...}, accents. The subset that
+// Greek letters and the common symbols, \left( \right), \text{...}, accents, and rows and columns
+// (\\ and &, at the top level and in aligned, cases, the matrices and array). The subset that
 // README files and notes use; what it does not know is shown as its text, never dropped.
 #pragma once
 
@@ -20,6 +21,7 @@ struct Node {
         Accent,  // children: base; `text` is the accent glyph ("^", "¯", "→", "~", "˙"); "‾" draws a line
         Space,   // `space` em of horizontal space
         Fenced,  // children: content; `text`/`text2` the left/right delimiters, stretched to it
+        Table,   // children: rows (Row), each of cells; `text` the columns' alignment (l, c, r; the last repeats)
     };
     Kind kind = Kind::Row;
     std::string text;
@@ -27,7 +29,10 @@ struct Node {
     bool upright = false;     // Text: \mathrm, \text, function names
     bool bold = false;        // Text: \mathbf
     bool binary = false;      // Text: a binary operator or relation (space around it)
+    bool relation = false;    // Text: a relation (= ≤ → ∈): a long formula breaks before one first
     bool limitsAbove = false; // Op: limits go above and below in display style (∑, ∏, lim), else beside (∫)
+    bool pairs = false;       // Table: columns go in right-left pairs (align), with no gap inside a pair
+    bool display = false;     // Table: cells in display style (aligned, gather), else text style (matrices, cases)
     float space = 0.0f;       // Space, in em
     std::vector<Node> children;
 };

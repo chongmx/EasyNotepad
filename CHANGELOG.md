@@ -44,6 +44,11 @@ its release notes on GitHub.
   and block elements (`█▓▒░`) are drawn to fill their cells, so borders are as wide as the text
   and lines join between rows; wide characters and emoji take two cells, tabs stop at multiples
   of 4, and a long line wraps at a whole character (it used to break characters apart).
+- Rendered Markdown math on several lines: `\\` starts a new line and `&` aligns columns, and
+  `aligned`, `align`, `cases`, `matrix`, `pmatrix`, `bmatrix`, `vmatrix`, `array` and `gather`
+  are laid out with their delimiters drawn to full height (they used to run together on one
+  line). A display formula too long for the page breaks before an operator instead of shrinking;
+  `$$...$$` within a paragraph is set apart on its own lines; `\binom` is drawn.
 - The menus of the ribbon and the title bar have room around their items.
 - Editor: the caret no longer drifts from the text on long lines; suggestions keep their order.
 - Memory goes back to the system when a folder closes, on Linux, macOS and Windows; every byte
