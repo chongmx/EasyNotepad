@@ -27,5 +27,10 @@ struct MathStyle {
 MathBox measureMath(const model::math::Node& node, const MathStyle& style);
 // `baseline` is the left end of the baseline.
 void drawMath(ImDrawList* dl, const model::math::Node& node, ImVec2 baseline, const MathStyle& style);
+// Display math in `maxWidth`: a wider formula that is a line of items breaks into lines before a
+// binary operator or relation, as long formulas break in print; `baseline` is the first line's. A
+// piece that cannot break and is still too wide is left for the caller to shrink.
+MathBox measureMath(const model::math::Node& node, const MathStyle& style, float maxWidth);
+void drawMath(ImDrawList* dl, const model::math::Node& node, ImVec2 baseline, const MathStyle& style, float maxWidth);
 
 } // namespace enp::view

@@ -164,6 +164,13 @@ MathBox measureAccent(const Node& n, const Ctx& c)
     return b;
 }
 
+// Half the height of the delimiters around `content`: centred on the axis, to its farther edge.
+float fenceHalf(const MathBox& content, const Ctx& c)
+{
+    const float axis = kAxis * c.size();
+    return std::max({content.ascent - axis, content.descent + axis, 0.5f * c.size()});
+}
+
 MathBox measureFenced(const Node& n, const Ctx& c)
 {
     const MathBox content = measure(n.children[0], c);
@@ -173,6 +180,85 @@ MathBox measureFenced(const Node& n, const Ctx& c)
         b.width += 0.45f * size + 0.05f * size;
     if (!n.text2.empty())
         b.width += 0.45f * size + 0.05f * size;
+    const float half = fenceHalf(content, c), axis = kAxis * size;
+    b.ascent = std::max(b.ascent, axis + half);
+    b.descent = std::max(b.descent, half - axis);
+    return b;
+}
+
+// Tables: column widths kept for this many columns (a wider table puts the rest in the last).
+constexpr int kMaxColumns = 64;
+constexpr float kRowGap = 0.3f;    // between rows
+constexpr float kColumnGap = 1.0f; // between columns (between pairs in align, and in cases)
+constexpr float kMatrixGap = 0.8f; // between columns of a matrix or an array
+
+Ctx cellContext(const Node& table, const Ctx& c)
+{
+    Ctx k = c;
+    k.display = table.display && c.display;
+    return k;
+}
+
+int columnOf(size_t j) { return int(std::min<size_t>(j, kMaxColumns - 1)); }
+
+char alignOf(const Node& table, size_t j)
+{
+    if (table.pairs)
+        return j % 2 == 0 ? 'r' : 'l';
+    if (table.text.empty())
+        return 'c';
+    return table.text[std::min(j, table.text.size() - 1)];
+}
+
+float gapAfter(const Node& table, size_t j, float size)
+{
+    if (table.pairs)
+        return j % 2 == 1 ? kColumnGap * size : 0.0f;
+    return (table.text == "l" ? kColumnGap : kMatrixGap) * size;
+}
+
+// A row's box, at least a line of text high so rows are evenly spaced.
+MathBox rowBox(const Node& cells, const Ctx& k)
+{
+    MathBox b;
+    b.ascent = 0.8f * k.size();
+    b.descent = 0.3f * k.size();
+    for (const Node& cell : cells.children) {
+        const MathBox cb = measure(cell, k);
+        b.ascent = std::max(b.ascent, cb.ascent);
+        b.descent = std::max(b.descent, cb.descent);
+    }
+    return b;
+}
+
+// Fills `widths`; returns the number of columns.
+int columnWidths(const Node& table, const Ctx& k, float (&widths)[kMaxColumns])
+{
+    int columns = 0;
+    for (const Node& cells : table.children)
+        for (size_t j = 0; j < cells.children.size(); ++j) {
+            const int col = columnOf(j);
+            widths[col] = std::max(widths[col], measure(cells.children[j], k).width);
+            columns = std::max(columns, col + 1);
+        }
+    return columns;
+}
+
+// Centred on the math axis, as LaTeX centres a matrix or an aligned block.
+MathBox measureTable(const Node& n, const Ctx& c)
+{
+    const Ctx k = cellContext(n, c);
+    const float size = c.size();
+    float widths[kMaxColumns] = {};
+    const int columns = columnWidths(n, k, widths);
+    MathBox b;
+    for (int j = 0; j < columns; ++j)
+        b.width += widths[j] + (j + 1 < columns ? gapAfter(n, size_t(j), size) : 0.0f);
+    float height = 0.0f;
+    for (size_t r = 0; r < n.children.size(); ++r)
+        height += rowBox(n.children[r], k).height() + (r > 0 ? kRowGap * size : 0.0f);
+    b.ascent = height * 0.5f + kAxis * size;
+    b.descent = height * 0.5f - kAxis * size;
     return b;
 }
 
@@ -192,6 +278,7 @@ MathBox measure(const Node& n, const Ctx& c)
         return b;
     }
     case Node::Kind::Fenced: return measureFenced(n, c);
+    case Node::Kind::Table: return measureTable(n, c);
     }
     return {};
 }
@@ -217,6 +304,71 @@ void drawStretched(ImDrawList* dl, const Ctx& c, const std::string& glyph, float
     // Centre the glyph's body (ascent..descent) on the axis.
     const float top = axisY - (a + d) * 0.5f + (a - d) * 0.0f;
     dl->AddText(c.font, size, ImVec2(x + (slot - w) * 0.5f, top - 0.1f * size), c.color, glyph.c_str());
+}
+
+// A delimiter from `top` to `bottom` in a slot `slot` wide at `x`, drawn as lines: ( ) [ ] { } | ‖ ⟨ ⟩
+// taller than a glyph stretches well (a matrix, cases). False (nothing drawn) for others and short ones,
+// which come from the font.
+bool drawDelimiter(ImDrawList* dl, const Ctx& c, const std::string& glyph, float x, float top, float bottom, float slot)
+{
+    const float size = c.size(), height = bottom - top;
+    const bool left = glyph == "(" || glyph == "[" || glyph == "{" || glyph == "⟨";
+    const bool right = glyph == ")" || glyph == "]" || glyph == "}" || glyph == "⟩";
+    const bool bar = glyph == "|" || glyph == "‖";
+    if (height < 1.8f * size || !(left || right || bar))
+        return false;
+    const float t = std::max(1.0f, c.s * size / 14.0f);
+    // Shapes drawn as the left one; the right one mirrored. u across the slot (0 outer, 1 inner), v down.
+    auto p = [&](float u, float v) {
+        const float ux = 0.2f + 0.6f * (left ? u : 1.0f - u);
+        return ImVec2(x + slot * ux, top + height * v);
+    };
+    const char k = bar ? '|' : glyph == "(" || glyph == ")" ? '(' : glyph == "[" || glyph == "]" ? '[' : glyph == "{" || glyph == "}" ? '{' : '<';
+    switch (k) {
+    case '|':
+        if (glyph == "|") {
+            dl->AddLine(ImVec2(x + slot * 0.5f, top), ImVec2(x + slot * 0.5f, bottom), c.color, t);
+        } else {
+            dl->AddLine(ImVec2(x + slot * 0.35f, top), ImVec2(x + slot * 0.35f, bottom), c.color, t);
+            dl->AddLine(ImVec2(x + slot * 0.65f, top), ImVec2(x + slot * 0.65f, bottom), c.color, t);
+        }
+        break;
+    case '(': {
+        constexpr int kSteps = 24;
+        for (int i = 0; i <= kSteps; ++i) {
+            const float v = float(i) / kSteps;
+            dl->PathLineTo(p(1.0f - std::sin(v * 3.14159265f), v));
+        }
+        dl->PathStroke(c.color, t * 1.2f);
+        break;
+    }
+    case '[':
+        dl->PathLineTo(p(0.9f, 0.0f));
+        dl->PathLineTo(p(0.15f, 0.0f));
+        dl->PathLineTo(p(0.15f, 1.0f));
+        dl->PathLineTo(p(0.9f, 1.0f));
+        dl->PathStroke(c.color, t);
+        break;
+    case '{': {
+        const float r = std::min(0.12f, 0.25f * size / height); // the curls, as a fraction of the height
+        dl->PathLineTo(p(1.0f, 0.0f));
+        dl->PathBezierQuadraticCurveTo(p(0.5f, 0.0f), p(0.5f, r), 0);
+        dl->PathLineTo(p(0.5f, 0.5f - r));
+        dl->PathBezierQuadraticCurveTo(p(0.5f, 0.5f), p(0.0f, 0.5f), 0);
+        dl->PathBezierQuadraticCurveTo(p(0.5f, 0.5f), p(0.5f, 0.5f + r), 0);
+        dl->PathLineTo(p(0.5f, 1.0f - r));
+        dl->PathBezierQuadraticCurveTo(p(0.5f, 1.0f), p(1.0f, 1.0f), 0);
+        dl->PathStroke(c.color, t);
+        break;
+    }
+    default: // ⟨ ⟩
+        dl->PathLineTo(p(1.0f, 0.0f));
+        dl->PathLineTo(p(0.0f, 0.5f));
+        dl->PathLineTo(p(1.0f, 1.0f));
+        dl->PathStroke(c.color, t);
+        break;
+    }
+    return true;
 }
 
 void draw(ImDrawList* dl, const Node& n, ImVec2 at, const Ctx& c)
@@ -326,18 +478,101 @@ void draw(ImDrawList* dl, const Node& n, ImVec2 at, const Ctx& c)
         const float slot = 0.45f * size;
         const float axisY = at.y - kAxis * size;
         const float height = std::max(content.height(), size);
+        const float half = fenceHalf(content, c);
+        auto delimiter = [&](const std::string& glyph, float dx) {
+            if (!drawDelimiter(dl, c, glyph, dx, axisY - half, axisY + half, slot))
+                drawStretched(dl, c, glyph, dx, axisY, height, slot);
+        };
         float x = at.x;
         if (!n.text.empty()) {
-            drawStretched(dl, c, n.text, x, axisY, height, slot);
+            delimiter(n.text, x);
             x += slot + 0.05f * size;
         }
         draw(dl, n.children[0], ImVec2(x, at.y), c);
         x += content.width;
         if (!n.text2.empty())
-            drawStretched(dl, c, n.text2, x + 0.05f * size, axisY, height, slot);
+            delimiter(n.text2, x + 0.05f * size);
+        break;
+    }
+    case Node::Kind::Table: {
+        const Ctx k = cellContext(n, c);
+        float widths[kMaxColumns] = {};
+        columnWidths(n, k, widths);
+        float y = at.y - measureTable(n, c).ascent; // the top of the first row
+        for (const Node& cells : n.children) {
+            const MathBox rb = rowBox(cells, k);
+            float x = at.x;
+            for (size_t j = 0; j < cells.children.size(); ++j) {
+                const Node& cell = cells.children[j];
+                const float w = widths[columnOf(j)], cw = measure(cell, k).width;
+                const char a = alignOf(n, j);
+                const float cx = a == 'l' ? x : a == 'r' ? x + w - cw : x + (w - cw) * 0.5f;
+                draw(dl, cell, ImVec2(cx, y + rb.ascent), k);
+                x += w + gapAfter(n, j, size);
+            }
+            y += rb.height() + kRowGap * size;
+        }
         break;
     }
     }
+}
+
+// The lines of a long row broken to fit `maxWidth`: visit(begin, end, indent) for each, the
+// items [begin, end). A line breaks before a binary operator or relation, the latest that fits;
+// the later lines are indented to the first relation (continuing "= a + b" under it), or by 1 em
+// when that is more than half the width.
+template <typename Visit>
+void forEachLine(const Node& n, const Ctx& c, float maxWidth, Visit&& visit)
+{
+    const std::vector<Node>& items = n.children;
+    float indent = c.size(), x = 0.0f;
+    for (const Node& item : items) {
+        if (item.kind == Node::Kind::Text && item.relation) {
+            if (x > 0.0f && x <= maxWidth * 0.5f)
+                indent = x;
+            break;
+        }
+        x += measure(item, c).width;
+    }
+    size_t start = 0, lastBreak = 0;
+    float lineIndent = 0.0f, atBreak = 0.0f;
+    x = 0.0f;
+    for (size_t i = 0; i < items.size(); ++i) {
+        const Node& item = items[i];
+        if (i > start && item.kind == Node::Kind::Text && item.binary) {
+            lastBreak = i;
+            atBreak = x;
+        }
+        const float w = measure(item, c).width;
+        if (x + w > maxWidth && lastBreak > start) {
+            visit(start, lastBreak, lineIndent);
+            x = indent + (x - atBreak);
+            start = lastBreak;
+            lineIndent = indent;
+        }
+        x += w;
+    }
+    visit(start, items.size(), lineIndent);
+}
+
+// A box of the items [begin, end) of a row.
+MathBox lineBox(const Node& n, size_t begin, size_t end, const Ctx& c)
+{
+    MathBox b;
+    b.ascent = 0.8f * c.size();
+    b.descent = 0.3f * c.size();
+    for (size_t i = begin; i < end; ++i) {
+        const MathBox ib = measure(n.children[i], c);
+        b.width += ib.width;
+        b.ascent = std::max(b.ascent, ib.ascent);
+        b.descent = std::max(b.descent, ib.descent);
+    }
+    return b;
+}
+
+bool breaks(const Node& n, const Ctx& c, float maxWidth)
+{
+    return n.kind == Node::Kind::Row && maxWidth > 0.0f && measure(n, c).width > maxWidth;
 }
 
 Ctx context(const MathStyle& style)
@@ -360,6 +595,55 @@ void drawMath(ImDrawList* dl, const Node& node, ImVec2 baseline, const MathStyle
     if (!style.font || !dl)
         return;
     draw(dl, node, baseline, context(style));
+}
+
+MathBox measureMath(const Node& node, const MathStyle& style, float maxWidth)
+{
+    if (!style.font)
+        return {};
+    const Ctx c = context(style);
+    if (!breaks(node, c, maxWidth))
+        return measure(node, c);
+    MathBox b;
+    bool first = true;
+    float previousDescent = 0.0f;
+    forEachLine(node, c, maxWidth, [&](size_t begin, size_t end, float indent) {
+        const MathBox lb = lineBox(node, begin, end, c);
+        b.width = std::max(b.width, indent + lb.width);
+        if (first)
+            b.ascent = lb.ascent;
+        else
+            b.descent += previousDescent + kRowGap * c.size() + lb.ascent;
+        previousDescent = lb.descent;
+        first = false;
+    });
+    b.descent += previousDescent;
+    return b;
+}
+
+void drawMath(ImDrawList* dl, const Node& node, ImVec2 baseline, const MathStyle& style, float maxWidth)
+{
+    if (!style.font || !dl)
+        return;
+    const Ctx c = context(style);
+    if (!breaks(node, c, maxWidth)) {
+        draw(dl, node, baseline, c);
+        return;
+    }
+    float y = baseline.y, previousDescent = 0.0f;
+    bool first = true;
+    forEachLine(node, c, maxWidth, [&](size_t begin, size_t end, float indent) {
+        const MathBox lb = lineBox(node, begin, end, c);
+        if (!first)
+            y += previousDescent + kRowGap * c.size() + lb.ascent;
+        float x = baseline.x + indent;
+        for (size_t i = begin; i < end; ++i) {
+            draw(dl, node.children[i], ImVec2(x, y), c);
+            x += measure(node.children[i], c).width;
+        }
+        previousDescent = lb.descent;
+        first = false;
+    });
 }
 
 } // namespace enp::view

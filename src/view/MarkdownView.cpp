@@ -3,6 +3,7 @@
 #include "enp/model/Emoji.h"
 #include "enp/model/Highlighter.h"
 #include "enp/model/Language.h"
+#include "enp/view/CodeGrid.h"
 #include "enp/view/MathView.h"
 
 #include "IconsFontAwesome6.h"
@@ -147,6 +148,35 @@ private:
         lineEmpty_ = true;
     }
 
+    // $$...$$ within a paragraph: display math on lines of its own, centred, as a math block draws it.
+    void displayMath(const md::Span& span)
+    {
+        if (!st_.math)
+            return;
+        const model::math::Node& node = st_.formula(span.text);
+        MathStyle ms;
+        ms.font = st_.ui;
+        ms.size = size_ * 1.1f;
+        ms.scale = st_.s;
+        ms.color = color_;
+        ms.display = true;
+        const float width = right_ - left_;
+        MathBox box = measureMath(node, ms, width);
+        if (box.width > width && box.width > 0.0f) {
+            ms.size *= width / box.width;
+            box = measureMath(node, ms, width);
+        }
+        if (x_ > left_ || lineEmpty_)
+            newline(), lineEmpty_ = false;
+        const float pad = 6.0f * st_.s;
+        const float top = y_ + pad;
+        if (draw_)
+            drawMath(dl_, node, ImVec2(left_ + (width - box.width) * 0.5f, top + box.ascent), ms, width);
+        x_ = left_;
+        y_ = top + box.height() + pad;
+        lineEmpty_ = true;
+    }
+
     // Inline math, on the text's baseline; a formula taller than the line (a fraction) shrinks to it.
     void math(const md::Span& span)
     {
@@ -244,7 +274,10 @@ private:
             return;
         }
         if (span.style & md::Math) {
-            math(span);
+            if (span.style & md::Display)
+                displayMath(span);
+            else
+                math(span);
             return;
         }
         if (lineEmpty_ && !span.text.empty())
@@ -481,7 +514,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         break;
     }
     case md::BlockKind::Math: {
-        // Display math: centred, a little larger, limits above and below the big operators.
+        // Display math: centred, a little larger, limits above and below the big operators; too wide,
+        // broken into lines, and only what cannot break shrunk.
         const model::math::Node& node = st.formula(block.code);
         MathStyle ms;
         ms.font = st.ui;
@@ -489,15 +523,16 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         ms.scale = st.s;
         ms.color = textColor;
         ms.display = true;
-        MathBox box = measureMath(node, ms);
-        if (box.width > right - left && box.width > 0.0f) {
-            ms.size *= (right - left) / box.width;
-            box = measureMath(node, ms);
+        const float width = right - left;
+        MathBox box = measureMath(node, ms, width);
+        if (box.width > width && box.width > 0.0f) {
+            ms.size *= width / box.width;
+            box = measureMath(node, ms, width);
         }
         const float pad = 6.0f * st.s;
         height = box.height() + pad * 2.0f;
         if (draw)
-            drawMath(dl, node, ImVec2(left + (right - left - box.width) * 0.5f, at.y + pad + box.ascent), ms);
+            drawMath(dl, node, ImVec2(left + (width - box.width) * 0.5f, at.y + pad + box.ascent), ms, width);
         break;
     }
     case md::BlockKind::Rule:
@@ -509,6 +544,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         const float pad = 8.0f * st.s;
         const float size = st.size * 0.92f;
         const float h = std::floor(size * 1.4f);
+        // A grid of cells one character wide (layoutCodeLine): ASCII art and box drawing line up.
         const float charW = st.mono->CalcTextSizeA(size, FLT_MAX, 0.0f, "M").x;
         const int columns = std::max(8, int((right - left - pad * 2.0f) / std::max(1.0f, charW)));
         // Lines wrap at the panel's width (code is narrow in the chat).
@@ -523,8 +559,11 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                 break;
         }
         int rows = 0;
-        for (const auto& [b, e] : lines)
-            rows += std::max(1, int((e - b + size_t(columns) - 1) / size_t(columns)));
+        std::string line, emojiKey;
+        for (const auto& [b, e] : lines) {
+            line.assign(block.code, b, e - b);
+            rows += layoutCodeLine(line, columns, emojiKey, [](const CodeCell&) {});
+        }
         height = pad * 2.0f + float(rows) * h;
         if (!draw)
             break;
@@ -535,29 +574,66 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         std::vector<model::Token> tokens;
         float y = at.y + pad;
         const ImVec2 clipMin = dl->GetClipRectMin(), clipMax = dl->GetClipRectMax();
+        ImFontBaked* baked = st.mono->GetFontBaked(size);
+        const float lineWidth = size / 14.0f; // box drawing: 1 px at the default size, thicker zoomed in
         for (const auto& [b, e] : lines) {
-            const std::string line = block.code.substr(b, e - b);
+            line.assign(block.code, b, e - b);
             model::highlightLine(line, spec, state, tokens);
-            size_t pos = 0;
-            do {
-                const size_t end = std::min(line.size(), pos + size_t(columns));
-                if (y + h >= clipMin.y && y <= clipMax.y) {
-                    float x = left + pad;
-                    // Runs of one colour.
-                    for (size_t k = pos; k < end;) {
-                        size_t m = k;
-                        const model::Token token = k < tokens.size() ? tokens[k] : model::Token::Text;
-                        while (m < end && (m < tokens.size() ? tokens[m] : model::Token::Text) == token)
-                            ++m;
-                        const ImU32 color = st.palette->syntax[size_t(token)];
-                        dl->AddText(st.mono, size, ImVec2(x, y + (h - size) * 0.5f), color, line.c_str() + k, line.c_str() + m);
-                        x += st.mono->CalcTextSizeA(size, FLT_MAX, 0.0f, line.c_str() + k, line.c_str() + m).x;
-                        k = m;
+            const float top = y;
+            auto colorAt = [&](size_t byte) {
+                return st.palette->syntax[size_t(byte < tokens.size() ? tokens[byte] : model::Token::Text)];
+            };
+            // ASCII is drawn in runs of one colour on one row (each character is exactly one cell);
+            // anything else on its own, in its cells.
+            size_t runBegin = 0, runEnd = 0;
+            int runColumn = 0, runRow = 0;
+            auto flush = [&]() {
+                const float ry = top + float(runRow) * h;
+                if (runEnd > runBegin && ry + h >= clipMin.y && ry <= clipMax.y)
+                    dl->AddText(st.mono, size, ImVec2(left + pad + float(runColumn) * charW, ry + (h - size) * 0.5f),
+                                colorAt(runBegin), line.c_str() + runBegin, line.c_str() + runEnd);
+                runBegin = runEnd = 0;
+            };
+            const int lineRows = layoutCodeLine(line, columns, emojiKey, [&](const CodeCell& cell) {
+                if (cell.c < 0x80 && cell.c != '\t' && cell.c != '\r' && !cell.emoji) {
+                    if (runEnd == cell.byte && runEnd > runBegin && cell.row == runRow && colorAt(cell.byte) == colorAt(runBegin)) {
+                        runEnd += 1;
+                        return;
                     }
+                    flush();
+                    runBegin = cell.byte, runEnd = cell.byte + 1, runColumn = cell.column, runRow = cell.row;
+                    return;
                 }
-                y += h;
-                pos = end;
-            } while (pos < line.size());
+                flush();
+                const float cy = top + float(cell.row) * h;
+                if (cell.cells == 0 || cell.c == '\t' || cy + h < clipMin.y || cy > clipMax.y)
+                    return;
+                const ImVec2 cellMin(left + pad + float(cell.column) * charW, cy), cellMax(cellMin.x + float(cell.cells) * charW, cy + h);
+                const ImU32 color = colorAt(cell.byte);
+                if (drawBoxCharacter(dl, cell.c, cellMin, cellMax, color, lineWidth))
+                    return;
+                if (cell.emoji && st.emoji && st.emoji->has(*cell.emoji)) { // its picture, centred in its two cells
+                    const float box = std::min(std::floor(size * 1.2f), std::min(cellMax.x - cellMin.x, h));
+                    const ImVec2 p(std::floor((cellMin.x + cellMax.x - box) * 0.5f), std::floor(cy + (h - box) * 0.5f));
+                    if (ImTextureData* tex = st.emoji->texture(*cell.emoji))
+                        dl->AddImage(tex->GetTexRef(), p, ImVec2(p.x + box, p.y + box));
+                    return;
+                }
+                // From a fallback font a glyph may be wider than its cells: shrunk to fit, so the
+                // grid holds. Narrower ones are centred.
+                const float room = cellMax.x - cellMin.x;
+                float advance = cell.c <= 0xFFFF ? baked->GetCharAdvance(ImWchar(cell.c)) : room;
+                float drawSize = size;
+                if (advance > room + 0.5f) {
+                    drawSize = size * room / advance;
+                    advance = room;
+                }
+                const char* s = line.c_str() + cell.byte;
+                dl->AddText(st.mono, drawSize, ImVec2(cellMin.x + (room - advance) * 0.5f, cy + (h - drawSize) * 0.5f), color, s,
+                            s + cell.length);
+            });
+            flush();
+            y += float(lineRows) * h;
         }
         // Copy button, on hover.
         if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(boxMin, boxMax)) {

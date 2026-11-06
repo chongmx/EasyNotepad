@@ -8,9 +8,11 @@
 // ID conflicts are only detected for hovered items, which is why the mouse visits the whole window.
 #include "enp/os/Fs.h"
 #include "enp/os/Os.h"
+#include "enp/view/CodeGrid.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
+#include "enp/view/MathView.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/DummyData.h"
 #include "enp/viewmodel/NotepadViewModel.h"
@@ -577,6 +579,139 @@ int main(int argc, char** argv)
                 std::printf("  FAILED emoji: %zu picture(s) or the index still held after the document closed\n",
                             h.view().emoji().textureCount()),
                     ++checksFailed;
+
+            // Code blocks: a grid of cells, as in a terminal. Box drawing and block elements are
+            // drawn to fill their cells on whole pixels; wide characters and emoji take two cells;
+            // tabs stop at multiples of 4; a long line wraps at a whole character.
+            h.setContext("rendered Markdown code block on a grid");
+            {
+                auto expect = [&](bool ok, const char* what) {
+                    if (!ok)
+                        std::printf("  FAILED code grid: %s\n", what), ++checksFailed;
+                };
+                struct Placed {
+                    int column, row, cells;
+                    bool emoji;
+                };
+                std::string key;
+                auto layout = [&](const std::string& line, int columns, int* rows = nullptr) {
+                    std::vector<Placed> out;
+                    const int r = view::layoutCodeLine(line, columns, key, [&](const view::CodeCell& c) {
+                        out.push_back({c.column, c.row, c.cells, c.emoji != nullptr});
+                    });
+                    if (rows)
+                        *rows = r;
+                    return out;
+                };
+                std::vector<Placed> p = layout("┌─┐", 80);
+                expect(p.size() == 3 && p[1].column == 1 && p[2].column == 2 && p[2].cells == 1, "box drawing should be one cell each");
+                p = layout("中文ab", 80);
+                expect(p.size() == 4 && p[1].column == 2 && p[2].column == 4 && p[3].column == 5, "CJK should be two cells each");
+                p = layout("\U0001F600x", 80);
+                expect(p.size() == 2 && p[0].emoji && p[0].cells == 2 && p[1].column == 2, "an emoji should be two cells");
+                p = layout("ab\tx\ty", 80);
+                expect(p.size() == 6 && p[3].column == 4 && p[5].column == 8, "tabs should stop at multiples of 4");
+                int rows = 0;
+                p = layout(std::string(10 * 3, ' ').replace(0, 30, "──────────"), 4, &rows);
+                expect(rows == 3 && p.size() == 10 && p[4].row == 1 && p[4].column == 0, "ten cells on a 4-wide grid should wrap to 3 rows");
+                p = layout("abc中", 4);
+                expect(p.size() == 4 && p[3].row == 1 && p[3].column == 0, "a wide character should not be split by a wrap");
+                int length = 0;
+                expect(view::decodeUtf8("\xF0\x9F\x98\x80", 0, &length) == 0x1F600 && length == 4, "UTF-8 above U+FFFF should decode");
+
+                // Drawn: every edge on a whole pixel (no half-covered pixel where cells or arms meet),
+                // and a vertical line from the cell's top to its bottom, so rows join.
+                ImDrawList dl(ImGui::GetDrawListSharedData());
+                dl._ResetForNewFrame();
+                dl._SetPixelDensity(1.0f); // as a window's list at 100% (FramebufferScale 1)
+                dl.PushClipRect(ImVec2(0.0f, 0.0f), ImVec2(4096.0f, 4096.0f));
+                for (uint32_t c = 0x2500; c <= 0x259F; ++c) {
+                    if (c == 0x2571 || c == 0x2572 || c == 0x2573 || (c >= 0x256D && c <= 0x2570))
+                        continue; // diagonals and arcs are anti-aliased strokes
+                    const int vtx = dl.VtxBuffer.Size;
+                    const ImVec2 cellMin(100.3f + 8.4f * float(c - 0x2500), 50.6f), cellMax(cellMin.x + 8.4f, 50.6f + 19.0f);
+                    if (!view::drawBoxCharacter(&dl, c, cellMin, cellMax, IM_COL32(0, 0, 0, 255), 1.0f)) {
+                        expect(false, "a box character was not drawn");
+                        continue;
+                    }
+                    for (int i = vtx; i < dl.VtxBuffer.Size; ++i) {
+                        const ImVec2 v = dl.VtxBuffer[i].pos;
+                        if (v.x != std::floor(v.x) || v.y != std::floor(v.y)) {
+                            std::printf("  FAILED code grid: U+%04X has an edge off the pixel grid (%.2f, %.2f)\n", c, v.x, v.y), ++checksFailed;
+                            break;
+                        }
+                    }
+                }
+                const int vtx = dl.VtxBuffer.Size;
+                view::drawBoxCharacter(&dl, 0x2502, ImVec2(10.0f, 20.2f), ImVec2(18.0f, 39.6f), IM_COL32(0, 0, 0, 255), 1.0f); // │
+                float top = FLT_MAX, bottom = -FLT_MAX;
+                for (int i = vtx; i < dl.VtxBuffer.Size; ++i)
+                    top = std::min(top, dl.VtxBuffer[i].pos.y), bottom = std::max(bottom, dl.VtxBuffer[i].pos.y);
+                expect(top == 20.0f && bottom == 40.0f, "a vertical line should span its whole (rounded) cell");
+                expect(!view::drawBoxCharacter(&dl, 'A', ImVec2(0, 0), ImVec2(8, 16), IM_COL32(0, 0, 0, 255), 1.0f),
+                       "a letter is not a box character");
+
+                // In the app: a block of box drawing with an emoji, drawn without ImGui errors, the
+                // emoji from the pack.
+                h.vm().newDocument();
+                if (model::Document* doc = h.vm().activeDocument()) {
+                    doc->buffer.setText("# Grid\n\n```\n╔══╦══╗\n║ a║ b║ \U0001F680\n"
+                                        "╚══╩══╝ █▓▒░ → 中\t|\n```\n");
+                    doc->language = model::Language::Markdown;
+                    doc->rendered = true;
+                }
+                h.settle();
+                h.sweep(0.0f, 0.0f, kWidth, kHeight);
+                expect(h.view().emoji().textureCount() >= 1, "the emoji in a code block should be drawn from the pack");
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+                h.view().compactCaches();
+                h.settle();
+            }
+
+            // Display math: \\ makes rows and the environments lay out their columns; a formula too
+            // wide for its block breaks into lines before an operator instead of shrinking on one line.
+            h.setContext("rendered Markdown math on several lines");
+            {
+                auto expect = [&](bool ok, const char* what) {
+                    if (!ok)
+                        std::printf("  FAILED math lines: %s\n", what), ++checksFailed;
+                };
+                view::MathStyle ms;
+                ms.font = ImGui::GetIO().Fonts->Fonts[0];
+                ms.size = 16.0f;
+                ms.display = true;
+                const view::MathBox one = view::measureMath(model::math::parse("a = b"), ms);
+                const view::MathBox two = view::measureMath(model::math::parse("a = b \\\\ c = d"), ms);
+                const view::MathBox al = view::measureMath(model::math::parse("\\begin{aligned} a &= b \\\\ cc &= d \\end{aligned}"), ms);
+                expect(two.height() > one.height() * 1.8f && two.width < one.width * 1.2f, "\\\\ should start a new line");
+                expect(al.height() > one.height() * 1.8f, "aligned should lay out its rows");
+                const view::MathBox pm = view::measureMath(model::math::parse("\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\\\ 5 & 6 \\end{pmatrix}"), ms);
+                expect(pm.height() > one.height() * 2.5f, "a matrix should be as tall as its rows");
+                std::string longSum = "S = a_1";
+                for (int i = 2; i <= 40; ++i)
+                    longSum += " + a_{" + std::to_string(i) + "}";
+                const model::math::Node sum = model::math::parse(longSum);
+                const view::MathBox flat = view::measureMath(sum, ms);
+                const view::MathBox wrapped = view::measureMath(sum, ms, 300.0f);
+                expect(flat.width > 300.0f && wrapped.width <= 300.0f, "a long formula should break to fit its width");
+                expect(wrapped.height() > flat.height() * 2.0f, "a long formula should take several lines");
+                expect(view::measureMath(model::math::parse("a = b"), ms, 300.0f).width == one.width, "a short formula should not change");
+
+                // In the app: such formulas drawn without ImGui errors, in a narrow window too.
+                h.vm().newDocument();
+                if (model::Document* doc = h.vm().activeDocument()) {
+                    doc->buffer.setText("# Math\n\n$$\n\\begin{aligned}\nf(x) &= (x+1)^2 \\\\\n&= x^2 + 2x + 1\n\\end{aligned}\n$$\n\n"
+                                        "$$ |x| = \\begin{cases} x & x \\ge 0 \\\\ -x & \\text{otherwise} \\end{cases} $$\n\n"
+                                        "$$ A = \\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix} $$\n\n$$ " + longSum + " $$\n");
+                    doc->language = model::Language::Markdown;
+                    doc->rendered = true;
+                }
+                h.settle();
+                h.sweep(0.0f, 0.0f, kWidth, kHeight);
+                h.vm().closeDocument(h.vm().activeIndex.get());
+                h.settle();
+            }
 
             h.vm().openStartupDocuments({}); // the sample documents again for the states below
             h.settle();

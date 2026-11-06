@@ -24,7 +24,10 @@ ImFont* addFont(const char* asset, float size, const ImFontConfig& config, const
 // Glyphs the bundled fonts lack (terminal programs draw with box drawing, block elements, arrows,
 // geometric shapes and braille: htop's sort arrow, btop's graphs) come from a system font when
 // one is installed. With dynamic fonts only the glyphs actually used are rasterized.
-void mergeSymbolFallback(float size)
+// `monospace` (the code font): on Windows Consolas is merged before Segoe UI Symbol, so arrows and
+// the like come one cell wide (Segoe's are proportional, its arrows 1.4 cells); Segoe still gives
+// what Consolas lacks (braille, geometric shapes). Elsewhere the first candidate is monospace.
+void mergeSymbolFallback(float size, bool monospace)
 {
     static const char* const kCandidates[] = {
 #if defined(_WIN32)
@@ -37,17 +40,29 @@ void mergeSymbolFallback(float size)
         "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
 #endif
     };
-    for (const char* path : kCandidates) {
+    auto merge = [size](const char* path) {
         std::optional<std::string> data = os::fs::readFile(path);
         if (!data || data->empty())
-            continue;
+            return false;
         void* buffer = IM_ALLOC(data->size());
         std::memcpy(buffer, data->data(), data->size());
         ImFontConfig config;
         config.MergeMode = true;
         ImGui::GetIO().Fonts->AddFontFromMemoryTTF(buffer, int(data->size()), size, &config);
+        return true;
+    };
+#if defined(_WIN32)
+    if (monospace) { // a merged font gives the glyphs that the fonts before it lack
+        merge(kCandidates[1]);
+        merge(kCandidates[0]);
         return;
     }
+#else
+    (void)monospace;
+#endif
+    for (const char* path : kCandidates)
+        if (merge(path))
+            return;
 }
 
 bool mergeIcons(float size)
@@ -73,12 +88,12 @@ Fonts Fonts::load()
     if (!fonts.ui)
         fonts.ui = atlas->AddFontDefaultVector();
     fonts.hasIcons = mergeIcons(kUiSize);
-    mergeSymbolFallback(kUiSize); // ∑ ∫ √ and other math glyphs Roboto lacks (rendered Markdown)
+    mergeSymbolFallback(kUiSize, false); // ∑ ∫ √ and other math glyphs Roboto lacks (rendered Markdown)
 
     fonts.mono = addFont("fonts/Cousine-Regular.ttf", kEditorSize, ImFontConfig());
     if (fonts.mono) {
         mergeIcons(kEditorSize);
-        mergeSymbolFallback(kEditorSize);
+        mergeSymbolFallback(kEditorSize, true);
     } else {
         fonts.mono = fonts.ui;
     }

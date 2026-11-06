@@ -17,9 +17,10 @@ enum Style : unsigned {
     Code = 1u << 2,
     Strike = 1u << 3,
     Link = 1u << 4,
-    Image = 1u << 5, // ![alt](src) or <img src alt>: text is the alt text, url the source
-    Math = 1u << 6,  // $...$ or \(...\): text is the LaTeX source
-    Emoji = 1u << 7, // one emoji sequence (model/Emoji.h): text is its characters, emoji its picture key
+    Image = 1u << 5,    // ![alt](src) or <img src alt>: text is the alt text, url the source
+    Math = 1u << 6,     // $...$ or \(...\): text is the LaTeX source
+    Emoji = 1u << 7,    // one emoji sequence (model/Emoji.h): text is its characters, emoji its picture key
+    Display = 1u << 8,  // with Math: $$...$$ within a paragraph, set apart on lines of its own
 };
 
 struct Span {
