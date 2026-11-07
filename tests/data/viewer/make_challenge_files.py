@@ -308,9 +308,13 @@ def make_xlsx(path):
 <xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="0" fontId="0" fillId="8" borderId="0" xfId="0" applyFill="1"/>
 </cellXfs>
-<dxfs count="3"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+<dxfs count="5"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
 <dxf><font><b/><color rgb="FF006100"/></font><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf>
-<dxf><font><i/></font><fill><patternFill><bgColor rgb="FFFFEB9C"/></patternFill></fill></dxf></dxfs></styleSheet>'''
+<dxf><font><i/></font><fill><patternFill><bgColor rgb="FFFFEB9C"/></patternFill></fill></dxf>
+<dxf><font><b/><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF7030A0"/></patternFill></fill></dxf>
+<dxf><fill><patternFill><bgColor rgb="FFE4DFEC"/></patternFill></fill></dxf></dxfs>
+<tableStyles count="1" defaultTableStyle="TableStyleMedium2"><tableStyle name="Challenge Purple" pivot="0" count="2">
+<tableStyleElement type="headerRow" dxfId="3"/><tableStyleElement type="firstRowStripe" dxfId="4"/></tableStyle></tableStyles></styleSheet>'''
 
     def c(ref, value, t=None, s=None, f=None):
         attrs = f' r="{ref}"' + (f' t="{t}"' if t else "") + (f' s="{s}"' if s is not None else "")
@@ -349,9 +353,20 @@ def make_xlsx(path):
 <sheetData>{sheet_rows}</sheetData><mergeCells count="1"><mergeCell ref="A17:C18"/></mergeCells>
 <conditionalFormatting sqref="B2:B10"><cfRule type="cellIs" dxfId="0" priority="1" operator="lessThan"><formula>0</formula></cfRule></conditionalFormatting>
 <drawing r:id="rId1"/></worksheet>'''
-    data_rows = "".join(f'<row r="{i + 2}"><c r="A{i + 2}" t="inlineStr"><is><t>{m}</t></is></c><c r="B{i + 2}"><v>{v}</v></c><c r="C{i + 2}"><v>{w}</v></c></row>'
-                        for i, (m, v, w) in enumerate([("Jan", 10, 4), ("Feb", 14, 9), ("Mar", 9, 12), ("Apr", 18, 7)]))
-    sheet2 = CT_HEAD + f'<worksheet {X}><sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c></row>{data_rows}</sheetData></worksheet>'
+    # Two tables: Excel's default style (TableStyleMedium2) and one of the workbook's own.
+    teams = {2: ("North", 31), 3: ("South", 27), 4: ("East", 19)}
+    data_rows = "".join(f'<row r="{i + 2}"><c r="A{i + 2}" t="inlineStr"><is><t>{m}</t></is></c><c r="B{i + 2}"><v>{v}</v></c><c r="C{i + 2}"><v>{w}</v></c>' +
+                        (f'<c r="E{i + 2}" t="inlineStr"><is><t>{teams[i + 2][0]}</t></is></c><c r="F{i + 2}"><v>{teams[i + 2][1]}</v></c>' if i + 2 in teams else "") +
+                        '</row>' for i, (m, v, w) in enumerate([("Jan", 10, 4), ("Feb", 14, 9), ("Mar", 9, 12), ("Apr", 18, 7)]))
+    header_row = "".join(f'<c r="{col}1" t="inlineStr"><is><t>{t}</t></is></c>' for col, t in (("A", "Month"), ("B", "Sales"), ("C", "Costs"), ("E", "Team"), ("F", "Score")))
+    sheet2 = CT_HEAD + f'<worksheet {X}><sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews><sheetData><row r="1">{header_row}</row>{data_rows}</sheetData>' \
+        '<tableParts count="2"><tablePart r:id="rId1"/><tablePart r:id="rId2"/></tableParts></worksheet>'
+    table1 = CT_HEAD + '''<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sales" displayName="Sales" ref="A1:C5">
+<autoFilter ref="A1:C5"/><tableColumns count="3"><tableColumn id="1" name="Month"/><tableColumn id="2" name="Sales"/><tableColumn id="3" name="Costs"/></tableColumns>
+<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>'''
+    table2 = CT_HEAD + '''<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="2" name="Teams" displayName="Teams" ref="E1:F4">
+<tableColumns count="2"><tableColumn id="1" name="Team"/><tableColumn id="2" name="Score"/></tableColumns>
+<tableStyleInfo name="Challenge Purple" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>'''
     sheet3 = CT_HEAD + f'<worksheet {X}><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>'
     # Cell looks: fonts, pattern and gradient fills, diagonals, indent, shrink to fit, a number too
     # wide for its column, text running on to the left and both ways.
@@ -418,6 +433,8 @@ def make_xlsx(path):
         ("xl/workbook.xml", workbook), ("xl/sharedStrings.xml", sst), ("xl/styles.xml", styles), ("xl/theme/theme1.xml", THEME),
         ("xl/worksheets/sheet1.xml", sheet1), ("xl/worksheets/sheet2.xml", sheet2), ("xl/worksheets/sheet3.xml", sheet3),
         ("xl/worksheets/sheet4.xml", sheet4), ("xl/worksheets/sheet5.xml", sheet5),
+        ("xl/worksheets/_rels/sheet2.xml.rels", rels([("rId1", "table", "../tables/table1.xml"), ("rId2", "table", "../tables/table2.xml")])),
+        ("xl/tables/table1.xml", table1), ("xl/tables/table2.xml", table2),
         ("xl/worksheets/_rels/sheet1.xml.rels", rels([("rId1", "drawing", "../drawings/drawing1.xml")])),
         ("xl/drawings/drawing1.xml", drawing),
         ("xl/drawings/_rels/drawing1.xml.rels", rels([("rId1", "chart", "../charts/chart1.xml"), ("rId2", "image", "../media/checker.png")])),

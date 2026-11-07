@@ -89,14 +89,29 @@ Done on `feature/word-rendering`:
 
 ### Excel
 
+Done on `feature/word-rendering`:
+
+- **The sheet as Excel draws it:** white paper, Excel's grey grid, black automatic text; cells and
+  rich-text runs in their own fonts (the document fonts, real bold and italic faces).
+- **Fills and lines:** hatch patterns, grey patterns as their mix, linear and centre gradients,
+  diagonal borders; the palette's indexed colours 8-63.
+- **Text:** `####` for numbers too wide for their column, right-aligned and centred text running
+  over the empty cells beside it, indent, shrink to fit.
+- **Conditional formatting** (`model/viewer/ConditionalFormat.cpp`), on the saved values: cell
+  rules (against numbers, text or cells), top / bottom, above / below the average, text, blanks,
+  errors, duplicates, colour scales, data bars, icon sets; priority order and stopIfTrue. Rules
+  with formulas (expressions) and time periods are reported as not shown.
+- **Table styles** (`model/viewer/SheetTable.cpp`): the built-in Light, Medium and Dark styles from
+  the theme's accents (checked against Excel's own render of Medium 2 and 9, Light 1 and 9), and
+  the workbook's own styles from its dxfs; header, total, banded rows and columns, first and last
+  column. A cell's own fill, colour and borders win over the style, and conditional formats win
+  over both.
+
 | Pri | Gap | What it takes |
 |---|---|---|
-| A | **Conditional formatting** is not applied: cell rules, colour scales, data bars, icon sets | evaluate `cfRule` against the cached values (no formula engine needed for cellIs, top/bottom, colour scales, data bars) |
-| A | **Table styles** ("Format as Table": header colour, banded rows) are not drawn | read `xl/tables/*.xml` and the built-in table styles, like PowerPoint's table styles |
-| B | Numbers too wide for their column are clipped; Excel shows `####` | measure, then `#` fill |
-| B | Italic not drawn; font families ignored | the font work under All formats |
-| B | Only solid fills: pattern fills (`gray125`, hatches) and gradient fills are not drawn | pattern bitmaps / the gradient code the page painter has |
-| C | Centred and right-aligned text does not run over empty cells to the left; indent and shrink-to-fit ignored; diagonal borders; thick borders partly covered by the next cell's fill | per item |
+| B | Conditional formats with formulas (`expression`), time periods; Excel 2010 data bars (`x14`: solid, negative bars, axis) | a small formula evaluator for the common forms (`MOD(ROW(),2)=0`, comparisons with `$A1`) |
+| B | Table styles' borders from a custom style's dxfs; Dark 8-11 and Medium 15-21 only approximated | read dxf borders; check against Excel's render |
+| C | The top border of row 1 sits under the column headers; thick borders partly covered by the next cell's fill | draw borders after all fills |
 | C | Chart sheets, sparklines, comment markers, data validation arrows, outline (grouping) bars, hidden-by-filter rows | per item |
 
 ### PowerPoint

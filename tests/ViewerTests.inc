@@ -803,6 +803,18 @@ TEST(viewer_reads_the_challenge_files)
         // The Looks sheet: fonts by name, pattern and gradient fills, diagonals, indent, shrink to fit.
         CHECK(book.defaultFont == "Calibri" && book.sheets.size() == 5);
         if (book.sheets.size() == 5) {
+            // The Data sheet's tables: Excel's default style (the accent's header, banded rows, light
+            // lines) and the workbook's own (its dxfs).
+            const mv::Sheet& data = book.sheets[1];
+            const mv::Cell* head = data.cell(0, 0);
+            CHECK(head && head->fill == mv::rgba(0x2E, 0x75, 0xB6) && head->color == mv::rgba(255, 255, 255) && (head->flags & mv::Cell::Bold));
+            const mv::Cell* band = data.cell(1, 1);
+            CHECK(band && band->fill != 0 && data.cell(2, 1) && data.cell(2, 1)->fill == 0);
+            CHECK(band && band->border > 0 && band->border < book.borders.size() && book.borders[band->border].style[3] == mv::Border::Thin);
+            const mv::Cell* purple = data.cell(0, 4);
+            CHECK(purple && purple->fill == mv::rgba(0x70, 0x30, 0xA0) && (purple->flags & mv::Cell::Bold));
+            CHECK(data.cell(1, 4) && data.cell(1, 4)->fill == mv::rgba(0xE4, 0xDF, 0xEC) && data.cell(2, 4) && data.cell(2, 4)->fill == 0);
+            CHECK(data.cell(3, 5) && data.cell(3, 5)->fill == mv::rgba(0xE4, 0xDF, 0xEC)); // the third row: banded again
             // The Rules sheet's conditional formats, on the saved values.
             const mv::Sheet& rules = book.sheets[4];
             CHECK(rules.cell(0, 0) && rules.cell(0, 0)->fill == mv::rgba(0xF8, 0x69, 0x6B));  // colour scale: the lowest red

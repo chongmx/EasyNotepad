@@ -8,6 +8,7 @@
 #include "ConditionalFormat.h"
 #include "Ooxml.h"
 #include "Shapes.h"
+#include "SheetTable.h"
 
 #include <algorithm>
 #include <cmath>
@@ -306,6 +307,7 @@ private:
         XmlReader x(*xml);
         enum class In { None, Fonts, Fills, Borders, CellXfs, Dxfs, Other } in = In::None;
         enum class DxfPart { None, Font, Fill } dxfPart = DxfPart::None; // in a dxf: its font or its fill
+        std::string tableStyle; // the custom table style being read
         // The fill being read: its pattern's colours, or its gradient.
         std::string pattern;
         std::uint32_t fg = 0, bg = 0;
@@ -425,6 +427,24 @@ private:
                         d.hasFill = true;
                         d.fill = colorOf(x);
                     }
+                }
+            } else if (n == "tableStyle") { // the workbook's own table styles, from its dxfs
+                tableStyle = x.attribute("name");
+                if (!tableStyle.empty() && customTables_.size() < 256)
+                    customTables_[tableStyle] = table::Style();
+                else
+                    tableStyle.clear();
+            } else if (n == "tableStyleElement" && !tableStyle.empty()) {
+                const table::Element el = table::elementOf(x.attribute("type"));
+                const int id = std::atoi(x.attribute("dxfId").c_str());
+                if (el != table::ElementCount && x.hasAttribute("dxfId") && id >= 0 && std::size_t(id) < dxfs_.size()) {
+                    const cf::Dxf& d = dxfs_[std::size_t(id)];
+                    table::Part& part = customTables_[tableStyle].parts[el];
+                    part.hasFill = d.hasFill;
+                    part.fill = d.fill;
+                    part.hasColor = d.hasColor;
+                    part.color = d.color;
+                    part.bold = (d.setFlags & Cell::Bold) != 0;
                 }
             } else if (n == "cellStyleXfs") {
                 in = In::Other;
@@ -614,6 +634,10 @@ private:
                 x.skip();
             }
         }
+        // Tables' styles, then the conditional formats over them (they win, as in Excel).
+        for (const auto& [id, r] : rels)
+            if (r.type == "table" && !r.external)
+                readTable(r.target, sheet);
         if (!rules.empty())
             unsupportedRules_ += cf::apply(rules, dxfs_, values_, sheet, date1904_);
         std::vector<cf::Value>().swap(values_); // given back
@@ -629,6 +653,55 @@ private:
         for (const auto& [id, r] : rels)
             if (r.type == "drawing" && !r.external)
                 readDrawing(r.target, sheet);
+    }
+
+    // A table part (xl/tables/tableN.xml): its range and style, laid onto the sheet's cells.
+    void readTable(const std::string& part, Sheet& sheet)
+    {
+        const std::optional<std::string> xml = zip_.read(part, std::size_t(4) << 20);
+        if (!xml)
+            return;
+        table::Table t;
+        std::string name;
+        bool ranged = false;
+        XmlReader x(*xml);
+        auto flag = [&](const char* attr, bool otherwise) {
+            const std::string v = x.attribute(attr);
+            return v.empty() ? otherwise : v == "1" || v == "true";
+        };
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "table") {
+                std::vector<Merge> refs;
+                cf::parseRanges(x.attribute("ref"), refs);
+                if (refs.empty())
+                    return;
+                t.ref = refs.front();
+                ranged = true;
+                if (x.hasAttribute("headerRowCount"))
+                    t.headerRows = std::uint32_t(std::max(0, std::atoi(x.attribute("headerRowCount").c_str())));
+                t.totalRows = std::uint32_t(std::max(0, std::atoi(x.attribute("totalsRowCount").c_str())));
+            } else if (n == "tableStyleInfo") {
+                name = x.attribute("name");
+                t.firstColumn = flag("showFirstColumn", false);
+                t.lastColumn = flag("showLastColumn", false);
+                t.rowStripes = flag("showRowStripes", true);
+                t.columnStripes = flag("showColumnStripes", false);
+            } else if (n == "autoFilter" || n == "tableColumns" || n == "extLst") {
+                x.skip();
+            }
+        }
+        if (!ranged || name.empty())
+            return;
+        table::Style style;
+        const auto custom = customTables_.find(name);
+        if (custom != customTables_.end())
+            style = custom->second;
+        else if (!table::builtin(name, theme_, style))
+            return;
+        table::apply(t, style, *book_, sheet);
     }
 
     // At the Start of conditionalFormatting: its rules over its ranges.
@@ -947,6 +1020,7 @@ private:
     std::vector<std::uint32_t> stringRich_; // per shared string: its Workbook::richTexts index (0: none)
     std::vector<CellFormat> formats_;
     std::vector<cf::Dxf> dxfs_;      // the conditional formats' formats
+    std::map<std::string, table::Style> customTables_; // the workbook's own table styles
     std::vector<cf::Value> values_;  // the sheet being read's numbers, while it has conditional formats
     bool collectValues_ = false;
     int unsupportedRules_ = 0;
