@@ -209,6 +209,11 @@ def make_docx(path):
         '<w:sdt><w:sdtPr><w:alias w:val="Client"/></w:sdtPr><w:sdtContent>' + para(run("Inside a content control.")) + '</w:sdtContent></w:sdt>',
         para(run("Tab") + '<w:r><w:tab/></w:r>' + run("stop, line") + '<w:r><w:br/></w:r>' + run("break, symbol ") +
              '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>' + run(", no-break") + '<w:r><w:noBreakHyphen/></w:r>' + run("hyphen.")),
+        # Tab stops as a table of contents sets them: a right stop with a dot leader at the margin,
+        # a centre stop, and a decimal stop lining up the amounts.
+        para(run("Chapter One") + '<w:r><w:tab/></w:r>' + run("7"), '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs>'),
+        para(run("Left") + '<w:r><w:tab/></w:r>' + run("centred") + '<w:r><w:tab/></w:r>' + run("12.50"),
+             '<w:tabs><w:tab w:val="center" w:pos="4500"/><w:tab w:val="decimal" w:pos="8000"/></w:tabs>'),
         para(run("Unicode: 中文, العربية, é vs é, \U0001F600, ∑ x².")),
         para(inline_picture + run(" inline after a picture.")),
         table,

@@ -79,10 +79,23 @@ public:
         startLine();
     }
 
+    // A document paragraph's tab stops (null: every half inch), measured from `origin` (the text
+    // column's left edge), and its hanging indent's position (where a tab on the first line goes
+    // first; < 0: none).
+    void tabs(const std::vector<md::TabStop>* stops, float origin, float hanging, float pxPerPoint)
+    {
+        stops_ = stops;
+        tabOrigin_ = origin;
+        hanging_ = hanging;
+        tabPx_ = pxPerPoint > 0.0f ? pxPerPoint : size_ / 11.0f;
+    }
+
     void spans(const md::Spans& spans)
     {
-        for (const md::Span& span : spans)
-            text(span);
+        all_ = &spans;
+        for (index_ = 0; index_ < spans.size(); ++index_)
+            text(spans[index_]);
+        all_ = nullptr;
         if (measured_)
             measured_->push_back(std::max(0.0f, ink_ - lineStart_));
     }
@@ -101,6 +114,11 @@ private:
     };
 
     const MarkdownView::Style& st_;
+    // Tabs: the paragraph's stops and where they are measured from; the spans being laid out.
+    const std::vector<md::TabStop>* stops_ = nullptr;
+    float tabOrigin_ = 0.0f, hanging_ = -1.0f, tabPx_ = 1.0f;
+    const md::Spans* all_ = nullptr;
+    std::size_t index_ = 0;
     ImDrawList* dl_;
     bool draw_;
     float left_, right_, x_, y_, size_, lineH_;
@@ -337,22 +355,9 @@ private:
         if (lineEmpty_ && !span.text.empty())
             lineEmpty_ = false;
         const bool code = (span.style & md::Code) != 0;
-        Ink ink;
-        ink.font = code ? st_.mono : st_.ui;
-        // A document's run in its own font: the face's weight and slant are real (else faked).
-        if (!code && span.font > 0 && st_.documentFonts && st_.fontNames && span.font <= st_.fontNames->size()) {
-            const DocumentFonts::Face face = st_.documentFonts->face((*st_.fontNames)[span.font - 1], bold_ || (span.style & md::Bold) != 0,
-                                                                     (span.style & md::Italic) != 0);
-            if (face.font) {
-                ink.font = face.font;
-                ink.document = true;
-                ink.realBold = face.bold;
-                ink.realItalic = face.italic;
-            }
-        }
+        const Ink ink = inkFor(span);
         ImFont* font = ink.font;
-        const float own = span.size > 0.0f && pxPerPoint_ > 0.0f ? span.size * pxPerPoint_ : size_;
-        const float size = code ? own * 0.92f : own;
+        const float size = sizeFor(span);
         const std::string& t = span.text;
         size_t i = 0;
         while (i < t.size()) {
@@ -361,9 +366,14 @@ private:
                 ++i;
                 continue;
             }
+            if (t[i] == '\t') {
+                tab(span, i, size);
+                ++i;
+                continue;
+            }
             // A word and the spaces after it.
             size_t end = i;
-            while (end < t.size() && t[end] != ' ' && t[end] != '\n')
+            while (end < t.size() && t[end] != ' ' && t[end] != '\n' && t[end] != '\t')
                 ++end;
             size_t spaces = end;
             while (spaces < t.size() && t[spaces] == ' ')
@@ -380,6 +390,100 @@ private:
             word(t.data() + i, t.data() + end, spaces - end, wordInk, size, span);
             i = spaces;
         }
+    }
+
+    // The face a run is drawn in: a document's run in its own font, the face's weight and slant
+    // real (else faked); otherwise the view's font.
+    Ink inkFor(const md::Span& span) const
+    {
+        const bool code = (span.style & md::Code) != 0;
+        Ink ink;
+        ink.font = code ? st_.mono : st_.ui;
+        if (!code && span.font > 0 && st_.documentFonts && st_.fontNames && span.font <= st_.fontNames->size()) {
+            const DocumentFonts::Face face = st_.documentFonts->face((*st_.fontNames)[span.font - 1], bold_ || (span.style & md::Bold) != 0,
+                                                                     (span.style & md::Italic) != 0);
+            if (face.font) {
+                ink.font = face.font;
+                ink.document = true;
+                ink.realBold = face.bold;
+                ink.realItalic = face.italic;
+            }
+        }
+        return ink;
+    }
+
+    float sizeFor(const md::Span& span) const
+    {
+        const float own = span.size > 0.0f && pxPerPoint_ > 0.0f ? span.size * pxPerPoint_ : size_;
+        return (span.style & md::Code) ? own * 0.92f : own;
+    }
+
+    // At a tab (span.text[at]): the text moves to the next stop past it; a right, centre or decimal
+    // stop places the text after the tab (to the next tab or the line's end) against it. The gap
+    // is filled with the stop's leader.
+    void tab(const md::Span& span, std::size_t at, float size)
+    {
+        const float rel = x_ - tabOrigin_;
+        const md::TabStop* stop = nullptr;
+        if (stops_)
+            for (const md::TabStop& s : *stops_)
+                if (s.pos * tabPx_ > rel + 0.5f) {
+                    stop = &s;
+                    break;
+                }
+        float target;
+        if (stop) {
+            target = tabOrigin_ + stop->pos * tabPx_;
+        } else if (hanging_ > x_ + 0.5f && line_ == 0) { // the first line's tab to the hanging indent
+            target = hanging_;
+        } else { // Word's default stops, every half inch
+            const float every = 36.0f * tabPx_;
+            target = tabOrigin_ + (std::floor(rel / every + 1e-3f) + 1.0f) * every;
+        }
+        if (stop && stop->kind != 0) {
+            const float w = ahead(at, stop->kind == 3);
+            target -= stop->kind == 1 ? w * 0.5f : w;
+        }
+        if (target > right_ + 0.5f) { // past the line's end: on the next line, at its start
+            newline();
+            return;
+        }
+        target = std::max(target, x_);
+        if (draw_ && stop && stop->leader && target - x_ > 4.0f * st_.s) {
+            ImFont* font = inkFor(span).font;
+            const char leader[2] = {stop->leader, 0};
+            const float w = std::max(1.0f, measure(font, size, leader, leader + 1));
+            const ImU32 color = span.color ? ImU32(span.color) : color_;
+            const float top = y_ + (lineH_ - size) * 0.5f;
+            // On a grid of the leader's width, as Word lines them up from line to line.
+            for (float lx = std::ceil((x_ + 2.0f * st_.s - tabOrigin_) / w) * w + tabOrigin_; lx + w <= target - 2.0f * st_.s; lx += w)
+                dl_->AddText(font, size, ImVec2(std::floor(lx), top), color, leader, leader + 1);
+        }
+        x_ = target;
+        ink_ = x_;
+    }
+
+    // The width of the text after the tab at all_[index_].text[at], up to the next tab or the
+    // line's end (for a decimal stop: up to its decimal point).
+    float ahead(std::size_t at, bool decimal) const
+    {
+        float w = 0.0f;
+        if (!all_)
+            return w;
+        for (std::size_t k = index_; k < all_->size(); ++k) {
+            const md::Span& s = (*all_)[k];
+            if (s.style & (md::Emoji | md::Image | md::Math))
+                return w;
+            const std::string& t = s.text;
+            std::size_t b = k == index_ ? at + 1 : 0, e = b;
+            while (e < t.size() && t[e] != '\t' && t[e] != '\n' && !(decimal && (t[e] == '.' || t[e] == ',')))
+                ++e;
+            if (e > b)
+                w += measure(inkFor(s).font, sizeFor(s), t.data() + b, t.data() + e);
+            if (e < t.size())
+                return w;
+        }
+        return w;
     }
 
     // Whether `font` has every letter of [b, e) beyond the Latin, Greek and Cyrillic ones all
@@ -584,9 +688,13 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     const bool own = block.textAlign != 0 || block.firstLine != 0.0f || block.size > 0.0f || maxSpan > 0.0f || block.shading != 0;
     // Runs a flow over the block's spans: with its layout, measured first when it is aligned (the
     // lines' widths place them) or shaded (its height sizes the shading).
+    // Tab stops are measured from the text column's left edge (Word's margin, before the indent);
+    // a hanging indent is the first line's first stop.
+    const float tabOrigin = at.x + quoteIndent, hanging = block.firstLine < 0.0f ? left : -1.0f;
     auto flowSpans = [&](float textLeft, float size, float lineH, ImU32 color, bool bold) {
         if (!own) {
             Flow flow(st, dl, draw, textLeft, right, at.y, size, lineH, color, bold, &links);
+            flow.tabs(&block.tabs, tabOrigin, hanging, pxPerPoint);
             flow.spans(block.spans);
             return flow.bottom() - at.y;
         }
@@ -595,6 +703,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         if (draw && (block.textAlign != 0 || block.shading != 0)) {
             Flow measure(st, dl, false, textLeft, right, at.y, size, lineH, color, bold, nullptr);
             measure.layout(0, block.firstLine * pxPerPoint, nullptr, &widths, pxPerPoint);
+            measure.tabs(&block.tabs, tabOrigin, hanging, pxPerPoint);
             measure.spans(block.spans);
             measuredH = measure.bottom() - at.y;
             if (block.shading)
@@ -603,6 +712,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         }
         Flow flow(st, dl, draw, textLeft, right, at.y, size, lineH, color, bold, &links);
         flow.layout(block.textAlign, block.firstLine * pxPerPoint, draw ? &widths : nullptr, nullptr, pxPerPoint);
+        flow.tabs(&block.tabs, tabOrigin, hanging, pxPerPoint);
         flow.spans(block.spans);
         return flow.bottom() - at.y;
     };

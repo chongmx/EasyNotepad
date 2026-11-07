@@ -42,6 +42,13 @@ using Spans = std::vector<Span>;
 // the document's drawings. The Markdown parser never makes one.
 enum class BlockKind { Paragraph, Heading, Bullet, Numbered, Task, Code, Rule, Table, Math, Drawing };
 
+// A document paragraph's tab stop (Word): where a tab character moves the text to.
+struct TabStop {
+    float pos = 0.0f;        // points from the text column's left edge
+    std::uint8_t kind = 0;   // 0 left, 1 centre, 2 right, 3 decimal (the text's '.' at the stop)
+    char leader = 0;         // what fills the gap: '.', '-', '_', or 0 nothing
+};
+
 struct Block {
     BlockKind kind = BlockKind::Paragraph;
     int level = 0;          // heading 1..6; list nesting depth (0 = top)
@@ -60,6 +67,7 @@ struct Block {
     float indentLeft = 0.0f, indentRight = 0.0f, firstLine = 0.0f; // firstLine < 0: a hanging indent
     float spaceBefore = 0.0f;     // above the paragraph, beyond the renderer's own gap
     std::uint32_t shading = 0;    // the paragraph's background (0: none)
+    std::vector<TabStop> tabs;    // its tab stops, by position (none: every half inch)
 };
 
 std::vector<Block> parse(std::string_view text);

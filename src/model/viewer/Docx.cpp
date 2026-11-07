@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -66,9 +67,17 @@ struct ParaProps {
     bool hasLeft = false, hasRight = false, hasFirst = false, hasBefore = false, hasShading = false;
     float left = 0.0f, right = 0.0f, first = 0.0f, before = 0.0f;
     std::uint32_t shading = 0;
+    // Tab stops as set at this level: kind 4 clears an inherited stop at its position.
+    std::vector<md::TabStop> tabs;
 
     void over(const ParaProps& o)
     {
+        for (const md::TabStop& t : o.tabs) { // a stop replaces, or clears, the one at its position
+            tabs.erase(std::remove_if(tabs.begin(), tabs.end(), [&](const md::TabStop& s) { return std::fabs(s.pos - t.pos) < 0.5f; }), tabs.end());
+            tabs.push_back(t);
+        }
+        if (!o.tabs.empty())
+            std::sort(tabs.begin(), tabs.end(), [](const md::TabStop& a, const md::TabStop& b) { return a.pos < b.pos; });
         if (o.align >= 0)
             align = o.align;
         if (o.hasLeft)
@@ -250,6 +259,19 @@ bool readParaProperty(const XmlReader& x, std::string_view n, ParaProps& p)
         const std::string fill = x.attribute("w:fill");
         p.shading = fill.empty() || fill == "auto" ? 0 : ooxml::hexColor(fill);
         p.hasShading = true;
+    } else if (n == "tab") { // w:tabs/w:tab: a tab stop
+        const std::string v = x.attribute("w:val");
+        if (v == "bar" || v == "num")
+            return true; // a vertical line, or a list's: not a stop text moves to
+        md::TabStop t;
+        t.pos = twips("w:pos");
+        t.kind = v == "center" ? 1 : v == "right" || v == "end" ? 2 : v == "decimal" ? 3 : v == "clear" ? 4 : 0;
+        const std::string leader = x.attribute("w:leader");
+        t.leader = leader == "dot" || leader == "middleDot" ? '.' : leader == "hyphen" ? '-' : leader == "underscore" || leader == "heavy" ? '_' : 0;
+        if (p.tabs.size() < 64)
+            p.tabs.push_back(t);
+    } else if (n == "tabs") {
+        // its w:tab children are read one by one
     } else {
         return false;
     }
@@ -805,7 +827,7 @@ private:
                     add(text, link, !link.empty());
             } else if (n == "tab" || n == "ptab") {
                 if (!inField)
-                    add("    ", link, !link.empty());
+                    add("\t", link, !link.empty()); // to the next tab stop (the renderer's)
             } else if (n == "br" || n == "cr") {
                 const std::string type = x.attribute("w:type");
                 if (type != "page" && type != "column")
@@ -906,6 +928,9 @@ private:
         if (paraDirect.hasBefore || (ps && ps->para.hasBefore))
             b.spaceBefore = std::clamp(para.before - 6.0f, 0.0f, 36.0f); // beyond the renderer's own gap
         b.shading = para.shading;
+        for (const md::TabStop& t : para.tabs) // the stops left after the styles' and the paragraph's own clears
+            if (t.kind != 4)
+                b.tabs.push_back(t);
         return b;
     }
 
