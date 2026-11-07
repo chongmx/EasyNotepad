@@ -82,6 +82,8 @@ struct TextRun {
     std::uint32_t color = kBlack;
     std::uint8_t flags = 0;
     std::string font; // its typeface ("Calibri"); empty: the view's font
+    float baseline = 0.0f; // superscript (> 0) or subscript (< 0): how far it is raised, in its size
+    float spacing = 0.0f;  // points added after each letter (spc)
 };
 
 struct TextParagraph {

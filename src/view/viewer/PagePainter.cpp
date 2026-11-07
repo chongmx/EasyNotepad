@@ -30,6 +30,24 @@ struct Ink {
     ImFont* font;
     std::uint8_t flags;
 };
+float measure(ImFont* font, float px, const char* b, const char* e);
+
+// A run's text size in pixels: superscript and subscript at two thirds of it.
+float pxOf(const mv::TextRun& r, float scale)
+{
+    return r.size * scale * (r.baseline != 0.0f ? 0.66f : 1.0f);
+}
+
+// A run's width from b to e: its letters, and its letter spacing after each of them.
+float runWidth(ImFont* font, const mv::TextRun& r, float px, float scale, const char* b, const char* e)
+{
+    float w = measure(font, px, b, e);
+    if (r.spacing != 0.0f)
+        for (const char* p = b; p < e; p += utf8Length(static_cast<unsigned char>(*p)))
+            w += r.spacing * scale;
+    return w;
+}
+
 Ink inkFor(const Fonts& fonts, const mv::TextRun& r)
 {
     if (!r.font.empty() && fonts.documents && !(r.flags & mv::Mono)) {
@@ -469,7 +487,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         continue;
                     }
                     ImFont* font = inkFor(fonts, r).font;
-                    const float px = r.size * scale;
+                    const float px = pxOf(r, scale);
                     maxSize = std::max(maxSize, r.size);
                     const char* s = r.text.data();
                     if (s[p.at] == '\n') {
@@ -483,7 +501,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         ++e;
                     while (e < r.text.size() && s[e] == ' ')
                         ++e;
-                    const float w = measure(font, px, s + p.at, s + e);
+                    const float w = runWidth(font, r, px, scale, s + p.at, s + e);
                     if (any && box.wrap && width + w > avail + 0.5f && width > 0.0f) {
                         // The trailing spaces of the word may stay on this line.
                         break;
@@ -520,12 +538,27 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                             if (e > q.at && r.text[e - 1] == '\n')
                                 --e;
                             const Ink ink = inkFor(fonts, r);
-                            const float px = r.size * scale;
+                            const float px = pxOf(r, scale);
                             const char* b = r.text.data() + q.at;
                             const char* en = r.text.data() + e;
-                            const float w = measure(ink.font, px, b, en);
-                            if (px >= 1.0f && en > b)
-                                styledText(dl, ink.font, px, ImVec2(x, y + (lineH - px * 1.2f) * 0.5f + px * 0.1f), r.color, ink.flags, b, en, w);
+                            const float w = runWidth(ink.font, r, px, scale, b, en);
+                            // On the line's baseline as full-size text, raised or lowered when it is a superscript or subscript.
+                            const float full = r.size * scale;
+                            const ImVec2 at(x, y + (lineH - full * 1.2f) * 0.5f + full * 0.1f + (full - px) * 0.8f - r.baseline * full);
+                            if (px >= 1.0f && en > b) {
+                                if (r.spacing == 0.0f) {
+                                    styledText(dl, ink.font, px, at, r.color, ink.flags, b, en, w);
+                                } else { // letter by letter, each followed by the spacing
+                                    float lx = at.x;
+                                    for (const char* c = b; c < en;) {
+                                        const char* next = std::min(en, c + utf8Length(static_cast<unsigned char>(*c)));
+                                        const float cw = measure(ink.font, px, c, next) + r.spacing * scale;
+                                        styledText(dl, ink.font, px, ImVec2(lx, at.y), r.color, ink.flags, c, next, cw);
+                                        lx += cw;
+                                        c = next;
+                                    }
+                                }
+                            }
                             x += w;
                         }
                         q = Pos{q.run + 1, 0};

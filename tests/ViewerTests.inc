@@ -936,7 +936,8 @@ TEST(viewer_draws_slides_as_office_does)
 <p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Section title</a:t></a:r></a:p></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Grey subtitle</a:t></a:r></a:p>
 <a:p><a:r><a:rPr i="1"/><a:t>Slanted</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="rId9"/></a:rPr><a:t>link</a:t></a:r>
-<a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>In Arial</a:t></a:r></a:p></p:txBody></p:sp>
+<a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>In Arial</a:t></a:r><a:r><a:rPr baseline="30000"/><a:t>up</a:t></a:r>
+<a:r><a:rPr baseline="-25000" spc="300"/><a:t>down</a:t></a:r></a:p></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="5000000" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr>
 <p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>
 <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:p><a:r><a:t>White text</a:t></a:r></a:p></p:txBody></p:sp>
@@ -1007,6 +1008,9 @@ TEST(viewer_draws_slides_as_office_does)
     CHECK(find("SECTION TITLE") && find("SECTION TITLE")->font == "Georgia");
     CHECK(grey && grey->font == "Calibri");
     CHECK(find("In Arial") && find("In Arial")->font == "Arial");
+    // Superscript, subscript and letter spacing (hundredths of a point).
+    CHECK(find("up") && std::fabs(find("up")->baseline - 0.3f) < 0.001f && find("up")->spacing == 0.0f);
+    CHECK(find("down") && std::fabs(find("down")->baseline + 0.25f) < 0.001f && std::fabs(find("down")->spacing - 3.0f) < 0.001f);
     const mv::TextRun* link = find("link");
     CHECK(link && link->color == mv::rgba(0x05, 0x63, 0xC1) && (link->flags & mv::Underline)); // the theme's hlink
     const mv::TextRun* white = find("White text");

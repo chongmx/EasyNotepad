@@ -1235,6 +1235,10 @@ private:
                     run.flags |= Strike;
                 if (x.hasAttribute("cap"))
                     caps = x.attribute("cap") == "all";
+                if (x.hasAttribute("baseline"))
+                    run.baseline = std::clamp(float(std::atof(x.attribute("baseline").c_str()) / 100000.0), -1.0f, 1.0f);
+                if (x.hasAttribute("spc"))
+                    run.spacing = std::clamp(float(std::atof(x.attribute("spc").c_str()) / 100.0), -20.0f, 200.0f);
                 const int d2 = x.depth();
                 for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
                     if (f == Event::End && x.depth() < d2)
