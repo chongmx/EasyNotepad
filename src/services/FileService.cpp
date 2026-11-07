@@ -85,6 +85,16 @@ std::string FileService::homeDirectory()
     return os::fs::homeDirectory();
 }
 
+bool FileService::hasStorageAccess()
+{
+    return os::fs::hasStorageAccess();
+}
+
+void FileService::requestStorageAccess()
+{
+    os::fs::requestStorageAccess();
+}
+
 std::optional<interfaces::FileStamp> FileService::stamp(const std::string& path)
 {
     const os::fs::FileInfo info = os::fs::stat(path);

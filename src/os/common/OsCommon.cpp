@@ -189,6 +189,16 @@ double now()
     return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
+#if !defined(__ANDROID__)
+namespace fs {
+
+// Only Android keeps files outside the app's folders behind a permission (OsAndroid.cpp).
+bool hasStorageAccess() { return true; }
+void requestStorageAccess() {}
+
+} // namespace fs
+#endif
+
 namespace log {
 
 void write(Level level, const char* fmt, ...)

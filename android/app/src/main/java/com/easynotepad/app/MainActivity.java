@@ -1,15 +1,21 @@
 package com.easynotepad.app;
 
+import android.Manifest;
+import android.app.AlertDialog;
 import android.app.NativeActivity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Insets;
 import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.view.DisplayCutout;
 import android.view.KeyEvent;
 import android.view.View;
@@ -129,6 +135,78 @@ public class MainActivity extends NativeActivity {
     public int pollUnicodeChar() {
         Integer c = unicodeQueue.poll();
         return c == null ? 0 : c;
+    }
+
+    // ---- Files outside the app's folders ---------------------------------------------------------
+    // The editor opens, saves and lists files by path (a folder is a workspace), so it needs plain
+    // file access to the shared storage: "All files access" (MANAGE_EXTERNAL_STORAGE) on Android 11
+    // and later, which only the system settings can grant, and the storage permission before. The
+    // Storage Access Framework hands out content:// documents instead of paths, which a workspace,
+    // Find in Files or git cannot work in.
+
+    private static final int STORAGE_PERMISSION = 4712;
+    private static final String PREFERENCES = "easynotepad", ASK_AT_START = "askStorageAccessAtStart";
+    // Asked at most once per run (the process): "Not now" holds until the app is started again.
+    private static boolean askedAtStart;
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        askForStorageAccessAtStart();
+    }
+
+    // At start, without access: why it is needed, and the way to it. The Open dialog says the same
+    // (with its own button) for the rest of the run.
+    private void askForStorageAccessAtStart() {
+        if (askedAtStart || hasStorageAccess())
+            return;
+        askedAtStart = true;
+        final SharedPreferences preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
+        if (!preferences.getBoolean(ASK_AT_START, true))
+            return;
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Access to your files")
+            .setMessage("EasyNotepad can only see its own files. To open files and folders elsewhere on the "
+                        + "device (Download, Documents, an SD card), it needs access to all files.")
+            .setPositiveButton("Allow", (d, w) -> requestStorageAccess())
+            .setNegativeButton("Not now", null)
+            .setNeutralButton("Don't ask again", (d, w) -> preferences.edit().putBoolean(ASK_AT_START, false).apply())
+            .show();
+    }
+
+    /** True when the app may read and write the shared storage, not only its own folders. */
+    public boolean hasStorageAccess() {
+        if (Build.VERSION.SDK_INT >= 30)
+            return Environment.isExternalStorageManager();
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Opens the app's "All files access" page in the settings (Android 11+), or the permission prompt. */
+    public void requestStorageAccess() {
+        runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT < 30) {
+                requestPermissions(new String[] {Manifest.permission.READ_EXTERNAL_STORAGE,
+                                                 Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                                   STORAGE_PERMISSION);
+                return;
+            }
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                         Uri.parse("package:" + getPackageName())));
+            } catch (Exception e) {
+                // No page for one app on this device: the list of every app that may ask for it.
+                try {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    /** The shared storage's folder, "/storage/emulated/0" for the device's first user. */
+    @SuppressWarnings("deprecation")
+    public String sharedStoragePath() {
+        return Environment.getExternalStorageDirectory().getAbsolutePath();
     }
 
     // ---- Large downloads (models): fetched by the app itself -----------------------------------

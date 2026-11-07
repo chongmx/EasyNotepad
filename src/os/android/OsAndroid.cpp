@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <android/asset_manager.h>
 #include <android/log.h>
+#include <mutex>
 
 namespace enp::os {
 
@@ -43,6 +44,66 @@ std::optional<std::string> launchIntentData()
     }
     env.clearException();
     return result;
+}
+
+// ---- Files outside the app's folders: MainActivity's storage helpers ------------------------
+
+jmethodID activityMethod(android::ScopedJniEnv& env, const char* name, const char* signature)
+{
+    jclass cls = env->GetObjectClass(android::app()->activity->clazz);
+    jmethodID id = env->GetMethodID(cls, name, signature);
+    env->DeleteLocalRef(cls);
+    if (!id)
+        env.clearException();
+    return id;
+}
+
+// Calls a ()Z method of MainActivity; false if it cannot be called.
+bool callActivityBool(const char* name)
+{
+    android::ScopedJniEnv env;
+    if (!env)
+        return false;
+    jmethodID id = activityMethod(env, name, "()Z");
+    const bool result = id && env->CallBooleanMethod(android::app()->activity->clazz, id);
+    return !env.clearException() && result;
+}
+
+// Calls a ()V method of MainActivity.
+void callActivityVoid(const char* name)
+{
+    android::ScopedJniEnv env;
+    if (!env)
+        return;
+    if (jmethodID id = activityMethod(env, name, "()V"))
+        env->CallVoidMethod(android::app()->activity->clazz, id);
+    env.clearException();
+}
+
+// The shared storage ("/storage/emulated/<user>"), asked once: it does not move while the app runs.
+const std::string& sharedStorage()
+{
+    static const std::string dir = []() {
+        std::string result = "/storage/emulated/0";
+        android::ScopedJniEnv env;
+        if (!env)
+            return result;
+        if (jmethodID id = activityMethod(env, "sharedStoragePath", "()Ljava/lang/String;")) {
+            auto text = static_cast<jstring>(env->CallObjectMethod(android::app()->activity->clazz, id));
+            if (text && !env.clearException()) {
+                if (const char* utf = env->GetStringUTFChars(text, nullptr)) {
+                    if (*utf)
+                        result = utf;
+                    env->ReleaseStringUTFChars(text, utf);
+                }
+            }
+            if (text)
+                env->DeleteLocalRef(text);
+        }
+        env.clearException();
+        return result;
+    }();
+    return dir;
 }
 
 } // namespace
@@ -85,13 +146,41 @@ std::string appDataDirectory()
     return dir;
 }
 
+bool hasStorageAccess()
+{
+    // Asked every frame while the file dialog is open; the answer changes when the user comes back
+    // from the system settings, so it is kept for a second.
+    static std::mutex lock;
+    static double checkedAt = -1.0;
+    static bool granted = false;
+    std::lock_guard<std::mutex> guard(lock);
+    if (checkedAt < 0.0 || now() - checkedAt > 1.0) {
+        granted = callActivityBool("hasStorageAccess");
+        checkedAt = now();
+    }
+    return granted;
+}
+
+void requestStorageAccess() { callActivityVoid("requestStorageAccess"); }
+
+std::string homeDirectory()
+{
+    // "/" and "/storage/emulated" cannot be listed, so a browser starting there could never reach
+    // the user's files: start in the shared storage itself, or in the app's folder without access.
+    return hasStorageAccess() ? sharedStorage() : std::string(android::app()->activity->internalDataPath);
+}
+
 std::vector<std::string> rootDirectories()
 {
-    std::vector<std::string> roots{android::app()->activity->internalDataPath};
+    const std::string shared = sharedStorage();
+    std::vector<std::string> roots{shared, path::join(shared, "Download"), path::join(shared, "Documents")};
+    // SD cards and USB drives: /storage/<volume id> next to "emulated" (the shared storage) and "self".
+    for (const DirEntry& e : listDirectory("/storage"))
+        if (e.isDirectory && e.name != "emulated" && e.name != "self")
+            roots.push_back(path::join("/storage", e.name));
+    roots.emplace_back(android::app()->activity->internalDataPath);
     if (const char* ext = android::app()->activity->externalDataPath)
         roots.emplace_back(ext);
-    roots.emplace_back("/storage/emulated/0/Download");
-    roots.emplace_back("/storage/emulated/0/Documents");
     return roots;
 }
 

@@ -65,6 +65,7 @@ void FileDialogViewModel::show(FileDialogMode mode, const std::string& folder, c
     confirmOverwrite = false;
     error.set({});
     history_.clear();
+    storageAccess_ = !files_ || files_->hasStorageAccess();
     folder_ = slashes(files_ ? files_->absolute(folder.empty() ? "." : folder) : folder);
     findPlaces();
     load();
@@ -128,9 +129,52 @@ void FileDialogViewModel::findPlaces()
         for (const std::string& root : files_->roots())
             if (root.size() == 3 && root[1] == ':')
                 out.emplace_back(root.substr(0, 2), root);
+#elif defined(__ANDROID__)
+    // "/" and "/storage/emulated" cannot be listed on Android, so they lead nowhere: the shared
+    // storage's folders, SD cards and the app's own folders instead, each under a name of its own.
+    if (files_)
+        for (const std::string& root : files_->roots()) {
+            const std::string path = slashes(root);
+            if (path == slashes(home))
+                continue;
+            std::string label = path.find("/Android/data/") != std::string::npos ? "App storage"
+                                : path.rfind("/data/", 0) == 0                    ? "App files"
+                                : path.rfind("/storage/emulated/", 0) == 0 && path.find('/', 18) == std::string::npos
+                                    ? "Storage"
+                                    : path.substr(path.find_last_of('/') + 1);
+            const std::string base = label;
+            for (int n = 2; std::any_of(out.begin(), out.end(), [&](const auto& p) { return p.first == label; }); ++n)
+                label = base + " " + std::to_string(n);
+            out.emplace_back(label, path);
+        }
 #else
     out.emplace_back("/", "/");
 #endif
+}
+
+void FileDialogViewModel::requestStorageAccess()
+{
+    if (files_)
+        files_->requestStorageAccess();
+}
+
+void FileDialogViewModel::checkStorageAccess()
+{
+    if (storageAccess_ || !files_ || !files_->hasStorageAccess())
+        return;
+    // Just turned on (the user is back from the system settings): Home is the shared storage now,
+    // so a dialog still at the old Home goes there; any other folder is listed again.
+    storageAccess_ = true;
+    std::string oldHome;
+    for (const auto& [label, path] : places_)
+        if (label == "Home")
+            oldHome = path;
+    findPlaces();
+    const std::string home = owner_.homeDirectory();
+    if (!home.empty() && folder_ == oldHome)
+        goTo(slashes(home));
+    else
+        load();
 }
 
 void FileDialogViewModel::goTo(const std::string& folder)

@@ -22,6 +22,12 @@ its release notes on GitHub.
   characters a line). The minimize, maximize and close buttons have no hint.
 
 ### Fixed
+- Android: files and folders outside the app's own (Download, Documents, the whole shared
+  storage, SD cards) could not be browsed or opened. The app now asks for "All files access"
+  (Android 11 and later; the storage permission before), once at start (Allow, Not now, Don't
+  ask again), and later in the Open and Open Folder dialogs, which say
+  what is missing and open the system's page for it, then list the files when the user is back.
+  Home is the shared storage, and its folders and SD cards are places of the dialog.
 - Hints opened from the ribbon (and other places without padding) had their text touching the
   edges of a box too small for it.
 
