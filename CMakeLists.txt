@@ -324,8 +324,23 @@ add_library(enp_model STATIC
     src/model/LogicalMap.cpp
     src/model/Git.cpp
     src/model/AgentRoute.cpp
+    # Documents read for viewing (plan 25): packages, then the readers
+    src/model/package/Inflate.cpp
+    src/model/package/Zip.cpp
+    src/model/package/Xml.cpp
+    src/model/viewer/Viewer.cpp
+    src/model/viewer/NumberFormat.cpp
+    src/model/viewer/Ooxml.cpp
+    src/model/viewer/Chart.cpp
+    src/model/viewer/Shapes.cpp
+    src/model/viewer/Docx.cpp
+    src/model/viewer/Xlsx.cpp
+    src/model/viewer/Pptx.cpp
+    src/model/viewer/PdfObjects.cpp
+    src/model/viewer/Pdf.cpp
 )
 target_include_directories(enp_model PUBLIC include)
+target_include_directories(enp_model PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stb)
 target_link_libraries(enp_model PRIVATE llvm_demangle)
 
 # interfaces: service contracts (header only)
@@ -342,6 +357,7 @@ add_library(enp_services STATIC
     src/services/ProcessService.cpp
     src/services/AutomationServer.cpp
     src/services/LocalEngineService.cpp
+    src/services/DocumentReaderService.cpp
     src/services/ServiceContainer.cpp
     src/services/ImageDecoder.cpp
     src/services/ImageEncoder.cpp
@@ -371,6 +387,7 @@ add_library(enp_viewmodel STATIC
     src/viewmodel/EngineLabViewModel.cpp
     src/viewmodel/ReviewViewModel.cpp
     src/viewmodel/TerminalViewModel.cpp
+    src/viewmodel/ViewerViewModel.cpp
     src/viewmodel/LayersViewModel.cpp
     src/viewmodel/LogicalMapViewModel.cpp
     src/viewmodel/FileDialogViewModel.cpp
@@ -404,6 +421,8 @@ add_library(enp_view STATIC
     src/view/EmojiCache.cpp
     src/view/DataViews.cpp
     src/view/LibraryView.cpp
+    src/view/viewer/PagePainter.cpp
+    src/view/viewer/ViewerView.cpp
     src/view/TableReset.cpp
     src/view/MathView.cpp
     src/view/CodeGrid.cpp

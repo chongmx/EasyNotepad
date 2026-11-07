@@ -154,6 +154,8 @@ def snapshot(endpoint, settle):
         "user": proc.get("userObjects", 0),
         "threads": proc.get("threads", 0),
         "imguiWindows": st.get("imgui", {}).get("windows", 0),
+        # The font atlas: its texture and the sizes baked into it (printed, to find what holds `imgui`).
+        "atlas": "%sx%s, %s sizes, %s glyphs" % tuple(st.get("imgui", {}).get(k, 0) for k in ("atlasWidth", "atlasHeight", "fontSizes", "glyphs")),
         "scopes": {s["name"]: s["liveKB"] for s in mem["scopes"] if s["blocks"]},
         "scopeBytes": scope_bytes,
         # The test bench's own side in the app (the automation connector): while this reading is
@@ -165,7 +167,7 @@ def snapshot(endpoint, settle):
 def row(label, s):
     print(f"{label:<28} heap {s['heapKB']:>7} KB / {s['blocks']:>7} blocks   private {s['privateKB']:>7} KB   "
           f"rss {s['residentKB']:>7} KB   handles {s['handles']:>4}  gdi {s['gdi']:>4}  user {s['user']:>4}  "
-          f"threads {s['threads']:>3}  imgui windows {s['imguiWindows']}"
+          f"threads {s['threads']:>3}  imgui windows {s['imguiWindows']}  atlas {s['atlas']}"
           + (f"   malloc {s['mallocInUseKB']}/{s['mallocHeldKB']} KB" if s["mallocHeldKB"] else "")
           + (f"   graphics {s['graphicsKB']} KB  compressed {s['compressedKB']} KB" if s["graphicsKB"] or s["compressedKB"] else ""),
           flush=True)

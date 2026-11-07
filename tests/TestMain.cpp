@@ -28,6 +28,11 @@
 #include "enp/model/FileKind.h"
 #include "enp/model/Markdown.h"
 #include "enp/model/Math.h"
+#include "enp/model/package/Inflate.h"
+#include "enp/model/package/Xml.h"
+#include "enp/model/package/Zip.h"
+#include "enp/model/viewer/NumberFormat.h"
+#include "enp/model/viewer/Viewer.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/ILocalEngineService.h"
 #include "enp/os/Dispatch.h"
@@ -39,11 +44,15 @@
 #include "enp/services/ImageDecoder.h"
 #include "enp/services/ImageEncoder.h"
 #include "enp/services/ProcessService.h"
+#include "enp/services/DocumentReaderService.h"
+#include "enp/viewmodel/ViewerViewModel.h"
 
 #include "AutomationController.h"
 #include "McpBridge.h"
 
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <set>
@@ -5832,6 +5841,8 @@ TEST(damaged_libraries_are_read_without_crashing)
         }
     }
 }
+
+#include "ViewerTests.inc"
 
 TEST(source_rules_no_raw_allocation_outside_the_os_layer)
 {

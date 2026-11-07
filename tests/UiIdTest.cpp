@@ -18,7 +18,10 @@
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include "FakeTerminalService.h"
+#include "ViewerFixtures.h"
 #include "enp/interfaces/IFileService.h"
+#include "enp/os/Dispatch.h"
+#include "enp/services/DocumentReaderService.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -29,7 +32,10 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <chrono>
 #include <functional>
+#include <thread>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -69,9 +75,21 @@ struct Failure {
 // Reads real files (the library view's fixtures) and nothing else: no folder is listed or written.
 class ReadOnlyFiles final : public interfaces::IFileService {
 public:
-    std::optional<std::string> read(const std::string& path, std::string* error) override { return os::fs::readFile(path, error); }
+    // Files the test made up (the viewer's sample documents), served before the disk.
+    std::map<std::string, std::string> memory;
+    std::optional<std::string> read(const std::string& path, std::string* error) override
+    {
+        if (const auto it = memory.find(path); it != memory.end())
+            return it->second;
+        return os::fs::readFile(path, error);
+    }
     std::optional<std::string> readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total) override
     {
+        if (const auto it = memory.find(path); it != memory.end()) {
+            if (total)
+                *total = it->second.size();
+            return offset < it->second.size() ? it->second.substr(size_t(offset), size) : std::string();
+        }
         return os::fs::readFileRange(path, offset, size, total);
     }
     bool write(const std::string&, std::string_view, std::string*) override { return false; }
@@ -106,6 +124,17 @@ public:
     }
 
     viewmodel::NotepadViewModel& vm() { return vm_; }
+    ReadOnlyFiles& files() { return files_; }
+    services::DocumentReaderService& documentReader() { return documentReader_; }
+    // Frames until the reader service has delivered everything asked of it (at most about 10 s).
+    void settleReading()
+    {
+        for (int i = 0; i < 2000 && (vm_.viewer().loadingCount() > 0 || documentReader_.pendingTickets() > 0); ++i) {
+            frame(ImVec2(-100.0f, -100.0f));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        settle();
+    }
     view::MainView& view() { return *view_; }
     const std::vector<Failure>& failures() const { return failures_; }
     int frames() const { return frames_; }
@@ -123,6 +152,7 @@ public:
         io.AddMousePosEvent(pos.x, pos.y);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
         terminalService_.pump();
+        os::dispatch::pump(); // results of background work (the reader service) arrive here, as in the app
         ImGui::NewFrame();
         // Conflicts are evaluated in NewFrame() for the item hovered in the previous frame.
         ImGuiContext& g = *GImGui;
@@ -202,7 +232,8 @@ private:
 
     tests::FakeTerminalService terminalService_; // declared before vm_, which uses it
     ReadOnlyFiles files_;
-    viewmodel::NotepadViewModel vm_{&terminalService_, &files_};
+    services::DocumentReaderService documentReader_{&files_}; // Word, Excel, PowerPoint, PDF: read off the UI thread
+    viewmodel::NotepadViewModel vm_{&terminalService_, &files_, nullptr, nullptr, nullptr, &documentReader_};
     view::Fonts fonts_;
     FakeFrame frame_;
     std::unique_ptr<view::MainView> view_;
@@ -960,6 +991,124 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // Hints stay inside the app's window, near its edges too (with multi-viewports a hint over the
+        // edge would become an OS window of its own, its transparent background black): every title
+        // bar control hovered, in both looks, its hint inside the display and on the main viewport.
+        for (const bool enhanced : {false, true}) {
+            h.setContext(enhanced ? "title bar hints (enhanced UI)" : "title bar hints");
+            const bool before = h.vm().enhancedUi.get();
+            h.vm().enhancedUi.set(enhanced);
+            h.settle();
+            std::vector<ImVec2> spots;
+            for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                if (e.max.y <= 60.0f && e.max.x > e.min.x)
+                    spots.push_back(ImVec2((e.min.x + e.max.x) * 0.5f, (e.min.y + e.max.y) * 0.5f));
+            for (const ImVec2& at : spots) {
+                for (int i = 0; i < 40; ++i) // past the hover delay
+                    h.frame(at);
+                for (const ImGuiWindow* w : GImGui->Windows) {
+                    if (!w->Active || !(w->Flags & ImGuiWindowFlags_Tooltip))
+                        continue;
+                    const bool inside = w->Pos.x >= -0.5f && w->Pos.y >= -0.5f && w->Pos.x + w->Size.x <= kWidth + 0.5f &&
+                                        w->Pos.y + w->Size.y <= kHeight + 0.5f;
+                    if (!inside || w->Viewport != ImGui::GetMainViewport())
+                        std::printf("  FAILED hint at (%.0f, %.0f) over the window's edge: (%.0f, %.0f) %.0f x %.0f (%s)\n", at.x, at.y, w->Pos.x,
+                                    w->Pos.y, w->Size.x, w->Size.y, enhanced ? "enhanced" : "plain"),
+                            ++checksFailed;
+                }
+            }
+            h.vm().enhancedUi.set(before);
+            h.settle();
+        }
+
+        // Preferences: its title bar's x closes it when clicked with the mouse, in the plain look and
+        // the enhanced one.
+        for (const bool enhanced : {false, true}) {
+            h.setContext(enhanced ? "preferences close button (enhanced UI)" : "preferences close button");
+            const bool before = h.vm().enhancedUi.get();
+            h.vm().enhancedUi.set(enhanced);
+            h.vm().execute(viewmodel::CommandId::Preferences);
+            h.settle();
+            h.settle();
+            const view::UiElement* close = view::UiAutomation::instance().find("dialog:preferences:close");
+            if (!close || !ImGui::IsPopupOpen("Preferences", ImGuiPopupFlags_AnyPopupId)) {
+                std::printf("  FAILED preferences did not open (%s)\n", enhanced ? "enhanced" : "plain"), ++checksFailed;
+            } else {
+                const ImVec2 at((close->min.x + close->max.x) * 0.5f, (close->min.y + close->max.y) * 0.5f);
+                h.click(at);
+                h.settle();
+                if (view::UiAutomation::instance().find("dialog:preferences:close"))
+                    std::printf("  FAILED preferences: a click on its x at (%.0f, %.0f) did not close it (%s)\n", at.x, at.y,
+                                enhanced ? "enhanced" : "plain"),
+                        ++checksFailed;
+            }
+            h.vm().enhancedUi.set(before);
+            h.settle();
+        }
+
+        // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,
+        // sheets and zoom gone through; everything it read and every picture it decoded must go
+        // when it is opened as text, and when it closes.
+        {
+            h.setContext("document viewer");
+            const view::ViewerView& viewer = h.view().editor().viewerView();
+            std::vector<std::string> paths; // served from memory by the test's file service
+            for (const auto& [name, bytes] : viewertest::sampleDocuments()) {
+                paths.push_back("/enp-ui-viewer/" + name);
+                h.files().memory[paths.back()] = bytes;
+            }
+            for (int round = 0; round < 2; ++round) {
+                for (const std::string& path : paths) {
+                    h.vm().openFile(path);
+                    model::Document* doc = h.vm().activeDocument();
+                    if (!doc || doc->kind != model::FileKind::Document) {
+                        std::printf("  FAILED document viewer: %s did not open as a document\n", path.c_str());
+                        ++checksFailed;
+                        continue;
+                    }
+                    h.settle(); // the first frames show "Reading": the service reads it off the UI thread
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    h.settleReading();
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    h.settleReading(); // pages asked for while sweeping
+                    const viewmodel::ViewerViewModel::Entry* model = h.vm().viewer().find(doc->id);
+                    if (!model || model->state != viewmodel::ViewerViewModel::State::Ready)
+                        std::printf("  FAILED document viewer: %s was not read (%s)\n", path.c_str(), model ? model->doc.error.c_str() : "no entry"),
+                            ++checksFailed;
+                    if (!viewer.holds(doc->id))
+                        std::printf("  FAILED document viewer: %s was not read\n", path.c_str()), ++checksFailed;
+                    for (const char* button : {"viewer:zoom-in", "viewer:zoom-out", "viewer:zoom-fit"})
+                        if (const view::UiElement* e = view::UiAutomation::instance().find(button); e && e->activate) {
+                            const std::function<void()> action = e->activate;
+                            action();
+                            h.settle();
+                        }
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                }
+                if (viewer.entryCount() != paths.size())
+                    std::printf("  FAILED document viewer: %zu documents held, expected %zu\n", viewer.entryCount(), paths.size()), ++checksFailed;
+                if (round == 0) { // opened as text: what the viewer read goes at once
+                    const int id = h.vm().activeDocument() ? h.vm().activeDocument()->id : -1;
+                    h.vm().openAsText(h.vm().activeIndex.get());
+                    h.settle();
+                    if (viewer.holds(id))
+                        std::printf("  FAILED document viewer: a document opened as text still holds what was read\n"), ++checksFailed;
+                }
+                while (!h.vm().documents().empty())
+                    h.vm().closeDocument(0);
+                h.settleReading(); // results that were on their way are dropped
+                if (viewer.entryCount() != 0 || viewer.heldImageCount() != 0 || h.view().editor().imageTextureCount() != 0 ||
+                    h.vm().viewer().entryCount() != 0 || h.documentReader().pendingTickets() != 0)
+                    std::printf("  FAILED document viewer: %zu view entries, %zu pictures, %zu textures, %zu models, %zu reads held after closing them\n",
+                                viewer.entryCount(), viewer.heldImageCount(), h.view().editor().imageTextureCount(), h.vm().viewer().entryCount(),
+                                h.documentReader().pendingTickets()),
+                        ++checksFailed;
+            }
+            h.files().memory.clear();
+            h.vm().openStartupDocuments({});
+            h.settle();
+        }
+
         // Libraries and programs: every list of each fixture drawn and swept, names shown both ways;
         // what a file contained must go when it is opened as text, and when it closes.
         {
@@ -1277,6 +1426,14 @@ int main(int argc, char** argv)
             }
         }
 
+        // The automation registry's room is taken once (view::UiAutomation::kReservedElements): every
+        // layout state drawn above must fit in it, or the room is too small and has to be raised.
+        const std::size_t peak = view::UiAutomation::instance().peakElements();
+        std::printf("automation registry: at most %zu elements in a frame, room for %zu\n", peak, view::UiAutomation::kReservedElements);
+        if (peak > view::UiAutomation::kReservedElements)
+            std::printf("  FAILED a frame registered %zu automation elements, more than the %zu reserved: raise kReservedElements\n", peak,
+                        view::UiAutomation::kReservedElements),
+                ++checksFailed;
         for (const Failure& f : h.failures())
             std::printf("  FAILED %s at (%.0f, %.0f) in %s\n", f.what.c_str(), f.mouse.x, f.mouse.y, f.where.c_str());
         std::printf("%d frames, %d ID failure(s), %d failed check(s)\n", h.frames(), int(h.failures().size()), checksFailed);

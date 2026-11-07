@@ -35,6 +35,12 @@ public:
     const std::vector<UiElement>& elements() const { return current_; }
     const UiElement* find(std::string_view id) const;
 
+    // Elements each buffer has room for from the first frame on, kept for good. The UI test fails
+    // when a frame of any layout state needs more (peakElements): then this is raised.
+    static constexpr std::size_t kReservedElements = 512;
+    // The most elements one frame has registered since the start (get_state reports it).
+    std::size_t peakElements() const { return peak_; }
+
     // The automation's pointer resting at `at` for `seconds` (the hover tool): ImGui sees the mouse
     // there, so hover effects and hints show, while the user's own mouse is not moved. Applied once a
     // frame; the real mouse takes over again when it ends.
@@ -45,6 +51,7 @@ public:
 private:
     ImVec2 hoverAt_{0.0f, 0.0f};
     double hoverUntil_ = 0.0;
+    std::size_t peak_ = 0;
     std::vector<UiElement> building_;
     std::vector<UiElement> current_;
 };

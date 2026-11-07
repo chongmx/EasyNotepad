@@ -118,11 +118,30 @@ Json getState(viewmodel::NotepadViewModel& vm)
                              .set("gdiObjects", p.gdiObjects)
                              .set("userObjects", p.userObjects)
                              .set("threads", p.threads));
-    if (ImGuiContext* g = ImGui::GetCurrentContext())
+    if (ImGuiContext* g = ImGui::GetCurrentContext()) {
+        // The font atlas: its texture and the font sizes baked into it (each size drawn gets one).
+        const ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+        int baked = 0, glyphs = 0;
+        if (atlas->Builder)
+            for (int i = 0; i < atlas->Builder->BakedPool.Size; ++i)
+                if (const ImFontBaked& b = atlas->Builder->BakedPool[i]; !b.WantDestroy) {
+                    ++baked;
+                    glyphs += b.Glyphs.Size;
+                }
         state.set("imgui", Json::object()
                                .set("allocations", g->DebugAllocInfo.TotalAllocCount - g->DebugAllocInfo.TotalFreeCount)
                                .set("windows", g->Windows.Size)
-                               .set("viewports", g->Viewports.Size));
+                               .set("viewports", g->Viewports.Size)
+                               .set("atlasWidth", atlas->TexData ? atlas->TexData->Width : 0)
+                               .set("atlasHeight", atlas->TexData ? atlas->TexData->Height : 0)
+                               .set("fontSizes", baked)
+                               .set("glyphs", glyphs)
+                               // The automation registry: elements on screen now, the most in any
+                               // frame so far, and the room it keeps (view::UiAutomation).
+                               .set("elements", int(view::UiAutomation::instance().elements().size()))
+                               .set("peakElements", int(view::UiAutomation::instance().peakElements()))
+                               .set("reservedElements", int(view::UiAutomation::kReservedElements)));
+    }
     return state;
 }
 

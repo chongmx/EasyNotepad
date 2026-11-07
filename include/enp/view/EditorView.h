@@ -9,6 +9,7 @@
 #include "enp/view/DataViews.h"
 #include "enp/view/LibraryView.h"
 #include "enp/view/MarkdownView.h"
+#include "enp/view/viewer/ViewerView.h"
 
 #include "imgui_internal.h" // ImRect
 #include "enp/view/Theme.h"
@@ -32,6 +33,7 @@ public:
     void setEmoji(EmojiCache* emoji) { emoji_ = emoji; } // pictures for emoji in rendered Markdown
     const DataViews& dataViews() const { return data_; }
     const LibraryView& libraryView() const { return library_; }
+    const ViewerView& viewerView() const { return viewer_; } // Word, Excel, PowerPoint and PDF documents
     // A phone layout: no side bar (layers, minimap); the text gets the whole width.
     void setCompact(bool compact) { compact_ = compact; }
     // Rendered-Markdown states held (one per open Markdown document; tests check that closed
@@ -159,6 +161,7 @@ private:
     EmojiCache* emoji_ = nullptr;               // owned by MainView
     DataViews data_;                            // CSV table, JSON/YAML tree and accordion
     LibraryView library_;                       // what a .so, .dll, .a or .lib contains
+    ViewerView viewer_;                         // documents read by model::viewer (after images_ and emoji_: it uses both)
     std::map<int, RenderedMarkdown::HeldImage> fileImages_; // image documents' images, by document id
     bool imageFit_ = true;                      // image documents: fit the window, else actual size
     void releaseImages(RenderedMarkdown& md);
