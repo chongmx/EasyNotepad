@@ -981,3 +981,62 @@ TEST(viewer_reads_word_run_fonts)
                                                        {"word/document.xml", R"(<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>)"}}));
     CHECK(plain.flow.fonts.size() == 1 && plain.flow.fonts[0] == "Times New Roman");
 }
+
+TEST(viewer_reads_word_layout)
+{
+    // Tab stops, Word's spacing, list indents, page breaks and tables with a table style.
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string styles = R"(<w:styles xmlns:w="w">
+<w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:styleId="List"><w:name w:val="List Paragraph"/><w:pPr><w:contextualSpacing/></w:pPr></w:style>
+<w:style w:type="table" w:styleId="Grid"><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="8" w:color="FF0000"/><w:insideH w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>
+<w:tblStylePr w:type="firstRow"><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="4472C4"/></w:tcPr></w:tblStylePr>
+<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr></w:style></w:styles>)";
+    const std::string numbering = R"(<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>)";
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs><w:spacing w:before="240" w:line="360" w:lineRule="exact"/></w:pPr>
+<w:r><w:t>Chapter</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>7</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="List"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item</w:t></w:r></w:p>
+<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>New page</w:t></w:r></w:p>
+<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblLook w:val="04A0"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/></w:tblGrid>
+<w:tr><w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>wide</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/><w:shd w:val="clear" w:fill="FFFF00"/></w:tcPr><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rId1", "styles", "styles.xml"}, {"rId2", "numbering", "numbering.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/numbering.xml", numbering}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    CHECK(b.size() == 4);
+    if (b.size() != 4)
+        return;
+    // The tab stop, the paragraph's spacing (its own before and exact line, the defaults' after).
+    CHECK(b[0].tabs.size() == 1 && b[0].tabs[0].kind == 2 && b[0].tabs[0].leader == '.' && std::fabs(b[0].tabs[0].pos - 450.0f) < 0.01f);
+    CHECK(md::plainText(b[0].spans) == "Chapter\t7");
+    CHECK(b[0].documentSpacing && std::fabs(b[0].spaceBefore - 12.0f) < 0.01f && std::fabs(b[0].spaceAfter - 8.0f) < 0.01f);
+    CHECK(std::fabs(b[0].lineExact - 18.0f) < 0.01f && !b[0].lineAtLeast);
+    // The list item: its level's indents, contextual spacing from its style.
+    CHECK(b[1].kind == md::BlockKind::Numbered && std::fabs(b[1].indentLeft - 36.0f) < 0.01f && std::fabs(b[1].firstLine + 18.0f) < 0.01f);
+    CHECK(b[1].contextual && std::fabs(b[1].lineMultiple - 259.0f / 240.0f) < 0.001f);
+    // A page break at the start of a paragraph.
+    CHECK(b[2].pageBreakBefore && !b[1].pageBreakBefore);
+    // The table: its grid, the style's header row and bands, spans, merges, the cell's own shading.
+    const md::Block& t = b[3];
+    CHECK(t.kind == md::BlockKind::Table && t.columns.size() == 2 && std::fabs(t.columns[1] - 200.0f) < 0.01f);
+    CHECK(t.looks.size() == 4 && t.looks[0].size() == 2);
+    if (t.looks.size() != 4)
+        return;
+    const md::CellLook& head = t.looks[0][0];
+    CHECK(head.fill == mv::rgba(0x44, 0x72, 0xC4) && head.bold && head.color == mv::rgba(255, 255, 255));
+    CHECK(std::fabs(head.edges[1].width - 1.0f) < 0.01f && head.edges[1].color == mv::rgba(255, 0, 0)); // the table's top line
+    CHECK(t.looks[1][0].span == 2 && t.looks[1][1].covered && t.looks[1][0].align == 1);
+    CHECK(t.looks[1][0].fill == mv::rgba(0xD9, 0xE2, 0xF3));                                   // band 1
+    CHECK(t.looks[2][0].fill == mv::rgba(255, 255, 0) && !t.looks[2][0].merged && t.looks[3][0].merged); // own shading; vMerge
+    CHECK(t.looks[2][0].edges[3].width > 0.0f);                                                // insideH between rows
+}

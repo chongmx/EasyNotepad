@@ -66,6 +66,11 @@ struct ParaProps {
     int align = -1; // 0 left / justified, 1 centre, 2 right
     bool hasLeft = false, hasRight = false, hasFirst = false, hasBefore = false, hasShading = false;
     float left = 0.0f, right = 0.0f, first = 0.0f, before = 0.0f;
+    bool hasAfter = false, hasLine = false;
+    float after = 0.0f;
+    float line = 0.0f;                  // with lineRule auto: a multiple; else points
+    int lineRule = 0;                   // 0 auto, 1 exact, 2 at least
+    signed char contextual = -1, pageBreakBefore = -1, keepNext = -1;
     std::uint32_t shading = 0;
     // Tab stops as set at this level: kind 4 clears an inherited stop at its position.
     std::vector<md::TabStop> tabs;
@@ -88,6 +93,16 @@ struct ParaProps {
             first = o.first, hasFirst = true;
         if (o.hasBefore)
             before = o.before, hasBefore = true;
+        if (o.hasAfter)
+            after = o.after, hasAfter = true;
+        if (o.hasLine)
+            line = o.line, lineRule = o.lineRule, hasLine = true;
+        if (o.contextual >= 0)
+            contextual = o.contextual;
+        if (o.pageBreakBefore >= 0)
+            pageBreakBefore = o.pageBreakBefore;
+        if (o.keepNext >= 0)
+            keepNext = o.keepNext;
         if (o.hasShading)
             shading = o.shading, hasShading = true;
     }
@@ -179,6 +194,7 @@ struct Level {
     std::string format = "decimal"; // bullet, decimal, lowerLetter, upperLetter, lowerRoman, upperRoman, none
     std::string text = "%1.";
     int start = 1;
+    float left = -1.0f, hanging = 0.0f; // its paragraphs' indent and hanging indent (points); -1: not set
 };
 
 struct Numbering {
@@ -314,6 +330,21 @@ bool readParaProperty(const XmlReader& x, std::string_view n, ParaProps& p)
     } else if (n == "spacing") {
         if (x.hasAttribute("w:before"))
             p.before = twips("w:before"), p.hasBefore = true;
+        if (x.hasAttribute("w:after"))
+            p.after = twips("w:after"), p.hasAfter = true;
+        if (x.hasAttribute("w:line")) {
+            const std::string rule = x.attribute("w:lineRule");
+            p.lineRule = rule == "exact" ? 1 : rule == "atLeast" ? 2 : 0;
+            const double v = std::atof(x.attribute("w:line").c_str());
+            p.line = p.lineRule == 0 ? float(std::clamp(v / 240.0, 0.5, 5.0)) : float(std::clamp(v / 20.0, 1.0, 400.0));
+            p.hasLine = true;
+        }
+    } else if (n == "contextualSpacing") {
+        p.contextual = on(x) ? 1 : 0;
+    } else if (n == "pageBreakBefore") {
+        p.pageBreakBefore = on(x) ? 1 : 0;
+    } else if (n == "keepNext") {
+        p.keepNext = on(x) ? 1 : 0;
     } else if (n == "shd") {
         const std::string fill = x.attribute("w:fill");
         p.shading = fill.empty() || fill == "auto" ? 0 : ooxml::hexColor(fill);
@@ -649,6 +680,11 @@ private:
                 level->text = x.attribute("w:val");
             } else if (n == "start" && level) {
                 level->start = std::atoi(x.attribute("w:val").c_str());
+            } else if (n == "ind" && level) {
+                const std::string l = x.hasAttribute("w:left") ? x.attribute("w:left") : x.attribute("w:start");
+                if (!l.empty())
+                    level->left = float(std::atof(l.c_str()) / 20.0);
+                level->hanging = float(std::atof(x.attribute("w:hanging").c_str()) / 20.0);
             } else if (n == "num") {
                 numId = x.attribute("w:numId");
             } else if (n == "abstractNumId" && !numId.empty()) {
@@ -838,8 +874,23 @@ private:
         return std::uint8_t(fonts.size());
     }
 
+    // A paragraph style's number (contextual spacing compares neighbours' styles).
+    std::uint16_t styleNumber(const std::string& id)
+    {
+        const auto it = styleNumbers_.find(id);
+        if (it != styleNumbers_.end())
+            return it->second;
+        const std::uint16_t n = std::uint16_t(std::min<std::size_t>(styleNumbers_.size() + 1, 65535));
+        styleNumbers_.emplace(id, n);
+        return n;
+    }
+
     void push(md::Block b)
     {
+        if (pendingPageBreak_) { // a page break ended the paragraph before
+            b.pageBreakBefore = true;
+            pendingPageBreak_ = false;
+        }
         if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
             b.spans.push_back(textSpan(" ")); // an empty paragraph keeps its line, as in Word
         doc_->flow.blocks.push_back(std::move(b));
@@ -929,8 +980,19 @@ private:
                 else if (n == "outlineLvl")
                     outline = std::atoi(x.attribute("w:val").c_str());
                 else if (readParaProperty(x, n, paraDirect)) {
-                } else if (n == "rPr" || n == "sectPr" || n == "pPrChange")
-                    x.skip(); // the paragraph mark's format; a section break; a tracked format change
+                } else if (n == "sectPr") { // a section ends with this paragraph: the next starts a page
+                    const int d = x.depth();
+                    bool continuous = false;
+                    for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                        if (f == Event::End && x.depth() < d)
+                            break;
+                        if (f == Event::Start && x.localName() == "type")
+                            continuous = x.attribute("w:val") == "continuous";
+                    }
+                    if (!continuous)
+                        pendingPageBreak_ = true;
+                } else if (n == "rPr" || n == "pPrChange")
+                    x.skip(); // the paragraph mark's format; a tracked format change
                 continue;
             }
             if (inRpr) {
@@ -958,8 +1020,14 @@ private:
                     add("\t", link, !link.empty()); // to the next tab stop (the renderer's)
             } else if (n == "br" || n == "cr") {
                 const std::string type = x.attribute("w:type");
-                if (type != "page" && type != "column")
+                if (type == "page") { // the page view starts a new page: before this paragraph, or after it
+                    if (spans.empty())
+                        b.pageBreakBefore = true;
+                    else
+                        pendingPageBreak_ = true;
+                } else if (type != "column") {
                     add("\n", link, !link.empty()); // a line break: the renderer starts a new line
+                }
             } else if (n == "noBreakHyphen") {
                 add("-", link, !link.empty());
             } else if (n == "sym") {
@@ -1022,8 +1090,6 @@ private:
         if (heading > 0 && !spans.empty()) {
             b.kind = md::BlockKind::Heading;
             b.level = heading;
-            for (md::Span& s : spans)
-                s.style &= ~unsigned(md::Bold); // headings are drawn bold anyway
             if (hasNumPr && !numId.empty() && numId != "0") { // numbered headings: "A.1 Introduction"
                 bool bullet = false;
                 const std::string marker = nextMarker(numId, std::max(0, ilvl), bullet);
@@ -1053,8 +1119,29 @@ private:
             b.indentRight = std::clamp(para.right, 0.0f, 288.0f);
             b.firstLine = std::clamp(para.first, -b.indentLeft, 144.0f);
         }
-        if (paraDirect.hasBefore || (ps && ps->para.hasBefore))
-            b.spaceBefore = std::clamp(para.before - 6.0f, 0.0f, 36.0f); // beyond the renderer's own gap
+        if ((b.kind == md::BlockKind::Bullet || b.kind == md::BlockKind::Numbered) && hasNumPr) {
+            // A list item's indents: its level's, under the paragraph's own.
+            const Level* lvl = numbering_.level(numId, std::clamp(ilvl, 0, 8));
+            const float levelLeft = lvl && lvl->left >= 0.0f ? lvl->left : 36.0f * float(std::max(0, ilvl) + 1);
+            const float levelHanging = lvl && lvl->left >= 0.0f ? lvl->hanging : 18.0f;
+            b.indentLeft = std::clamp(paraDirect.hasLeft ? para.left : levelLeft, 0.0f, 432.0f);
+            b.firstLine = std::clamp(paraDirect.hasFirst ? para.first : -levelHanging, -b.indentLeft, 144.0f);
+            b.indentRight = std::clamp(para.right, 0.0f, 288.0f);
+        }
+        // Word's spacing: before and after the paragraph, its line height, contextual spacing.
+        b.documentSpacing = true;
+        b.spaceBefore = std::clamp(para.before, 0.0f, 400.0f);
+        b.spaceAfter = std::clamp(para.after, 0.0f, 400.0f);
+        if (para.hasLine) {
+            if (para.lineRule == 0)
+                b.lineMultiple = para.line;
+            else
+                b.lineExact = para.line, b.lineAtLeast = para.lineRule == 2;
+        }
+        b.contextual = para.contextual == 1;
+        b.style = styleNumber(styleId.empty() ? defaultStyle_ : styleId);
+        b.pageBreakBefore = b.pageBreakBefore || para.pageBreakBefore == 1;
+        b.keepNext = para.keepNext == 1;
         b.shading = para.shading;
         for (const md::TabStop& t : para.tabs) // the stops left after the styles' and the paragraph's own clears
             if (t.kind != 4)
@@ -1131,6 +1218,7 @@ private:
             bool hasFill = false;
             Borders borders;
             int valign = 0, span = 1, align = -1;
+            std::vector<std::int8_t> aligns; // each paragraph's
             bool merged = false, firstParagraph = true;
         };
         std::vector<std::vector<Own>> own;
@@ -1215,10 +1303,14 @@ private:
                 else if (p.kind == md::BlockKind::Bullet)
                     p.spans.insert(p.spans.begin(), textSpan("\xE2\x80\xA2 "));
                 Own& o = own.back().back();
-                if (o.firstParagraph) { // the cell's alignment: its first paragraph's
-                    o.align = p.textAlign == 0 ? -1 : p.textAlign;
-                    o.firstParagraph = false;
-                }
+                const std::int8_t align = std::int8_t(p.textAlign == 0 ? -1 : p.textAlign);
+                if (o.firstParagraph)
+                    o.align = align;
+                if (o.aligns.size() < 256)
+                    o.aligns.push_back(align);
+                if (!o.firstParagraph) // each paragraph on its own line, an empty one a blank line
+                    cell->push_back(textSpan("\n"));
+                o.firstParagraph = false;
                 md::Spans kept;
                 for (md::Span& sp : p.spans) {
                     if (sp.style & md::Image) { // the renderer's table cells hold text: the image follows the table
@@ -1230,8 +1322,6 @@ private:
                         kept.push_back(std::move(sp));
                     }
                 }
-                if (!cell->empty() && !kept.empty())
-                    cell->push_back(textSpan("\n")); // a cell's paragraphs, each on its own line
                 for (md::Span& sp : kept)
                     cell->push_back(std::move(sp));
             } else if (n == "jc" && x.depth() == depth + 2) { // tblPr's: the table's own alignment
@@ -1319,6 +1409,8 @@ private:
                 look.color = p.color;
                 look.bold = p.bold == 1;
                 look.align = std::int8_t(o.align);
+                if (std::any_of(o.aligns.begin(), o.aligns.end(), [&](std::int8_t a) { return a != o.align; }))
+                    look.paragraphAligns = o.aligns;
                 look.valign = std::int8_t(o.valign);
                 look.span = std::uint8_t(span);
                 look.merged = o.merged;
@@ -1389,6 +1481,8 @@ private:
     Style defaults_;           // w:docDefaults
     std::string headerId_, footerId_; // the document's header and footer (relationship ids)
     std::string defaultStyle_; // the paragraph style a paragraph without one has ("Normal")
+    std::map<std::string, std::uint16_t> styleNumbers_;
+    bool pendingPageBreak_ = false; // a page break ended the last paragraph: the next starts a page
     Numbering numbering_;
     std::map<std::string, md::Spans> footnotes_, endnotes_, comments_;
     std::map<std::string, std::string> commentAuthors_;

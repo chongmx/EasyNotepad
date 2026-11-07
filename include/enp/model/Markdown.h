@@ -59,7 +59,8 @@ struct CellLook {
     std::uint32_t fill = 0;    // background; 0: none
     std::uint32_t color = 0;   // text colour where a run sets none; 0: the block's
     bool bold = false;         // its text bold (a header row's)
-    std::int8_t align = -1;    // its paragraphs' alignment: -1 left, 1 centre, 2 right
+    std::int8_t align = -1;    // its first paragraph's alignment: -1 left, 1 centre, 2 right
+    std::vector<std::int8_t> paragraphAligns; // each paragraph's (the '\n'-separated parts of its text)
     std::int8_t valign = 0;    // 0 top, 1 centre, 2 bottom
     std::uint8_t span = 1;     // columns it covers (gridSpan)
     bool covered = false;      // inside the span of a cell before it on its row: not drawn
@@ -86,6 +87,17 @@ struct Block {
     float spaceBefore = 0.0f;     // above the paragraph, beyond the renderer's own gap
     std::uint32_t shading = 0;    // the paragraph's background (0: none)
     std::vector<TabStop> tabs;    // its tab stops, by position (none: every half inch)
+    // Spacing as the author set it (points), used instead of the renderer's gaps when
+    // `documentSpacing` is set; and where pages break (the page view).
+    bool documentSpacing = false;
+    float spaceAfter = 0.0f;
+    float lineMultiple = 0.0f;    // lines this many times the font's single line; 0: single
+    float lineExact = 0.0f;       // > 0: lines exactly (with lineAtLeast: at least) this tall
+    bool lineAtLeast = false;
+    bool contextual = false;      // no spacing to a neighbour of the same paragraph style (lists)
+    std::uint16_t style = 0;      // its paragraph style, numbered (contextual spacing compares them)
+    bool pageBreakBefore = false; // starts a new page
+    bool keepNext = false;        // kept on the page of the block after it
     std::vector<float> columns;   // Table: Word's grid, the columns' widths in points (empty: by their text)
     std::vector<std::vector<CellLook>> looks; // Table: each cell's look, as `rows` (empty: the renderer's own)
 };

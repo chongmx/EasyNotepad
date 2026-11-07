@@ -50,6 +50,41 @@ const char* bundledFamily(const std::string& f)
 
 const char* const kStyles[4] = {"Regular", "Bold", "Italic", "BoldItalic"};
 
+// A font file's single line height in ems, as Word spaces lines: hhea's ascender, descender and
+// line gap (else OS/2's Windows ascent and descent). The first face of a collection (.ttc).
+float lineHeightOf(const unsigned char* p, std::size_t n)
+{
+    auto u16 = [&](std::size_t o) { return o + 2 <= n ? unsigned(p[o]) << 8 | p[o + 1] : 0u; };
+    auto u32 = [&](std::size_t o) { return o + 4 <= n ? (std::uint32_t(u16(o)) << 16) | u16(o + 2) : 0u; };
+    auto s16 = [&](std::size_t o) { return int(std::int16_t(u16(o))); };
+    std::size_t base = 0;
+    if (n >= 16 && std::memcmp(p, "ttcf", 4) == 0)
+        base = u32(12);
+    const unsigned tables = u16(base + 4);
+    std::size_t head = 0, hhea = 0, os2 = 0;
+    for (unsigned i = 0; i < tables && i < 64; ++i) {
+        const std::size_t rec = base + 12 + 16 * std::size_t(i);
+        if (rec + 16 > n)
+            break;
+        const std::uint32_t at = u32(rec + 8);
+        if (std::memcmp(p + rec, "head", 4) == 0)
+            head = at;
+        else if (std::memcmp(p + rec, "hhea", 4) == 0)
+            hhea = at;
+        else if (std::memcmp(p + rec, "OS/2", 4) == 0)
+            os2 = at;
+    }
+    const unsigned em = head ? u16(head + 18) : 0;
+    if (em < 16)
+        return 1.17f;
+    int units = 0;
+    if (hhea)
+        units = s16(hhea + 4) - s16(hhea + 6) + s16(hhea + 8);
+    if (units <= 0 && os2)
+        units = int(u16(os2 + 74) + u16(os2 + 76));
+    return units > 0 ? std::clamp(float(units) / float(em), 0.8f, 2.0f) : 1.17f;
+}
+
 // Families the system has under their own names, by style (regular, bold, italic, bold italic).
 struct SystemFamily {
     const char* family;
@@ -129,7 +164,7 @@ DocumentFonts::Face DocumentFonts::face(std::string_view family, bool bold, bool
                 continue;
             if (Loaded* l = load(std::string(s.dir) + s.files[st])) {
                 request.source = l;
-                request.face = Face{l->font, (st & 1) != 0, (st & 2) != 0};
+                request.face = Face{l->font, (st & 1) != 0, (st & 2) != 0, l->lineHeight};
                 break;
             }
         }
@@ -141,7 +176,7 @@ DocumentFonts::Face DocumentFonts::face(std::string_view family, bool bold, bool
     if (!request.source)
         if (Loaded* l = load(std::string("pack:") + bundledFamily(f) + "-" + kStyles[style] + ".ttf")) {
             request.source = l;
-            request.face = Face{l->font, bold, italic};
+            request.face = Face{l->font, bold, italic, l->lineHeight};
         }
     if (request.source)
         request.source->lastUsed = now;
@@ -183,6 +218,7 @@ DocumentFonts::Loaded* DocumentFonts::load(const std::string& key)
         std::snprintf(config.Name, sizeof(config.Name), "%s", key.c_str() + (key.size() > 39 ? key.size() - 39 : 0));
         // Read only: ImGui's loader parses the file in place and never writes to it.
         l->font = ImGui::GetIO().Fonts->AddFontFromMemoryTTF(const_cast<void*>(bytes), int(size), Fonts::kUiSize, &config);
+        l->lineHeight = lineHeightOf(static_cast<const unsigned char*>(bytes), size);
     }
     if (!l->font) {
         missing_.push_back(key);

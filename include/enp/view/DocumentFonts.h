@@ -23,6 +23,7 @@ public:
     struct Face {
         ImFont* font = nullptr;
         bool bold = false, italic = false;
+        float lineHeight = 1.17f; // single line spacing, in ems (the font's ascender, descender and line gap, as Word takes them)
     };
 
     DocumentFonts() = default;
@@ -47,6 +48,7 @@ private:
         os::fs::MappedFile file; // a system font
         std::string data;        // a bundled one, inflated from the pack
         double lastUsed = 0.0;
+        float lineHeight = 1.17f;
     };
     // A family and style asked for, with what answers it: asked each frame for every run drawn, so
     // the answer is kept (by the document's own spelling: no allocation after the first time).
