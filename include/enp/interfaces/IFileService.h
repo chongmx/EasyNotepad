@@ -65,6 +65,10 @@ public:
     virtual std::string homeDirectory() { return {}; }
     // Starting points for browsing (drive letters on Windows), found without touching the drives.
     virtual std::vector<std::string> roots() { return {}; }
+    // False while the app may only see its own folders (Android without "All files access").
+    virtual bool hasStorageAccess() { return true; }
+    // Asks the user for that access (the system settings on Android); returns at once.
+    virtual void requestStorageAccess() {}
     virtual bool rename(const std::string& from, const std::string& to, std::string* error = nullptr)
     {
         (void)from, (void)to, (void)error;
