@@ -23,6 +23,8 @@ enum Style : unsigned {
     Emoji = 1u << 7,    // one emoji sequence (model/Emoji.h): text is its characters, emoji its picture key
     Display = 1u << 8,  // with Math: $$...$$ within a paragraph, set apart on lines of its own
     Underline = 1u << 9,
+    PageNumber = 1u << 10, // documents: the number of the page it is drawn on (a PAGE field); text: the saved one
+    PageCount = 1u << 11,  // documents: the number of pages (NUMPAGES)
 };
 
 struct Span {

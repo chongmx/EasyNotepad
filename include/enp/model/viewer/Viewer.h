@@ -29,6 +29,20 @@ struct FlowDocument {
     std::vector<Page> drawings;
     // The font families the runs are in ("Calibri", "Times New Roman"), as Span::font numbers them.
     std::vector<std::string> fonts;
+
+    // As printed (the page view): the page's size and margins in points, the header and footer
+    // every page repeats, the blocks the pages flow through in order (the body, then endnotes and
+    // comments: not the header, footer and footnotes `blocks` holds for reading), and each
+    // footnote with the block that refers to it (it goes at the foot of that block's page).
+    struct PageSetup {
+        float width = 612.0f, height = 792.0f;
+        float top = 72.0f, right = 72.0f, bottom = 72.0f, left = 72.0f;
+        float header = 36.0f, footer = 36.0f; // from the page's edge to the header's top / the footer's bottom
+    };
+    PageSetup page;
+    std::vector<markdown::Block> header, footer;
+    std::vector<std::size_t> printed;
+    std::vector<std::pair<std::size_t, std::size_t>> footnotes; // (footnote block, referring block), into `blocks`
 };
 
 // Scripts whose letters the bundled fonts lack: the views merge a system font in while a document

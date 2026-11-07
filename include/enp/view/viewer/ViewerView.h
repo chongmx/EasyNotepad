@@ -76,6 +76,17 @@ private:
         int currentPage = 0;
         int goToPage = -1;          // scroll to this page's top next frame (the toolbar's arrows, Home / End)
         std::uint8_t scripts = 0;   // of the document and the pages it has shown
+        // Word: the page view (else reflowed); its pages as laid out at `wordScale` for `wordGeneration`.
+        bool reflow = false;
+        struct WordPage {
+            std::vector<std::pair<std::size_t, float>> blocks; // block, its top in the page's text area (pixels; < 0: continued)
+            std::vector<std::size_t> notes;                    // its footnotes' blocks
+            float notesH = 0.0f;
+        };
+        std::vector<WordPage> wordPages;
+        float wordScale = 0.0f;
+        std::uint64_t wordGeneration = 0;
+        MarkdownView header, footer; // every page's
     };
     // A page's pictures, decoded for that page (and released with it).
     class PageImageSource final : public PageImages {
@@ -106,6 +117,8 @@ private:
     const MarkdownImage* image(Entry& e, std::map<std::string, HeldImage>& held, const std::string& media);
     void toolbar(model::Document& doc, Entry& e, const model::viewer::ViewerDocument& d, float width);
     void flow(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
+    void wordPages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size, const Palette& paper);
+    void paginate(Entry& e, const model::viewer::ViewerDocument& d, float textHeight, float pxPerPoint);
     void sheet(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void sheetTabs(Entry& e, const model::viewer::Workbook& book, ImVec2 size);
     void pages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);

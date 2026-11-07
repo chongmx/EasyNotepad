@@ -392,17 +392,23 @@ public:
         theme_ = ooxml::readTheme(zip_, ooxml::targetOfType(rels_, "theme"));
         XmlReader x(*xml);
         body(x, rels_, main_);
+        const std::size_t bodyBlocks = doc.flow.blocks.size();
         // The header above the body and the footer below it and its notes (as printed), each set
-        // apart by a rule.
+        // apart by a rule; the page view repeats them on every page.
+        std::size_t shift = 0; // the body's place once the header is in front of it
         if (!headerId_.empty()) {
             std::vector<md::Block> header = headerFooter(headerId_);
             if (!header.empty()) {
+                doc.flow.header = header;
                 md::Block rule;
                 rule.kind = md::BlockKind::Rule;
                 header.push_back(rule);
+                shift = header.size();
                 doc.flow.blocks.insert(doc.flow.blocks.begin(), std::make_move_iterator(header.begin()), std::make_move_iterator(header.end()));
             }
         }
+        for (std::size_t i = 0; i < bodyBlocks; ++i)
+            doc.flow.printed.push_back(shift + i);
         if (!x.error().empty() && doc.flow.blocks.empty())
             doc.error = "the document's XML is broken: " + x.error();
         // Footnotes and endnotes, in the order they were referenced.
@@ -417,14 +423,23 @@ public:
                     continue;
                 md::Block b;
                 b.kind = md::BlockKind::Numbered;
-                b.marker = noteNumbers_[std::string(1, kind) + id] + ".";
+                const std::string key = std::string(1, kind) + id;
+                b.marker = noteNumbers_[key] + ".";
                 b.spans = it->second;
+                // A footnote goes at the foot of the page of the block that refers to it; an
+                // endnote after the body.
+                const auto ref = noteBlocks_.find(key);
+                if (kind == 'f' && ref != noteBlocks_.end())
+                    doc.flow.footnotes.emplace_back(doc.flow.blocks.size(), shift + ref->second);
+                else
+                    doc.flow.printed.push_back(doc.flow.blocks.size());
                 doc.flow.blocks.push_back(std::move(b));
             }
         }
         if (!footerId_.empty()) {
             std::vector<md::Block> footer = headerFooter(footerId_);
             if (!footer.empty()) {
+                doc.flow.footer = footer;
                 md::Block rule;
                 rule.kind = md::BlockKind::Rule;
                 doc.flow.blocks.push_back(rule);
@@ -438,6 +453,7 @@ public:
             heading.kind = md::BlockKind::Heading;
             heading.level = 3;
             heading.spans.push_back(textSpan("Comments"));
+            doc.flow.printed.push_back(doc.flow.blocks.size());
             doc.flow.blocks.push_back(std::move(heading));
             for (std::size_t i = 0; i < commentOrder_.size(); ++i) {
                 const auto it = comments_.find(commentOrder_[i]);
@@ -454,6 +470,7 @@ public:
                 }
                 for (const md::Span& span : it->second)
                     b.spans.push_back(span);
+                doc.flow.printed.push_back(doc.flow.blocks.size());
                 doc.flow.blocks.push_back(std::move(b));
             }
         }
@@ -814,10 +831,25 @@ private:
             if (e != Event::Start)
                 continue;
             const std::string_view n = x.localName();
+            auto twips = [&](const char* a, float fallback) {
+                return x.hasAttribute(a) ? float(std::atof(x.attribute(a).c_str()) / 20.0) : fallback;
+            };
             if (n == "headerReference" || n == "footerReference") {
                 std::string& slot = n == "headerReference" ? header : footer;
                 if (slot.empty() || x.attribute("w:type") == "default")
                     slot = x.attribute("r:id");
+            } else if (n == "pgSz") {
+                FlowDocument::PageSetup& p = doc_->flow.page;
+                p.width = std::clamp(twips("w:w", p.width), 72.0f, 3000.0f);
+                p.height = std::clamp(twips("w:h", p.height), 72.0f, 3000.0f);
+            } else if (n == "pgMar") {
+                FlowDocument::PageSetup& p = doc_->flow.page;
+                p.top = std::clamp(std::fabs(twips("w:top", p.top)), 0.0f, p.height * 0.45f); // negative: the header may overlap
+                p.bottom = std::clamp(std::fabs(twips("w:bottom", p.bottom)), 0.0f, p.height * 0.45f);
+                p.left = std::clamp(twips("w:left", p.left), 0.0f, p.width * 0.45f);
+                p.right = std::clamp(twips("w:right", p.right), 0.0f, p.width * 0.45f);
+                p.header = std::clamp(twips("w:header", p.header), 0.0f, p.top);
+                p.footer = std::clamp(twips("w:footer", p.footer), 0.0f, p.bottom);
             }
         }
         if (!header.empty())
@@ -891,6 +923,9 @@ private:
             b.pageBreakBefore = true;
             pendingPageBreak_ = false;
         }
+        for (const std::string& key : paragraphNotes_)
+            noteBlocks_.emplace(key, doc_->flow.blocks.size());
+        paragraphNotes_.clear();
         if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
             b.spans.push_back(textSpan(" ")); // an empty paragraph keeps its line, as in Word
         doc_->flow.blocks.push_back(std::move(b));
@@ -925,12 +960,25 @@ private:
         std::string link;    // the hyperlink being read
         int linkDepth = -1;
         bool inField = false; // between fldChar begin and separate: the field's instruction
+        std::string instruction; // that instruction ("PAGE", "NUMPAGES", ...)
+        unsigned field = 0;      // a PAGE / NUMPAGES field's result being read: drawn as the live number
+        bool fieldShown = false; // its number is in the spans already
+        int simpleDepth = -1;    // inside w:fldSimple at this depth
+        // A field's kind by its instruction: the page's number or the number of pages.
+        auto fieldKind = [](std::string_view in) -> unsigned {
+            while (!in.empty() && in.front() == ' ')
+                in.remove_prefix(1);
+            const std::string_view word = in.substr(0, in.find(' '));
+            return word == "PAGE" ? unsigned(md::PageNumber) : word == "NUMPAGES" || word == "SECTIONPAGES" ? unsigned(md::PageCount) : 0u;
+        };
         RunProps runDirect;   // the run's own formatting
         std::string runStyleId;
         ParaProps paraDirect;
         bool inRpr = false, inPpr = false;
         // A run's text with its look: the defaults, the paragraph's style, the run's style, the run.
         auto add = [&](std::string_view text, const std::string& url, bool asLink) {
+            if (field != 0 && fieldShown)
+                return; // the rest of the saved result: the number is drawn live
             RunProps r = defaults_.run;
             ParaProps unused;
             styleProps(styleId.empty() ? defaultStyle_ : styleId, r, unused);
@@ -947,6 +995,13 @@ private:
             look.size = r.size;
             look.font = fontNumber(r.font);
             look.url = url;
+            if (field != 0) { // the saved number stands in for the page's own (reflowed: as saved)
+                look.style |= field;
+                spans.push_back(look);
+                spans.back().text = std::string(text);
+                fieldShown = true;
+                return;
+            }
             appendText(spans, text, look);
         };
         const int depth = x.depth();
@@ -958,6 +1013,9 @@ private:
                 if (n == "hyperlink" && x.depth() + 1 == linkDepth) {
                     link.clear();
                     linkDepth = -1;
+                } else if (n == "fldSimple" && x.depth() + 1 == simpleDepth) {
+                    field = 0;
+                    simpleDepth = -1;
                 } else if (n == "rPr") {
                     inRpr = false;
                 } else if (n == "pPr") {
@@ -1034,11 +1092,28 @@ private:
                 add("\xE2\x96\xA1", link, !link.empty()); // a symbol-font glyph: a box
             } else if (n == "fldChar") {
                 const std::string type = x.attribute("w:fldCharType");
-                if (type == "begin")
+                if (type == "begin") {
                     inField = true;
-                else if (type == "separate" || type == "end")
+                    instruction.clear();
+                    field = 0;
+                } else if (type == "separate") {
                     inField = false;
-            } else if (n == "instrText" || n == "delText" || n == "del" || n == "moveFrom" || n == "Fallback" ||
+                    field = fieldKind(instruction);
+                    fieldShown = false;
+                } else if (type == "end") {
+                    inField = false;
+                    field = 0;
+                }
+            } else if (n == "instrText") {
+                if (inField && instruction.size() < 256)
+                    instruction += x.elementText();
+                else
+                    x.skip();
+            } else if (n == "fldSimple") {
+                field = fieldKind(x.attribute("w:instr"));
+                fieldShown = false;
+                simpleDepth = x.depth();
+            } else if (n == "delText" || n == "del" || n == "moveFrom" || n == "Fallback" ||
                        n == "commentRangeStart" || n == "commentRangeEnd") {
                 x.skip();
             } else if (n == "commentReference") {
@@ -1065,6 +1140,8 @@ private:
                     noteNumbers_[key] = std::to_string(noteOrder_.size() + 1);
                     noteOrder_.push_back({kind, id});
                 }
+                if (kind == 'f')
+                    paragraphNotes_.push_back(key); // its block, once pushed
                 add("[" + noteNumbers_[key] + "]", {}, false);
             } else if (n == "drawing" || n == "pict" || n == "object") {
                 drawing(x, rels, part, spans, extra);
@@ -1483,6 +1560,8 @@ private:
     std::string defaultStyle_; // the paragraph style a paragraph without one has ("Normal")
     std::map<std::string, std::uint16_t> styleNumbers_;
     bool pendingPageBreak_ = false; // a page break ended the last paragraph: the next starts a page
+    std::vector<std::string> paragraphNotes_;          // the footnotes the paragraph being read refers to
+    std::map<std::string, std::size_t> noteBlocks_;    // footnote key -> the body block that refers to it
     Numbering numbering_;
     std::map<std::string, md::Spans> footnotes_, endnotes_, comments_;
     std::map<std::string, std::string> commentAuthors_;

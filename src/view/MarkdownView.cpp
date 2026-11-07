@@ -25,6 +25,7 @@ struct MarkdownView::Style {
     ImFont* ui = nullptr;
     ImFont* mono = nullptr;
     DocumentFonts* documentFonts = nullptr;               // a document's own fonts (Span::font), when set
+    int pageNumber = 0, pageCount = 0;                   // the page drawn on (PageNumber / PageCount spans); 0: as saved
     const std::vector<std::string>* fontNames = nullptr; // the document's font families, as Span::font numbers them
     float size = 15.0f; // body text, in pixels
     bool paper = false; // a document read for viewing: its own colours; italics not dimmed
@@ -349,6 +350,14 @@ private:
 
     void text(const md::Span& span)
     {
+        // A page-number field on a page: that page's number (else the number the file saved).
+        if ((span.style & (md::PageNumber | md::PageCount)) && (st_.pageNumber > 0)) {
+            md::Span number = span; // short: no allocation
+            number.text = std::to_string((span.style & md::PageNumber) ? st_.pageNumber : st_.pageCount);
+            number.style &= ~unsigned(md::PageNumber | md::PageCount);
+            text(number);
+            return;
+        }
         if (span.style & md::Emoji) {
             emoji(span);
             return;
@@ -699,8 +708,18 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const std::size_t columns = block.align.size(), rows = block.rows.size();
-    const float ppp = st.size / 11.0f, lineH = st.lineH();
-    const float padX = 5.4f * ppp, padY = 1.5f * ppp; // Word's default cell margins (0.08 inch at the sides)
+    const float ppp = st.size / 11.0f;
+    // Lines at Word's single spacing of the cells' font (the first run's that names one).
+    const float single = [&]() {
+        for (const auto& row : block.rows)
+            for (const md::Spans& cell : row)
+                for (const md::Span& span : cell)
+                    if (span.font > 0 && st.documentFonts && st.fontNames && span.font <= st.fontNames->size())
+                        return st.documentFonts->face((*st.fontNames)[span.font - 1], false, false).lineHeight;
+        return 1.17f;
+    }();
+    const float lineH = st.paper ? std::floor(st.size * single) : st.lineH();
+    const float padX = 5.4f * ppp, padY = 0.5f * ppp; // Word's default cell margins (0.08 inch at the sides)
     std::vector<float> widths(columns, 0.0f);
     if (block.columns.size() == columns) {
         for (std::size_t c = 0; c < columns; ++c)
@@ -1232,12 +1251,8 @@ void MarkdownView::render(const std::string& text, float width, const Fonts& fon
     layoutAndDraw(st, std::max(width, 40.0f * uiScale));
 }
 
-void MarkdownView::renderBlocks(const std::vector<md::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
-                                const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames)
+void MarkdownView::use(const std::vector<md::Block>& blocks, std::uint64_t generation)
 {
-    Style st;
-    styleFor(st, fonts, palette, fontSize, uiScale);
-    st.fontNames = fontNames;
     if (external_ != &blocks || generation != generation_) {
         os::mem::release(text_); // no own text: the blocks are the caller's
         os::mem::release(blocks_);
@@ -1246,10 +1261,50 @@ void MarkdownView::renderBlocks(const std::vector<md::Block>& blocks, std::uint6
         math_.clear();
         width_ = -1.0f;
     }
+}
+
+void MarkdownView::renderBlocks(const std::vector<md::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
+                                const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames)
+{
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    st.fontNames = fontNames;
+    use(blocks, generation);
     layoutAndDraw(st, std::max(width, 40.0f * uiScale));
 }
 
-void MarkdownView::layoutAndDraw(const Style& st, float width)
+void MarkdownView::measureBlocks(const std::vector<md::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
+                                 const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames)
+{
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    st.fontNames = fontNames;
+    use(blocks, generation);
+    measure(st, std::max(width, 40.0f * uiScale));
+}
+
+float MarkdownView::blockGap(std::size_t index) const
+{
+    if (index == 0 || index >= tops_.size())
+        return 0.0f;
+    return std::max(0.0f, tops_[index] - (tops_[index - 1] + heights_[index - 1]));
+}
+
+void MarkdownView::drawBlockAt(std::size_t index, ImVec2 at, float width, const Fonts& fonts, const Palette& palette, float fontSize,
+                               float uiScale, const std::vector<std::string>* fontNames, int pageNumber, int pageCount)
+{
+    const std::vector<md::Block>& blocks = shown();
+    if (index >= blocks.size())
+        return;
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    st.fontNames = fontNames;
+    st.pageNumber = pageNumber;
+    st.pageCount = pageCount;
+    drawBlock(blocks[index], at, std::max(width, 40.0f * uiScale), st, true);
+}
+
+void MarkdownView::measure(const Style& st, float width)
 {
     const std::vector<md::Block>& blocks = shown();
     // Measure every block when the layout changed (text, width or size).
@@ -1266,6 +1321,13 @@ void MarkdownView::layoutAndDraw(const Style& st, float width)
             y += heights_[i];
         }
     }
+
+}
+
+void MarkdownView::layoutAndDraw(const Style& st, float width)
+{
+    measure(st, width);
+    const std::vector<md::Block>& blocks = shown();
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();

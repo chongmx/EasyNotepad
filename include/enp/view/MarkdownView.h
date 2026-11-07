@@ -32,6 +32,18 @@ public:
     void renderBlocks(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
                       const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
 
+    // For a caller that places the blocks itself (a document's pages): measures `blocks` at
+    // `width` (once per width, size and generation, as renderBlocks does), after which each
+    // block's height and the gap before it (after the block before it in `blocks`) are known; then
+    // draws one block where the caller puts it, on page `pageNumber` of `pageCount` (its page-number
+    // fields; 0: as saved).
+    void measureBlocks(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
+                       const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
+    float blockHeight(std::size_t index) const { return index < heights_.size() ? heights_[index] : 0.0f; }
+    float blockGap(std::size_t index) const;
+    void drawBlockAt(std::size_t index, ImVec2 at, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
+                     const std::vector<std::string>* fontNames = nullptr, int pageNumber = 0, int pageCount = 0);
+
     // A link was clicked (its target).
     std::function<void(const std::string& url)> onLink;
     // Resolves an image's source (as written) to a decoded image; null, or a null result, shows
@@ -70,6 +82,8 @@ private:
     float drawBlock(const model::markdown::Block& block, ImVec2 at, float width, const Style& style, bool draw);
     void styleFor(Style& st, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale);
     void layoutAndDraw(const Style& st, float width); // shown_, measured when needed
+    void measure(const Style& st, float width);       // tops_ and heights_ of shown(), when the layout changed
+    void use(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation); // shows the caller's blocks
 };
 
 } // namespace enp::view
