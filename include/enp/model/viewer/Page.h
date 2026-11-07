@@ -36,7 +36,8 @@ struct GradientStop {
 struct Gradient {
     std::vector<GradientStop> stops; // empty: no gradient
     float angle = 0.0f;              // linear: the direction the colour changes in, degrees clockwise from left-to-right
-    bool radial = false;             // radial: from the centre of the shape's bounds out to its corners
+    bool radial = false;             // radial: from `cx, cy` of the shape's bounds out to its farthest corner
+    float cx = 0.5f, cy = 0.5f;      // that centre, as a share of the bounds (DrawingML's fillToRect)
     // PDF shadings give the axis itself (page points): linear from `from` to `to`, radial from a
     // circle at `from` of radius r0 to one at `to` of radius r1. Otherwise the shape's bounds do.
     bool absolute = false;

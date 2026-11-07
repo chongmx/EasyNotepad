@@ -155,6 +155,29 @@ std::uint32_t fromHsl(double h, double s, double l, std::uint32_t alpha)
     return byte(r) | (byte(g) << 8) | (byte(b) << 16) | (alpha & 0xFF000000u);
 }
 
+double toLinear(double v)
+{
+    return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+}
+
+double toSrgb(double v)
+{
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055;
+}
+
+// Each channel in linear light: a tint moves it toward white (c * v + 1 - v), a shade toward black (c * v).
+std::uint32_t linearTintShade(std::uint32_t color, double v, bool tint)
+{
+    v = std::clamp(v, 0.0, 1.0);
+    std::uint32_t out = color & 0xFF000000u;
+    for (int shift = 0; shift < 24; shift += 8) {
+        double c = toLinear(double((color >> shift) & 0xFFu) / 255.0);
+        c = tint ? c * v + (1.0 - v) : c * v;
+        out |= std::uint32_t(std::clamp(int(std::lround(toSrgb(c) * 255.0)), 0, 255)) << shift;
+    }
+    return out;
+}
+
 } // namespace
 
 std::uint32_t applyTint(std::uint32_t color, double tint)
@@ -190,10 +213,11 @@ Theme readTheme(const ZipArchive& zip, std::string_view part)
                 {"accent6", hexColor("70AD47")}, {"hlink", hexColor("0563C1")},  {"folHlink", hexColor("954F72")}};
     if (part.empty())
         return t;
-    const std::optional<std::string> xml = zip.read(part, std::size_t(16) << 20);
+    std::optional<std::string> xml = zip.read(part, std::size_t(16) << 20);
     if (!xml)
         return t;
-    XmlReader x(*xml);
+    t.xml = std::make_shared<const std::string>(std::move(*xml));
+    XmlReader x(*t.xml);
     std::string current;
     bool inScheme = false;
     std::string fontKind;
@@ -220,6 +244,58 @@ Theme readTheme(const ZipArchive& zip, std::string_view part)
         }
     }
     return t;
+}
+
+bool themeFill(const Theme& theme, int index, bool background, std::uint32_t placeholder,
+               const std::map<std::string, std::string>* schemeMap, std::uint32_t& color, Gradient& gradient)
+{
+    if (!theme.xml || index < 0)
+        return false;
+    Theme withPlaceholder = theme; // phClr: the colour the style reference names
+    withPlaceholder.colors["phClr"] = placeholder;
+    const std::string_view list = background ? "bgFillStyleLst" : "fillStyleLst";
+    XmlReader x(*theme.xml);
+    int listDepth = -1, n = -1;
+    for (XmlReader::Event e; (e = x.next()) != XmlReader::Event::Eof && e != XmlReader::Event::Error;) {
+        if (e == XmlReader::Event::End && listDepth >= 0 && x.depth() < listDepth)
+            return false; // the list ended before the style
+        if (e != XmlReader::Event::Start)
+            continue;
+        if (listDepth < 0) {
+            if (x.localName() == list)
+                listDepth = x.depth();
+            continue;
+        }
+        if (x.depth() != listDepth + 1)
+            continue;
+        if (++n != index) {
+            x.skip();
+            continue;
+        }
+        gradient = Gradient();
+        const std::string_view kind = x.localName();
+        if (kind == "gradFill") {
+            color = readGradientFill(x, withPlaceholder, schemeMap, gradient);
+            return !gradient.stops.empty();
+        }
+        if (kind == "noFill") {
+            color = 0;
+            return true;
+        }
+        if (kind == "solidFill") {
+            const int depth = x.depth();
+            for (XmlReader::Event f; (f = x.next()) != XmlReader::Event::Eof && f != XmlReader::Event::Error;) {
+                if (f == XmlReader::Event::End && x.depth() < depth)
+                    break;
+                if (f == XmlReader::Event::Start) {
+                    color = readColor(x, withPlaceholder, schemeMap);
+                    return true;
+                }
+            }
+        }
+        return false; // a picture or pattern fill
+    }
+    return false;
 }
 
 std::uint32_t readColor(XmlReader& x, const Theme& theme, const std::map<std::string, std::string>* schemeMap)
@@ -256,8 +332,13 @@ std::uint32_t readColor(XmlReader& x, const Theme& theme, const std::map<std::st
         auto pct = [&](const char* a) { return std::uint32_t(std::clamp(std::atof(x.attribute(a).c_str()) / 100000.0, 0.0, 1.0) * 255.0); };
         c = pct("r") | (pct("g") << 8) | (pct("b") << 16) | 0xFF000000u;
     }
-    double mod = 1.0, off = 0.0;
-    bool lum = false;
+    // The modifiers, in the order written (Office applies them one after another).
+    auto hsl = [&](auto change) {
+        double h, s, l;
+        toHsl(c, h, s, l);
+        change(h, s, l);
+        c = fromHsl(h - std::floor(h), std::clamp(s, 0.0, 1.0), std::clamp(l, 0.0, 1.0), c);
+    };
     const int depth = x.depth();
     for (XmlReader::Event e; (e = x.next()) != XmlReader::Event::Eof && e != XmlReader::Event::Error;) {
         if (e == XmlReader::Event::End && x.depth() < depth)
@@ -267,21 +348,31 @@ std::uint32_t readColor(XmlReader& x, const Theme& theme, const std::map<std::st
         const std::string_view n = x.localName();
         const double v = std::atof(x.attribute("val").c_str()) / 100000.0;
         if (n == "lumMod") {
-            mod = v;
-            lum = true;
+            hsl([&](double&, double&, double& l) { l *= v; });
         } else if (n == "lumOff") {
-            off = v;
-            lum = true;
-        } else if (n == "shade") {
-            c = applyTint(c, -(1.0 - v));
-        } else if (n == "tint") {
-            c = applyTint(c, 1.0 - v);
+            hsl([&](double&, double&, double& l) { l += v; });
+        } else if (n == "lum") {
+            hsl([&](double&, double&, double& l) { l = v; });
+        } else if (n == "satMod") {
+            hsl([&](double&, double& s, double&) { s *= v; });
+        } else if (n == "satOff") {
+            hsl([&](double&, double& s, double&) { s += v; });
+        } else if (n == "sat") {
+            hsl([&](double&, double& s, double&) { s = v; });
+        } else if (n == "hueOff") { // in 60,000ths of a degree
+            const double turn = std::atof(x.attribute("val").c_str()) / 60000.0 / 360.0;
+            hsl([&](double& h, double&, double&) { h += turn; });
+        } else if (n == "alphaMod") {
+            const double a = double((c >> 24) & 0xFFu) * std::clamp(v, 0.0, 1.0);
+            c = (c & 0x00FFFFFFu) | (std::uint32_t(a) << 24);
+        } else if (n == "shade" || n == "tint") {
+            // DrawingML's tint and shade work in linear light (scRGB), as Office draws them: a tint
+            // of 75% takes black to #898989, not to HSL's #404040 (SpreadsheetML's tint is HSL).
+            c = linearTintShade(c, v, n == "tint");
         } else if (n == "alpha") {
             c = (c & 0x00FFFFFFu) | (std::uint32_t(std::clamp(v, 0.0, 1.0) * 255.0) << 24);
         }
     }
-    if (lum)
-        c = lumModOff(c, mod, off);
     return c;
 }
 
@@ -337,7 +428,11 @@ std::uint32_t readGradientFill(XmlReader& x, const Theme& theme, const std::map<
             out.radial = false;
         } else if (n == "path") {
             out.radial = true; // circle, rect and shape paths: from the centre out
-            x.skip();
+        } else if (n == "fillToRect" && out.radial) {
+            // The focus rectangle as insets from the bounds' sides: its centre is the gradient's.
+            auto inset = [&](const char* a) { return std::atof(x.attribute(a).c_str()) / 100000.0; };
+            out.cx = float(std::clamp((inset("l") + 1.0 - inset("r")) * 0.5, -1.0, 2.0));
+            out.cy = float(std::clamp((inset("t") + 1.0 - inset("b")) * 0.5, -1.0, 2.0));
         }
     }
     std::stable_sort(out.stops.begin(), out.stops.end(), [](const GradientStop& a, const GradientStop& b) { return a.position < b.position; });

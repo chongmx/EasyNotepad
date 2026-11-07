@@ -27,13 +27,19 @@ float measure(ImFont* font, float px, const char* b, const char* e)
     return b >= e ? 0.0f : font->CalcTextSizeA(px, FLT_MAX, 0.0f, b, e).x;
 }
 
-// Text drawn with its style: bold as a second copy a pixel to the right (the UI font has no bold
-// face), underline and strike as lines.
+// Text drawn with its style: bold as a second copy a pixel to the right and italic slanted (the UI
+// font has neither face), underline and strike as lines.
 void styledText(ImDrawList* dl, ImFont* font, float px, ImVec2 at, ImU32 color, std::uint8_t flags, const char* b, const char* e, float width)
 {
+    const int first = dl->VtxBuffer.Size;
     dl->AddText(font, px, at, color, b, e);
     if (flags & mv::Bold)
         dl->AddText(font, px, ImVec2(at.x + std::max(1.0f, px * 0.045f), at.y), color, b, e);
+    if (flags & mv::Italic) { // about 12 degrees, about the baseline
+        const float baseline = at.y + px * 0.8f;
+        for (int i = first; i < dl->VtxBuffer.Size; ++i)
+            dl->VtxBuffer[i].pos.x += (baseline - dl->VtxBuffer[i].pos.y) * 0.21f;
+    }
     if (flags & mv::Underline)
         dl->AddLine(ImVec2(at.x, at.y + px * 1.02f), ImVec2(at.x + width, at.y + px * 1.02f), color, std::max(1.0f, px * 0.06f));
     if (flags & mv::Strike)
@@ -93,18 +99,90 @@ void shadeVertices(ImDrawList* dl, int first, const mv::Gradient& g, ImVec2 lo, 
     const float a = g.angle * 3.14159265f / 180.0f, dx = std::cos(a), dy = std::sin(a);
     // Linear: the projection on the direction, over the bounds' extent along it.
     const float half = std::fabs((hi.x - lo.x) * 0.5f * dx) + std::fabs((hi.y - lo.y) * 0.5f * dy);
-    const float radius = std::max(1.0f, std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y)) * 0.5f);
+    // Radial: from its centre out to the farthest corner of the bounds.
+    const ImVec2 rc(lo.x + (hi.x - lo.x) * g.cx, lo.y + (hi.y - lo.y) * g.cy);
+    const float far = std::max(std::fabs(rc.x - lo.x), std::fabs(hi.x - rc.x)), farY = std::max(std::fabs(rc.y - lo.y), std::fabs(hi.y - rc.y));
+    const float radius = std::max(1.0f, std::sqrt(far * far + farY * farY));
     for (int i = first; i < dl->VtxBuffer.Size; ++i) {
         ImDrawVert& v = dl->VtxBuffer.Data[i];
         float t;
         if (g.radial)
-            t = std::sqrt((v.pos.x - c.x) * (v.pos.x - c.x) + (v.pos.y - c.y) * (v.pos.y - c.y)) / radius;
+            t = std::sqrt((v.pos.x - rc.x) * (v.pos.x - rc.x) + (v.pos.y - rc.y) * (v.pos.y - rc.y)) / radius;
         else
             t = half > 0.0f ? 0.5f + ((v.pos.x - c.x) * dx + (v.pos.y - c.y) * dy) / (2.0f * half) : 0.0f;
         const std::uint32_t color = g.at(std::clamp(t, 0.0f, 1.0f));
         const float share = float((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f;
         const float alpha = float((color >> 24) & 0xFF) * share;
         v.col = (color & 0x00FFFFFFu) | (ImU32(alpha + 0.5f) << IM_COL32_A_SHIFT);
+    }
+}
+
+// Whether a gradient varies inside a triangle in a way its corners' colours cannot give: radial
+// ones, and linear ones of more than two stops.
+bool needsFineMesh(const mv::Gradient& g)
+{
+    return g.radial || g.stops.size() > 2;
+}
+
+// Splits the triangles drawn since (firstVtx, firstIdx) into smaller ones, each edge in pieces of
+// about `step` pixels (at most 24), so colours set per vertex afterwards vary inside them. Left as
+// drawn when they span two draw commands. `tris` is the caller's scratch.
+void subdivide(ImDrawList* dl, int firstVtx, int firstIdx, float step, std::vector<ImDrawVert>& tris)
+{
+    if (dl->CmdBuffer.empty())
+        return;
+    ImDrawCmd& cmd = dl->CmdBuffer.back();
+    const int idxCount = dl->IdxBuffer.Size - firstIdx;
+    if (idxCount <= 0 || idxCount % 3 != 0 || int(cmd.ElemCount) < idxCount || firstVtx < int(cmd.VtxOffset))
+        return;
+    tris.clear();
+    for (int i = firstIdx; i < dl->IdxBuffer.Size; ++i)
+        tris.push_back(dl->VtxBuffer[int(cmd.VtxOffset) + int(dl->IdxBuffer[i])]);
+    // Take the triangles back out of the list, then draw their pieces in their place.
+    dl->VtxBuffer.resize(firstVtx);
+    dl->IdxBuffer.resize(firstIdx);
+    dl->_VtxWritePtr = dl->VtxBuffer.Data + firstVtx;
+    dl->_IdxWritePtr = dl->IdxBuffer.Data + firstIdx;
+    dl->_VtxCurrentIdx = unsigned(firstVtx - int(cmd.VtxOffset));
+    cmd.ElemCount -= unsigned(idxCount);
+    auto mix = [](const ImDrawVert& a, const ImDrawVert& b, const ImDrawVert& c, float u, float v) {
+        const float w = 1.0f - u - v;
+        ImDrawVert out;
+        out.pos = ImVec2(a.pos.x * w + b.pos.x * u + c.pos.x * v, a.pos.y * w + b.pos.y * u + c.pos.y * v);
+        out.uv = ImVec2(a.uv.x * w + b.uv.x * u + c.uv.x * v, a.uv.y * w + b.uv.y * u + c.uv.y * v);
+        ImU32 col = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            const float ch = float((a.col >> shift) & 0xFF) * w + float((b.col >> shift) & 0xFF) * u + float((c.col >> shift) & 0xFF) * v;
+            col |= ImU32(std::clamp(ch + 0.5f, 0.0f, 255.0f)) << shift;
+        }
+        out.col = col;
+        return out;
+    };
+    auto length = [](ImVec2 p, ImVec2 q) { return std::sqrt((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)); };
+    for (std::size_t t = 0; t + 2 < tris.size(); t += 3) {
+        const ImDrawVert a = tris[t], b = tris[t + 1], c = tris[t + 2];
+        const float edge = std::max({length(a.pos, b.pos), length(b.pos, c.pos), length(c.pos, a.pos)});
+        const int k = std::clamp(int(std::ceil(edge / std::max(1.0f, step))), 1, 24);
+        const int vertices = (k + 1) * (k + 2) / 2;
+        dl->PrimReserve(k * k * 3, vertices);
+        const unsigned base = dl->_VtxCurrentIdx; // after the reserve: it may have started a new command
+        for (int j = 0; j <= k; ++j)
+            for (int i = 0; i + j <= k; ++i) {
+                const ImDrawVert v = mix(a, b, c, float(i) / float(k), float(j) / float(k));
+                dl->PrimWriteVtx(v.pos, v.uv, v.col);
+            }
+        auto at = [&](int i, int j) { return ImDrawIdx(base + unsigned(j * (k + 1) - j * (j - 1) / 2 + i)); };
+        for (int j = 0; j < k; ++j)
+            for (int i = 0; i + j < k; ++i) {
+                dl->PrimWriteIdx(at(i, j));
+                dl->PrimWriteIdx(at(i + 1, j));
+                dl->PrimWriteIdx(at(i, j + 1));
+                if (i + j < k - 1) {
+                    dl->PrimWriteIdx(at(i + 1, j));
+                    dl->PrimWriteIdx(at(i + 1, j + 1));
+                    dl->PrimWriteIdx(at(i, j + 1));
+                }
+            }
     }
 }
 
@@ -155,6 +233,7 @@ void lineEnd(ImDrawList* dl, mv::LineEnd kind, ImVec2 tip, ImVec2 from, float si
 void PagePainter::release()
 {
     os::mem::release(points_);
+    os::mem::release(tris_);
     peak_ = 0;
 }
 
@@ -164,10 +243,14 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
     const ImVec2 end(origin.x + page.width * scale, origin.y + page.height * scale);
     dl->PushClipRect(origin, end, true);
     {
-        const int first = dl->VtxBuffer.Size;
+        const int first = dl->VtxBuffer.Size, firstIdx = dl->IdxBuffer.Size;
         dl->AddRectFilled(origin, end, page.backgroundGradient.stops.empty() ? page.background : page.backgroundGradient.stops.front().color);
+        if (needsFineMesh(page.backgroundGradient))
+            subdivide(dl, first, firstIdx, 24.0f, tris_);
         shadeVertices(dl, first, page.backgroundGradient, origin, end);
     }
+    if (tris_.capacity() > 65536)
+        os::mem::release(tris_);
     peak_ = 0;
     for (const mv::PageItem& item : page.items) {
         const bool clipped = item.clip >= 0 && std::size_t(item.clip) < page.clips.size();
@@ -225,7 +308,7 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
         for (std::size_t i = 0; i < sub.size(); ++i)
             points_[i] = ImVec2(origin.x + sub[i].x * scale, origin.y + sub[i].y * scale);
         const int n = int(points_.size());
-        const int firstFill = dl->VtxBuffer.Size;
+        const int firstFill = dl->VtxBuffer.Size, firstFillIdx = dl->IdxBuffer.Size;
         if (p.fill && n >= 3) {
             const bool rect = n == 4 && ((points_[0].x == points_[1].x && points_[1].y == points_[2].y && points_[2].x == points_[3].x) ||
                                          (points_[0].y == points_[1].y && points_[1].x == points_[2].x && points_[2].y == points_[3].y));
@@ -242,6 +325,8 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
                     lo = ImVec2(std::min(lo.x, q.x), std::min(lo.y, q.y));
                     hi = ImVec2(std::max(hi.x, q.x), std::max(hi.y, q.y));
                 }
+                if (needsFineMesh(p.gradient))
+                    subdivide(dl, firstFill, firstFillIdx, 16.0f, tris_);
                 shadeVertices(dl, firstFill, p.gradient, lo, hi, origin, scale);
             }
         }

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -42,9 +43,17 @@ struct Theme {
     // dk1 lt1 dk2 lt2 accent1..6 hlink folHlink
     std::map<std::string, std::uint32_t> colors;
     std::string majorFont, minorFont;
+    std::shared_ptr<const std::string> xml; // the theme part, for its style lists (themeFill); shared by copies
     std::uint32_t color(std::string_view name, std::uint32_t otherwise = 0) const;
 };
 Theme readTheme(const ZipArchive& zip, std::string_view part);
+
+// A theme's fill style: number `index` (from 0) of its fillStyleLst, or of its bgFillStyleLst when
+// `background`, with `placeholder` as its phClr. Sets `color` (a gradient's first stop) and, for a
+// gradient fill, `gradient` (else clears it). False when the theme has no such style, or it is a
+// picture or pattern fill.
+bool themeFill(const Theme& theme, int index, bool background, std::uint32_t placeholder,
+               const std::map<std::string, std::string>* schemeMap, std::uint32_t& color, Gradient& gradient);
 
 // DrawingML: at the Start of a colour element (srgbClr, schemeClr, sysClr, prstClr, scrgbClr),
 // reads it with its modifiers and leaves the reader at its End. `schemeMap` maps tx1/bg1/... to

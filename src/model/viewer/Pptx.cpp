@@ -37,6 +37,7 @@ struct LevelStyle {
     std::uint32_t color = 0;
     bool hasColor = false;
     int bold = -1, italic = -1;
+    int caps = -1;            // cap="all": 1; "none" / "small": 0; -1 not set
     int align = -1;           // 0 left, 1 centre, 2 right, 3 justified; -1 not set
     float spaceBefore = -1.0f; // points; -1 not set
     float spaceBeforePct = -1.0f; // of the text size; -1 not set
@@ -54,6 +55,8 @@ struct LevelStyle {
             bold = o.bold;
         if (o.italic >= 0)
             italic = o.italic;
+        if (o.caps >= 0)
+            caps = o.caps;
         if (o.align >= 0)
             align = o.align;
         if (o.spaceBefore >= 0.0f)
@@ -145,6 +148,7 @@ struct ShapeProps {
     // From <p:style>: what the theme's references give when spPr says nothing.
     std::uint32_t styleFill = 0, styleLine = 0, styleFont = 0;
     bool hasStyleFill = false, hasStyleLine = false, hasStyleFont = false;
+    Gradient styleGradient; // the theme's fill style, when it is a gradient
 };
 
 std::string phKey(const std::string& type)
@@ -369,6 +373,8 @@ private:
                     l.bold = x.attribute("b") == "1" ? 1 : 0;
                 if (x.hasAttribute("i"))
                     l.italic = x.attribute("i") == "1" ? 1 : 0;
+                if (x.hasAttribute("cap"))
+                    l.caps = x.attribute("cap") == "all" ? 1 : 0;
             } else if (level >= 0 && n == "solidFill") {
                 bool found = false;
                 const std::uint32_t c = ooxml::readFillIn(x, theme, clrMap, &found);
@@ -400,12 +406,22 @@ private:
                 color = ooxml::readGradientFill(x, theme, clrMap, gradient);
                 has = has || !gradient.stops.empty();
             } else if (n == "solidFill" || n == "bgRef") {
+                // bgRef: the theme's background fill style (idx 1001 on) or fill style (1 to 999),
+                // in the referenced colour.
+                const int idx = n == "bgRef" ? std::atoi(x.attribute("idx").c_str()) : 0;
                 bool found = false;
                 const std::uint32_t c = ooxml::readFillIn(x, theme, clrMap, &found);
                 if (found) {
                     color = c;
                     gradient = Gradient();
                     has = true;
+                    if (idx > 0) {
+                        std::uint32_t styled = c;
+                        if (ooxml::themeFill(theme, idx >= 1001 ? idx - 1001 : idx - 1, idx >= 1001, c, clrMap, styled, gradient))
+                            color = styled;
+                        else
+                            gradient = Gradient();
+                    }
                 }
             } else if (n == "blip") {
                 const auto it = rels.find(x.attribute("r:embed"));
@@ -731,7 +747,11 @@ private:
                 if (!found)
                     continue;
                 if (n == "fillRef" && idx > 0) {
-                    p.styleFill = color;
+                    // The theme's fill style number idx, in the referenced colour (else that colour).
+                    std::uint32_t styled = color;
+                    if (!ooxml::themeFill(c.master->theme, idx - 1, false, color, &c.master->clrMap, styled, p.styleGradient))
+                        styled = color;
+                    p.styleFill = styled;
                     p.hasStyleFill = true;
                 } else if (n == "lnRef" && idx > 0) {
                     p.styleLine = color;
@@ -752,6 +772,8 @@ private:
         path.lineWidth = float(std::max(0.25, p.lineWidth / kEmuPerPoint));
         if (p.hasFill)
             path.gradient = p.gradient;
+        else if (p.hasStyleFill)
+            path.gradient = p.styleGradient;
         dml::LineStyle style = p.lineStyle;
         style.width = path.lineWidth;
         path.dash = style.pattern();
@@ -763,12 +785,9 @@ private:
             path.fill = 0;
             if (!path.stroke)
                 path.stroke = kBlack;
-            float x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
-            if (p.flipH)
-                std::swap(x0, x1);
-            if (p.flipV)
-                std::swap(y0, y1);
-            path.subpaths.push_back({{x0, y0}, {x1, y1}});
+            std::vector<Point> pts;
+            dml::connectorPath(g, r, p.flipH, p.flipV, pts);
+            path.subpaths.push_back(std::move(pts));
             path.closed.push_back(false);
         } else if (!path.fill && !path.stroke) {
             return;
@@ -849,7 +868,10 @@ private:
                 if (!t)
                     continue;
                 const Placeholder* found = nullptr;
-                if (!phIdx.empty()) {
+                // A slide's placeholder matches its layout's by idx, the master's by type only: a
+                // master numbers its date, footer and slide number 2-4, the idx a layout's body
+                // placeholders use too.
+                if (!phIdx.empty() && t == c.layout) {
                     const auto it = t->byIdx.find(phIdx);
                     if (it != t->byIdx.end() && it->second.hasBox)
                         found = &it->second;
@@ -899,8 +921,8 @@ private:
         return c.master->other;
     }
 
-    // At the Start of txBody: its paragraphs into `box`. True when it holds any text.
-    // The placeholder of a master or layout this shape inherits from (by idx, else type), or null.
+    // The placeholder of a layout this shape inherits from (by idx, else type), or of a master (pass
+    // no idx: masters match by type only), or null.
     static const Placeholder* inherited(const Template* t, const std::string& phType, const std::string& phIdx)
     {
         if (!t)
@@ -913,6 +935,7 @@ private:
         return nullptr;
     }
 
+    // At the Start of txBody: its paragraphs into `box`. True when it holds any text.
     bool textBody(XmlReader& x, const Context& c, const std::string& phType, bool placeholder, const ShapeProps& p, TextBox& box,
                   const std::string& phIdx = std::string())
     {
@@ -920,11 +943,18 @@ private:
         // placeholder, then the shape's own lstStyle (read below), then each paragraph and run.
         TextStyle style = styleFor(c, phType, placeholder);
         if (placeholder) {
-            if (const Placeholder* m = inherited(c.master, phType, phIdx))
+            if (const Placeholder* m = inherited(c.master, phType, std::string()))
                 style.over(m->lst);
             if (const Placeholder* l = inherited(c.layout, phType, phIdx))
                 style.over(l->lst);
         }
+        // The shape's style (p:style/a:fontRef) colours its text over the master's text styles;
+        // the shape's own lstStyle and the runs still override it.
+        if (p.hasStyleFont)
+            for (LevelStyle& level : style.levels) {
+                level.color = p.styleFont;
+                level.hasColor = true;
+            }
         const bool bodyPh = placeholder && (phType == "body" || phType == "obj");
         const ooxml::Theme& theme = c.master->theme;
         const auto* map = &c.master->clrMap;
@@ -1073,6 +1103,7 @@ private:
             run.flags |= Bold;
         if (level.italic == 1)
             run.flags |= Italic;
+        bool caps = level.caps == 1, link = false;
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End && x.depth() < depth)
@@ -1091,6 +1122,8 @@ private:
                     run.flags |= Underline;
                 if (!x.attribute("strike").empty() && x.attribute("strike") != "noStrike")
                     run.flags |= Strike;
+                if (x.hasAttribute("cap"))
+                    caps = x.attribute("cap") == "all";
                 const int d2 = x.depth();
                 for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
                     if (f == Event::End && x.depth() < d2)
@@ -1108,6 +1141,9 @@ private:
                         if (face.find("Courier") != std::string::npos || face.find("Consolas") != std::string::npos ||
                             face.find("Mono") != std::string::npos)
                             run.flags |= Mono;
+                    } else if (m == "hlinkClick") {
+                        link = !x.attribute("r:id").empty();
+                        x.skip();
                     } else {
                         x.skip();
                     }
@@ -1116,7 +1152,29 @@ private:
                 run.text += x.elementText();
             }
         }
+        if (link) { // a hyperlink: the theme's link colour, underlined, as PowerPoint draws it
+            run.color = theme.color("hlink", run.color);
+            run.flags |= Underline;
+        }
+        if (caps)
+            upperCase(run.text);
         return run;
+    }
+
+    // `cap="all"`: ASCII and Latin-1 letters in capitals (the rest as written).
+    static void upperCase(std::string& s)
+    {
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(s[i]);
+            if (c >= 'a' && c <= 'z') {
+                s[i] = char(c - 32);
+            } else if (c == 0xC3 && i + 1 < s.size()) { // U+00E0-U+00FE (but U+00F7, the division sign)
+                const unsigned char d = static_cast<unsigned char>(s[i + 1]);
+                if (d >= 0xA0 && d <= 0xBE && d != 0xB7)
+                    s[i + 1] = char(d - 0x20);
+                ++i;
+            }
+        }
     }
 
     // At the Start of pic.

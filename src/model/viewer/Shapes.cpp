@@ -186,6 +186,33 @@ bool isLine(std::string_view g)
     return g == "line" || g == "straightConnector1" || g.find("Connector") != std::string_view::npos;
 }
 
+void connectorPath(std::string_view g, Rect r, bool flipH, bool flipV, std::vector<Point>& out)
+{
+    out.clear();
+    // In the box's own terms (0..1, start at the top left), then placed and flipped.
+    auto put = [&](float u, float v) {
+        out.push_back({r.x + (flipH ? 1.0f - u : u) * r.w, r.y + (flipV ? 1.0f - v : v) * r.h});
+    };
+    if (g == "bentConnector2") { // one corner: across, then down
+        put(0.0f, 0.0f);
+        put(1.0f, 0.0f);
+        put(1.0f, 1.0f);
+    } else if (g.rfind("bentConnector", 0) == 0) { // across to the middle, down, across (adj1: 50%)
+        put(0.0f, 0.0f);
+        put(0.5f, 0.0f);
+        put(0.5f, 1.0f);
+        put(1.0f, 1.0f);
+    } else if (g.rfind("curvedConnector", 0) == 0) { // a cubic leaving level and arriving level
+        for (int i = 0; i <= 24; ++i) {             // controls at (0.5, 0) and (0.5, 1)
+            const float t = float(i) / 24.0f, s = 1.0f - t;
+            put(1.5f * s * s * t + 1.5f * s * t * t + t * t * t, 3.0f * s * t * t + t * t * t);
+        }
+    } else {
+        put(0.0f, 0.0f);
+        put(1.0f, 1.0f);
+    }
+}
+
 void presetOutline(std::string_view g, Rect r, std::vector<Point>& pts)
 {
     const float x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h, cx = r.x + r.w * 0.5f, cy = r.y + r.h * 0.5f;
@@ -397,13 +424,9 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
     const std::uint32_t lineColor = hasLine ? line : hasStyleLine ? styleLine : 0;
     bool drawn = false;
     if (isLine(geometry)) {
-        float ax = box.x, ay = box.y, bx = box.x + box.w, by = box.y + box.h;
-        if (flipH)
-            std::swap(ax, bx);
-        if (flipV)
-            std::swap(ay, by);
         PathItem p;
-        std::vector<Point> ends = {{ax, ay}, {bx, by}};
+        std::vector<Point> ends;
+        connectorPath(geometry, box, flipH, flipV, ends);
         rotate(ends, box, rotation);
         p.subpaths.push_back(std::move(ends));
         p.closed.push_back(false);

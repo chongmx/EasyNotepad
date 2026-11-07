@@ -39,7 +39,8 @@ private:
     void drawGlyphs(ImDrawList* dl, const model::viewer::GlyphRun& g, ImVec2 origin, float scale, const Fonts& fonts);
     void drawBox(ImDrawList* dl, const model::viewer::TextBox& b, ImVec2 origin, float scale, const Fonts& fonts);
     std::vector<ImVec2> points_;
-    std::size_t peak_ = 0; // the most points one path took this frame
+    std::size_t peak_ = 0;          // the most points one path took this frame
+    std::vector<ImDrawVert> tris_; // the corners of the triangles a gradient fill splits into smaller ones
 };
 
 } // namespace enp::view

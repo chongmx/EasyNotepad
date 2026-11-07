@@ -823,3 +823,126 @@ TEST(viewer_reads_word_table_alignment_and_cell_lines)
     CHECK(b[2].kind == md::BlockKind::Table && b[2].textAlign == 1 && md::plainText(b[2].rows[0][0]) == "one\ntwo\nthree");
     CHECK(b[3].kind == md::BlockKind::Table && b[3].textAlign == 2); // the cell's own jc is not the table's
 }
+
+TEST(viewer_draws_slides_as_office_does)
+{
+    // What a side-by-side comparison with PowerPoint's own render found (docs/plan/25).
+    using namespace viewertest;
+    const std::string presentation = R"(<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>)";
+    // The theme's third background fill style: a radial gradient in the referenced colour (phClr).
+    const std::string theme = R"(<a:theme xmlns:a="a"><a:themeElements><a:clrScheme name="t"><a:dk1><a:srgbClr val="000000"/></a:dk1>
+<a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1></a:clrScheme>
+<a:fmtScheme name="f"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>
+<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+<a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="80000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="30000"/></a:schemeClr></a:gs></a:gsLst>
+<a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path></a:gradFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>)";
+    // The master numbers its date, footer and slide number 2-4, the slide number right-aligned.
+    const std::string master = R"(<p:sldMaster xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+<p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr></p:sp>
+<p:sp><p:nvSpPr><p:nvPr><p:ph type="ftr" idx="3"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:lstStyle><a:lvl1pPr algn="ctr"/></a:lstStyle><a:p/></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:nvPr><p:ph type="sldNum" idx="4"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:lstStyle><a:lvl1pPr algn="r"/></a:lstStyle><a:p/></p:txBody></p:sp>
+</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"/>
+<p:txStyles><p:bodyStyle><a:lvl1pPr algn="l"><a:defRPr sz="2000"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:lvl1pPr></p:bodyStyle>
+<p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>)";
+    const std::string layout = R"(<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1003"><a:schemeClr val="bg2"/></p:bgRef></p:bg><p:spTree>
+<p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="600000"/></a:xfrm></p:spPr>
+<p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr cap="all"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="700000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm></p:spPr>
+<p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="tx1"><a:tint val="75000"/></a:schemeClr></a:solidFill></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sldLayout>)";
+    const std::string slide = R"(<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
+<p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Section title</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Grey subtitle</a:t></a:r></a:p>
+<a:p><a:r><a:rPr i="1"/><a:t>Slanted</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="rId9"/></a:rPr><a:t>link</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="5000000" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr>
+<p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>
+<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:p><a:r><a:t>White text</a:t></a:r></a:p></p:txBody></p:sp>
+<p:cxnSp><p:nvCxnSpPr/><p:spPr><a:xfrm><a:off x="0" y="5000000"/><a:ext cx="2540000" cy="1270000"/></a:xfrm><a:prstGeom prst="bentConnector3"/>
+<a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr></p:cxnSp>
+</p:spTree></p:cSld></p:sld>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("ppt/presentation.xml")},
+                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}})},
+                                   {"ppt/presentation.xml", presentation},
+                                   {"ppt/slides/_rels/slide1.xml.rels",
+                                    rels({{"rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"}, {"rId9", "hyperlink", "https://example.com/"}})},
+                                   {"ppt/slides/slide1.xml", slide},
+                                   {"ppt/slideLayouts/_rels/slideLayout1.xml.rels", rels({{"rId1", "slideMaster", "../slideMasters/slideMaster1.xml"}})},
+                                   {"ppt/slideLayouts/slideLayout1.xml", layout},
+                                   {"ppt/slideMasters/_rels/slideMaster1.xml.rels", rels({{"rId1", "theme", "../theme/theme1.xml"}})},
+                                   {"ppt/slideMasters/slideMaster1.xml", master},
+                                   {"ppt/theme/theme1.xml", theme}});
+    const mv::ViewerDocument doc = mv::readViewerDocument("deck.pptx", bytes);
+    CHECK(doc.shape == mv::Shape::Pages && doc.pages.pages.size() == 1);
+    if (doc.pages.pages.size() != 1)
+        return;
+    const mv::Page& p = doc.pages.pages[0];
+    // bgRef 1003: the theme's radial background, centred, in bg2 lightened and darkened.
+    CHECK(p.backgroundGradient.radial && p.backgroundGradient.stops.size() == 2 && std::fabs(p.backgroundGradient.cx - 0.5f) < 0.01f &&
+          std::fabs(p.backgroundGradient.cy - 0.5f) < 0.01f);
+    auto find = [&](const char* text) -> const mv::TextRun* {
+        for (const mv::TextBox& b : p.boxes)
+            for (const mv::TextParagraph& para : b.paragraphs)
+                for (const mv::TextRun& r : para.runs)
+                    if (r.text == text)
+                        return &r;
+        return nullptr;
+    };
+    auto align = [&](const char* text) {
+        for (const mv::TextBox& b : p.boxes)
+            for (const mv::TextParagraph& para : b.paragraphs)
+                if (!para.runs.empty() && para.runs[0].text == text)
+                    return para.align;
+        return -1;
+    };
+    // Placeholders idx 3 and 4 inherit from the layout's, not the master's footer and slide number.
+    CHECK(align("SECTION TITLE") == 0 && align("Grey subtitle") == 0);
+    CHECK(find("SECTION TITLE") != nullptr); // cap="all"
+    // tx1 with a 75% tint, in linear light: #898989 (HSL would give #404040).
+    const mv::TextRun* grey = find("Grey subtitle");
+    CHECK(grey && std::abs(int(grey->color & 0xFF) - 0x89) <= 2 && std::abs(int((grey->color >> 8) & 0xFF) - 0x89) <= 2);
+    const mv::TextRun* slanted = find("Slanted");
+    CHECK(slanted && (slanted->flags & mv::Italic));
+    const mv::TextRun* link = find("link");
+    CHECK(link && link->color == mv::rgba(0x05, 0x63, 0xC1) && (link->flags & mv::Underline)); // the theme's hlink
+    const mv::TextRun* white = find("White text");
+    CHECK(white && white->color == mv::rgba(255, 255, 255)); // fontRef over the master's otherStyle
+    bool elbow = false;
+    for (const mv::PathItem& path : p.paths)
+        if (path.stroke && path.subpaths.size() == 1 && path.subpaths[0].size() == 4)
+            elbow = std::fabs(path.subpaths[0][1].x - path.subpaths[0][2].x) < 0.01f; // across, down, across
+    CHECK(elbow);
+}
+
+TEST(viewer_numbers_word_headings_through_their_styles)
+{
+    using namespace viewertest;
+    namespace md = model::markdown;
+    // Heading styles that name only the list: the level is the one whose pStyle names the style.
+    const std::string styles = R"(<w:styles xmlns:w="w">
+<w:style w:type="paragraph" w:styleId="App1"><w:name w:val="heading 1"/><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="App2"><w:name w:val="heading 2"/><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr></w:style></w:styles>)";
+    const std::string numbering = R"(<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="3">
+<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="upperLetter"/><w:pStyle w:val="App1"/><w:lvlText w:val="%1."/></w:lvl>
+<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="App2"/><w:lvlText w:val="%1.%2"/></w:lvl></w:abstractNum>
+<w:num w:numId="7"><w:abstractNumId w:val="3"/></w:num></w:numbering>)";
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:p><w:pPr><w:pStyle w:val="App1"/></w:pPr><w:r><w:t>Help</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="App2"/></w:pPr><w:r><w:t>Introduction</w:t></w:r></w:p>
+<w:p/>
+<w:p><w:pPr><w:pStyle w:val="App2"/></w:pPr><w:r><w:t>Directives</w:t></w:r></w:p></w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rId1", "styles", "styles.xml"}, {"rId2", "numbering", "numbering.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/numbering.xml", numbering}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    CHECK(b.size() == 4);
+    if (b.size() != 4)
+        return;
+    CHECK_EQ(md::plainText(b[0].spans), std::string("A. Help"));
+    CHECK_EQ(md::plainText(b[1].spans), std::string("A.1 Introduction"));
+    CHECK(b[2].kind == md::BlockKind::Paragraph && md::plainText(b[2].spans) == " "); // an empty paragraph keeps its line
+    CHECK_EQ(md::plainText(b[3].spans), std::string("A.2 Directives"));
+}

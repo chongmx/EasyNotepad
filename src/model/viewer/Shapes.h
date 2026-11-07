@@ -18,6 +18,9 @@ namespace enp::model::viewer::dml {
 // Lines and connectors are not outlines: isLine() says so and they are drawn corner to corner.
 void presetOutline(std::string_view prst, Rect r, std::vector<Point>& out);
 bool isLine(std::string_view prst);
+// The path of line or connector `prst` across `r` from its top left to its bottom right (flipped
+// as the shape says): straight, bent at right angles (bentConnector2-5) or curved (curvedConnector2-5).
+void connectorPath(std::string_view prst, Rect r, bool flipH, bool flipV, std::vector<Point>& out);
 // Turns `points` by `degrees` clockwise about the centre of `r` (DrawingML's rot, in degrees).
 void rotate(std::vector<Point>& points, Rect r, float degrees);
 // The rectangle a box turned by a quarter turn covers (same centre, sides swapped); `r` otherwise.

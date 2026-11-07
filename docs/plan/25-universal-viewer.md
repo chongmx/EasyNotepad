@@ -28,14 +28,131 @@ Page / Plot / Pitch workspaces unchanged:
 | Word: charts as drawing blocks between the paragraphs (a fixed page in the flow), text boxes as quoted blocks after their paragraph, comments listed at the end under their marks | `model/viewer/Docx.cpp` | unit test, UI test |
 | Excel: pictures, charts and shapes over the cells, placed by their anchors (two-cell, one-cell, absolute) | `model/viewer/Xlsx.cpp`, `model/viewer/Shapes.cpp` | unit test, UI test |
 | PowerPoint: charts in their frames; SmartArt from the drawing PowerPoint keeps of it, or, when there is none, its text as an outline from the data model; shape rotation; 40 preset shapes shared with Excel | `model/viewer/Pptx.cpp`, `model/viewer/Shapes.cpp` | unit test, UI test |
+| Word formatting: run colour, highlight, size, underline styles; paragraph alignment, indents, first line, spacing, shading; tables aligned by `tblPr/jc`, cells of several paragraphs and line breaks on their own lines; the last section's default header and footer | `model/viewer/Docx.cpp`, `view/MarkdownView.cpp` | unit tests, `viewer_reads_the_challenge_files` |
+| Excel cell look: number format colour sections and fractions, rich text runs, font sizes, strikeout, borders (thin to double, dashed, dotted, hair), wrap, vertical alignment, rotation and stacked text; text running over empty cells; merges across frozen panes; grid lines under fills; sheet tabs along the bottom | `model/viewer/Xlsx.cpp`, `NumberFormat.cpp`, `view/viewer/ViewerView.cpp` | unit tests, challenge files |
+| PowerPoint text and lines: the list-style cascade (master text styles -> master / layout placeholder -> shape -> paragraph), line spacing and space before, table styles (`tableStyles.xml`, else Office's default), slide-number fields, gradients (linear, radial), dashes, arrowheads, cropped and flipped pictures, vertical text | `model/viewer/Pptx.cpp`, `Shapes.cpp`, `Ooxml.cpp` | unit tests, challenge files |
+| PDF: axial and radial shadings and shading patterns, dashes, clipping (by the clip path's bounds), ligatures, rotated text, words fitted to their width | `model/viewer/Pdf.cpp`, `view/viewer/PagePainter.cpp` | unit tests, challenge files |
+| Chinese, Japanese and Korean text: a system font merged into the UI font while an open document needs it, removed after; the file mapped, not read | `view/Fonts.cpp` (`ScriptFonts`), `os::fs::MappedFile` | unit test (script detection), memory cycle |
 
 What LibreOffice's sample documents still report as not shown: Word charts 2 files (of 52), Excel
 charts or drawings 8 files (of 75; group shapes and chartex charts), PowerPoint SmartArt laid out
 only as text 38 files (they carry no drawing, only data), videos and sounds 7, PDF annotations 4.
 
-Not yet: encrypted PDFs, ZIP64, PDF clipping / shadings / embedded font outlines, SmartArt layout
-from data alone, rotated text, gradients (their first colour is used), the workspaces themselves
-(25.0).
+Not yet: encrypted PDFs, ZIP64, the rendering gaps below, the workspaces themselves (25.0).
+
+## Rendering gaps against Microsoft Office and LibreOffice
+
+Listed 2026-11-07 from the code, screenshot tours of `C:\cpp\office-samples` (27 files) and the
+challenge files, and one reference render made with Microsoft Office (Word, Excel and PowerPoint
+16 export to PDF, rasterised with PyMuPDF). The side-by-side comparison of every sample against
+Office's render is the next step (see **Reference renders** at the end of this section); this list
+is to be checked and ranked against it. Priority: **A** visible in most real files, **B** common,
+**C** occasional.
+
+### All formats
+
+| Pri | Gap | What it takes |
+|---|---|---|
+| A | **One font for everything.** Text is drawn in Roboto (bold by drawing twice, no true italic in cells); Calibri, Cambria, Times New Roman, Arial and PDFs' embedded fonts are not used, so text widths and line breaks differ from Office | load the document's fonts on demand from the system (as `ScriptFonts` does for CJK), with metric-compatible substitutes when missing (Carlito for Calibri, Caladea for Cambria, Liberation for Times / Arial / Courier); bold and italic faces; PDF embedded TrueType / CFF outlines through the font loader |
+| B | **No text shaping:** Arabic and Hebrew come out in logical order without joining; Thai, Devanagari and other scripts that need shaping are wrong | a bidi pass (UAX #9) and shaping (HarfBuzz is the standard; a new dependency, so a decision first) |
+| B | CJK only renders when a system CJK font is installed | ship or download a small CJK subset font, or say so in the document's "not shown" note |
+| C | Shadows, glow, reflection, soft edges, 3D bevels | outer shadow first (an offset, blurred copy of the shape); the rest later |
+
+### Word
+
+| Pri | Gap | What it takes |
+|---|---|---|
+| A | **No pages:** the document is one reflowed column; page size, margins, page breaks, section breaks and columns are ignored | a paginated layout (25 "Later": print layout) on the display list; reflowed stays the reading default |
+| A | **Floating pictures, shapes and text boxes** (anchored, with text wrapping) are put after their paragraph | position anchors relative to page / margin / paragraph and wrap text around them; needs pages |
+| A | **Tab stops** become four spaces: right, centre and decimal tabs and dot leaders (tables of contents) are lost | read `w:tabs` per paragraph and lay text out to them |
+| B | Table column widths come from the content, not `tblGrid` / `tcW`; text alignment inside cells is not applied; nested tables are flattened; pictures in cells move after the table; table style borders and shading partly | table layout from the grid; cells holding blocks (the shared renderer's table cell model, 25.1) |
+| B | Headers and footers: only the last section's default, shown once; first-page and even-page headers and page-number fields per page | with pages |
+| B | Footnotes at the end instead of at the page bottom; comments as a list instead of margin balloons; tracked changes: deletions hidden, insertions plain (Word shows markup) | a markup mode: insertions underlined and coloured, deletions struck |
+| C | Paragraph borders, drop caps, `w:sym` symbol characters (drawn as a box), equations (OMML) laid out as math, line numbers, watermarks | per item |
+
+### Excel
+
+| Pri | Gap | What it takes |
+|---|---|---|
+| A | **Conditional formatting** is not applied: cell rules, colour scales, data bars, icon sets | evaluate `cfRule` against the cached values (no formula engine needed for cellIs, top/bottom, colour scales, data bars) |
+| A | **Table styles** ("Format as Table": header colour, banded rows) are not drawn | read `xl/tables/*.xml` and the built-in table styles, like PowerPoint's table styles |
+| B | Numbers too wide for their column are clipped; Excel shows `####` | measure, then `#` fill |
+| B | Italic not drawn; font families ignored | the font work under All formats |
+| B | Only solid fills: pattern fills (`gray125`, hatches) and gradient fills are not drawn | pattern bitmaps / the gradient code the page painter has |
+| C | Centred and right-aligned text does not run over empty cells to the left; indent and shrink-to-fit ignored; diagonal borders; thick borders partly covered by the next cell's fill | per item |
+| C | Chart sheets, sparklines, comment markers, data validation arrows, outline (grouping) bars, hidden-by-filter rows | per item |
+
+### PowerPoint
+
+| Pri | Gap | What it takes |
+|---|---|---|
+| A | **SmartArt without a cached drawing** is an outline of its text (38 of LibreOffice's samples; `lo-smartart1.pptx`: PowerPoint draws five blue blocks, we draw a bulleted list) | lay out from the data model by the layout's `uniqueId`: the common layouts first (basic block list, process, cycle, hierarchy, pyramid), the quick style and colour parts for the look |
+| A | **Text autofit** (`normAutofit fontScale`, `lnSpcReduction`) and the substituted font make text overflow or break differently | apply the scale; with metric-compatible fonts, breaks match |
+| B | 40 of about 180 preset shapes; the others fall back to a simpler outline | port the preset geometry definitions (`presetShapeDefinitions.xml` formulas) instead of hand-written outlines |
+| B | Picture, texture and pattern fills inside shapes; picture bullets | image fill clipped to the shape path |
+| B | Text effects: gradient or outlined text, letter spacing (`spc`), columns in text boxes, superscript / subscript offsets | per item |
+| C | Table borders from the table style (`tcBdr`) are skipped; diagonal cell borders | read them with the fills |
+| C | Video and audio show at most their poster frame; OLE objects their preview image | say so in "not shown" (done for media) |
+| C | Charts are drawn flat: 3D charts, chart styles, data labels positions, trendlines and error bars, `chartex` (waterfall, treemap, sunburst, histogram, box) | per chart kind |
+
+### PDF
+
+| Pri | Gap | What it takes |
+|---|---|---|
+| A | **Glyph shapes** come from Roboto, words stretched to their width: serif, monospace and display fonts all look sans | draw the embedded font programs (TrueType, CFF, Type 1) through the font loader, or rasterise glyph outlines into the atlas |
+| B | **Clipping** uses the clip path's bounding box, not its outline (rounded corners, circles, text clips) | stencil the path, or clip polygons on the CPU for simple paths |
+| B | JPEG 2000, JBIG2 and CCITT images (scanned documents) are not decoded | decoders (OpenJPEG and jbig2dec are the usual ones; new dependencies) |
+| B | Annotations and form fields (their appearance streams) are not drawn | draw `/AP` normal appearances as forms |
+| C | Mesh shadings (types 4-7), tiling patterns, blend modes, transparency groups and soft masks on content | per item |
+| C | Vertical writing (`Identity-V`), Type 3 fonts as their glyph procedures, encrypted files | per item |
+
+### Checked against Office's render (2026-11-07)
+
+Microsoft Office 16 exported 23 of the 27 samples (40 pages compared side by side with the
+viewer's screenshots; the comparison sheets are made by the scripts under **Reference renders**).
+What the comparison showed, most visible first. **Bugs** are things the viewer reads but draws
+wrong; the rest confirm gaps listed above. **Fixed** rows were fixed the same day and are covered by
+`viewer_draws_slides_as_office_does` and `viewer_numbers_word_headings_through_their_styles`.
+
+| Pri | Kind | What Office shows / what we show | Sample |
+|---|---|---|---|
+| A | Fixed | PowerPoint subtitles and secondary text are light grey (`tx1` with `lumMod` / `lumOff` or a tint in the master's styles); ours are near black, on every deck | poi-SampleShow 1, poi-layouts 1, poi-shapes 2, poi-themes 1 (fixed: DrawingML tint and shade in linear light (Ooxml.cpp); colour modifiers in order, satMod added) |
+| A | Fixed | Text in a shape takes its colour from the shape's style (`p:style/a:fontRef` with a scheme colour): white text on a green box; ours black | poi-themes 4 ("Text in a autoshape is white") (fixed: fontRef colours the shape's text over the master's text styles (Pptx textBody)) |
+| A | Fixed | Italic text in slides is upright (title placeholders of the Austin theme, "This bit is in italic green") | poi-SampleShow 1, poi-themes 4-5 (fixed: italic runs slanted by the painter (styledText)) |
+| A | Gap (fonts) | Calibri / Century Gothic are lighter and narrower than our Roboto Medium: every slide's text looks bolder and breaks lines elsewhere ("Nunc at risus vel erat tempus / posuere." breaks after "tempus" in Office) | all decks, poi-sample 1 |
+| A | Gap | Word table styles: the tables' orange header rows and lines (a built-in "Grid Table" style) are not drawn | poi-table-alignment |
+| A | Fixed | A layout's radial gradient background is drawn as one flat colour | poi-themes 3 ("Radial Gradient Fill On Slide Layout") (fixed: bgRef / fillRef resolve the theme's fill style lists with phClr (themeFill); radial centre from fillToRect; gradient fills drawn on a subdivided mesh (PagePainter subdivide)) |
+| B | Fixed | Comparison layout: the right column's bullet sits apart from its text, which is pushed right, and its heading is centred; Office left-aligns both columns | poi-layouts 5 (fixed: a placeholder matches the master by type only, the layout by idx) |
+| B | Fixed | Elbow connectors (`bentConnector3`) are drawn as one straight line | poi-shapes 1 (cloud to picture) (fixed: bent and curved connectors routed (dml::connectorPath)) |
+| B | Fixed | Hyperlinks in slides are not blue and underlined (the theme's `hlink` colour) | poi-shapes 5 (fixed: hlinkClick runs in the theme's hlink colour, underlined) |
+| B | Fixed | `cap="all"`: Office shows "SECTION TITLE" in capitals | poi-layouts 3 (fixed: cap from rPr and list styles) |
+| B | Fixed | Word heading numbering from the styles (`A.1 Introduction`, `A.2.1 DESCRIPTION`): ours drops the numbers, and the chapter heading is right-aligned instead of centred | lo-tdf95495 (fixed: numbered headings take their marker; a style without ilvl takes the level whose pStyle names it (the right alignment is the style's own jc, as in Word)) |
+| B | Fixed | Empty Word paragraphs keep their height in Office (spacing between list groups); ours collapse them | poi-Numbering (fixed: an empty paragraph keeps its line) |
+| B | Gap | A chart's plot area filled with a picture (`blipFill`), white gridlines over it and the default "Chart Title" are missing | poi-chart-picture-bg |
+| C | Fixed | Gradient backgrounds of the Austin theme run darker at the edges in Office; ours lighter and flatter (stops or path) | poi-themes 4, 6 (fixed: with the theme's fill styles and the mesh, the edges darken as in Office) |
+| C | Gap | Title slide of a layout without master graphics: Office's title is larger and anchored at the bottom of its box | poi-themes 6 |
+| C | Gap | Table lines in slides are white in Office (the style's `tcBdr`); ours grey | poi-table_test |
+| - | Same | Excel samples (values, formats, colours, theme colours), slide masters and layouts, level indents, table merges, bullets, pictures, texture fills, Word header / footer / table alignment: match, apart from fonts and our dark grid | 15 samples |
+
+### Reference renders
+
+Microsoft Office is installed on the development machine (Word, Excel and PowerPoint 16).
+`File > Export > PDF` through COM gives the reference for every OOXML sample; PyMuPDF rasterises
+it, and the viewer's own screenshot (automation `screenshot`) sits beside it. Learned so far:
+
+- Office must open each file in its own process with a time limit: one of the samples left Word
+  behind a hidden dialog and stopped a batch export. The exporter starts Word, Excel or PowerPoint
+  per file and ends only the processes it started.
+- **Office refuses the challenge files** (`tests/data/viewer/challenge.*`): "the file appears to be
+  corrupted". The generator declares only `document.xml` (or the workbook / presentation) in
+  `[Content_Types].xml` and lets the other parts fall back to `application/xml`; Office needs each
+  part's own content type (styles, numbering, footnotes, headers, sheets, slides, charts...). The
+  viewer reads them because it follows relationships, not content types. Fix the generator so the
+  challenge files are valid for Office too, then use them as references.
+- `lo-tdf100709.xlsx` does not open in Excel either (a LibreOffice regression file).
+- With a per-file process and a 90 s limit, 23 of 27 samples exported (the 3 challenge files and
+  `lo-tdf100709.xlsx` failed to open). Pages are rasterised at 55 dpi and paired with the viewer's
+  screenshots (the document area of each), three pairs a sheet, Office on the left.
 
 ## LibreOffice: what it is, and the essence worth extracting
 
@@ -229,8 +346,8 @@ How:
 ## Later
 
 - **ODF** (`.odt`, `.ods`, `.odp`) readers into the same models.
-- **More of the format:** charts (drawn from their cached data), more shapes, a paginated (print) layout for
-  documents, comments and tracked changes shown, PDF reading (PDFium).
+- **More of the format:** the rendering gaps above, a paginated (print) layout for documents,
+  comments and tracked changes shown. (Charts and PDF reading are done, with our own readers.)
 
 ## Rules for every step
 

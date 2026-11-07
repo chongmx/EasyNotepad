@@ -101,7 +101,7 @@ struct Style {
     RunProps run;
     ParaProps para;
     std::string numId;   // a numbered style
-    int numLevel = 0;
+    int numLevel = -1;   // its list level; -1: the level whose pStyle names it (else 0)
 };
 
 struct Level {
@@ -115,6 +115,7 @@ struct Numbering {
     std::map<std::string, std::string> nums;               // numId -> abstractNumId
     std::map<std::string, std::map<int, int>> overrides;   // numId -> level -> start
     std::map<std::string, std::vector<int>> counters;      // numId -> per level
+    std::map<std::string, int> styleLevels;                // paragraph style -> the level whose pStyle names it
 
     const Level* level(const std::string& numId, int ilvl) const
     {
@@ -452,6 +453,7 @@ private:
         XmlReader x(*xml);
         std::string abstractId, numId;
         Level* level = nullptr;
+        int levelIndex = 0;
         int overrideLevel = -1;
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
@@ -472,7 +474,10 @@ private:
             if (n == "abstractNum") {
                 abstractId = x.attribute("w:abstractNumId");
             } else if (n == "lvl" && !abstractId.empty()) {
-                level = &numbering_.abstracts[abstractId][std::atoi(x.attribute("w:ilvl").c_str())];
+                levelIndex = std::clamp(std::atoi(x.attribute("w:ilvl").c_str()), 0, 8);
+                level = &numbering_.abstracts[abstractId][levelIndex];
+            } else if (n == "pStyle" && level) { // headings numbered through their styles
+                numbering_.styleLevels.emplace(x.attribute("w:val"), levelIndex);
             } else if (n == "numFmt" && level) {
                 level->format = x.attribute("w:val");
             } else if (n == "lvlText" && level) {
@@ -653,7 +658,7 @@ private:
     void push(md::Block b)
     {
         if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
-            return; // empty paragraphs are spacing in Word; the renderer spaces blocks itself
+            b.spans.push_back(textSpan(" ")); // an empty paragraph keeps its line, as in Word
         doc_->flow.blocks.push_back(std::move(b));
     }
 
@@ -821,8 +826,13 @@ private:
             heading = std::min(outline + 1, 6);
         if (!hasNumPr && ps && !ps->numId.empty()) {
             numId = ps->numId;
-            if (ilvl < 0)
+            if (ilvl < 0) {
                 ilvl = ps->numLevel;
+                if (ilvl < 0) { // the level of the list that names this style (Appendix2 -> "%1.%2")
+                    const auto it = numbering_.styleLevels.find(styleId);
+                    ilvl = it != numbering_.styleLevels.end() ? it->second : 0;
+                }
+            }
             hasNumPr = true;
         }
         if (heading > 0 && !spans.empty()) {
@@ -830,6 +840,12 @@ private:
             b.level = heading;
             for (md::Span& s : spans)
                 s.style &= ~unsigned(md::Bold); // headings are drawn bold anyway
+            if (hasNumPr && !numId.empty() && numId != "0") { // numbered headings: "A.1 Introduction"
+                bool bullet = false;
+                const std::string marker = nextMarker(numId, std::max(0, ilvl), bullet);
+                if (!marker.empty() && !bullet)
+                    spans.insert(spans.begin(), textSpan(marker + " "));
+            }
         } else if (hasNumPr && !numId.empty() && numId != "0" && !spans.empty()) {
             bool bullet = false;
             const std::string marker = nextMarker(numId, std::max(0, ilvl), bullet);
