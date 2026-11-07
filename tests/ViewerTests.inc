@@ -703,3 +703,123 @@ TEST(viewer_shows_text_boxes_comments_shapes_and_smartart)
         CHECK(placed);
     }
 }
+
+TEST(viewer_formats_fractions_colours_and_finds_scripts)
+{
+    using mv::formatNumber;
+    CHECK_EQ(formatNumber(3.25, "# ?/?"), std::string("3 1/4"));
+    CHECK_EQ(formatNumber(0.5, "# ?/?"), std::string("  1/2"));
+    CHECK_EQ(formatNumber(2, "# ?/?"), std::string("2    ")); // a whole number: the fraction's room blank
+    CHECK_EQ(formatNumber(-1.75, "# ?\?/?\?"), std::string("-1  3/4 "));
+    CHECK_EQ(formatNumber(0.3, "?/4"), std::string("1/4"));
+    std::uint32_t color = 0;
+    CHECK_EQ(formatNumber(-5, "0;[Red]0", false, &color), std::string("5"));
+    CHECK(color == mv::rgba(255, 0, 0));
+    formatNumber(5, "0;[Red]0", false, &color);
+    CHECK(color == 0);
+    formatNumber(5, "[Color3]0", false, &color);
+    CHECK(color == mv::rgba(255, 0, 0));
+
+    CHECK(mv::scriptsIn("plain ASCII, caf\xC3\xA9, \xCE\xB1\xCE\xB2") == 0);
+    CHECK(mv::scriptsIn("\xE6\x9D\xB1\xE4\xBA\xAC") == mv::ScriptHan);        // 東京
+    CHECK(mv::scriptsIn("\xE3\x81\x8B\xE3\x81\xAA") == mv::ScriptHan);        // かな
+    CHECK(mv::scriptsIn("\xED\x95\x9C\xEA\xB8\x80") == mv::ScriptHangul);     // 한글
+    CHECK(mv::scriptsIn("\xF0\xA0\x80\x80 and \xEA\xB0\x80") == (mv::ScriptHan | mv::ScriptHangul)); // U+20000, 가
+    CHECK(mv::scriptsIn("\xE6\x9D") == 0); // cut short: not read past the end
+}
+
+TEST(viewer_reads_the_challenge_files)
+{
+    // tests/data/viewer/make_challenge_files.py writes them: one of each format, each with the
+    // features hardest to get right.
+    namespace md = model::markdown;
+    const std::string dir = std::string(ENP_SOURCE_DIR) + "/tests/data/viewer/";
+    auto read = [&](const char* name) {
+        const std::optional<std::string> bytes = os::fs::readFile(dir + name);
+        CHECK(bytes.has_value());
+        return mv::readViewerDocument(name, bytes ? *bytes : std::string());
+    };
+
+    // Word: the header above the body and the footer below it, line breaks kept.
+    {
+        const mv::ViewerDocument doc = read("challenge.docx");
+        CHECK(doc.shape == mv::Shape::Flow && doc.flow.blocks.size() > 4);
+        if (doc.flow.blocks.size() > 4) {
+            const std::vector<md::Block>& b = doc.flow.blocks;
+            CHECK(md::plainText(b.front().spans).find("header") != std::string::npos);
+            CHECK(b[1].kind == md::BlockKind::Rule);
+            bool footer = false; // after the body and its notes, before the comments
+            for (std::size_t i = 1; i < b.size(); ++i)
+                footer = footer || (b[i - 1].kind == md::BlockKind::Rule && md::plainText(b[i].spans) == "Page 1");
+            CHECK(footer);
+            CHECK(mv::plainText(doc).find("stop, line\nbreak") != std::string::npos);
+        }
+    }
+
+    // Excel: number format colours and fractions, rich text, sizes, borders, wrapping, rotation,
+    // and Chinese characters (the view's fonts).
+    {
+        const mv::ViewerDocument doc = read("challenge.xlsx");
+        CHECK(doc.shape == mv::Shape::Sheet && !doc.book.sheets.empty());
+        if (doc.book.sheets.empty())
+            return;
+        const mv::Workbook& book = doc.book;
+        const mv::Sheet& s = book.sheets[0];
+        const mv::Cell* negative = s.cell(4, 1);
+        CHECK(negative && negative->text == "(1,234.50)" && negative->color == mv::rgba(255, 0, 0));
+        CHECK(s.cell(9, 1) && s.cell(9, 1)->text == "3  1/4 "); // built-in 13, "# ?\?/?\?": padded
+        const mv::Cell* rich = s.cell(11, 0);
+        CHECK(rich && rich->text == "Rich text" && rich->rich > 0 && rich->rich < book.richTexts.size());
+        if (rich && rich->rich > 0 && rich->rich < book.richTexts.size()) {
+            const std::vector<mv::CellRun>& runs = book.richTexts[rich->rich];
+            CHECK(runs.size() == 2 && !runs[0].own && runs[1].own && runs[1].begin == 5 && runs[1].end == 9 &&
+                  (runs[1].flags & mv::Cell::Bold) && runs[1].color == mv::rgba(0xC0, 0, 0));
+        }
+        CHECK(s.cell(11, 1) && s.cell(11, 1)->text == "\xE6\x9D\xB1\xE4\xBA\xAC" && (doc.scripts & mv::ScriptHan));
+        const mv::Cell* header = s.cell(0, 0);
+        CHECK(header && header->halfPoints == 28 && header->border > 0 && header->border < book.borders.size());
+        if (header && header->border > 0 && header->border < book.borders.size()) {
+            const mv::Border& b = book.borders[header->border];
+            CHECK(b.style[0] == mv::Border::Thin && b.style[3] == mv::Border::Medium && b.color[3] == mv::rgba(0x2E, 0x75, 0xB6) &&
+                  b.color[0] == 0);
+        }
+        const mv::Cell* total = s.cell(14, 0);
+        CHECK(total && total->border > 0 && total->border < book.borders.size() &&
+              book.borders[total->border].style[3] == mv::Border::Double);
+        CHECK(s.cell(11, 2) && (s.cell(11, 2)->flags & mv::Cell::Wrap) && s.cell(19, 1) && (s.cell(19, 1)->flags & mv::Cell::Wrap));
+        CHECK(s.cell(19, 0) && s.cell(19, 0)->rotation == 90);
+    }
+
+    // PDF: a page's scripts are found when it is read.
+    {
+        mv::ViewerDocument doc = read("challenge.pdf");
+        CHECK(doc.shape == mv::Shape::Pages && !doc.pages.pages.empty());
+        if (!doc.pages.pages.empty()) {
+            CHECK(doc.pages.load(0));
+            CHECK(doc.pages.pages[0].scripts & mv::ScriptHan);
+        }
+    }
+}
+
+TEST(viewer_reads_word_table_alignment_and_cell_lines)
+{
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:tbl><w:tblPr><w:jc w:val="center"/></w:tblPr><w:tr><w:tc><w:p><w:r><w:t>one</w:t></w:r></w:p><w:p><w:r><w:t>two</w:t><w:br/><w:t>three</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:tbl><w:tblPr><w:jc w:val="right"/></w:tblPr><w:tr><w:tc><w:tcPr><w:jc w:val="left"/></w:tcPr><w:p><w:r><w:t>r</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:sectPr><w:headerReference w:type="first" r:id="rIdH1" xmlns:r="r"/><w:headerReference w:type="default" r:id="rIdH2" xmlns:r="r"/></w:sectPr></w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rIdH1", "header", "header1.xml"}, {"rIdH2", "header", "header2.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/header1.xml", R"(<w:hdr xmlns:w="w"><w:p><w:r><w:t>first page</w:t></w:r></w:p></w:hdr>)"},
+                                   {"word/header2.xml", R"(<w:hdr xmlns:w="w"><w:p><w:r><w:t>every page</w:t></w:r></w:p></w:hdr>)"}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    CHECK(b.size() == 4);
+    if (b.size() != 4)
+        return;
+    CHECK(md::plainText(b[0].spans) == "every page" && b[1].kind == md::BlockKind::Rule); // the default header
+    CHECK(b[2].kind == md::BlockKind::Table && b[2].textAlign == 1 && md::plainText(b[2].rows[0][0]) == "one\ntwo\nthree");
+    CHECK(b[3].kind == md::BlockKind::Table && b[3].textAlign == 2); // the cell's own jc is not the table's
+}

@@ -6,6 +6,7 @@
 #include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
+#include "imgui_internal.h" // ImTextCharFromUtf8
 
 #include <algorithm>
 #include <cfloat>
@@ -67,6 +68,14 @@ void ViewerView::releaseImages(std::map<std::string, HeldImage>& held)
     for (auto& [media, h] : held)
         images_.release(h.key);
     std::map<std::string, HeldImage>().swap(held);
+}
+
+std::uint8_t ViewerView::scripts() const
+{
+    std::uint8_t scripts = 0;
+    for (const auto& [id, e] : entries_)
+        scripts |= e.scripts;
+    return scripts;
 }
 
 std::size_t ViewerView::heldImageCount() const
@@ -170,6 +179,7 @@ void ViewerView::render(model::Document& doc, ImVec2 size)
         return;
     }
     Entry& e = entryFor(doc, *model);
+    e.scripts |= d.scripts;
     const float pad = 8.0f * s_;
     const float before = ImGui::GetCursorPosY();
     ImGui::SetCursorPos(ImVec2(pad, pad * 0.5f));
@@ -214,6 +224,20 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
     }
     ImGui::TextDisabled("%s", label_);
     if (d.shape == mv::Shape::Pages) {
+        const int pageCount = int(d.pages.pages.size());
+        auto go = [&e, pageCount](int delta) { e.goToPage = std::clamp(e.currentPage + delta, 0, std::max(0, pageCount - 1)); };
+        ImGui::SameLine();
+        ImGui::BeginDisabled(e.currentPage <= 0);
+        if (ImGui::SmallButton(ICON_FA_CHEVRON_UP "##viewerPrevious"))
+            go(-1);
+        ImGui::EndDisabled();
+        registerLastItem("viewer:previous-page", "button", "Previous page", [go]() { go(-1); });
+        ImGui::SameLine();
+        ImGui::BeginDisabled(e.currentPage + 1 >= pageCount);
+        if (ImGui::SmallButton(ICON_FA_CHEVRON_DOWN "##viewerNext"))
+            go(1);
+        ImGui::EndDisabled();
+        registerLastItem("viewer:next-page", "button", "Next page", [go]() { go(1); });
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_MINUS "##viewerZoomOut"))
             e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f);
@@ -221,7 +245,7 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
         ImGui::SameLine();
         if (ImGui::SmallButton("Fit##viewerZoomFit"))
             e.zoom = 0.0f;
-        registerLastItem("viewer:zoom-fit", "button", "Fit to width", [&e]() { e.zoom = 0.0f; });
+        registerLastItem("viewer:zoom-fit", "button", d.format == "PDF document" ? "Fit to width" : "Fit the slide", [&e]() { e.zoom = 0.0f; });
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_PLUS "##viewerZoomIn"))
             e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f);
@@ -301,14 +325,35 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             return page.height * scale + 6.0f * s_;
         };
     e.flow.emoji = emoji_;
-    panel::beginChild("##viewerFlow", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    e.flow.paper = true;
+    // A Word document is drawn as it is printed: dark text on a white page, in its own colours (a
+    // copy of the palette with a paper's colours: no allocation).
+    Palette paper = palette_;
+    paper.text = IM_COL32(32, 33, 36, 255);
+    paper.textDim = IM_COL32(95, 99, 104, 255);
+    paper.textFaint = IM_COL32(140, 144, 150, 255);
+    paper.iconBlue = IM_COL32(5, 99, 193, 255);
+    paper.border = IM_COL32(200, 203, 208, 255);
+    paper.synString = IM_COL32(163, 21, 21, 255);
+    panel::beginChild("##viewerFlow", size, IM_COL32(128, 128, 128, 70), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float zoom = vm_.zoom.get();
-    const float pad = 24.0f * s_;
-    const float column = std::min(std::max(1.0f, viewW - pad * 2.0f), 820.0f * s_ * zoom);
-    ImGui::SetCursorPos(ImVec2(std::max(pad, (viewW - column) * 0.5f), pad));
-    e.flow.renderBlocks(d.flow.blocks, e.generation, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
-    ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f));
+    const float pad = 24.0f * s_, margin = 36.0f * s_ * zoom;
+    const float column = std::min(std::max(1.0f, viewW - pad * 2.0f - margin * 2.0f), 820.0f * s_ * zoom);
+    const ImVec2 page(std::max(pad, (viewW - column) * 0.5f - margin), pad);
+    ImGui::SetCursorPos(ImVec2(page.x + margin, page.y + margin));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->ChannelsSplit(2); // the page goes under the text, once its height is known
+    dl->ChannelsSetCurrent(1);
+    const ImVec2 top = ImGui::GetCursorScreenPos();
+    e.flow.renderBlocks(d.flow.blocks, e.generation, column, fonts_, paper, Fonts::kUiSize * 1.08f * zoom, s_);
+    const float bottom = ImGui::GetCursorScreenPos().y;
+    dl->ChannelsSetCurrent(0);
+    dl->AddRectFilled(ImVec2(top.x - margin + 3.0f * s_, top.y - margin + 3.0f * s_), ImVec2(top.x + column + margin + 3.0f * s_, bottom + margin + 3.0f * s_),
+                      IM_COL32(0, 0, 0, 40)); // its shadow
+    dl->AddRectFilled(ImVec2(top.x - margin, top.y - margin), ImVec2(top.x + column + margin, bottom + margin), IM_COL32(255, 255, 255, 255));
+    dl->ChannelsMerge();
+    ImGui::Dummy(ImVec2(1.0f, margin + size.y * 0.4f));
     e.scroll = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
     ImGui::EndChild();
 }
@@ -330,31 +375,9 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     }
     e.sheet = std::clamp(e.sheet, 0, int(book.sheets.size()) - 1);
     const float pad = 8.0f * s_;
-    const float rowLine = ImGui::GetFrameHeight();
-    // Sheet tabs, then the cell inspector, then the grid.
+    // The cell inspector, then the grid, then the sheet tabs along the bottom (as in Excel).
     float top = ImGui::GetCursorPosY();
-    int visible = 0;
-    for (const mv::Sheet& s : book.sheets)
-        visible += s.hidden ? 0 : 1;
-    if (visible > 1) {
-        ImGui::SetCursorPos(ImVec2(pad, top));
-        for (std::size_t i = 0; i < book.sheets.size(); ++i) {
-            if (book.sheets[i].hidden)
-                continue;
-            ImGui::PushID(int(i));
-            const bool current = int(i) == e.sheet;
-            if (current)
-                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetColorU32(ImGuiCol_ButtonActive));
-            if (ImGui::SmallButton(book.sheets[i].name.empty() ? "(sheet)" : book.sheets[i].name.c_str()))
-                e.sheet = int(i);
-            if (current)
-                ImGui::PopStyleColor();
-            ImGui::PopID();
-            ImGui::SameLine();
-        }
-        ImGui::NewLine();
-        top = ImGui::GetCursorPosY();
-    }
+    const float tabsH = std::floor(ImGui::GetFontSize() * 1.45f);
     const mv::Sheet& sh = book.sheets[size_t(e.sheet)];
     {
         char ref[16];
@@ -370,7 +393,7 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         top = ImGui::GetCursorPosY();
     }
     ImGui::SetCursorPos(ImVec2(0.0f, top));
-    const ImVec2 gridSize(size.x, std::max(1.0f, size.y - (top - ImGui::GetCursorStartPos().y) + (size.y > 0 ? 0.0f : 0.0f) - rowLine * 0.0f));
+    const ImVec2 gridSize(size.x, std::max(1.0f, size.y - (top - ImGui::GetCursorStartPos().y) - tabsH));
 
     // Geometry: Excel's column width is in characters of the default font (7 pixels each at 96
     // dpi, plus 5 pixels of padding); row heights are in points.
@@ -455,6 +478,188 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         return nullptr;
     };
 
+    // A cell's borders, on the grid lines around it (automatic colour: the text colour).
+    auto edges = [&](const mv::Border& border, ImVec2 a, ImVec2 b) {
+        const ImVec2 ends[4][2] = {{ImVec2(a.x - 0.5f, a.y - 0.5f), ImVec2(a.x - 0.5f, b.y - 0.5f)},
+                                   {ImVec2(b.x - 0.5f, a.y - 0.5f), ImVec2(b.x - 0.5f, b.y - 0.5f)},
+                                   {ImVec2(a.x - 0.5f, a.y - 0.5f), ImVec2(b.x - 0.5f, a.y - 0.5f)},
+                                   {ImVec2(a.x - 0.5f, b.y - 0.5f), ImVec2(b.x - 0.5f, b.y - 0.5f)}};
+        for (int i = 0; i < 4; ++i) {
+            const std::uint8_t style = border.style[i];
+            if (style == mv::Border::None)
+                continue;
+            ImU32 color = border.color[i] ? border.color[i] : palette_.text;
+            if (style == mv::Border::Hair)
+                color = (color & 0x00FFFFFFu) | 0x90000000u;
+            const float w = (style == mv::Border::Medium ? 2.0f : style == mv::Border::Thick ? 3.0f : 1.0f) * std::max(1.0f, s_);
+            const ImVec2 p = ends[i][0], q = ends[i][1];
+            if (style == mv::Border::Double) {
+                const ImVec2 off = i < 2 ? ImVec2(1.0f * s_, 0.0f) : ImVec2(0.0f, 1.0f * s_);
+                dl->AddLine(ImVec2(p.x - off.x, p.y - off.y), ImVec2(q.x - off.x, q.y - off.y), color, std::max(1.0f, s_));
+                dl->AddLine(ImVec2(p.x + off.x, p.y + off.y), ImVec2(q.x + off.x, q.y + off.y), color, std::max(1.0f, s_));
+            } else if (style == mv::Border::Dashed || style == mv::Border::Dotted) {
+                const float dash = (style == mv::Border::Dotted ? 1.0f : 3.0f) * w, gap = (style == mv::Border::Dotted ? 1.0f : 2.0f) * w;
+                const float len = i < 2 ? q.y - p.y : q.x - p.x;
+                for (float t = 0.0f; t < len; t += dash + gap) {
+                    const float t1 = std::min(len, t + dash);
+                    dl->AddLine(i < 2 ? ImVec2(p.x, p.y + t) : ImVec2(p.x + t, p.y), i < 2 ? ImVec2(p.x, p.y + t1) : ImVec2(p.x + t1, p.y), color, w);
+                }
+            } else {
+                dl->AddLine(p, q, color, w);
+            }
+        }
+    };
+
+    // A cell's text laid out in lines of pieces, each piece in one font (rich text runs, sizes),
+    // wrapped to the cell when it wraps, then turned when it is rotated. The scratch is this frame's.
+    struct Piece {
+        const char* begin;
+        const char* end;
+        float x, px; // within its line; the font size
+        ImU32 color;
+        std::uint8_t flags;
+    };
+    struct Line {
+        std::size_t first = 0, last = 0;
+        float ink = 0.0f, width = 0.0f, height = 0.0f; // ink: without the trailing spaces
+    };
+    std::vector<Piece> pieces;
+    std::vector<Line> lines;
+    auto layout = [&](const mv::Cell& cell, float limit) {
+        pieces.clear();
+        lines.clear();
+        const float basePx = fontPx * (cell.halfPoints ? cell.halfPoints * 0.5f / book.defaultFontSize : 1.0f);
+        const ImU32 baseColor = cell.color ? cell.color : (cell.flags & mv::Cell::Error) ? palette_.iconOrange : palette_.text;
+        const bool wrap = (cell.flags & mv::Cell::Wrap) != 0, stacked = cell.rotation == 255;
+        Line line;
+        line.height = basePx;
+        auto endLine = [&]() {
+            line.last = pieces.size();
+            lines.push_back(line);
+            line = Line();
+            line.first = pieces.size();
+            line.height = basePx;
+        };
+        auto add = [&](const char* p, const char* end, float px, ImU32 color, std::uint8_t flags) {
+            while (p < end) {
+                if (*p == '\n') { // a line break shows only in wrapped text
+                    if (wrap || stacked)
+                        endLine();
+                    else if (!pieces.empty() || line.width > 0.0f)
+                        line.width += fonts_.ui->CalcTextSizeA(px, FLT_MAX, 0.0f, " ").x;
+                    ++p;
+                    continue;
+                }
+                const char* w = p; // the next word with its spaces, or one letter when stacked
+                if (stacked) {
+                    unsigned int c = 0;
+                    w += std::max(1, ImTextCharFromUtf8(&c, p, end));
+                } else {
+                    while (w < end && *w != ' ' && *w != '\n')
+                        ++w;
+                    while (w < end && *w == ' ')
+                        ++w;
+                }
+                const char* ink = w;
+                while (ink > p && ink[-1] == ' ')
+                    --ink;
+                const float inkW = fonts_.ui->CalcTextSizeA(px, FLT_MAX, 0.0f, p, ink).x;
+                const float fullW = ink == w ? inkW : fonts_.ui->CalcTextSizeA(px, FLT_MAX, 0.0f, p, w).x;
+                if (wrap && pieces.size() > line.first && line.width + inkW > limit)
+                    endLine();
+                Piece* last = pieces.size() > line.first ? &pieces.back() : nullptr;
+                if (last && last->end == p && last->px == px && last->color == color && last->flags == flags)
+                    last->end = w; // the same font: one piece
+                else
+                    pieces.push_back(Piece{p, w, line.width, px, color, flags});
+                line.ink = line.width + inkW;
+                line.width += fullW;
+                line.height = std::max(line.height, px);
+                if (stacked)
+                    endLine();
+                p = w;
+            }
+        };
+        const char* text = cell.text.data();
+        const std::uint32_t size = std::uint32_t(cell.text.size());
+        const std::uint8_t baseFlags = cell.flags & (mv::Cell::Bold | mv::Cell::Underline | mv::Cell::Strike);
+        if (cell.rich && cell.rich < book.richTexts.size()) {
+            std::uint32_t at = 0;
+            for (const mv::CellRun& run : book.richTexts[cell.rich]) {
+                const std::uint32_t b = std::min(run.begin, size), e = std::min(run.end, size);
+                if (b > at)
+                    add(text + at, text + b, basePx, baseColor, baseFlags);
+                if (e > b) {
+                    if (run.own)
+                        add(text + b, text + e, run.halfPoints ? fontPx * run.halfPoints * 0.5f / book.defaultFontSize : basePx,
+                            run.color ? run.color : palette_.text, run.flags);
+                    else
+                        add(text + b, text + e, basePx, baseColor, baseFlags);
+                }
+                at = std::max(at, e);
+            }
+            if (at < size)
+                add(text + at, text + size, basePx, baseColor, baseFlags);
+        } else {
+            add(text, text + size, basePx, baseColor, baseFlags);
+        }
+        if (pieces.size() > line.first || lines.empty())
+            endLine();
+    };
+    auto cellText = [&](const mv::Cell& cell, ImVec2 a, ImVec2 b, float overflow, ImVec4 clip) {
+        const float inset = 3.0f * s_;
+        const int align = cell.align >= 0 ? cell.align : (cell.flags & mv::Cell::Number) ? 2 : 0;
+        const bool turned = cell.rotation != 0 && cell.rotation != 255;
+        const bool upright = turned && std::abs(cell.rotation) >= 45; // laid out along the cell's height
+        const ImVec2 size(b.x - a.x, b.y - a.y);
+        layout(cell, std::max(1.0f, (upright ? size.y : size.x) - 2.0f * inset));
+        float total = 0.0f;
+        for (const Line& l : lines)
+            total += l.height;
+        // The box the text is laid out in, before it is turned about the cell's centre.
+        const ImVec2 centre((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+        const ImVec2 box = upright ? ImVec2(size.y, size.x) : size;
+        const ImVec2 at = turned ? ImVec2(centre.x - box.x * 0.5f, centre.y - box.y * 0.5f) : a;
+        float y = turned || cell.valign == 1 ? at.y + (box.y - total) * 0.5f : cell.valign == 0 ? at.y + 1.0f * s_ : at.y + box.y - total - 2.0f * s_;
+        float right = b.x;
+        if (!turned && align == 0 && lines.size() == 1 && !(cell.flags & mv::Cell::Wrap) && a.x + inset + lines[0].ink > b.x)
+            right = std::max(right, overflow);
+        const ImVec4 cellClip(std::max(a.x, clip.x), std::max(a.y, clip.y), std::min(right, clip.z), std::min(b.y, clip.w));
+        if (cellClip.x >= cellClip.z || cellClip.y >= cellClip.w)
+            return;
+        const int firstVertex = dl->VtxBuffer.Size;
+        if (turned)
+            dl->PushClipRect(ImVec2(cellClip.x, cellClip.y), ImVec2(cellClip.z, cellClip.w), true);
+        const ImVec4* fine = turned ? nullptr : &cellClip; // glyphs are clipped before they are turned
+        for (const Line& l : lines) {
+            const float x = align == 1 ? at.x + (box.x - l.ink) * 0.5f : align == 2 ? at.x + box.x - inset - l.ink : at.x + inset;
+            for (std::size_t i = l.first; i < l.last; ++i) {
+                const Piece& p = pieces[i];
+                const ImVec2 pos(x + p.x, y + l.height - p.px);
+                dl->AddText(fonts_.ui, p.px, pos, p.color, p.begin, p.end, 0.0f, fine);
+                if (p.flags & mv::Cell::Bold)
+                    dl->AddText(fonts_.ui, p.px, ImVec2(pos.x + std::max(1.0f, p.px * 0.045f), pos.y), p.color, p.begin, p.end, 0.0f, fine);
+                if (p.flags & (mv::Cell::Underline | mv::Cell::Strike)) {
+                    const float w = fonts_.ui->CalcTextSizeA(p.px, FLT_MAX, 0.0f, p.begin, p.end).x;
+                    const float lineY = (p.flags & mv::Cell::Underline) ? pos.y + p.px * 0.95f : pos.y + p.px * 0.55f;
+                    const float x0 = turned ? pos.x : std::max(pos.x, cellClip.x), x1 = turned ? pos.x + w : std::min(pos.x + w, cellClip.z);
+                    if (x1 > x0 && (turned || (lineY >= cellClip.y && lineY <= cellClip.w)))
+                        dl->AddLine(ImVec2(x0, lineY), ImVec2(x1, lineY), p.color, std::max(1.0f, p.px / 14.0f));
+                }
+            }
+            y += l.height;
+        }
+        if (turned) {
+            const float t = float(cell.rotation) * 3.14159265f / 180.0f, cs = std::cos(t), sn = std::sin(t);
+            for (int i = firstVertex; i < dl->VtxBuffer.Size; ++i) {
+                ImVec2& v = dl->VtxBuffer[i].pos;
+                const float dx = v.x - centre.x, dy = v.y - centre.y;
+                v = ImVec2(centre.x + dx * cs + dy * sn, centre.y - dx * sn + dy * cs);
+            }
+            dl->PopClipRect();
+        }
+    };
+
     // One region of cells: rows [r0, r1), columns [c0, c1), placed so that row `rBase` / column
     // `cBase` is at (x0, y0), clipped to `clip`.
     auto region = [&](std::uint32_t r0, std::uint32_t r1, std::uint32_t c0, std::uint32_t c1, std::uint32_t rBase, std::uint32_t cBase, float x0,
@@ -463,12 +668,54 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             return;
         dl->PushClipRect(ImVec2(clip.x, clip.y), ImVec2(clip.z, clip.w), true);
         const float baseTop = rowTop(rBase);
+        if (sh.showGrid) { // under the cells: filled cells and merges hide them, as in Excel
+            for (std::uint32_t c = c0; c <= c1 && c <= columns; ++c) {
+                const float x = x0 + e.columnX[c] - e.columnX[cBase] - 0.5f;
+                if (x > clip.z)
+                    break;
+                dl->AddLine(ImVec2(x, clip.y), ImVec2(x, clip.w), grid);
+            }
+            float y = y0 + rowTop(r0) - baseTop;
+            for (std::uint32_t r = r0; r < r1 && y <= clip.w; ++r) {
+                const float h = rowHeight(r);
+                if (h > 0.5f)
+                    dl->AddLine(ImVec2(clip.x, y + h - 0.5f), ImVec2(clip.z, y + h - 0.5f), grid);
+                y += h;
+            }
+        }
+        // A cell at row r (its top at y, the row h high) through row cr1 / column cc1 when merged;
+        // text may run on to column `stop` (the next cell with something in it).
+        auto drawCell = [&](const mv::Cell& cell, std::uint32_t r, std::uint32_t cr1, std::uint32_t cc1, float y, float h, std::uint32_t stop) {
+            const float cx = x0 + e.columnX[cell.column] - e.columnX[cBase];
+            const float cw = e.columnX[std::min(cc1 + 1, columns)] - e.columnX[cell.column];
+            const float ch = cr1 > r ? rowTop(cr1 + 1) - rowTop(r) : h;
+            const ImVec2 a(cx, y), b(cx + cw, y + ch);
+            if (cell.fill)
+                dl->AddRectFilled(a, ImVec2(b.x - 1.0f, b.y - 1.0f), cell.fill);
+            if (cell.border && cell.border < book.borders.size())
+                edges(book.borders[cell.border], a, b);
+            if (cell.text.empty() || cw < 2.0f)
+                return;
+            // Text wider than its cell runs on over the empty cells to its right, as in Excel
+            // (left-aligned text that is not in a merge; numbers never do).
+            float overflow = b.x;
+            if (cc1 == cell.column && cr1 == r && !(cell.flags & mv::Cell::Number))
+                overflow = x0 + e.columnX[std::min(stop, columns)] - e.columnX[cBase];
+            cellText(cell, a, b, overflow, clip);
+        };
+        // Merges reaching into this region from outside it (from frozen rows or columns, or
+        // scrolled past): their first cell is not among the region's.
+        if (!sh.merges.empty() && sh.merges.size() <= 512)
+            for (const mv::Merge& m : sh.merges) {
+                if ((m.row0 >= r0 && m.col0 >= c0) || m.row1 < r0 || m.row0 >= r1 || m.col1 < c0 || m.col0 >= c1)
+                    continue;
+                if (const mv::Cell* cell = sh.cell(m.row0, m.col0))
+                    drawCell(*cell, m.row0, m.row1, m.col1, y0 + rowTop(m.row0) - baseTop, rowHeight(m.row0), columns);
+            }
         float y = y0 + rowTop(r0) - baseTop;
         for (std::uint32_t r = r0; r < r1; ++r) {
             const mv::Row* row = sh.row(r);
             const float h = row && row->height > 0.0f ? row->height * pxPerPoint : defaultH;
-            if (sh.showGrid && h > 0.5f)
-                dl->AddLine(ImVec2(clip.x, y + h - 0.5f), ImVec2(clip.z, y + h - 0.5f), grid);
             if (row && h > 0.5f) {
                 const auto first = std::lower_bound(row->cells.begin(), row->cells.end(), c0,
                                                     [](const mv::Cell& cell, std::uint32_t c) { return cell.column < c; });
@@ -481,43 +728,13 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
                         cr1 = m->row1;
                         cc1 = m->col1;
                     }
-                    const float cx = x0 + e.columnX[cell.column] - e.columnX[cBase];
-                    const float cw = e.columnX[std::min(cc1 + 1, columns)] - e.columnX[cell.column];
-                    const float ch = cr1 > r ? rowTop(cr1 + 1) - rowTop(r) : h;
-                    const ImVec2 a(cx, y), b(cx + cw, y + ch);
-                    if (cell.fill)
-                        dl->AddRectFilled(a, ImVec2(b.x - 1.0f, b.y - 1.0f), cell.fill);
-                    if (cell.text.empty() || cw < 2.0f)
-                        continue;
-                    const char* tb = cell.text.data();
-                    const char* te = tb + cell.text.size();
-                    const ImVec2 tsize = fonts_.ui->CalcTextSizeA(fontPx, FLT_MAX, 0.0f, tb, te);
-                    const int align = cell.align >= 0 ? cell.align : (cell.flags & mv::Cell::Number) ? 2 : 0;
-                    const float inset = 3.0f * s_;
-                    float tx = a.x + inset;
-                    if (align == 1)
-                        tx = a.x + (cw - tsize.x) * 0.5f;
-                    else if (align == 2)
-                        tx = b.x - inset - tsize.x;
-                    const ImU32 color = cell.color ? cell.color : (cell.flags & mv::Cell::Error) ? palette_.iconOrange : palette_.text;
-                    const ImVec4 cellClip(std::max(a.x, clip.x), std::max(a.y, clip.y), std::min(b.x, clip.z), std::min(b.y, clip.w));
-                    const ImVec2 at(tx, a.y + (std::min(ch, h) - fontPx) * 0.5f);
-                    dl->AddText(fonts_.ui, fontPx, at, color, tb, te, 0.0f, &cellClip);
-                    if (cell.flags & mv::Cell::Bold)
-                        dl->AddText(fonts_.ui, fontPx, ImVec2(at.x + std::max(1.0f, fontPx * 0.045f), at.y), color, tb, te, 0.0f, &cellClip);
+                    const auto next = std::next(it);
+                    drawCell(cell, r, cr1, cc1, y, h, next != row->cells.end() ? next->column : columns);
                 }
             }
             y += h;
             if (y > clip.w)
                 break;
-        }
-        if (sh.showGrid) {
-            for (std::uint32_t c = c0; c <= c1 && c <= columns; ++c) {
-                const float x = x0 + e.columnX[c] - e.columnX[cBase] - 0.5f;
-                if (x > clip.z)
-                    break;
-                dl->AddLine(ImVec2(x, clip.y), ImVec2(x, clip.w), grid);
-            }
         }
         dl->PopClipRect();
     };
@@ -646,6 +863,45 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         dl->PopClipRect();
     }
     ImGui::EndChild();
+    sheetTabs(e, book, ImVec2(size.x, tabsH));
+}
+
+// A thin strip of sheet tabs under the grid: the shown sheet lit like a page tab, the others plain;
+// it scrolls sideways (wheel, or shift+wheel) when the names do not fit.
+void ViewerView::sheetTabs(Entry& e, const mv::Workbook& book, ImVec2 size)
+{
+    panel::beginChild("##viewerSheetTabs", size, palette_.panelBg, ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoNav);
+    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f) // the plain wheel scrolls the tabs sideways
+        ImGui::SetScrollX(ImGui::GetScrollX() - ImGui::GetIO().MouseWheel * 40.0f * s_);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float padX = 10.0f * s_, h = size.y;
+    ImGui::SetCursorPos(ImVec2(6.0f * s_, 0.0f));
+    for (std::size_t i = 0; i < book.sheets.size(); ++i) {
+        if (book.sheets[i].hidden)
+            continue;
+        const char* name = book.sheets[i].name.empty() ? "(sheet)" : book.sheets[i].name.c_str();
+        const ImVec2 text = ImGui::CalcTextSize(name);
+        ImGui::PushID(int(i));
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const bool current = int(i) == e.sheet;
+        if (ImGui::InvisibleButton("##sheet", ImVec2(text.x + padX * 2.0f, h)))
+            e.sheet = int(i);
+        const bool hovered = ImGui::IsItemHovered();
+        registerLastItem("viewer:sheet:" + std::to_string(i), "tab", std::string("Sheet ") + name, [&e, i]() { e.sheet = int(i); }, true, false);
+        const ImVec2 end(at.x + text.x + padX * 2.0f, at.y + h);
+        if (current) {
+            dl->AddRectFilled(at, end, palette_.editorBg);
+            dl->AddLine(ImVec2(at.x, end.y - 1.5f * s_), ImVec2(end.x, end.y - 1.5f * s_), palette_.accent, 2.0f * s_);
+        } else if (hovered) {
+            dl->AddRectFilled(at, end, palette_.hover);
+        }
+        dl->AddText(ImVec2(at.x + padX, at.y + (h - text.y) * 0.5f), current ? palette_.text : palette_.textDim, name);
+        dl->AddLine(ImVec2(end.x, at.y + h * 0.25f), ImVec2(end.x, at.y + h * 0.75f), palette_.border, 1.0f); // between tabs
+        ImGui::PopID();
+        ImGui::SameLine(0.0f, 0.0f);
+    }
+    ImGui::EndChild();
 }
 
 // ---- PowerPoint and PDF: pages drawn by the page painter -----------------------------------------
@@ -661,7 +917,13 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     float widest = 1.0f;
     for (const mv::Page& p : pd.pages)
         widest = std::max(widest, p.width);
-    const float fit = std::max(0.05f, (viewW - pad * 2.0f) / widest);
+    float fit = std::max(0.05f, (viewW - pad * 2.0f) / widest);
+    if (slides) { // a slide is seen whole: fit its height too
+        float tallest = 1.0f;
+        for (const mv::Page& p : pd.pages)
+            tallest = std::max(tallest, p.height);
+        fit = std::min(fit, std::max(0.05f, (ImGui::GetWindowSize().y - pad * 2.0f) / tallest));
+    }
     const float scale = std::min(fit * (e.zoom > 0.0f ? e.zoom : 1.0f), 12.0f);
     // Page tops (and speaker notes below slides) at this scale and width.
     const float wrap = std::max(50.0f, viewW - pad * 2.0f);
@@ -682,6 +944,11 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     for (const mv::Page& p : pd.pages)
         contentW = std::max(contentW, p.width * scale);
     ImGui::Dummy(ImVec2(contentW + pad * 2.0f, e.pageTop[size_t(n)] + pad));
+    if (e.goToPage >= 0 && e.goToPage < n) { // the toolbar's arrows
+        ImGui::SetScrollY(std::max(0.0f, e.pageTop[size_t(e.goToPage)] - pad));
+        e.currentPage = e.goToPage;
+        e.goToPage = -1;
+    }
     const float scrollY = ImGui::GetScrollY();
     e.scroll = ImVec2(ImGui::GetScrollX(), scrollY);
     const ImVec2 win = ImGui::GetWindowPos();
@@ -699,7 +966,11 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     }
     if (last < 0)
         last = first;
+    // The current page: the one under the view's upper third (not one whose bottom edge still shows).
     e.currentPage = first;
+    for (int i = first; i <= last && i < n; ++i)
+        if (e.pageTop[size_t(i)] <= scrollY + viewH * 0.35f)
+            e.currentPage = i;
     // The view-model reads the pages in view (and their neighbours) through the reader service,
     // and drops pages far away; the pictures of a page no longer read go here.
     if (n > 0)
@@ -721,6 +992,7 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         dl->AddRectFilled(ImVec2(at.x + 3.0f * s_, at.y + 3.0f * s_), ImVec2(at.x + w + 3.0f * s_, at.y + page.height * scale + 3.0f * s_),
                           IM_COL32(0, 0, 0, 50));
         PageImageSource source(*this, e, size_t(i));
+        e.scripts |= page.scripts;
         painter_.draw(page, at, scale, fonts_, &source);
         if (!page.loaded) // being read by the reader service
             dl->AddText(ImVec2(at.x + 12.0f * s_, at.y + 10.0f * s_), IM_COL32(120, 120, 120, 255), ICON_FA_HOURGLASS_HALF "  Reading the page...");
@@ -737,6 +1009,10 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     }
     // Page Up / Page Down step a page.
     if (ImGui::IsWindowHovered() || ImGui::IsWindowFocused()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Home))
+            e.goToPage = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_End))
+            e.goToPage = n - 1;
         if (ImGui::IsKeyPressed(ImGuiKey_PageDown) && first + 1 < n)
             ImGui::SetScrollY(e.pageTop[size_t(first + 1)] - pad);
         if (ImGui::IsKeyPressed(ImGuiKey_PageUp))

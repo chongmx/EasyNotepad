@@ -314,4 +314,34 @@ std::uint32_t readFillIn(XmlReader& x, const Theme& theme, const std::map<std::s
     return color;
 }
 
+std::uint32_t readGradientFill(XmlReader& x, const Theme& theme, const std::map<std::string, std::string>* schemeMap, Gradient& out)
+{
+    out = Gradient();
+    out.angle = 90.0f; // a gradient without a direction runs top to bottom
+    const int depth = x.depth();
+    for (XmlReader::Event e; (e = x.next()) != XmlReader::Event::Eof && e != XmlReader::Event::Error;) {
+        if (e == XmlReader::Event::End && x.depth() < depth)
+            break;
+        if (e != XmlReader::Event::Start)
+            continue;
+        const std::string_view n = x.localName();
+        if (n == "gs") {
+            GradientStop stop;
+            stop.position = float(std::clamp(std::atof(x.attribute("pos").c_str()) / 100000.0, 0.0, 1.0));
+            bool found = false;
+            stop.color = readFillIn(x, theme, schemeMap, &found);
+            if (found && out.stops.size() < 16)
+                out.stops.push_back(stop);
+        } else if (n == "lin") {
+            out.angle = float(std::atof(x.attribute("ang").c_str()) / 60000.0);
+            out.radial = false;
+        } else if (n == "path") {
+            out.radial = true; // circle, rect and shape paths: from the centre out
+            x.skip();
+        }
+    }
+    std::stable_sort(out.stops.begin(), out.stops.end(), [](const GradientStop& a, const GradientStop& b) { return a.position < b.position; });
+    return out.stops.empty() ? 0 : out.stops.front().color;
+}
+
 } // namespace enp::model::viewer::ooxml

@@ -170,7 +170,24 @@ std::uint32_t codeOf(std::string_view b)
 
 // ---- fonts ------------------------------------------------------------------------------------
 
+// The Latin ligatures (U+FB00..FB06) as their letters: what is copied, and what any font draws.
+std::string expandLigatures(const std::string& in)
+{
+    static const char* const kLetters[] = {"ff", "fi", "fl", "ffi", "ffl", "st", "st"};
+    std::string out;
+    for (std::size_t i = 0; i < in.size();) {
+        if (i + 2 < in.size() && std::uint8_t(in[i]) == 0xEF && std::uint8_t(in[i + 1]) == 0xAC && std::uint8_t(in[i + 2]) <= 0x86) {
+            out += kLetters[std::uint8_t(in[i + 2]) - 0x80];
+            i += 3;
+            continue;
+        }
+        out += in[i++];
+    }
+    return out;
+}
+
 struct Font {
+    std::map<std::uint32_t, std::string> multi; // simple fonts: codes whose glyph name names several letters ("f_i")
     bool twoByte = false;
     std::map<std::uint32_t, std::string> toUnicode;
     std::array<std::uint32_t, 256> encoding{}; // simple fonts: code -> Unicode
@@ -205,8 +222,14 @@ struct Font {
     {
         const auto it = toUnicode.find(code);
         if (it != toUnicode.end())
-            return it->second;
+            return expandLigatures(it->second);
+        if (const auto m = multi.find(code); m != multi.end())
+            return m->second;
         std::string out;
+        if (!twoByte && code < 256 && encoding[code] >= 0xFB00 && encoding[code] <= 0xFB06) {
+            appendUtf8(out, encoding[code]);
+            return expandLigatures(out);
+        }
         if (!twoByte && code < 256 && encoding[code]) {
             appendUtf8(out, encoding[code]);
         } else if (!twoByte && code >= 32 && code < 127) {
@@ -344,8 +367,23 @@ std::unique_ptr<Font> loadFont(File& file, const Object& dict)
                     } else if (v.type == Object::Type::Name) {
                         if (code >= 0 && code < 256) {
                             const std::uint32_t cp = glyphNameToUnicode(v.text);
-                            if (cp)
+                            if (cp) {
                                 font->encoding[size_t(code)] = cp;
+                            } else if (v.text.find('_') != std::string::npos) { // "f_f_i": its parts
+                                std::string letters;
+                                std::size_t start = 0;
+                                while (start <= v.text.size()) {
+                                    const std::size_t bar = v.text.find('_', start);
+                                    const std::string part = v.text.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+                                    if (const std::uint32_t c = glyphNameToUnicode(part))
+                                        appendUtf8(letters, c);
+                                    if (bar == std::string::npos)
+                                        break;
+                                    start = bar + 1;
+                                }
+                                if (!letters.empty())
+                                    font->multi[std::uint32_t(code)] = letters;
+                            }
                         }
                         ++code;
                     }
@@ -507,6 +545,9 @@ struct GState {
     float fontSize = 12.0f, charSpacing = 0, wordSpacing = 0, hscale = 1.0f, leading = 0, rise = 0;
     int render = 0;
     bool patternFill = false, patternStroke = false;
+    std::string fillPattern, strokePattern; // the pattern's name in the resources, with patternFill / patternStroke
+    std::vector<float> dash;                // the dash array (user space); empty: solid
+    std::int32_t clip = -1;                 // into the page's clips: the clip path's bounds (page points)
 };
 
 class PageReader {
@@ -524,6 +565,7 @@ public:
         GState g;
         g.ctm = base;
         state_ = g;
+        base_ = base;
         const Object* contents = file_.resolvedGet(pageDict, "Contents");
         if (!contents)
             return;
@@ -613,6 +655,7 @@ private:
         ColorSpace& cs = fill ? g.fillSpace : g.strokeSpace;
         if (cs.kind == ColorSpace::Pattern || (!operands_.empty() && operands_.back().type == Object::Type::Name)) {
             (fill ? g.patternFill : g.patternStroke) = true;
+            (fill ? g.fillPattern : g.strokePattern) = !operands_.empty() && operands_.back().type == Object::Type::Name ? operands_.back().text : std::string();
             return;
         }
         (fill ? g.patternFill : g.patternStroke) = false;
@@ -683,15 +726,41 @@ private:
         if (close)
             for (std::size_t i = 0; i < closed_.size(); ++i)
                 closed_[i] = true;
+        if (pendingClip_ && !path_.empty()) { // W / W* before this: the path's bounds clip what follows
+            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+            for (const std::vector<Point>& sub : path_)
+                for (const Point& q : sub) {
+                    x0 = std::min(x0, q.x);
+                    y0 = std::min(y0, q.y);
+                    x1 = std::max(x1, q.x);
+                    y1 = std::max(y1, q.y);
+                }
+            if (state_.clip >= 0 && std::size_t(state_.clip) < page_.clips.size()) { // inside the clip already set
+                const Rect& c = page_.clips[std::size_t(state_.clip)];
+                x0 = std::max(x0, c.x);
+                y0 = std::max(y0, c.y);
+                x1 = std::min(x1, c.x + c.w);
+                y1 = std::min(y1, c.y + c.h);
+            }
+            if (page_.clips.size() < 65536) {
+                page_.clips.push_back(Rect{x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0)});
+                state_.clip = std::int32_t(page_.clips.size() - 1);
+            }
+        }
+        pendingClip_ = false;
         if ((fill || stroke) && !path_.empty() && budget()) {
             PathItem item;
             if (fill && !state_.patternFill)
                 item.fill = state_.fill;
+            if (fill && state_.patternFill) // a shading pattern: the path filled with its gradient
+                item.fill = patternGradient(state_.fillPattern, item.gradient);
+            const Matrix& m = state_.ctm;
+            const float scale = float(std::sqrt(std::fabs(m.a * m.d - m.b * m.c)));
             if (stroke && !state_.patternStroke) {
                 item.stroke = state_.stroke;
-                const Matrix& m = state_.ctm;
-                const float scale = float(std::sqrt(std::fabs(m.a * m.d - m.b * m.c)));
                 item.lineWidth = std::max(0.1f, state_.lineWidth * scale);
+                for (float d : state_.dash)
+                    item.dash.push_back(std::max(0.1f, d * scale));
             }
             if (item.fill || item.stroke) {
                 for (std::size_t i = 0; i < path_.size(); ++i)
@@ -701,12 +770,191 @@ private:
                     }
                 if (!item.subpaths.empty()) {
                     flushRun();
+                    page_.clip = state_.clip;
                     page_.add(std::move(item));
                 }
             }
         }
         path_.clear();
         closed_.clear();
+    }
+
+    // A PDF function at `t` into `out` (types 2, 3 and a one-input sampled 0). False when not read.
+    bool evaluate(const Object& fn, double t, std::vector<double>& out, int depth = 0)
+    {
+        if (depth > 8 || !fn.isDict())
+            return false;
+        const Object* typeObj = file_.resolvedGet(fn, "FunctionType");
+        const int type = typeObj ? int(typeObj->num(-1)) : -1;
+        double d0 = 0.0, d1 = 1.0;
+        if (const Object* domain = file_.resolvedGet(fn, "Domain"); domain && domain->type == Object::Type::Array && domain->array.size() >= 2) {
+            d0 = file_.resolve(domain->array[0]).num(0);
+            d1 = file_.resolve(domain->array[1]).num(1);
+        }
+        t = std::clamp(t, std::min(d0, d1), std::max(d0, d1));
+        out.clear();
+        if (type == 2) {
+            const Object* c0 = file_.resolvedGet(fn, "C0");
+            const Object* c1 = file_.resolvedGet(fn, "C1");
+            const double n = file_.resolvedGet(fn, "N") ? file_.resolvedGet(fn, "N")->num(1) : 1.0;
+            const std::size_t count = std::max(c0 && c0->type == Object::Type::Array ? c0->array.size() : 1,
+                                               c1 && c1->type == Object::Type::Array ? c1->array.size() : 1);
+            const double k = std::pow(std::max(0.0, (t - d0) / (d1 - d0 == 0.0 ? 1.0 : d1 - d0)), n);
+            for (std::size_t i = 0; i < count && i < 8; ++i) {
+                const double a = c0 && c0->type == Object::Type::Array && i < c0->array.size() ? file_.resolve(c0->array[i]).num(0) : 0.0;
+                const double b = c1 && c1->type == Object::Type::Array && i < c1->array.size() ? file_.resolve(c1->array[i]).num(1) : 1.0;
+                out.push_back(a + k * (b - a));
+            }
+            return true;
+        }
+        if (type == 3) {
+            const Object* fns = file_.resolvedGet(fn, "Functions");
+            if (!fns || fns->type != Object::Type::Array || fns->array.empty())
+                return false;
+            std::vector<double> bounds;
+            if (const Object* b = file_.resolvedGet(fn, "Bounds"); b && b->type == Object::Type::Array)
+                for (const Object& v : b->array)
+                    bounds.push_back(file_.resolve(v).num());
+            std::size_t i = 0;
+            while (i < bounds.size() && t >= bounds[i])
+                ++i;
+            i = std::min(i, fns->array.size() - 1);
+            const double lo = i == 0 ? d0 : bounds[i - 1], hi = i < bounds.size() ? bounds[i] : d1;
+            double e0 = 0.0, e1 = 1.0;
+            if (const Object* enc = file_.resolvedGet(fn, "Encode"); enc && enc->type == Object::Type::Array && enc->array.size() >= 2 * (i + 1)) {
+                e0 = file_.resolve(enc->array[2 * i]).num(0);
+                e1 = file_.resolve(enc->array[2 * i + 1]).num(1);
+            }
+            const double u = hi > lo ? e0 + (t - lo) / (hi - lo) * (e1 - e0) : e0;
+            return evaluate(file_.resolve(fns->array[i]), u, out, depth + 1);
+        }
+        if (type == 0 && fn.type == Object::Type::Stream) { // sampled, one input
+            const Object* size = file_.resolvedGet(fn, "Size");
+            const Object* range = file_.resolvedGet(fn, "Range");
+            const int bps = int(file_.resolvedGet(fn, "BitsPerSample") ? file_.resolvedGet(fn, "BitsPerSample")->num(8) : 8);
+            if (!size || size->type != Object::Type::Array || size->array.empty() || !range || range->type != Object::Type::Array || (bps != 8 && bps != 16))
+                return false;
+            const int samples = std::max(1, int(file_.resolve(size->array[0]).num(1)));
+            const std::size_t outputs = range->array.size() / 2;
+            const std::optional<std::string> data = file_.streamData(fn);
+            if (!data || outputs == 0)
+                return false;
+            const double x = (t - d0) / (d1 - d0 == 0.0 ? 1.0 : d1 - d0) * double(samples - 1);
+            const int i0 = std::clamp(int(x), 0, samples - 1), i1 = std::min(samples - 1, i0 + 1);
+            const double f = x - double(i0);
+            const std::size_t bytes = std::size_t(bps / 8);
+            auto sample = [&](int i, std::size_t c) {
+                const std::size_t at = (std::size_t(i) * outputs + c) * bytes;
+                if (at + bytes > data->size())
+                    return 0.0;
+                double v = std::uint8_t((*data)[at]);
+                if (bytes == 2)
+                    v = v * 256.0 + std::uint8_t((*data)[at + 1]);
+                return v / (bytes == 2 ? 65535.0 : 255.0);
+            };
+            for (std::size_t c = 0; c < outputs && c < 8; ++c) {
+                const double r0 = file_.resolve(range->array[2 * c]).num(0), r1 = file_.resolve(range->array[2 * c + 1]).num(1);
+                const double v = sample(i0, c) * (1.0 - f) + sample(i1, c) * f;
+                out.push_back(r0 + v * (r1 - r0));
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // An axial (2) or radial (3) shading as a gradient along its axis in page points, `m` taking its
+    // coordinates there. Returns its first colour, or 0 when it is not one of those.
+    std::uint32_t shadingGradient(const Object& sh, const Matrix& m, Gradient& out)
+    {
+        out = Gradient();
+        const Object* typeObj = file_.resolvedGet(sh, "ShadingType");
+        const int type = typeObj ? int(typeObj->num()) : 0;
+        const Object* coords = file_.resolvedGet(sh, "Coords");
+        const Object* fn = file_.resolvedGet(sh, "Function");
+        if ((type != 2 && type != 3) || !coords || coords->type != Object::Type::Array || !fn)
+            return 0;
+        auto c = [&](std::size_t i) { return i < coords->array.size() ? file_.resolve(coords->array[i]).num() : 0.0; };
+        ColorSpace cs;
+        if (const Object* space = sh.get("ColorSpace"))
+            cs = colorSpace(*space, resources_);
+        double t0 = 0.0, t1 = 1.0;
+        if (const Object* domain = file_.resolvedGet(sh, "Domain"); domain && domain->type == Object::Type::Array && domain->array.size() >= 2) {
+            t0 = file_.resolve(domain->array[0]).num(0);
+            t1 = file_.resolve(domain->array[1]).num(1);
+        }
+        std::vector<double> values, part;
+        for (int i = 0; i <= 8; ++i) {
+            const double t = t0 + (t1 - t0) * double(i) / 8.0;
+            values.clear();
+            if (fn->type == Object::Type::Array) { // one function per component
+                for (const Object& f : fn->array)
+                    if (evaluate(file_.resolve(f), t, part) && !part.empty())
+                        values.push_back(part[0]);
+            } else if (!evaluate(*fn, t, values)) {
+                return 0;
+            }
+            float v[8] = {};
+            for (std::size_t k = 0; k < values.size() && k < 8; ++k)
+                v[k] = float(values[k]);
+            out.stops.push_back({float(i) / 8.0f, toColor(cs, v, int(std::min<std::size_t>(8, values.size())), state_.fillAlpha)});
+        }
+        out.absolute = true;
+        if (type == 2) {
+            out.from = m.apply(c(0), c(1));
+            out.to = m.apply(c(2), c(3));
+        } else {
+            out.radial = true;
+            const float k = float(std::sqrt(std::fabs(m.a * m.d - m.b * m.c)));
+            out.from = m.apply(c(0), c(1));
+            out.r0 = float(c(2)) * k;
+            out.to = m.apply(c(3), c(4));
+            out.r1 = float(c(5)) * k;
+        }
+        return out.stops.front().color;
+    }
+
+    // The gradient of shading pattern `name` (in the resources' /Pattern): its first colour, or a
+    // light grey for a tiling pattern (its cells are not drawn).
+    std::uint32_t patternGradient(const std::string& name, Gradient& out)
+    {
+        out = Gradient();
+        if (!resources_ || name.empty())
+            return 0;
+        const Object* patterns = file_.resolvedGet(*resources_, "Pattern");
+        const Object* ref = patterns ? patterns->get(name) : nullptr;
+        if (!ref)
+            return 0;
+        const Object& pattern = file_.resolve(*ref);
+        const Object* typeObj = file_.resolvedGet(pattern, "PatternType");
+        if (!typeObj || int(typeObj->num()) != 2)
+            return rgba(200, 200, 200, std::uint32_t(state_.fillAlpha * 255.0f));
+        Matrix m;
+        if (const Object* mo = file_.resolvedGet(pattern, "Matrix"); mo && mo->type == Object::Type::Array && mo->array.size() == 6)
+            m = Matrix{file_.resolve(mo->array[0]).num(1), file_.resolve(mo->array[1]).num(), file_.resolve(mo->array[2]).num(),
+                       file_.resolve(mo->array[3]).num(1), file_.resolve(mo->array[4]).num(), file_.resolve(mo->array[5]).num()};
+        const Object* sh = file_.resolvedGet(pattern, "Shading");
+        return sh ? shadingGradient(*sh, m.then(base_), out) : 0;
+    }
+
+    // `sh`: the shading fills the clip (or the page).
+    void shade(const std::string& name, const Object* resources)
+    {
+        const Object* shadings = file_.resolvedGet(*resources, "Shading");
+        const Object* ref = shadings ? shadings->get(name) : nullptr;
+        if (!ref || !budget())
+            return;
+        PathItem item;
+        item.fill = shadingGradient(file_.resolve(*ref), state_.ctm, item.gradient);
+        if (!item.fill && item.gradient.stops.empty())
+            return;
+        Rect r{0.0f, 0.0f, page_.width, page_.height};
+        if (state_.clip >= 0 && std::size_t(state_.clip) < page_.clips.size())
+            r = page_.clips[std::size_t(state_.clip)];
+        item.subpaths.push_back({{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}});
+        item.closed.push_back(true);
+        flushRun();
+        page_.clip = state_.clip;
+        page_.add(std::move(item));
     }
 
     bool budget()
@@ -719,8 +967,10 @@ private:
     {
         if (!run_.text.empty()) {
             // A run of spaces only is nothing to draw.
-            if (run_.text.find_first_not_of(' ') != std::string::npos && budget())
+            if (run_.text.find_first_not_of(' ') != std::string::npos && budget()) {
+                page_.clip = runClip_;
                 page_.add(std::move(run_));
+            }
         }
         run_ = GlyphRun();
         runOpen_ = false;
@@ -743,23 +993,33 @@ private:
             if (invisible)
                 color &= 0x00FFFFFFu;
             if (!text.empty() && size > 0.5f && size < 2000.0f) {
-                const float advance = float(w0 * std::sqrt(trm.a * trm.a + trm.b * trm.b));
-                const bool same = runOpen_ && std::fabs(origin.y - run_.baseline) < 0.5f && std::fabs(size - run_.size) < 0.05f &&
-                                  run_.color == color && run_.flags == font->flags;
-                const float expected = run_.x + run_.width;
-                if (same && origin.x >= expected - size * 0.3f && origin.x <= expected + size * 3.0f) {
-                    if (origin.x > expected + size * 0.2f && run_.text.back() != ' ') { // a gap: a space for copying
-                        run_.offsets.push_back(expected - run_.x);
+                const float xLength = float(std::sqrt(trm.a * trm.a + trm.b * trm.b));
+                const float advance = w0 * xLength;
+                // The run goes along the text's x axis on the page (turned text, a turned page).
+                const float angle = xLength > 0.0f ? float(std::atan2(trm.b, trm.a) * 180.0 / 3.14159265358979) : 0.0f;
+                const float rx = float(std::cos(run_.angle * 3.14159265358979 / 180.0)), ry = float(std::sin(run_.angle * 3.14159265358979 / 180.0));
+                const float dx = origin.x - run_.x, dy = origin.y - run_.baseline;
+                const float along = dx * rx + dy * ry, across = -dx * ry + dy * rx;
+                const bool same = runOpen_ && std::fabs(angle - run_.angle) < 0.5f && std::fabs(across) < 0.5f && std::fabs(size - run_.size) < 0.05f &&
+                                  run_.color == color && run_.flags == font->flags && runClip_ == state_.clip;
+                const float expected = run_.width;
+                float pos = along; // where this glyph starts along the run
+                if (same && along >= expected - size * 0.3f && along <= expected + size * 3.0f) {
+                    if (along > expected + size * 0.2f && run_.text.back() != ' ') { // a gap: a space for copying
+                        run_.offsets.push_back(expected);
                         run_.text += ' ';
                     }
                 } else {
                     flushRun();
                     run_.x = origin.x;
                     run_.baseline = origin.y;
+                    run_.angle = angle;
                     run_.size = size;
                     run_.color = color;
                     run_.flags = font->flags;
+                    runClip_ = state_.clip;
                     runOpen_ = true;
+                    pos = 0.0f;
                 }
                 // Each code point of the glyph's text, spread over its advance (ligatures).
                 std::size_t points = 0;
@@ -776,12 +1036,12 @@ private:
                         len = 3;
                     else if (ch >= 0xC0)
                         len = 2;
-                    run_.offsets.push_back(origin.x - run_.x + advance * float(k) / float(std::max<std::size_t>(1, points)));
+                    run_.offsets.push_back(pos + advance * float(k) / float(std::max<std::size_t>(1, points)));
                     run_.text.append(text, at, len);
                     at += len;
                     ++k;
                 }
-                run_.width = origin.x - run_.x + advance;
+                run_.width = pos + advance;
                 if (run_.text.size() > 4000)
                     flushRun();
             }
@@ -845,6 +1105,7 @@ private:
         item.box = Rect{x0, y0, x1 - x0, y1 - y0};
         item.media = key;
         flushRun();
+        page_.clip = state_.clip;
         page_.add(std::move(item));
     }
 
@@ -998,6 +1259,20 @@ private:
                 g.ctm = Matrix{num(0), num(1), num(2), num(3), num(4), num(5)}.then(g.ctm);
             } else if (op == "w") {
                 g.lineWidth = num(0);
+            } else if (op == "d" && !operands_.empty() && operands_[0].type == Object::Type::Array) {
+                g.dash.clear();
+                bool any = false;
+                for (const Object& v : operands_[0].array)
+                    if (v.isNumber() && g.dash.size() < 16) {
+                        g.dash.push_back(std::max(0.0f, float(v.number)));
+                        any = any || v.number > 0.0;
+                    }
+                if (!any)
+                    g.dash.clear();
+            } else if (op == "W" || op == "W*") {
+                pendingClip_ = true;
+            } else if (op == "sh" && !operands_.empty() && resources) {
+                shade(operands_[0].text, resources);
             } else if (op == "gs" && !operands_.empty() && resources) {
                 if (const Object* states = file_.resolvedGet(*resources, "ExtGState"))
                     if (const Object* s = states->get(operands_[0].text)) {
@@ -1164,6 +1439,9 @@ private:
     float cx_ = 0, cy_ = 0;
     GlyphRun run_;
     bool runOpen_ = false;
+    std::int32_t runClip_ = -1; // the clip the open run was started under
+    bool pendingClip_ = false;  // W / W*: the next path painting (or n) sets the clip
+    Matrix base_;               // the page's own transform (patterns are drawn in it)
     Font fallback_;
     std::size_t operations_ = 0;
 };

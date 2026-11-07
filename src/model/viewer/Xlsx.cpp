@@ -9,6 +9,7 @@
 #include "Shapes.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <cstdlib>
 
@@ -43,14 +44,18 @@ using Event = XmlReader::Event;
 struct CellFormat {
     std::string code; // number format code
     bool date = false;
-    std::uint8_t flags = 0; // Cell::Bold / Italic / Underline
+    std::uint8_t flags = 0; // Cell::Bold / Italic / Underline / Strike / Wrap
     std::uint32_t color = 0, fill = 0;
-    std::int8_t align = -1;
+    std::int8_t align = -1, valign = -1;
+    std::uint8_t halfPoints = 0;
+    std::int16_t rotation = 0;
+    std::uint16_t border = 0;
 };
 
 struct Font {
     std::uint8_t flags = 0;
     std::uint32_t color = 0;
+    float size = 0.0f;
 };
 
 // "B12" -> row 11, column 1. False when it is not a cell reference.
@@ -164,26 +169,74 @@ private:
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e != Event::Start || x.localName() != "si")
                 continue;
-            strings_.push_back(richText(x));
+            std::uint32_t rich = 0;
+            strings_.push_back(richText(x, &rich));
+            stringRich_.push_back(rich);
         }
     }
 
-    // At the Start of si / is: its text runs, without phonetic hints (rPh).
-    static std::string richText(XmlReader& x)
+    // At the Start of si / is: its text runs, without phonetic hints (rPh). Runs in fonts of their
+    // own go to the workbook's rich texts, their index to `rich`.
+    std::string richText(XmlReader& x, std::uint32_t* rich)
     {
         std::string out;
+        std::vector<CellRun> runs;
+        bool anyOwn = false;
+        CellRun* run = nullptr;
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End && x.depth() < depth)
                 break;
+            if (e == Event::End) {
+                if (x.localName() == "r" && run) {
+                    run->end = std::uint32_t(out.size());
+                    run = nullptr;
+                }
+                continue;
+            }
             if (e != Event::Start)
                 continue;
-            if (x.localName() == "rPh" || x.localName() == "phoneticPr")
+            const std::string_view n = x.localName();
+            if (n == "rPh" || n == "phoneticPr") {
                 x.skip();
-            else if (x.localName() == "t")
+            } else if (n == "r") {
+                runs.emplace_back();
+                run = &runs.back();
+                run->begin = std::uint32_t(out.size());
+            } else if (n == "rPr" && run) {
+                run->own = anyOwn = true;
+            } else if (n == "t") {
                 out += x.elementText();
+            } else if (run && run->own) {
+                const std::string v = x.attribute("val");
+                const bool set = v.empty() || (v != "0" && v != "false" && v != "none");
+                if (n == "b" && set)
+                    run->flags |= Cell::Bold;
+                else if (n == "i" && set)
+                    run->flags |= Cell::Italic;
+                else if (n == "u" && set)
+                    run->flags |= Cell::Underline;
+                else if (n == "strike" && set)
+                    run->flags |= Cell::Strike;
+                else if (n == "sz")
+                    run->halfPoints = std::uint8_t(std::clamp(std::lround(std::atof(v.c_str()) * 2.0), 1L, 255L));
+                else if (n == "color")
+                    run->color = textColor(colorOf(x));
+            }
+        }
+        if (rich && anyOwn && runs.size() <= 4096) {
+            if (book_->richTexts.empty())
+                book_->richTexts.emplace_back(); // [0]: none
+            *rich = std::uint32_t(book_->richTexts.size());
+            book_->richTexts.push_back(std::move(runs));
         }
         return out;
+    }
+
+    // A text colour: black (the automatic colour) as 0, so the view picks a readable one.
+    std::uint32_t textColor(std::uint32_t c) const
+    {
+        return c == theme_.color("dk1") || c == ooxml::hexColor("000000") ? 0 : c;
     }
 
     std::uint32_t colorOf(const XmlReader& x) const
@@ -221,14 +274,19 @@ private:
         std::map<int, std::string> codes;
         std::vector<Font> fonts;
         std::vector<std::uint32_t> fills;
+        std::vector<Border> borders;
+        std::map<int, std::uint16_t> borderIndex; // borderId -> Workbook::borders
+        int edge = -1;                            // the border edge being read
         XmlReader x(*xml);
-        enum class In { None, Fonts, Fills, CellXfs, Other } in = In::None;
+        enum class In { None, Fonts, Fills, Borders, CellXfs, Other } in = In::None;
         bool solid = false;
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
                 const std::string_view n = x.localName();
-                if (n == "fonts" || n == "fills" || n == "cellXfs" || n == "cellStyleXfs" || n == "dxfs")
+                if (n == "fonts" || n == "fills" || n == "borders" || n == "cellXfs" || n == "cellStyleXfs" || n == "dxfs")
                     in = In::None;
+                else if (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end" || n == "diagonal")
+                    edge = -1;
                 continue;
             }
             if (e != Event::Start)
@@ -240,6 +298,24 @@ private:
                 in = In::Fonts;
             } else if (n == "fills") {
                 in = In::Fills;
+            } else if (n == "borders") {
+                in = In::Borders;
+            } else if (in == In::Borders && n == "border") {
+                borders.emplace_back();
+                edge = -1;
+            } else if (in == In::Borders && !borders.empty() &&
+                       (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end")) {
+                edge = n == "left" || n == "start" ? 0 : n == "right" || n == "end" ? 1 : n == "top" ? 2 : 3;
+                const std::string st = x.attribute("style");
+                borders.back().style[edge] = st.empty() || st == "none" ? Border::None
+                                             : st == "medium" || st == "mediumDashed" || st == "mediumDashDot" || st == "mediumDashDotDot" || st == "slantDashDot" ? Border::Medium
+                                             : st == "thick" ? Border::Thick
+                                             : st == "dashed" || st == "dashDot" || st == "dashDotDot" ? Border::Dashed
+                                             : st == "dotted" ? Border::Dotted
+                                             : st == "double" ? Border::Double
+                                             : st == "hair" ? Border::Hair : Border::Thin;
+            } else if (in == In::Borders && n == "color" && edge >= 0 && !borders.empty()) {
+                borders.back().color[edge] = textColor(colorOf(x));
             } else if (n == "cellXfs") {
                 in = In::CellXfs;
             } else if (n == "cellStyleXfs" || n == "dxfs") {
@@ -255,6 +331,10 @@ private:
                     fonts.back().flags |= Cell::Italic;
                 else if (n == "u" && set)
                     fonts.back().flags |= Cell::Underline;
+                else if (n == "strike" && set)
+                    fonts.back().flags |= Cell::Strike;
+                else if (n == "sz")
+                    fonts.back().size = float(std::atof(v.c_str()));
                 else if (n == "color")
                     fonts.back().color = colorOf(x);
             } else if (in == In::Fills && n == "fill") {
@@ -270,19 +350,45 @@ private:
                 f.code = custom != codes.end() ? custom->second : std::string(builtinNumberFormat(numFmt));
                 f.date = isDateFormat(f.code);
                 const int font = std::atoi(x.attribute("fontId").c_str());
+                if (!fonts.empty() && fonts[0].size > 0.0f)
+                    book_->defaultFontSize = fonts[0].size;
                 if (font >= 0 && font < int(fonts.size())) {
                     f.flags = fonts[size_t(font)].flags;
-                    f.color = fonts[size_t(font)].color;
-                    if (f.color == theme_.color("dk1") || f.color == ooxml::hexColor("000000"))
-                        f.color = 0; // the default: the view picks a readable colour
+                    f.color = textColor(fonts[size_t(font)].color); // black: the view picks a readable colour
+                    const float size = fonts[size_t(font)].size;
+                    if (size > 0.0f && std::fabs(size - book_->defaultFontSize) > 0.01f)
+                        f.halfPoints = std::uint8_t(std::clamp(std::lround(size * 2.0f), 1L, 255L));
+                }
+                const int border = std::atoi(x.attribute("borderId").c_str());
+                if (border > 0 && border < int(borders.size())) {
+                    const Border& b = borders[size_t(border)];
+                    if (b.style[0] || b.style[1] || b.style[2] || b.style[3]) {
+                        auto [it, added] = borderIndex.emplace(border, std::uint16_t(0));
+                        if (added && book_->borders.size() < 65535) {
+                            if (book_->borders.empty())
+                                book_->borders.emplace_back(); // [0]: none
+                            it->second = std::uint16_t(book_->borders.size());
+                            book_->borders.push_back(b);
+                        }
+                        f.border = it->second;
+                    }
                 }
                 const int fill = std::atoi(x.attribute("fillId").c_str());
                 if (fill >= 2 && fill < int(fills.size())) // 0 and 1 are reserved (none, gray125)
                     f.fill = fills[size_t(fill)];
                 formats_.push_back(std::move(f));
             } else if (in == In::CellXfs && n == "alignment" && !formats_.empty()) {
+                CellFormat& f = formats_.back();
                 const std::string h = x.attribute("horizontal");
-                formats_.back().align = h == "center" || h == "centerContinuous" ? 1 : h == "right" ? 2 : h == "left" ? 0 : -1;
+                f.align = h == "center" || h == "centerContinuous" ? 1 : h == "right" ? 2 : h == "left" ? 0 : -1;
+                const std::string v = x.attribute("vertical");
+                f.valign = v == "top" ? 0 : v == "center" || v == "justify" || v == "distributed" ? 1 : -1;
+                const std::string wrap = x.attribute("wrapText");
+                if (wrap == "1" || wrap == "true")
+                    f.flags |= Cell::Wrap;
+                // 0-90 anticlockwise, 91-180 clockwise (as 90 - n), 255 stacked.
+                const int rot = std::atoi(x.attribute("textRotation").c_str());
+                f.rotation = std::int16_t(rot == 255 ? 255 : rot > 90 && rot <= 180 ? 90 - rot : std::clamp(rot, 0, 90));
             }
         }
     }
@@ -548,6 +654,7 @@ private:
         const int styleIndex = std::atoi(x.attribute("s").c_str());
         std::string value, formula, inlineText;
         bool hasValue = false, hasInline = false;
+        std::uint32_t inlineRich = 0;
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End && x.depth() < depth)
@@ -561,7 +668,7 @@ private:
             } else if (n == "f") {
                 formula = x.elementText();
             } else if (n == "is") {
-                inlineText = richText(x);
+                inlineText = richText(x, &inlineRich);
                 hasInline = true;
             }
         }
@@ -576,13 +683,20 @@ private:
             c.color = f->color;
             c.fill = f->fill;
             c.align = f->align;
+            c.valign = f->valign;
+            c.halfPoints = f->halfPoints;
+            c.rotation = f->rotation;
+            c.border = f->border;
         }
         if (type == "s") {
             const long i = std::atol(value.c_str());
-            if (hasValue && i >= 0 && std::size_t(i) < strings_.size())
+            if (hasValue && i >= 0 && std::size_t(i) < strings_.size()) {
                 c.text = strings_[size_t(i)];
+                c.rich = stringRich_[size_t(i)];
+            }
         } else if (type == "inlineStr") {
             c.text = std::move(inlineText);
+            c.rich = inlineRich;
         } else if (type == "str") {
             c.text = std::move(value);
         } else if (type == "b") {
@@ -601,13 +715,16 @@ private:
             char* end = nullptr;
             const double v = std::strtod(value.c_str(), &end);
             if (end != value.c_str()) {
-                c.text = formatNumber(v, f ? f->code : std::string_view(), date1904_);
+                std::uint32_t tag = 0; // [Red] and the like
+                c.text = formatNumber(v, f ? f->code : std::string_view(), date1904_, &tag);
                 c.flags |= Cell::Number;
+                if (tag)
+                    c.color = textColor(tag);
             } else {
                 c.text = std::move(value);
             }
         }
-        if (c.text.empty() && c.formula.empty() && c.fill == 0)
+        if (c.text.empty() && c.formula.empty() && c.fill == 0 && c.border == 0)
             return;
         if (!row.cells.empty() && row.cells.back().column >= column) // out of order: ignored
             return;
@@ -619,6 +736,7 @@ private:
     Workbook* book_ = nullptr; // the workbook being read (its pictures)
     ooxml::Theme theme_;
     std::vector<std::string> strings_;
+    std::vector<std::uint32_t> stringRich_; // per shared string: its Workbook::richTexts index (0: none)
     std::vector<CellFormat> formats_;
     bool date1904_ = false;
     int otherSheets_ = 0, charts_ = 0;

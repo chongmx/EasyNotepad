@@ -159,6 +159,8 @@ void Application::frame()
 void Application::endFrame()
 {
     const double now = os::now();
+    // Between frames: the atlas takes or gives back a font for the scripts the documents need.
+    scriptFonts_.update(fonts_.ui, view_ ? view_->viewerScripts() : 0);
     if (viewModel_->takeMemoryTrimRequest()) {
         trimFrames_ = 4; // (re)start: textures released this frame are destroyed by the backend next frame, freed the one after
         lateTrimAt_ = now + 1.5;

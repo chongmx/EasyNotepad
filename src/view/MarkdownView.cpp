@@ -23,6 +23,7 @@ struct MarkdownView::Style {
     ImFont* ui = nullptr;
     ImFont* mono = nullptr;
     float size = 15.0f; // body text, in pixels
+    bool paper = false; // a document read for viewing: its own colours; italics not dimmed
     float s = 1.0f;     // UI scale
     const Palette* palette = nullptr;
     ImU32 text = 0, dim = 0, link = 0, rule = 0, codeBg = 0, quoteBar = 0, tableHeaderBg = 0;
@@ -61,14 +62,30 @@ public:
     {
     }
 
+    // A paragraph's own layout (documents read for viewing): its alignment (1 centre, 2 right) with
+    // the widths of its lines from a measuring pass (`widths`; or `measured` to record them), its
+    // first line's indent, and pixels per point for runs with their own size.
+    void layout(int align, float firstIndent, const std::vector<float>* widths, std::vector<float>* measured, float pxPerPoint)
+    {
+        align_ = align;
+        firstIndent_ = firstIndent;
+        widths_ = widths;
+        measured_ = measured;
+        pxPerPoint_ = pxPerPoint;
+        startLine();
+    }
+
     void spans(const md::Spans& spans)
     {
         for (const md::Span& span : spans)
             text(span);
+        if (measured_)
+            measured_->push_back(std::max(0.0f, ink_ - lineStart_));
     }
 
     float bottom() const { return lineEmpty_ ? y_ : y_ + lineH_; }
     float x() const { return x_; }
+    float widest() const { return std::max(widest_, x_); } // the longest line's end (cells with line breaks)
 
 private:
     const MarkdownView::Style& st_;
@@ -82,12 +99,34 @@ private:
     bool spanStart_ = false, spanEnd_ = false;
     float lineStartY_ = -1.0f; // y of the line the last code piece was on
     bool lineEmpty_ = false;   // after an image: the next line has nothing on it yet
+    int align_ = 0;
+    float firstIndent_ = 0.0f, pxPerPoint_ = 0.0f;
+    const std::vector<float>* widths_ = nullptr;
+    std::vector<float>* measured_ = nullptr;
+    std::size_t line_ = 0;
+    float lineStart_ = 0.0f, ink_ = 0.0f; // where this line starts, and where its last word ends
+    float widest_ = 0.0f;                   // the end of the longest line before this one
 
-    void newline()
+    void startLine()
     {
-        x_ = left_;
-        y_ += lineH_;
+        x_ = left_ + (line_ == 0 ? firstIndent_ : 0.0f);
+        if (align_ != 0 && widths_ && line_ < widths_->size())
+            x_ += std::max(0.0f, (right_ - x_ - (*widths_)[line_]) * (align_ == 1 ? 0.5f : 1.0f));
+        lineStart_ = ink_ = x_;
     }
+
+    // The line ends; the next starts at `y`.
+    void breakTo(float y)
+    {
+        if (measured_)
+            measured_->push_back(std::max(0.0f, ink_ - lineStart_));
+        widest_ = std::max(widest_, x_);
+        ++line_;
+        y_ = y;
+        startLine();
+    }
+
+    void newline() { breakTo(y_ + lineH_); }
 
     // An image on lines of its own, at its pixel size (scaled with the UI) within the column.
     void image(const md::Span& span)
@@ -103,14 +142,15 @@ private:
             h *= maxW / w;
             w = maxW;
         }
-        if (x_ > left_ || lineEmpty_)
+        if (x_ > lineStart_ || lineEmpty_)
             newline(), lineEmpty_ = false;
         const float top = y_;
+        const float ix = align_ != 0 ? left_ + (maxW - w) * (align_ == 1 ? 0.5f : 1.0f) : x_;
         if (draw_)
-            dl_->AddImage(img->texture->GetTexRef(), ImVec2(x_, top), ImVec2(x_ + w, top + h));
+            dl_->AddImage(img->texture->GetTexRef(), ImVec2(ix, top), ImVec2(ix + w, top + h));
         // Text goes on below it; the block ends there when nothing follows.
-        x_ = left_;
-        y_ = top + h + 4.0f * st_.s;
+        ink_ = x_ + w;
+        breakTo(top + h + 4.0f * st_.s);
         lineEmpty_ = true;
     }
 
@@ -286,7 +326,8 @@ private:
             lineEmpty_ = false;
         const bool code = (span.style & md::Code) != 0;
         ImFont* font = code ? st_.mono : st_.ui;
-        const float size = code ? size_ * 0.92f : size_;
+        const float own = span.size > 0.0f && pxPerPoint_ > 0.0f ? span.size * pxPerPoint_ : size_;
+        const float size = code ? own * 0.92f : own;
         const std::string& t = span.text;
         size_t i = 0;
         while (i < t.size()) {
@@ -351,8 +392,11 @@ private:
         // Spaces: dropped at the end of a line.
         const float trailing = spaceW * float(spaces);
         if (spaces > 0 && x_ + trailing <= right_) {
-            if (draw_ && (span.style & (md::Link | md::Strike)) != 0 && b < e)
-                decorate(x_, x_ + trailing, span); // underline continues under the gap
+            if (draw_ && (span.style & (md::Link | md::Strike | md::Underline)) != 0 && b < e)
+                decorate(x_, x_ + trailing, span, span.color ? ImU32(span.color) : color_, size); // the line continues under the gap
+            if (draw_ && span.highlight && b < e)
+                dl_->AddRectFilled(ImVec2(x_, y_ + (lineH_ - size) * 0.5f - 1.0f * st_.s), ImVec2(x_ + trailing, y_ + (lineH_ + size) * 0.5f + 1.0f * st_.s),
+                                   span.highlight);
             x_ += trailing;
         }
     }
@@ -364,7 +408,13 @@ private:
             const bool code = (span.style & md::Code) != 0;
             const bool link = (span.style & md::Link) != 0;
             const bool italic = (span.style & md::Italic) != 0;
-            ImU32 color = link ? st_.link : code ? st_.palette->synString : italic && !bold ? st_.dim : color_;
+            ImU32 color = span.color ? ImU32(span.color)
+                          : link        ? st_.link
+                          : code        ? st_.palette->synString
+                          : italic && !bold && !st_.paper ? st_.dim
+                                                          : color_;
+            if (span.highlight)
+                dl_->AddRectFilled(ImVec2(x_, top - 1.0f * st_.s), ImVec2(x_ + w, top + size + 1.0f * st_.s), span.highlight);
             if (code) {
                 const float pad = 2.0f * st_.s;
                 const bool first = spanStart_ || x_ <= left_ || lineStartY_ != y_; // starts the box on this line
@@ -385,22 +435,24 @@ private:
             dl_->AddText(font, size, ImVec2(textX, top), color, b, e);
             if (bold)
                 dl_->AddText(font, size, ImVec2(textX + extra, top), color, b, e);
-            decorate(x_, x_ + w, span);
+            decorate(x_, x_ + w, span, color, size);
             if (link && links_)
                 links_->push_back({ImVec2(x_, y_), ImVec2(x_ + w, y_ + lineH_), span.url});
         }
         x_ += w;
+        ink_ = x_;
     }
 
-    void decorate(float x0, float x1, const md::Span& span)
+    void decorate(float x0, float x1, const md::Span& span, ImU32 color, float size)
     {
         const float mid = y_ + lineH_ * 0.5f;
+        const float base = y_ + (lineH_ + size) * 0.5f;
         if (span.style & md::Strike)
-            dl_->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), color_, 1.0f * st_.s);
-        if (span.style & md::Link) {
-            const float base = y_ + (lineH_ + size_) * 0.5f;
+            dl_->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), color, 1.0f * st_.s);
+        if (span.style & md::Underline)
+            dl_->AddLine(ImVec2(x0, base), ImVec2(x1, base), color, std::max(1.0f, size / 16.0f));
+        else if (span.style & md::Link)
             dl_->AddLine(ImVec2(x0, base), ImVec2(x1, base), (st_.link & 0x00FFFFFFu) | 0x80000000u, 1.0f * st_.s);
-        }
     }
 };
 
@@ -454,18 +506,51 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     std::vector<LinkHit> links;
     const float lineH = st.lineH();
     const float quoteIndent = float(block.quote) * 14.0f * st.s;
-    const float left = at.x + quoteIndent;
-    const float right = at.x + width;
-    const ImU32 textColor = block.quote > 0 ? st.dim : st.text;
+    // A document's paragraph (Word) has its own size, indents, alignment, spacing and shading, in
+    // points: 11 points is the renderer's body size.
+    const float pxPerPoint = st.size / 11.0f;
+    const float spaceBefore = block.spaceBefore * pxPerPoint;
+    at.y += spaceBefore;
+    const float left = at.x + quoteIndent + block.indentLeft * pxPerPoint;
+    const float right = std::max(left + 20.0f * st.s, at.x + width - block.indentRight * pxPerPoint);
+    const ImU32 textColor = block.quote > 0 && !st.paper ? st.dim : st.text;
     float height = 0.0f;
+    float maxSpan = 0.0f; // the largest run with its own size: the lines are as tall as it needs
+    for (const md::Span& span : block.spans)
+        maxSpan = std::max(maxSpan, span.size);
+    const bool own = block.textAlign != 0 || block.firstLine != 0.0f || block.size > 0.0f || maxSpan > 0.0f || block.shading != 0;
+    // Runs a flow over the block's spans: with its layout, measured first when it is aligned (the
+    // lines' widths place them) or shaded (its height sizes the shading).
+    auto flowSpans = [&](float textLeft, float size, float lineH, ImU32 color, bool bold) {
+        if (!own) {
+            Flow flow(st, dl, draw, textLeft, right, at.y, size, lineH, color, bold, &links);
+            flow.spans(block.spans);
+            return flow.bottom() - at.y;
+        }
+        std::vector<float> widths;
+        float measuredH = 0.0f;
+        if (draw && (block.textAlign != 0 || block.shading != 0)) {
+            Flow measure(st, dl, false, textLeft, right, at.y, size, lineH, color, bold, nullptr);
+            measure.layout(0, block.firstLine * pxPerPoint, nullptr, &widths, pxPerPoint);
+            measure.spans(block.spans);
+            measuredH = measure.bottom() - at.y;
+            if (block.shading)
+                dl->AddRectFilled(ImVec2(textLeft - 3.0f * st.s, at.y - 1.0f * st.s), ImVec2(right + 3.0f * st.s, at.y + measuredH + 1.0f * st.s),
+                                  block.shading);
+        }
+        Flow flow(st, dl, draw, textLeft, right, at.y, size, lineH, color, bold, &links);
+        flow.layout(block.textAlign, block.firstLine * pxPerPoint, draw ? &widths : nullptr, nullptr, pxPerPoint);
+        flow.spans(block.spans);
+        return flow.bottom() - at.y;
+    };
+    auto sized = [&](float size) { return block.size > 0.0f ? block.size * pxPerPoint : size; };
+    auto lineFor = [&](float size, float factor) { return std::floor(std::max(size, maxSpan * pxPerPoint) * factor); };
 
     switch (block.kind) {
     case md::BlockKind::Heading: {
-        const float size = st.size * headingScale(block.level);
-        const float h = std::floor(size * 1.35f);
-        Flow flow(st, dl, draw, left, right, at.y, size, h, block.level >= 6 ? st.dim : st.text, true, &links);
-        flow.spans(block.spans);
-        height = flow.bottom() - at.y;
+        const float size = sized(st.size * headingScale(block.level));
+        const float h = lineFor(size, 1.35f);
+        height = flowSpans(left, size, h, block.level >= 6 ? st.dim : st.text, true);
         if (block.level <= 2) {
             height += 4.0f * st.s;
             if (draw)
@@ -475,9 +560,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         break;
     }
     case md::BlockKind::Paragraph: {
-        Flow flow(st, dl, draw, left, right, at.y, st.size, lineH, textColor, false, &links);
-        flow.spans(block.spans);
-        height = flow.bottom() - at.y;
+        const float size = sized(st.size);
+        height = flowSpans(left, size, own ? lineFor(size, 1.45f) : lineH, textColor, false);
         break;
     }
     case md::BlockKind::Bullet:
@@ -510,9 +594,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                             block.checked ? st.palette->iconGreen : st.dim, icon);
             }
         }
-        Flow flow(st, dl, draw, textX, right, at.y, st.size, lineH, block.checked ? st.dim : textColor, false, &links);
-        flow.spans(block.spans);
-        height = flow.bottom() - at.y;
+        const float size = sized(st.size);
+        height = flowSpans(textX, size, own ? lineFor(size, 1.45f) : lineH, block.checked ? st.dim : textColor, false);
         break;
     }
     case md::BlockKind::Math: {
@@ -669,7 +752,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                 return 0.0f;
             Flow line(st, dl, false, 0.0f, FLT_MAX * 0.25f, 0.0f, st.size, lineH, st.text, r == 0, nullptr);
             line.spans(block.rows[r][c]);
-            return line.x();
+            return line.widest();
         };
         std::vector<float> natural(columns, 0.0f);
         for (size_t r = 0; r < block.rows.size(); ++r)
@@ -686,12 +769,16 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
             for (float& w : widths)
                 w = std::max(minW, w * scale);
         }
+        // A document's table may be centred or right-aligned (its block's textAlign).
+        const float tableW = std::accumulate(widths.begin(), widths.end(), 0.0f);
+        const float tableLeft = left + (block.textAlign == 1 ? std::max(0.0f, (avail - tableW) * 0.5f)
+                                        : block.textAlign == 2 ? std::max(0.0f, avail - tableW) : 0.0f);
         float y = at.y;
         std::vector<float> rowTops;
         for (size_t r = 0; r < block.rows.size(); ++r) {
             // Measure the row, then draw it.
             float rowH = lineH;
-            float x = left;
+            float x = tableLeft;
             for (size_t c = 0; c < columns; ++c) {
                 Flow measure(st, dl, false, x + pad, x + widths[c] - pad, y + pad * 0.5f, st.size, lineH, st.text, r == 0, nullptr);
                 if (c < block.rows[r].size())
@@ -701,8 +788,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
             }
             if (draw) {
                 if (r == 0)
-                    dl->AddRectFilled(ImVec2(left, y), ImVec2(x, y + rowH), st.tableHeaderBg);
-                x = left;
+                    dl->AddRectFilled(ImVec2(tableLeft, y), ImVec2(x, y + rowH), st.tableHeaderBg);
+                x = tableLeft;
                 for (size_t c = 0; c < columns; ++c) {
                     float cellLeft = x + pad;
                     if (block.align[c] != -1) { // centre / right: from the single-line width
@@ -715,14 +802,14 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                         cell.spans(block.rows[r][c]);
                     x += widths[c];
                 }
-                dl->AddLine(ImVec2(left, y + rowH), ImVec2(x, y + rowH), st.rule, 1.0f);
+                dl->AddLine(ImVec2(tableLeft, y + rowH), ImVec2(x, y + rowH), st.rule, 1.0f);
             }
             rowTops.push_back(y);
             y += rowH;
         }
         if (draw) {
-            float x = left;
-            dl->AddRect(ImVec2(left, at.y), ImVec2(left + std::accumulate(widths.begin(), widths.end(), 0.0f), y), st.rule, 0.0f, 1.0f);
+            float x = tableLeft;
+            dl->AddRect(ImVec2(tableLeft, at.y), ImVec2(tableLeft + tableW, y), st.rule, 0.0f, 1.0f);
             for (size_t c = 0; c + 1 < columns; ++c) {
                 x += widths[c];
                 dl->AddLine(ImVec2(x, at.y), ImVec2(x, y), st.rule, 1.0f);
@@ -750,7 +837,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                     break;
                 }
     }
-    return height;
+    return height + spaceBefore;
 }
 
 void MarkdownView::styleFor(Style& st, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale)
@@ -762,6 +849,7 @@ void MarkdownView::styleFor(Style& st, const Fonts& fonts, const Palette& palett
     ImGui::PopFont();
     st.s = uiScale;
     st.palette = &palette;
+    st.paper = paper;
     st.text = palette.text;
     st.dim = palette.textDim;
     st.link = palette.iconBlue;

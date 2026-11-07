@@ -1,7 +1,9 @@
 #include "enp/model/viewer/NumberFormat.h"
 
 #include <cctype>
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -412,6 +414,143 @@ std::string formatNumeric(double v, const std::string& code)
     return prefix + body + suffix;
 }
 
+// A fraction section ("# ?/?", "# ??/??", "?/4"): the whole part, then the closest fraction with
+// as many denominator digits as the code has (or the code's fixed denominator). Empty when the
+// section is not a fraction.
+std::string formatFraction(double v, const std::string& code)
+{
+    std::size_t slash = std::string::npos;
+    bool quoted = false;
+    for (std::size_t i = 0; i < code.size(); ++i) {
+        if (code[i] == '"')
+            quoted = !quoted;
+        else if (!quoted && code[i] == '/')
+            slash = i;
+    }
+    auto placeholder = [](char c) { return c == '0' || c == '#' || c == '?'; };
+    if (slash == std::string::npos || slash == 0 || !placeholder(code[slash - 1]))
+        return std::string();
+    std::size_t numStart = slash;
+    while (numStart > 0 && placeholder(code[numStart - 1]))
+        --numStart;
+    const int numWidth = int(slash - numStart);
+    // The denominator: placeholders (digits allowed) or a fixed number.
+    std::size_t denEnd = slash + 1;
+    bool fixed = true;
+    while (denEnd < code.size() && (placeholder(code[denEnd]) || std::isdigit(static_cast<unsigned char>(code[denEnd])))) {
+        if (placeholder(code[denEnd]))
+            fixed = false;
+        ++denEnd;
+    }
+    const int denWidth = int(denEnd - slash - 1);
+    if (denWidth == 0)
+        return std::string();
+    // The whole part: placeholders before the numerator, apart from it (by a space or text).
+    std::size_t wholeEnd = numStart;
+    while (wholeEnd > 0 && !placeholder(code[wholeEnd - 1]))
+        --wholeEnd;
+    std::size_t wholeStart = wholeEnd;
+    while (wholeStart > 0 && placeholder(code[wholeStart - 1]))
+        --wholeStart;
+    const bool whole = wholeEnd > wholeStart;
+    auto literal = [](const std::string& part) {
+        std::string out;
+        for (std::size_t i = 0; i < part.size(); ++i) {
+            if (part[i] == '"')
+                continue;
+            if (part[i] == '\\' && i + 1 < part.size()) {
+                out += part[++i];
+            } else if (part[i] == '_' || part[i] == '*') {
+                if (part[i] == '_')
+                    out += ' ';
+                ++i;
+            } else if (part[i] == '[') {
+                const std::size_t end = part.find(']', i);
+                i = end == std::string::npos ? part.size() : end;
+            } else {
+                out += part[i];
+            }
+        }
+        return out;
+    };
+    const double a = std::fabs(v);
+    long long intPart = whole ? (long long)std::floor(a) : 0;
+    const double frac = a - double(intPart);
+    long long num = 0, den = 1;
+    if (fixed) {
+        den = std::max(1, std::atoi(code.substr(slash + 1, size_t(denWidth)).c_str()));
+        num = std::llround(frac * double(den));
+    } else {
+        long long maxDen = 1;
+        for (int i = 0; i < std::min(denWidth, 4); ++i)
+            maxDen *= 10;
+        maxDen -= 1;
+        double best = 2.0;
+        for (long long d = 1; d <= maxDen; ++d) {
+            const long long n = std::llround(frac * double(d));
+            const double err = std::fabs(frac - double(n) / double(d));
+            if (err < best - 1e-12) {
+                best = err;
+                num = n;
+                den = d;
+            }
+        }
+    }
+    if (whole && num == den && !fixed) {
+        ++intPart;
+        num = 0;
+    }
+    std::string out = literal(code.substr(0, wholeStart));
+    const std::string between = literal(code.substr(wholeEnd, numStart - wholeEnd));
+    const std::string after = literal(code.substr(denEnd));
+    std::string numText = std::to_string(num), denText = std::to_string(den);
+    if (whole && num == 0) { // a whole number: the fraction's room left blank
+        out += std::to_string(intPart);
+        out += std::string(between.size() + size_t(numWidth) + 1 + size_t(denWidth), ' ');
+        return out + after;
+    }
+    if (whole && intPart > 0)
+        out += std::to_string(intPart) + between;
+    else if (whole)
+        out += std::string(size_t(wholeEnd - wholeStart) + between.size(), ' ');
+    while (int(numText.size()) < numWidth)
+        numText = " " + numText;
+    if (!fixed)
+        while (int(denText.size()) < denWidth)
+            denText += " ";
+    return out + numText + "/" + denText + after;
+}
+
+// The colour a section's tag names ([Red], [Color10]), or 0.
+std::uint32_t sectionColor(const std::string& section)
+{
+    for (std::size_t i = section.find('['); i != std::string::npos; i = section.find('[', i + 1)) {
+        const std::size_t end = section.find(']', i);
+        if (end == std::string::npos)
+            break;
+        const std::string tag = lower(std::string_view(section).substr(i + 1, end - i - 1));
+        auto pack = [](unsigned r, unsigned g, unsigned b) { return std::uint32_t(r) | (g << 8) | (b << 16) | 0xFF000000u; };
+        if (tag == "black") return pack(0, 0, 0);
+        if (tag == "white") return pack(255, 255, 255);
+        if (tag == "red") return pack(255, 0, 0);
+        if (tag == "green") return pack(0, 255, 0);
+        if (tag == "blue") return pack(0, 0, 255);
+        if (tag == "yellow") return pack(255, 255, 0);
+        if (tag == "magenta") return pack(255, 0, 255);
+        if (tag == "cyan") return pack(0, 255, 255);
+        if (tag.rfind("color", 0) == 0) {
+            static const unsigned kIndexed[8][3] = {{0, 0, 0}, {255, 255, 255}, {255, 0, 0}, {0, 255, 0},
+                                                    {0, 0, 255}, {255, 255, 0}, {255, 0, 255}, {0, 255, 255}};
+            const int n = std::atoi(tag.c_str() + 5);
+            if (n >= 1 && n <= 56) {
+                const unsigned* c = kIndexed[(n - 1) % 8];
+                return pack(c[0], c[1], c[2]);
+            }
+        }
+    }
+    return 0;
+}
+
 bool hasNumberPlaceholders(const std::string& code)
 {
     bool quoted = false;
@@ -496,7 +635,7 @@ bool isDateFormat(std::string_view code)
     return false;
 }
 
-std::string formatNumber(double value, std::string_view codeIn, bool date1904)
+std::string formatNumber(double value, std::string_view codeIn, bool date1904, std::uint32_t* color)
 {
     const std::string code(codeIn);
     if (code.empty() || lower(code) == "general")
@@ -510,6 +649,8 @@ std::string formatNumber(double value, std::string_view codeIn, bool date1904)
     } else if (value == 0 && parts.size() >= 3 && !parts[2].empty()) {
         section = parts[2];
     }
+    if (color)
+        *color = sectionColor(section);
     if (lower(section) == "general")
         return absolute ? general(std::fabs(value)) : general(value);
     if (section == "@")
@@ -540,7 +681,9 @@ std::string formatNumber(double value, std::string_view codeIn, bool date1904)
         }
         return out;
     }
-    std::string out = formatNumeric(value, section);
+    std::string out = formatFraction(value, section);
+    if (out.empty())
+        out = formatNumeric(value, section);
     // The sign: only when the section is the positive one used for a negative value (and the number
     // does not round to zero).
     if (value < 0 && !absolute) {

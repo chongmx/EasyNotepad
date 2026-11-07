@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -105,6 +106,32 @@ bool readFileInto(const std::string& path, std::string& out, size_t maxBytes, st
     out.resize(got);
     ::close(fd);
     return true;
+}
+
+bool MappedFile::open(const std::string& path)
+{
+    close();
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return false;
+    struct stat st {};
+    if (::fstat(fd, &st) == 0 && st.st_size > 0) {
+        void* p = ::mmap(nullptr, size_t(st.st_size), PROT_READ, MAP_PRIVATE, fd, 0);
+        if (p != MAP_FAILED) {
+            data_ = p;
+            size_ = size_t(st.st_size);
+        }
+    }
+    ::close(fd); // the mapping stays without it
+    return data_ != nullptr;
+}
+
+void MappedFile::close()
+{
+    if (data_)
+        ::munmap(data_, size_);
+    data_ = nullptr;
+    size_ = 0;
 }
 
 std::optional<std::string> readFile(const std::string& path, std::string* error)

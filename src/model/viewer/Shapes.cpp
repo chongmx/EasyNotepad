@@ -110,6 +110,77 @@ Rect turnedBox(Rect r, float degrees)
     return Rect{r.x + (r.w - r.h) * 0.5f, r.y + (r.h - r.w) * 0.5f, r.h, r.w};
 }
 
+std::vector<float> LineStyle::pattern() const
+{
+    // DrawingML's preset dashes, in line widths (ECMA-376 20.1.10.48); the system ones are tighter.
+    static const std::pair<const char*, std::vector<float>> kDashes[] = {
+        {"dot", {1, 3}},           {"dash", {4, 3}},           {"lgDash", {8, 3}},
+        {"dashDot", {4, 3, 1, 3}}, {"lgDashDot", {8, 3, 1, 3}}, {"lgDashDotDot", {8, 3, 1, 3, 1, 3}},
+        {"sysDot", {1, 1}},        {"sysDash", {3, 1}},        {"sysDashDot", {3, 1, 1, 1}},
+        {"sysDashDotDot", {3, 1, 1, 1, 1, 1}}};
+    for (const auto& [name, units] : kDashes)
+        if (dash == name) {
+            std::vector<float> out;
+            for (float u : units)
+                out.push_back(u * std::max(0.5f, width));
+            return out;
+        }
+    return {};
+}
+
+namespace {
+LineEnd lineEndOf(const std::string& type)
+{
+    if (type == "triangle")
+        return LineEnd::Triangle;
+    if (type == "arrow")
+        return LineEnd::Arrow;
+    if (type == "stealth")
+        return LineEnd::Stealth;
+    if (type == "diamond")
+        return LineEnd::Diamond;
+    if (type == "oval")
+        return LineEnd::Oval;
+    return LineEnd::None;
+}
+} // namespace
+
+void readLine(XmlReader& x, const ooxml::Theme& theme, const std::map<std::string, std::string>* schemeMap, LineStyle& out)
+{
+    if (x.hasAttribute("w")) {
+        out.width = std::max(0.25f, float(std::atof(x.attribute("w").c_str()) / kEmu));
+        out.hasWidth = true;
+    }
+    const int depth = x.depth();
+    for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+        if (e == Event::End && x.depth() < depth)
+            break;
+        if (e != Event::Start)
+            continue;
+        const std::string_view n = x.localName();
+        if (n == "noFill") {
+            out.hasColor = true;
+            out.color = 0;
+        } else if (n == "solidFill" || n == "gradFill") {
+            bool found = false;
+            const std::uint32_t c = ooxml::readFillIn(x, theme, schemeMap, &found);
+            if (found) {
+                out.hasColor = true;
+                out.color = c;
+            }
+        } else if (n == "prstDash") {
+            const std::string v = x.attribute("val");
+            out.dash = v == "solid" ? std::string() : v;
+        } else if (n == "headEnd") {
+            out.head = lineEndOf(x.attribute("type"));
+        } else if (n == "tailEnd") {
+            out.tail = lineEndOf(x.attribute("type"));
+        } else {
+            x.skip();
+        }
+    }
+}
+
 bool isLine(std::string_view g)
 {
     return g == "line" || g == "straightConnector1" || g.find("Connector") != std::string_view::npos;
@@ -204,6 +275,9 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
     bool hasFill = false, hasLine = false, hasStyleFill = false, hasStyleLine = false, flipH = false, flipV = false;
     float rotation = 0.0f;
     float lineWidth = 0.75f;
+    Gradient gradient;
+    LineStyle lineStyle;
+    float textTurn = 0.0f; // vertical text: 90 or 270
     TextBox text;
     text.box = box;
     text.anchor = 0;
@@ -224,29 +298,21 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
         } else if (n == "noFill" && x.depth() == depth + 2) { // spPr's own (not a line's)
             hasFill = true;
             fill = 0;
-        } else if ((n == "solidFill" || n == "gradFill") && x.depth() == depth + 2) {
+        } else if (n == "solidFill" && x.depth() == depth + 2) {
             bool found = false;
             fill = ooxml::readFillIn(x, theme, nullptr, &found);
             hasFill = found;
+            gradient = Gradient();
+        } else if (n == "gradFill" && x.depth() == depth + 2) {
+            fill = ooxml::readGradientFill(x, theme, nullptr, gradient);
+            hasFill = !gradient.stops.empty();
         } else if (n == "ln" && x.depth() == depth + 2) {
-            if (x.hasAttribute("w"))
-                lineWidth = std::max(0.25f, float(std::atof(x.attribute("w").c_str()) / kEmu));
-            const int d2 = x.depth();
-            for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
-                if (f == Event::End && x.depth() < d2)
-                    break;
-                if (f != Event::Start)
-                    continue;
-                if (x.localName() == "noFill") {
-                    hasLine = true;
-                    line = 0;
-                } else if (x.localName() == "solidFill" || x.localName() == "gradFill") {
-                    bool found = false;
-                    line = ooxml::readFillIn(x, theme, nullptr, &found);
-                    hasLine = found;
-                } else {
-                    x.skip();
-                }
+            readLine(x, theme, nullptr, lineStyle);
+            if (lineStyle.hasWidth)
+                lineWidth = lineStyle.width;
+            if (lineStyle.hasColor) {
+                hasLine = true;
+                line = lineStyle.color;
             }
         } else if (n == "fillRef" || n == "lnRef" || n == "fontRef") {
             const int idx = std::atoi(x.attribute("idx").c_str());
@@ -273,6 +339,8 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
             inset("rIns", text.insetR);
             inset("bIns", text.insetB);
             text.wrap = x.attribute("wrap") != "none";
+            const std::string vert = x.attribute("vert");
+            textTurn = vert == "vert" || vert == "eaVert" || vert == "mongolianVert" ? 90.0f : vert == "vert270" ? 270.0f : 0.0f;
             x.skip();
         } else if (n == "p") {
             TextParagraph para;
@@ -341,6 +409,10 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
         p.closed.push_back(false);
         p.stroke = lineColor ? lineColor : kBlack;
         p.lineWidth = lineWidth;
+        lineStyle.width = lineWidth;
+        p.dash = lineStyle.pattern();
+        p.head = lineStyle.head;
+        p.tail = lineStyle.tail;
         page.add(std::move(p));
         drawn = true;
     } else if (fillColor || lineColor) {
@@ -358,13 +430,18 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
         p.subpaths.push_back(std::move(pts));
         p.closed.push_back(true);
         p.fill = fillColor;
+        p.gradient = hasFill ? gradient : Gradient();
         p.stroke = lineColor;
         p.lineWidth = lineWidth;
+        lineStyle.width = lineWidth;
+        p.dash = lineStyle.pattern();
         page.add(std::move(p));
         drawn = true;
     }
     if (hasText) {
-        text.box = turnedBox(box, rotation); // text stays upright, in the footprint of a quarter-turned shape
+        // Text turns with its shape; vertical text is laid out across the box and turned a quarter.
+        text.box = textTurn != 0.0f ? turnedBox(box, 90.0f) : box;
+        text.rotation = rotation + textTurn;
         page.add(std::move(text));
         drawn = true;
     }

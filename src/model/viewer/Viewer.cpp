@@ -6,27 +6,50 @@
 
 namespace enp::model::viewer {
 
+std::uint32_t Gradient::at(float t) const
+{
+    if (stops.empty())
+        return kNone;
+    if (t <= stops.front().position)
+        return stops.front().color;
+    for (std::size_t i = 1; i < stops.size(); ++i) {
+        const GradientStop& a = stops[i - 1];
+        const GradientStop& b = stops[i];
+        if (t > b.position)
+            continue;
+        const float span = b.position - a.position;
+        const float k = span > 1e-6f ? (t - a.position) / span : 1.0f;
+        std::uint32_t out = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            const float ca = float((a.color >> shift) & 0xFF), cb = float((b.color >> shift) & 0xFF);
+            out |= std::uint32_t(ca + (cb - ca) * k + 0.5f) << shift;
+        }
+        return out;
+    }
+    return stops.back().color;
+}
+
 void Page::add(PathItem p)
 {
-    items.push_back({PageItem::Kind::Path, std::uint32_t(paths.size())});
+    items.push_back({PageItem::Kind::Path, std::uint32_t(paths.size()), clip});
     paths.push_back(std::move(p));
 }
 
 void Page::add(GlyphRun g)
 {
-    items.push_back({PageItem::Kind::Glyphs, std::uint32_t(glyphs.size())});
+    items.push_back({PageItem::Kind::Glyphs, std::uint32_t(glyphs.size()), clip});
     glyphs.push_back(std::move(g));
 }
 
 void Page::add(TextBox b)
 {
-    items.push_back({PageItem::Kind::Box, std::uint32_t(boxes.size())});
+    items.push_back({PageItem::Kind::Box, std::uint32_t(boxes.size()), clip});
     boxes.push_back(std::move(b));
 }
 
 void Page::add(ImageItem i)
 {
-    items.push_back({PageItem::Kind::Image, std::uint32_t(images.size())});
+    items.push_back({PageItem::Kind::Image, std::uint32_t(images.size()), clip});
     images.push_back(std::move(i));
 }
 
@@ -79,7 +102,42 @@ bool PageDocument::load(std::size_t index)
     if (!source)
         return false;
     page.loaded = true; // even when it fails: not tried again every frame
-    return source->load(index, page, media);
+    const bool ok = source->load(index, page, media);
+    page.scripts = scriptsIn(page.plainText());
+    return ok;
+}
+
+std::uint8_t scriptsIn(std::string_view utf8)
+{
+    std::uint8_t scripts = 0;
+    const auto* p = reinterpret_cast<const unsigned char*>(utf8.data());
+    const auto* end = p + utf8.size();
+    while (p < end) {
+        const unsigned char b = *p;
+        if (b < 0xE1) { // ASCII and two-byte letters (Latin, Greek, Cyrillic, ...): none of these
+            p += b < 0x80 ? 1 : 2;
+            continue;
+        }
+        if (b >= 0xF0) { // beyond the BMP: CJK extensions B and on (U+20000-U+3FFFF)
+            if (b == 0xF0 && end - p >= 2 && p[1] >= 0xA0 && p[1] < 0xC0)
+                scripts |= ScriptHan;
+            p += 4;
+            continue;
+        }
+        if (end - p < 3)
+            break;
+        const unsigned c = (unsigned(b & 0x0F) << 12) | (unsigned(p[1] & 0x3F) << 6) | unsigned(p[2] & 0x3F);
+        p += 3;
+        if ((c >= 0x1100 && c <= 0x11FF) || (c >= 0x3130 && c <= 0x318F) || (c >= 0xAC00 && c <= 0xD7AF))
+            scripts |= ScriptHangul;
+        else if ((c >= 0x2E80 && c <= 0x2FDF) || (c >= 0x3000 && c <= 0x312F) || (c >= 0x3190 && c <= 0x31FF) ||
+                 (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF) ||
+                 (c >= 0xFF00 && c <= 0xFFEF))
+            scripts |= ScriptHan;
+        if (scripts == (ScriptHan | ScriptHangul))
+            break;
+    }
+    return scripts;
 }
 
 void PageDocument::unload(std::size_t index)
@@ -93,6 +151,8 @@ void PageDocument::unload(std::size_t index)
     std::vector<GlyphRun>().swap(page.glyphs);
     std::vector<TextBox>().swap(page.boxes);
     std::vector<ImageItem>().swap(page.images);
+    std::vector<Rect>().swap(page.clips);
+    page.clip = -1;
     page.loaded = false;
 }
 
@@ -128,19 +188,65 @@ std::string viewerFormat(std::string_view path, std::string_view bytes)
     return {};
 }
 
+namespace {
+
+// The Script bits of a document's text read so far (pages not read yet add theirs when read).
+std::uint8_t scriptsOf(ViewerDocument& doc)
+{
+    std::uint8_t scripts = 0;
+    auto spans = [&](const markdown::Spans& ss) {
+        for (const markdown::Span& s : ss)
+            scripts |= scriptsIn(s.text);
+    };
+    switch (doc.shape) {
+    case Shape::Flow:
+        for (const markdown::Block& b : doc.flow.blocks) {
+            spans(b.spans);
+            for (const auto& row : b.rows)
+                for (const markdown::Spans& cell : row)
+                    spans(cell);
+        }
+        break;
+    case Shape::Sheet:
+        for (const Sheet& s : doc.book.sheets) {
+            scripts |= scriptsIn(s.name);
+            for (const Row& r : s.rows)
+                for (const Cell& c : r.cells)
+                    scripts |= scriptsIn(c.text);
+            for (const SheetDrawing& d : s.drawings)
+                scripts |= scriptsIn(d.page.plainText());
+        }
+        break;
+    case Shape::Pages:
+        for (Page& p : doc.pages.pages)
+            if (p.loaded) {
+                p.scripts = scriptsIn(p.plainText());
+                scripts |= p.scripts;
+            }
+        break;
+    case Shape::None:
+        break;
+    }
+    return scripts;
+}
+
+} // namespace
+
 ViewerDocument readViewerDocument(std::string_view path, std::string bytes)
 {
     const std::string format = viewerFormat(path, bytes);
-    if (format == "PDF document")
-        return readPdf(std::move(bytes));
-    if (format == "Word document")
-        return readDocx(std::move(bytes));
-    if (format == "Excel workbook")
-        return readXlsx(std::move(bytes));
-    if (format == "PowerPoint presentation")
-        return readPptx(std::move(bytes));
     ViewerDocument doc;
-    doc.error = "not a document this viewer reads";
+    if (format == "PDF document")
+        doc = readPdf(std::move(bytes));
+    else if (format == "Word document")
+        doc = readDocx(std::move(bytes));
+    else if (format == "Excel workbook")
+        doc = readXlsx(std::move(bytes));
+    else if (format == "PowerPoint presentation")
+        doc = readPptx(std::move(bytes));
+    else
+        doc.error = "not a document this viewer reads";
+    doc.scripts = scriptsOf(doc);
     return doc;
 }
 

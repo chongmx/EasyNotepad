@@ -59,6 +59,11 @@ public:
     const EmojiCache& emoji() const { return emoji_; }
     // After a close (Application's memory trim): caches let go of what is no longer on screen.
     void compactCaches() { emoji_.releaseUnused(); }
+    // The scripts the documents shown in either column need fonts for (ScriptFonts).
+    std::uint8_t viewerScripts() const
+    {
+        return std::uint8_t(editor_.viewerView().scripts() | (editor2_ ? editor2_->viewerView().scripts() : 0));
+    }
 
 private:
     void handleShortcuts();

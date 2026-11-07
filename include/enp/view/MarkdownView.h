@@ -40,6 +40,8 @@ public:
     std::function<float(int index, ImVec2 at, float width, bool draw)> onDrawing;
     // Emoji pictures (shared by every view; owned by MainView). Null: emoji show as their text.
     EmojiCache* emoji = nullptr;
+    // A document read for viewing (Word): its runs keep their own colours, italics are not dimmed.
+    bool paper = false;
     // The source line of the block under the mouse in the last frame, or -1.
     int hoveredLine() const { return hoveredLine_; }
     // Top of the block that starts at or before `line`, relative to where the text is drawn (after

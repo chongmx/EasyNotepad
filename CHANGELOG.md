@@ -16,6 +16,16 @@ its release notes on GitHub.
   the fade times and the breathing.
 - Agents can rest the pointer on a control (`hover`) to see its hover effect and hint, without
   moving the mouse.
+- **Document viewer**: Word, Excel, PowerPoint and PDF files open read-only, drawn as their
+  authors see them. Word: styles, numbering, run colours and sizes, alignment and indents,
+  tables (aligned, cells of several lines), headers and footers, footnotes and comments, pictures
+  and charts. Excel: number formats (dates, fractions, colour sections), fonts and sizes, rich
+  text, fills, borders, wrapped and rotated text, merges, frozen panes, text running over empty
+  cells, charts and pictures, and sheet tabs along the bottom. PowerPoint: masters and layouts,
+  text styles, shapes with gradients, dashes and arrowheads, rotation, cropped pictures, tables
+  with their table styles, charts and SmartArt. PDF: text with its fonts and spacing, ligatures,
+  rotated text, paths, dashes, clipping, shadings and images, pages read as they come into view.
+  Chinese, Japanese and Korean text uses a system font, loaded only while a document needs it.
 
 ### Changed
 - Hints are a rounded, semi-transparent box without a border; a long hint wraps (about 55

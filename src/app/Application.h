@@ -66,6 +66,7 @@ private:
     double lateTrimAt_ = -1.0;
     void giveMemoryBack();
     view::Fonts fonts_;
+    view::ScriptFonts scriptFonts_; // Chinese, Japanese and Korean, while a document shown needs them
     std::unique_ptr<view::MainView> view_;
     // Local endpoint for the MCP connector (`EasyNotepad --mcp`); stopped before the view-model goes.
     std::unique_ptr<services::AutomationServer> automation_;

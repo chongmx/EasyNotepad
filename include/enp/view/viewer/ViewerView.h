@@ -46,6 +46,9 @@ public:
     bool holds(int documentId) const { return entries_.count(documentId) != 0; }
     std::size_t entryCount() const { return entries_.size(); }
     std::size_t heldImageCount() const; // for the tests: pictures decoded for open documents
+    // The scripts (model::viewer::Script bits) of what the open documents have shown: the fonts
+    // they need merged in (ScriptFonts).
+    std::uint8_t scripts() const;
 
 private:
     struct HeldImage {
@@ -71,6 +74,8 @@ private:
         std::vector<float> pageTop; // at `pageScale`
         float pageScale = 0.0f;
         int currentPage = 0;
+        int goToPage = -1;          // scroll to this page's top next frame (the toolbar's arrows, Home / End)
+        std::uint8_t scripts = 0;   // of the document and the pages it has shown
     };
     // A page's pictures, decoded for that page (and released with it).
     class PageImageSource final : public PageImages {
@@ -102,6 +107,7 @@ private:
     void toolbar(model::Document& doc, Entry& e, const model::viewer::ViewerDocument& d, float width);
     void flow(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void sheet(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
+    void sheetTabs(Entry& e, const model::viewer::Workbook& book, ImVec2 size);
     void pages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void loading(model::Document& doc, ImVec2 size);
     void unreadable(model::Document& doc, const std::string& format, const std::string& error, ImVec2 size);

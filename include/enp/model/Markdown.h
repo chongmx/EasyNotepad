@@ -4,6 +4,7 @@
 // cases, not every corner of it; text it cannot place stays plain.
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,6 +22,7 @@ enum Style : unsigned {
     Math = 1u << 6,     // $...$ or \(...\): text is the LaTeX source
     Emoji = 1u << 7,    // one emoji sequence (model/Emoji.h): text is its characters, emoji its picture key
     Display = 1u << 8,  // with Math: $$...$$ within a paragraph, set apart on lines of its own
+    Underline = 1u << 9,
 };
 
 struct Span {
@@ -28,6 +30,10 @@ struct Span {
     unsigned style = Plain;
     std::string url;   // for Link and Image
     std::string emoji; // for Emoji: the key of its picture in the emoji pack
+    // Documents read for viewing (Word) give a run its own look; Markdown leaves these at 0.
+    std::uint32_t color = 0;     // text colour (packed like ImU32); 0: the block's
+    std::uint32_t highlight = 0; // background behind the text; 0: none
+    float size = 0.0f;           // points; 0: the block's size
 };
 using Spans = std::vector<Span>;
 
@@ -47,6 +53,12 @@ struct Block {
     std::vector<std::vector<Spans>> rows; // Table: cells; the first row is the header
     std::vector<int> align; // Table: per column -1 left, 0 centre, 1 right
     int line = 0;           // first source line (0-based), to go back to the text
+    // Documents read for viewing (Word): the paragraph's own layout, in points; Markdown leaves 0.
+    int textAlign = 0;            // 0 left (or justified), 1 centre, 2 right
+    float size = 0.0f;            // the paragraph's text size; 0: the renderer's (11 points)
+    float indentLeft = 0.0f, indentRight = 0.0f, firstLine = 0.0f; // firstLine < 0: a hanging indent
+    float spaceBefore = 0.0f;     // above the paragraph, beyond the renderer's own gap
+    std::uint32_t shading = 0;    // the paragraph's background (0: none)
 };
 
 std::vector<Block> parse(std::string_view text);

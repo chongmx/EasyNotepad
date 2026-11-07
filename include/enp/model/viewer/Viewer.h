@@ -29,6 +29,13 @@ struct FlowDocument {
     std::vector<Page> drawings;
 };
 
+// Scripts whose letters the bundled fonts lack: the views merge a system font in while a document
+// that uses them is shown. Han: Chinese characters, kana, CJK punctuation and full-width forms.
+enum Script : std::uint8_t { ScriptHan = 1, ScriptHangul = 2 };
+
+// The Script bits of the letters in `utf8`.
+std::uint8_t scriptsIn(std::string_view utf8);
+
 struct ViewerDocument {
     Shape shape = Shape::None;
     std::string format; // "Word document", "Excel workbook", "PowerPoint presentation", "PDF document"
@@ -38,6 +45,7 @@ struct ViewerDocument {
     FlowDocument flow;
     Workbook book;
     PageDocument pages;
+    std::uint8_t scripts = 0; // Script bits of its text (pages not read yet: their own, when read)
 };
 
 // The format a file is by its content (and extension for the ZIP-based ones), or "" when it is not

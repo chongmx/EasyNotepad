@@ -4,6 +4,7 @@
 
 #include "enp/model/package/Xml.h"
 #include "enp/model/package/Zip.h"
+#include "enp/model/viewer/Page.h"
 
 #include <cstdint>
 #include <map>
@@ -52,5 +53,8 @@ std::uint32_t readColor(XmlReader& x, const Theme& theme, const std::map<std::st
 // At the Start of a fill-holding element: reads the first solidFill / gradFill colour inside it
 // (to its End). `found` says whether a fill element was there at all (noFill gives 0, found).
 std::uint32_t readFillIn(XmlReader& x, const Theme& theme, const std::map<std::string, std::string>* schemeMap, bool* found);
+// At the Start of a:gradFill: its stops and its direction into `out` (to its End). Returns the first
+// stop's colour (what a painter without gradients fills with).
+std::uint32_t readGradientFill(XmlReader& x, const Theme& theme, const std::map<std::string, std::string>* schemeMap, Gradient& out);
 
 } // namespace enp::model::viewer::ooxml

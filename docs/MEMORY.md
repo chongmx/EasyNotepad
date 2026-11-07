@@ -97,7 +97,10 @@ gives everything back. Concretely, all of these hold:
    `IFileService::readInto`: the IntelliSense index build reads 4,000 files into one 2 MB buffer),
    containers reserved from an estimate before they are filled (`SymbolIndex::reserve`,
    `TextBuffer::text()`), and buffers reused while a feature is active (the suggestion list's
-   ranking), released when it ends. Read documents in place rather than copying their text.
+   ranking), released when it ends. Read documents in place rather than copying their text, and
+   map a large file that is only read (`os::fs::MappedFile`) rather than reading it into the heap:
+   the Chinese, Japanese and Korean fonts merged while a document needs them (`view::ScriptFonts`,
+   4 to 20 MB) are the system's file cache while merged and unmapped when removed.
    Background work that recurs runs on one `os::dispatch::Worker` thread kept by its owner, not a
    new thread each time (`runAsync`): a new thread gets whichever malloc arena is free, and each
    arena keeps up to the trim threshold of its free top, so the same work moved memory between
@@ -139,6 +142,7 @@ frees it, so a scope's live bytes are exactly what that subsystem still holds. S
 | `viewer` | a Word, Excel, PowerPoint or PDF document read for viewing: read and parsed on the reader service's one kept thread (`services::DocumentReaderService`), owned by `viewmodel::ViewerViewModel` by document id (its blocks, cells or pages; a PDF's file and object cache, shared with the reader thread while a page is read), drawn by `ViewerView` (layout: column edges, page tops; pictures). Freed on close or when opened as text, with a trim request: the reads in flight are cancelled and a late result is dropped (by the service when cancelled, by the view-model's generation otherwise; the service tracks a ticket only while its request runs). PDF pages are read as they come into view and dropped (with their pictures and bytes) when more than six pages away; a picture's encoded bytes leave the view-model once decoded (its pixels are in `imgui`) |
 | `views` | everything else the views allocate (`Application::frame`) |
 | `imgui` | Dear ImGui: windows, draw buffers, font atlas, textures |
+| `fonts` | the atlas's record of a system font merged for Chinese, Japanese or Korean text while a document shown needs it (`view::ScriptFonts`, updated between frames by `Application::endFrame`); the font file itself is mapped, not in the heap. Removed with its baked sizes once no open document needs it: 0 bytes after the close |
 | `automation` | the automation connector, the app's side of a test bench or the MCP bridge: requests, replies and calls queued for the main thread (`services::AutomationServer`). Ended connections are reaped every 200 ms; idle, it holds 0 bytes, and while a reading is taken it holds exactly that request |
 | `dispatch` | the background thread pool (`os::dispatch::runAsync`): its queue and its threads, kept for the life of the process and as many as the most work ever run at once. A thread per task cost memory in libraries that see every thread start (NVIDIA's OpenGL driver: about 70 KB a thread, up to 37 MB) |
 | `app` | the view-model, its services, commands and settings, made at start-up (`MainGlfw.cpp`) |

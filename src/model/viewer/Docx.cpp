@@ -27,11 +27,79 @@ md::Span textSpan(std::string text)
     return s;
 }
 
+// A run's formatting as a style or the run itself sets it; unset fields leave the one below.
+struct RunProps {
+    float size = 0.0f;           // points
+    std::uint32_t color = 0;     // 0: not set
+    bool autoColor = false;      // w:color auto: the default colour, over what a style set
+    std::uint32_t highlight = 0;
+    bool hasHighlight = false;
+    signed char bold = -1, italic = -1, underline = -1, strike = -1, code = -1;
+
+    void over(const RunProps& o)
+    {
+        if (o.size > 0.0f)
+            size = o.size;
+        if (o.color || o.autoColor)
+            color = o.color, autoColor = o.autoColor;
+        if (o.hasHighlight)
+            highlight = o.highlight, hasHighlight = true;
+        if (o.bold >= 0)
+            bold = o.bold;
+        if (o.italic >= 0)
+            italic = o.italic;
+        if (o.underline >= 0)
+            underline = o.underline;
+        if (o.strike >= 0)
+            strike = o.strike;
+        if (o.code >= 0)
+            code = o.code;
+    }
+};
+
+// A paragraph's layout as a style or the paragraph sets it (points).
+struct ParaProps {
+    int align = -1; // 0 left / justified, 1 centre, 2 right
+    bool hasLeft = false, hasRight = false, hasFirst = false, hasBefore = false, hasShading = false;
+    float left = 0.0f, right = 0.0f, first = 0.0f, before = 0.0f;
+    std::uint32_t shading = 0;
+
+    void over(const ParaProps& o)
+    {
+        if (o.align >= 0)
+            align = o.align;
+        if (o.hasLeft)
+            left = o.left, hasLeft = true;
+        if (o.hasRight)
+            right = o.right, hasRight = true;
+        if (o.hasFirst)
+            first = o.first, hasFirst = true;
+        if (o.hasBefore)
+            before = o.before, hasBefore = true;
+        if (o.hasShading)
+            shading = o.shading, hasShading = true;
+    }
+};
+
+std::uint32_t highlightColor(std::string_view name)
+{
+    static const std::pair<const char*, const char*> kNames[] = {
+        {"yellow", "FFFF00"},  {"green", "00FF00"},     {"cyan", "00FFFF"},        {"magenta", "FF00FF"},    {"blue", "0000FF"},
+        {"red", "FF0000"},     {"darkBlue", "000080"},  {"darkCyan", "008080"},    {"darkGreen", "008000"},  {"darkMagenta", "800080"},
+        {"darkRed", "800000"}, {"darkYellow", "808000"}, {"darkGray", "808080"},   {"lightGray", "C0C0C0"},  {"black", "000000"},
+        {"white", "FFFFFF"}};
+    for (const auto& [n, hex] : kNames)
+        if (name == n)
+            return ooxml::hexColor(hex);
+    return 0;
+}
+
 struct Style {
     std::string name;    // lower case
     std::string basedOn;
     int outline = -1;    // w:outlineLvl (0-based)
-    bool bold = false, italic = false;
+    RunProps run;
+    ParaProps para;
     std::string numId;   // a numbered style
     int numLevel = 0;
 };
@@ -96,6 +164,82 @@ std::string counterText(int n, const std::string& format)
     return std::to_string(n);
 }
 
+// A child of w:rPr: into `r`. False when it is not a property read here.
+bool readRunProperty(const XmlReader& x, std::string_view n, RunProps& r)
+{
+    auto flag = [&]() { return static_cast<signed char>(on(x) ? 1 : 0); };
+    if (n == "b")
+        r.bold = flag();
+    else if (n == "i")
+        r.italic = flag();
+    else if (n == "strike" || n == "dstrike")
+        r.strike = flag();
+    else if (n == "u")
+        r.underline = static_cast<signed char>(x.attribute("w:val") != "none" && !x.attribute("w:val").empty() ? 1 : 0);
+    else if (n == "sz")
+        r.size = float(std::atof(x.attribute("w:val").c_str()) / 2.0);
+    else if (n == "color") {
+        const std::string v = x.attribute("w:val");
+        if (v == "auto") {
+            r.color = 0;
+            r.autoColor = true;
+        } else {
+            r.color = ooxml::hexColor(v);
+            r.autoColor = false;
+        }
+    } else if (n == "highlight") {
+        r.highlight = highlightColor(x.attribute("w:val"));
+        r.hasHighlight = true;
+    } else if (n == "shd") {
+        const std::string fill = x.attribute("w:fill");
+        if (!fill.empty() && fill != "auto") {
+            r.highlight = ooxml::hexColor(fill);
+            r.hasHighlight = true;
+        }
+    } else if (n == "rFonts") {
+        const std::string font = x.attribute("w:ascii");
+        if (font.find("Courier") != std::string::npos || font.find("Consolas") != std::string::npos || font.find("Mono") != std::string::npos)
+            r.code = 1;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// A child of w:pPr: into `p` (twips to points).
+bool readParaProperty(const XmlReader& x, std::string_view n, ParaProps& p)
+{
+    auto twips = [&](const char* a, const char* b = nullptr) {
+        std::string v = x.attribute(a);
+        if (v.empty() && b)
+            v = x.attribute(b);
+        return float(std::atof(v.c_str()) / 20.0);
+    };
+    if (n == "jc") {
+        const std::string v = x.attribute("w:val");
+        p.align = v == "center" ? 1 : v == "right" || v == "end" ? 2 : 0;
+    } else if (n == "ind") {
+        if (x.hasAttribute("w:left") || x.hasAttribute("w:start"))
+            p.left = twips("w:left", "w:start"), p.hasLeft = true;
+        if (x.hasAttribute("w:right") || x.hasAttribute("w:end"))
+            p.right = twips("w:right", "w:end"), p.hasRight = true;
+        if (x.hasAttribute("w:hanging"))
+            p.first = -twips("w:hanging"), p.hasFirst = true;
+        else if (x.hasAttribute("w:firstLine"))
+            p.first = twips("w:firstLine"), p.hasFirst = true;
+    } else if (n == "spacing") {
+        if (x.hasAttribute("w:before"))
+            p.before = twips("w:before"), p.hasBefore = true;
+    } else if (n == "shd") {
+        const std::string fill = x.attribute("w:fill");
+        p.shading = fill.empty() || fill == "auto" ? 0 : ooxml::hexColor(fill);
+        p.hasShading = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 class DocxReader {
 public:
     explicit DocxReader(ooxml::ZipArchive& zip) : zip_(zip) {}
@@ -120,6 +264,17 @@ public:
         theme_ = ooxml::readTheme(zip_, ooxml::targetOfType(rels_, "theme"));
         XmlReader x(*xml);
         body(x, rels_, main_);
+        // The header above the body and the footer below it and its notes (as printed), each set
+        // apart by a rule.
+        if (!headerId_.empty()) {
+            std::vector<md::Block> header = headerFooter(headerId_);
+            if (!header.empty()) {
+                md::Block rule;
+                rule.kind = md::BlockKind::Rule;
+                header.push_back(rule);
+                doc.flow.blocks.insert(doc.flow.blocks.begin(), std::make_move_iterator(header.begin()), std::make_move_iterator(header.end()));
+            }
+        }
         if (!x.error().empty() && doc.flow.blocks.empty())
             doc.error = "the document's XML is broken: " + x.error();
         // Footnotes and endnotes, in the order they were referenced.
@@ -137,6 +292,16 @@ public:
                 b.marker = noteNumbers_[std::string(1, kind) + id] + ".";
                 b.spans = it->second;
                 doc.flow.blocks.push_back(std::move(b));
+            }
+        }
+        if (!footerId_.empty()) {
+            std::vector<md::Block> footer = headerFooter(footerId_);
+            if (!footer.empty()) {
+                md::Block rule;
+                rule.kind = md::BlockKind::Rule;
+                doc.flow.blocks.push_back(rule);
+                for (md::Block& b : footer)
+                    doc.flow.blocks.push_back(std::move(b));
             }
         }
         // Comments, in the order they were referenced: "c1." and who wrote them.
@@ -185,20 +350,37 @@ private:
             return;
         XmlReader x(*xml);
         Style* s = nullptr;
-        bool inRpr = false;
+        bool inRpr = false, inPpr = false, inDefaults = false;
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
-                if (x.localName() == "style")
+                const std::string_view n = x.localName();
+                if (n == "style")
                     s = nullptr;
-                else if (x.localName() == "rPr")
+                else if (n == "rPr")
                     inRpr = false;
+                else if (n == "pPr")
+                    inPpr = false;
+                else if (n == "docDefaults")
+                    inDefaults = false;
                 continue;
             }
             if (e != Event::Start)
                 continue;
             const std::string_view n = x.localName();
-            if (n == "style") {
+            if (n == "docDefaults") {
+                inDefaults = true;
+            } else if (n == "tblPr" || n == "tblStylePr" || n == "trPr" || n == "tcPr") {
+                x.skip(); // a table style's own parts: not a paragraph's
+            } else if (n == "rPr" && (s || inDefaults)) {
+                inRpr = true;
+            } else if (n == "pPr" && (s || inDefaults)) {
+                inPpr = true;
+            } else if (inRpr && readRunProperty(x, n, s ? s->run : defaults_.run)) {
+            } else if (inPpr && readParaProperty(x, n, s ? s->para : defaults_.para)) {
+            } else if (n == "style") {
                 s = &styles_[x.attribute("w:styleId")];
+                if (x.attribute("w:default") == "1" && x.attribute("w:type") == "paragraph")
+                    defaultStyle_ = x.attribute("w:styleId");
             } else if (!s) {
                 continue;
             } else if (n == "name") {
@@ -209,12 +391,6 @@ private:
                 s->basedOn = x.attribute("w:val");
             } else if (n == "outlineLvl") {
                 s->outline = std::atoi(x.attribute("w:val").c_str());
-            } else if (n == "rPr") {
-                inRpr = true;
-            } else if (inRpr && n == "b") {
-                s->bold = on(x);
-            } else if (inRpr && n == "i") {
-                s->italic = on(x);
             } else if (n == "numId") {
                 s->numId = x.attribute("w:val");
             } else if (n == "ilvl") {
@@ -246,6 +422,18 @@ private:
             id = s.basedOn;
         }
         return 0;
+    }
+
+    // A style's run and paragraph properties through its basedOn chain (the base first).
+    void styleProps(const std::string& id, RunProps& run, ParaProps& para, int depth = 0) const
+    {
+        const Style* st = style(id);
+        if (!st || depth > 16)
+            return;
+        if (!st->basedOn.empty() && st->basedOn != id)
+            styleProps(st->basedOn, run, para, depth + 1);
+        run.over(st->run);
+        para.over(st->para);
     }
 
     const Style* style(const std::string& id) const
@@ -399,11 +587,67 @@ private:
                 table(x, rels, part, blocks);
                 for (md::Block& b : blocks)
                     push(std::move(b));
-            } else if (n == "sectPr" || n == "Fallback") {
+            } else if (n == "sectPr") {
+                section(x);
+            } else if (n == "Fallback") {
                 x.skip();
             }
             // body, sdt, sdtContent, customXml, AlternateContent/Choice: descended into
         }
+    }
+
+    // At the Start of w:sectPr: the default (else first) header and footer of the section; the last
+    // section's are the document's (sections earlier in the body may have their own).
+    void section(XmlReader& x)
+    {
+        const int depth = x.depth();
+        std::string header, footer;
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "headerReference" || n == "footerReference") {
+                std::string& slot = n == "headerReference" ? header : footer;
+                if (slot.empty() || x.attribute("w:type") == "default")
+                    slot = x.attribute("r:id");
+            }
+        }
+        if (!header.empty())
+            headerId_ = header;
+        if (!footer.empty())
+            footerId_ = footer;
+    }
+
+    // A header or footer part's paragraphs and tables as blocks.
+    std::vector<md::Block> headerFooter(const std::string& id)
+    {
+        std::vector<md::Block> out;
+        const auto it = rels_.find(id);
+        if (it == rels_.end() || it->second.external)
+            return out;
+        const std::string& part = it->second.target;
+        const std::optional<std::string> xml = zip_.read(part, std::size_t(8) << 20);
+        if (!xml)
+            return out;
+        const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
+        XmlReader x(*xml);
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            if (x.localName() == "p") {
+                std::vector<md::Block> more;
+                md::Block b = paragraph(x, rels, part, &more);
+                if (!(b.kind == md::BlockKind::Paragraph && b.spans.empty()))
+                    out.push_back(std::move(b));
+                for (md::Block& m : more)
+                    out.push_back(std::move(m));
+            } else if (x.localName() == "tbl") {
+                table(x, rels, part, out);
+            }
+        }
+        return out;
     }
 
     void push(md::Block b)
@@ -413,18 +657,20 @@ private:
         doc_->flow.blocks.push_back(std::move(b));
     }
 
-    static void appendText(md::Spans& spans, std::string_view text, unsigned style, const std::string& url)
+    static void appendText(md::Spans& spans, std::string_view text, const md::Span& look)
     {
         if (text.empty())
             return;
-        if (!spans.empty() && spans.back().style == style && spans.back().url == url && !(style & md::Image)) {
-            spans.back().text += text;
-            return;
+        if (!spans.empty()) {
+            const md::Span& last = spans.back();
+            if (last.style == look.style && last.url == look.url && last.color == look.color && last.highlight == look.highlight &&
+                last.size == look.size && !(look.style & md::Image)) {
+                spans.back().text += text;
+                return;
+            }
         }
-        md::Span s;
+        md::Span s = look;
         s.text = std::string(text);
-        s.style = style;
-        s.url = url;
         spans.push_back(std::move(s));
     }
 
@@ -440,8 +686,29 @@ private:
         std::string link;    // the hyperlink being read
         int linkDepth = -1;
         bool inField = false; // between fldChar begin and separate: the field's instruction
-        unsigned runStyle = 0;
+        RunProps runDirect;   // the run's own formatting
+        std::string runStyleId;
+        ParaProps paraDirect;
         bool inRpr = false, inPpr = false;
+        // A run's text with its look: the defaults, the paragraph's style, the run's style, the run.
+        auto add = [&](std::string_view text, const std::string& url, bool asLink) {
+            RunProps r = defaults_.run;
+            ParaProps unused;
+            styleProps(styleId.empty() ? defaultStyle_ : styleId, r, unused);
+            styleProps(runStyleId, r, unused);
+            r.over(runDirect);
+            md::Span look;
+            look.style = (r.bold == 1 ? unsigned(md::Bold) : 0u) | (r.italic == 1 ? unsigned(md::Italic) : 0u) |
+                         (r.strike == 1 ? unsigned(md::Strike) : 0u) | (r.underline == 1 ? unsigned(md::Underline) : 0u) |
+                         (r.code == 1 ? unsigned(md::Code) : 0u) | (asLink ? unsigned(md::Link) : 0u);
+            if (const Style* rs = style(runStyleId); rs && (rs->name.find("code") != std::string::npos))
+                look.style |= md::Code;
+            look.color = asLink ? 0u : r.color;
+            look.highlight = r.highlight;
+            look.size = r.size;
+            look.url = url;
+            appendText(spans, text, look);
+        };
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
@@ -472,56 +739,42 @@ private:
                     numId = x.attribute("w:val");
                 else if (n == "outlineLvl")
                     outline = std::atoi(x.attribute("w:val").c_str());
-                else if (n == "rPr" || n == "sectPr" || n == "pPrChange")
+                else if (readParaProperty(x, n, paraDirect)) {
+                } else if (n == "rPr" || n == "sectPr" || n == "pPrChange")
                     x.skip(); // the paragraph mark's format; a section break; a tracked format change
                 continue;
             }
             if (inRpr) {
-                if (n == "b")
-                    runStyle = on(x) ? (runStyle | md::Bold) : (runStyle & ~unsigned(md::Bold));
-                else if (n == "i")
-                    runStyle = on(x) ? (runStyle | md::Italic) : (runStyle & ~unsigned(md::Italic));
-                else if (n == "strike" || n == "dstrike")
-                    runStyle = on(x) ? (runStyle | md::Strike) : (runStyle & ~unsigned(md::Strike));
-                else if (n == "rStyle") {
-                    const Style* rs = style(x.attribute("w:val"));
-                    if (rs && rs->bold)
-                        runStyle |= md::Bold;
-                    if (rs && rs->italic)
-                        runStyle |= md::Italic;
-                    if (rs && (rs->name.find("code") != std::string::npos || rs->name == "html code"))
-                        runStyle |= md::Code;
-                } else if (n == "rFonts") {
-                    const std::string font = x.attribute("w:ascii");
-                    if (font.find("Courier") != std::string::npos || font.find("Consolas") != std::string::npos ||
-                        font.find("Mono") != std::string::npos)
-                        runStyle |= md::Code;
-                } else if (n == "rPrChange") {
+                if (n == "rStyle")
+                    runStyleId = x.attribute("w:val");
+                else if (n == "rPrChange")
                     x.skip();
-                }
+                else
+                    readRunProperty(x, n, runDirect);
                 continue;
             }
             if (n == "pPr") {
                 inPpr = true;
             } else if (n == "r") {
-                runStyle = 0;
+                runDirect = RunProps();
+                runStyleId.clear();
             } else if (n == "rPr") {
                 inRpr = true;
             } else if (n == "t") {
                 const std::string text = x.elementText();
                 if (!inField)
-                    appendText(spans, text, runStyle | (link.empty() ? 0u : unsigned(md::Link)), link);
+                    add(text, link, !link.empty());
             } else if (n == "tab" || n == "ptab") {
                 if (!inField)
-                    appendText(spans, "    ", runStyle, link);
+                    add("    ", link, !link.empty());
             } else if (n == "br" || n == "cr") {
                 const std::string type = x.attribute("w:type");
                 if (type != "page" && type != "column")
-                    appendText(spans, " ", runStyle, link);
+                    add("\n", link, !link.empty()); // a line break: the renderer starts a new line
             } else if (n == "noBreakHyphen") {
-                appendText(spans, "-", runStyle, link);
+                add("-", link, !link.empty());
             } else if (n == "sym") {
-                appendText(spans, "\xE2\x96\xA1", runStyle, link); // a symbol-font glyph: a box
+                add("\xE2\x96\xA1", link, !link.empty()); // a symbol-font glyph: a box
             } else if (n == "fldChar") {
                 const std::string type = x.attribute("w:fldCharType");
                 if (type == "begin")
@@ -538,7 +791,7 @@ private:
                     commentOrder_.push_back(id);
                     at = commentOrder_.end() - 1;
                 }
-                appendText(spans, "[c" + std::to_string(at - commentOrder_.begin() + 1) + "]", runStyle, {});
+                add("[c" + std::to_string(at - commentOrder_.begin() + 1) + "]", {}, false);
             } else if (n == "hyperlink") {
                 const std::string id = x.attribute("r:id");
                 const auto it = rels.find(id);
@@ -555,7 +808,7 @@ private:
                     noteNumbers_[key] = std::to_string(noteOrder_.size() + 1);
                     noteOrder_.push_back({kind, id});
                 }
-                appendText(spans, "[" + noteNumbers_[key] + "]", runStyle, {});
+                add("[" + noteNumbers_[key] + "]", {}, false);
             } else if (n == "drawing" || n == "pict" || n == "object") {
                 drawing(x, rels, part, spans, extra);
             }
@@ -585,14 +838,24 @@ private:
             b.marker = marker;
         } else if (ps && (ps->name.find("quote") != std::string::npos)) {
             b.quote = 1;
-        } else if (ps && (ps->bold || ps->italic)) {
-            for (md::Span& s : spans) {
-                if (ps->bold)
-                    s.style |= md::Bold;
-                if (ps->italic)
-                    s.style |= md::Italic;
-            }
         }
+        RunProps baseRun = defaults_.run;
+        ParaProps para = defaults_.para;
+        styleProps(styleId.empty() ? defaultStyle_ : styleId, baseRun, para);
+        para.over(paraDirect);
+        b.size = baseRun.size;
+        for (md::Span& span : spans)
+            if (span.size == b.size)
+                span.size = 0.0f; // the paragraph's own size
+        b.textAlign = std::max(0, para.align);
+        if (b.kind == md::BlockKind::Paragraph || b.kind == md::BlockKind::Heading) { // lists indent by level
+            b.indentLeft = std::clamp(para.left, 0.0f, 288.0f);
+            b.indentRight = std::clamp(para.right, 0.0f, 288.0f);
+            b.firstLine = std::clamp(para.first, -b.indentLeft, 144.0f);
+        }
+        if (paraDirect.hasBefore || (ps && ps->para.hasBefore))
+            b.spaceBefore = std::clamp(para.before - 6.0f, 0.0f, 36.0f); // beyond the renderer's own gap
+        b.shading = para.shading;
         return b;
     }
 
@@ -705,12 +968,14 @@ private:
                     }
                 }
                 if (!cell->empty() && !kept.empty())
-                    cell->push_back(textSpan(" "));
+                    cell->push_back(textSpan("\n")); // a cell's paragraphs, each on its own line
                 for (md::Span& s : kept)
                     cell->push_back(std::move(s));
-            } else if (n == "tblPr" || n == "tblGrid" || n == "trPr" || n == "tcPr") {
-                if (n != "tcPr")
-                    x.skip();
+            } else if (n == "jc" && x.depth() == depth + 2) { // tblPr's: the table's own alignment
+                const std::string v = x.attribute("w:val");
+                t.textAlign = v == "center" ? 1 : v == "right" || v == "end" ? 2 : 0;
+            } else if (n == "tblGrid" || n == "trPr") {
+                x.skip();
             }
         }
         std::size_t columns = 0;
@@ -784,6 +1049,9 @@ private:
     std::string main_;
     ooxml::Relationships rels_;
     std::map<std::string, Style> styles_;
+    Style defaults_;           // w:docDefaults
+    std::string headerId_, footerId_; // the document's header and footer (relationship ids)
+    std::string defaultStyle_; // the paragraph style a paragraph without one has ("Normal")
     Numbering numbering_;
     std::map<std::string, md::Spans> footnotes_, endnotes_, comments_;
     std::map<std::string, std::string> commentAuthors_;

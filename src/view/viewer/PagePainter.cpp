@@ -40,6 +40,116 @@ void styledText(ImDrawList* dl, ImFont* font, float px, ImVec2 at, ImU32 color, 
         dl->AddLine(ImVec2(at.x, at.y + px * 0.55f), ImVec2(at.x + width, at.y + px * 0.55f), color, std::max(1.0f, px * 0.06f));
 }
 
+// The vertices drawn since `first` turned by `degrees` clockwise about `c`.
+void rotateVertices(ImDrawList* dl, int first, ImVec2 c, float degrees)
+{
+    if (std::fabs(degrees) < 0.01f)
+        return;
+    const float a = degrees * 3.14159265f / 180.0f, cs = std::cos(a), sn = std::sin(a);
+    for (int i = first; i < dl->VtxBuffer.Size; ++i) {
+        ImVec2& v = dl->VtxBuffer.Data[i].pos;
+        const float dx = v.x - c.x, dy = v.y - c.y;
+        v = ImVec2(c.x + dx * cs - dy * sn, c.y + dx * sn + dy * cs);
+    }
+}
+
+// The vertices drawn since `first` stretched along x by `k` from `x0`.
+void stretchVertices(ImDrawList* dl, int first, float x0, float k)
+{
+    if (std::fabs(k - 1.0f) < 0.005f)
+        return;
+    for (int i = first; i < dl->VtxBuffer.Size; ++i) {
+        ImVec2& v = dl->VtxBuffer.Data[i].pos;
+        v.x = x0 + (v.x - x0) * k;
+    }
+}
+
+// The vertices drawn since `first` recoloured by `g` over the bounds [lo, hi]: each keeps its
+// share of alpha (anti-aliased fringes stay transparent).
+void shadeVertices(ImDrawList* dl, int first, const mv::Gradient& g, ImVec2 lo, ImVec2 hi, ImVec2 origin = ImVec2(0, 0), float scale = 1.0f)
+{
+    if (g.stops.empty() || first >= dl->VtxBuffer.Size)
+        return;
+    if (g.absolute) { // the axis in page points
+        const ImVec2 p0(origin.x + g.from.x * scale, origin.y + g.from.y * scale), p1(origin.x + g.to.x * scale, origin.y + g.to.y * scale);
+        const float ax = p1.x - p0.x, ay = p1.y - p0.y, len2 = std::max(1e-6f, ax * ax + ay * ay);
+        const float r0 = g.r0 * scale, r1 = g.r1 * scale;
+        for (int i = first; i < dl->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = dl->VtxBuffer.Data[i];
+            float t;
+            if (g.radial) { // the circle the point lies on, from the first to the second (concentric enough)
+                const float d = std::sqrt((v.pos.x - p1.x) * (v.pos.x - p1.x) + (v.pos.y - p1.y) * (v.pos.y - p1.y));
+                t = std::fabs(r1 - r0) > 0.01f ? (d - r0) / (r1 - r0) : 0.0f;
+            } else {
+                t = ((v.pos.x - p0.x) * ax + (v.pos.y - p0.y) * ay) / len2;
+            }
+            const std::uint32_t color = g.at(std::clamp(t, 0.0f, 1.0f));
+            const float share = float((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f;
+            v.col = (color & 0x00FFFFFFu) | (ImU32(float((color >> 24) & 0xFF) * share + 0.5f) << IM_COL32_A_SHIFT);
+        }
+        return;
+    }
+    const ImVec2 c((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f);
+    const float a = g.angle * 3.14159265f / 180.0f, dx = std::cos(a), dy = std::sin(a);
+    // Linear: the projection on the direction, over the bounds' extent along it.
+    const float half = std::fabs((hi.x - lo.x) * 0.5f * dx) + std::fabs((hi.y - lo.y) * 0.5f * dy);
+    const float radius = std::max(1.0f, std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y)) * 0.5f);
+    for (int i = first; i < dl->VtxBuffer.Size; ++i) {
+        ImDrawVert& v = dl->VtxBuffer.Data[i];
+        float t;
+        if (g.radial)
+            t = std::sqrt((v.pos.x - c.x) * (v.pos.x - c.x) + (v.pos.y - c.y) * (v.pos.y - c.y)) / radius;
+        else
+            t = half > 0.0f ? 0.5f + ((v.pos.x - c.x) * dx + (v.pos.y - c.y) * dy) / (2.0f * half) : 0.0f;
+        const std::uint32_t color = g.at(std::clamp(t, 0.0f, 1.0f));
+        const float share = float((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f;
+        const float alpha = float((color >> 24) & 0xFF) * share;
+        v.col = (color & 0x00FFFFFFu) | (ImU32(alpha + 0.5f) << IM_COL32_A_SHIFT);
+    }
+}
+
+// A line's end at `tip`, coming from `from`: a filled or open arrow, a diamond or a dot, `size`
+// pixels long.
+void lineEnd(ImDrawList* dl, mv::LineEnd kind, ImVec2 tip, ImVec2 from, float size, ImU32 color, float width)
+{
+    if (kind == mv::LineEnd::None)
+        return;
+    float dx = tip.x - from.x, dy = tip.y - from.y;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 0.01f)
+        return;
+    dx /= len;
+    dy /= len;
+    const ImVec2 back(tip.x - dx * size, tip.y - dy * size), side(-dy * size * 0.5f, dx * size * 0.5f);
+    switch (kind) {
+    case mv::LineEnd::Triangle:
+        dl->AddTriangleFilled(tip, ImVec2(back.x + side.x, back.y + side.y), ImVec2(back.x - side.x, back.y - side.y), color);
+        break;
+    case mv::LineEnd::Stealth: {
+        const ImVec2 notch(tip.x - dx * size * 0.6f, tip.y - dy * size * 0.6f);
+        const ImVec2 pts[4] = {tip, ImVec2(back.x + side.x, back.y + side.y), notch, ImVec2(back.x - side.x, back.y - side.y)};
+        dl->AddConcavePolyFilled(pts, 4, color);
+        break;
+    }
+    case mv::LineEnd::Arrow: {
+        const ImVec2 pts[3] = {ImVec2(back.x + side.x, back.y + side.y), tip, ImVec2(back.x - side.x, back.y - side.y)};
+        dl->AddPolyline(pts, 3, color, width, ImDrawFlags_None);
+        break;
+    }
+    case mv::LineEnd::Diamond: {
+        const ImVec2 mid(tip.x - dx * size * 0.5f, tip.y - dy * size * 0.5f);
+        const ImVec2 pts[4] = {tip, ImVec2(mid.x + side.x, mid.y + side.y), back, ImVec2(mid.x - side.x, mid.y - side.y)};
+        dl->AddConvexPolyFilled(pts, 4, color);
+        break;
+    }
+    case mv::LineEnd::Oval:
+        dl->AddCircleFilled(ImVec2(tip.x - dx * size * 0.25f, tip.y - dy * size * 0.25f), size * 0.4f, color);
+        break;
+    case mv::LineEnd::None:
+        break;
+    }
+}
+
 } // namespace
 
 void PagePainter::release()
@@ -52,10 +162,20 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 end(origin.x + page.width * scale, origin.y + page.height * scale);
-    dl->AddRectFilled(origin, end, page.background);
     dl->PushClipRect(origin, end, true);
+    {
+        const int first = dl->VtxBuffer.Size;
+        dl->AddRectFilled(origin, end, page.backgroundGradient.stops.empty() ? page.background : page.backgroundGradient.stops.front().color);
+        shadeVertices(dl, first, page.backgroundGradient, origin, end);
+    }
     peak_ = 0;
     for (const mv::PageItem& item : page.items) {
+        const bool clipped = item.clip >= 0 && std::size_t(item.clip) < page.clips.size();
+        if (clipped) {
+            const mv::Rect& c = page.clips[std::size_t(item.clip)];
+            dl->PushClipRect(ImVec2(origin.x + c.x * scale, origin.y + c.y * scale), ImVec2(origin.x + (c.x + c.w) * scale, origin.y + (c.y + c.h) * scale),
+                             true);
+        }
         switch (item.kind) {
         case mv::PageItem::Kind::Path:
             drawPath(dl, page.paths[item.index], origin, scale);
@@ -71,13 +191,22 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
             const ImVec2 a(origin.x + img.box.x * scale, origin.y + img.box.y * scale);
             const ImVec2 b(a.x + img.box.w * scale, a.y + img.box.h * scale);
             const MarkdownImage* image = images ? images->image(img.media) : nullptr;
+            float u0 = img.crop.x, v0 = img.crop.y, u1 = img.crop.x + img.crop.w, v1 = img.crop.y + img.crop.h;
+            if (img.flipH)
+                std::swap(u0, u1);
+            if (img.flipV)
+                std::swap(v0, v1);
+            const int first = dl->VtxBuffer.Size;
             if (image && image->texture)
-                dl->AddImage(image->texture->GetTexRef(), a, b);
+                dl->AddImage(image->texture->GetTexRef(), a, b, ImVec2(u0, v0), ImVec2(u1, v1));
             else
                 dl->AddRectFilled(a, b, IM_COL32(128, 128, 128, 40));
+            rotateVertices(dl, first, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), img.rotation);
             break;
         }
         }
+        if (clipped)
+            dl->PopClipRect();
     }
     dl->PopClipRect();
     // The point buffer keeps a big path's room only while such paths are drawn.
@@ -96,6 +225,7 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
         for (std::size_t i = 0; i < sub.size(); ++i)
             points_[i] = ImVec2(origin.x + sub[i].x * scale, origin.y + sub[i].y * scale);
         const int n = int(points_.size());
+        const int firstFill = dl->VtxBuffer.Size;
         if (p.fill && n >= 3) {
             const bool rect = n == 4 && ((points_[0].x == points_[1].x && points_[1].y == points_[2].y && points_[2].x == points_[3].x) ||
                                          (points_[0].y == points_[1].y && points_[1].x == points_[2].x && points_[2].y == points_[3].y));
@@ -106,14 +236,59 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
             } else {
                 dl->AddConcavePolyFilled(points_.data(), n, p.fill);
             }
+            if (!p.gradient.stops.empty()) {
+                ImVec2 lo = points_[0], hi = points_[0];
+                for (const ImVec2& q : points_) {
+                    lo = ImVec2(std::min(lo.x, q.x), std::min(lo.y, q.y));
+                    hi = ImVec2(std::max(hi.x, q.x), std::max(hi.y, q.y));
+                }
+                shadeVertices(dl, firstFill, p.gradient, lo, hi, origin, scale);
+            }
         }
         if (p.stroke) {
             const bool closed = s < p.closed.size() && p.closed[s];
-            dl->AddPolyline(points_.data(), n, p.stroke, std::max(1.0f, p.lineWidth * scale), closed ? ImDrawFlags_Closed : ImDrawFlags_None);
+            const float width = std::max(1.0f, p.lineWidth * scale);
+            if (p.dash.empty()) {
+                dl->AddPolyline(points_.data(), n, p.stroke, width, closed ? ImDrawFlags_Closed : ImDrawFlags_None);
+            } else {
+                // Dashes: along the outline, the pattern's lengths in turn (on, off, on, ...).
+                std::size_t phase = 0;
+                float left = std::max(0.5f, p.dash[0] * scale);
+                const int segments = closed ? n : n - 1;
+                for (int i = 0; i < segments; ++i) {
+                    ImVec2 a = points_[size_t(i)];
+                    const ImVec2 b = points_[size_t((i + 1) % n)];
+                    float len = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+                    if (len < 0.01f)
+                        continue;
+                    const ImVec2 d((b.x - a.x) / len, (b.y - a.y) / len);
+                    while (len > 0.0f) {
+                        const float step = std::min(left, len);
+                        const ImVec2 to(a.x + d.x * step, a.y + d.y * step);
+                        if (phase % 2 == 0)
+                            dl->AddLine(a, to, p.stroke, width);
+                        a = to;
+                        len -= step;
+                        left -= step;
+                        if (left <= 0.0f) {
+                            phase = (phase + 1) % (p.dash.size() % 2 == 0 ? p.dash.size() : p.dash.size() * 2);
+                            left = std::max(0.5f, p.dash[phase % p.dash.size()] * scale);
+                        }
+                    }
+                }
+            }
+            if (!closed && n >= 2) {
+                const float size = std::max(6.0f, width * 3.0f);
+                lineEnd(dl, p.head, points_[0], points_[1], size, p.stroke, width);
+                lineEnd(dl, p.tail, points_[size_t(n - 1)], points_[size_t(n - 2)], size, p.stroke, width);
+            }
         }
     }
 }
 
+// A PDF's text is drawn in our font at its own positions: word by word, each stretched to the width
+// the PDF gives it (its font's metrics, character spacing, horizontal scaling), so words keep their
+// natural letter spacing and land where the PDF put them. A turned run is turned about its start.
 void PagePainter::drawGlyphs(ImDrawList* dl, const mv::GlyphRun& g, ImVec2 origin, float scale, const Fonts& fonts)
 {
     if ((g.color >> 24) == 0) // invisible text (over a scanned page): kept for copying, not drawn
@@ -123,18 +298,34 @@ void PagePainter::drawGlyphs(ImDrawList* dl, const mv::GlyphRun& g, ImVec2 origi
         return;
     ImFont* font = fontFor(fonts, g.flags);
     const float ascent = font->GetFontBaked(px)->Ascent;
-    const float top = origin.y + g.baseline * scale - ascent;
+    const ImVec2 runAt(origin.x + g.x * scale, origin.y + g.baseline * scale);
+    const int firstVertex = dl->VtxBuffer.Size;
     const char* text = g.text.data();
     const char* end = text + g.text.size();
-    std::size_t k = 0;
-    for (const char* c = text; c < end; ++k) {
-        const char* next = std::min(end, c + utf8Length(static_cast<unsigned char>(*c)));
-        if (*c != ' ') {
-            const float x = origin.x + (g.x + (k < g.offsets.size() ? g.offsets[k] : 0.0f)) * scale;
-            styledText(dl, font, px, ImVec2(x, top), g.color, g.flags & ~std::uint8_t(mv::Underline | mv::Strike), c, next, 0.0f);
+    std::size_t k = 0; // code point index
+    auto offset = [&](std::size_t i) { return i < g.offsets.size() ? g.offsets[i] : g.width; };
+    for (const char* c = text; c < end;) {
+        if (*c == ' ') {
+            ++c;
+            ++k;
+            continue;
         }
-        c = next;
+        // One word: up to the next space.
+        const char* w = c;
+        const std::size_t k0 = k;
+        while (c < end && *c != ' ') {
+            c = std::min(end, c + utf8Length(static_cast<unsigned char>(*c)));
+            ++k;
+        }
+        const float x0 = runAt.x + offset(k0) * scale;
+        const float target = (offset(k) - offset(k0)) * scale;
+        const int wordVertex = dl->VtxBuffer.Size;
+        styledText(dl, font, px, ImVec2(x0, runAt.y - ascent), g.color, g.flags & ~std::uint8_t(mv::Underline | mv::Strike), w, c, 0.0f);
+        const float natural = measure(font, px, w, c);
+        if (natural > 0.5f && target > 0.5f)
+            stretchVertices(dl, wordVertex, x0, std::clamp(target / natural, 0.5f, 2.0f));
     }
+    rotateVertices(dl, firstVertex, runAt, g.angle);
 }
 
 // Wraps and draws a slide's text box: paragraphs of runs, line by line, without copying the text.
@@ -252,7 +443,10 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
         const float room = bottom - top;
         y = box.anchor == 1 ? top + (room - h) * 0.5f : bottom - h;
     }
+    const int firstVertex = dl->VtxBuffer.Size;
     layout(y, true);
+    rotateVertices(dl, firstVertex, ImVec2(origin.x + (box.box.x + box.box.w * 0.5f) * scale, origin.y + (box.box.y + box.box.h * 0.5f) * scale),
+                   box.rotation);
 }
 
 } // namespace enp::view

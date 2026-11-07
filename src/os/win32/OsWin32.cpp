@@ -185,6 +185,35 @@ bool readFileInto(const std::string& path, std::string& out, size_t maxBytes, st
     return true;
 }
 
+bool MappedFile::open(const std::string& path)
+{
+    close();
+    HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    LARGE_INTEGER length{};
+    if (GetFileSizeEx(h, &length) && length.QuadPart > 0 && std::uint64_t(length.QuadPart) <= SIZE_MAX) {
+        if (HANDLE mapping = CreateFileMappingW(h, nullptr, PAGE_READONLY, 0, 0, nullptr)) {
+            if (void* p = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0)) {
+                data_ = p;
+                size_ = size_t(length.QuadPart);
+            }
+            CloseHandle(mapping); // the view keeps the mapping
+        }
+    }
+    CloseHandle(h);
+    return data_ != nullptr;
+}
+
+void MappedFile::close()
+{
+    if (data_)
+        UnmapViewOfFile(data_);
+    data_ = nullptr;
+    size_ = 0;
+}
+
 std::optional<std::string> readFile(const std::string& path, std::string* error)
 {
     HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

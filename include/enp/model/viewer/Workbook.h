@@ -11,8 +11,24 @@
 
 namespace enp::model::viewer {
 
+// A cell's four edges (left, right, top, bottom), shared by the cells that use them.
+struct Border {
+    enum Style : std::uint8_t { None, Thin, Medium, Thick, Dashed, Dotted, Double, Hair };
+    std::uint8_t style[4] = {None, None, None, None};
+    std::uint32_t color[4] = {0, 0, 0, 0}; // 0: automatic (the text colour)
+};
+
+// A part of a cell's text in its own font (rich text): bytes [begin, end) of the text.
+struct CellRun {
+    std::uint32_t begin = 0, end = 0;
+    bool own = false;          // false: the cell's font; true: the font below
+    std::uint8_t flags = 0;    // Cell::Bold / Italic / Underline / Strike
+    std::uint32_t color = 0;   // 0: the default
+    std::uint8_t halfPoints = 0; // 0: the cell's size
+};
+
 struct Cell {
-    enum Flags : std::uint8_t { Number = 1, Bold = 2, Italic = 4, Error = 8, Underline = 16 };
+    enum Flags : std::uint8_t { Number = 1, Bold = 2, Italic = 4, Error = 8, Underline = 16, Wrap = 32, Strike = 64 };
     std::uint32_t column = 0; // 0-based
     std::string text;         // as shown
     std::string formula;      // without the '='; empty for a constant
@@ -20,6 +36,11 @@ struct Cell {
     std::int8_t align = -1;   // -1 by type (numbers right), 0 left, 1 centre, 2 right
     std::uint32_t fill = 0;   // background (0: none), packed like Page colours
     std::uint32_t color = 0;  // text colour (0: default)
+    std::uint8_t halfPoints = 0; // font size in half points (0: the workbook's default)
+    std::int8_t valign = -1;     // -1 bottom (Excel's default), 0 top, 1 centre
+    std::int16_t rotation = 0;   // degrees anticlockwise (-90..90); 255: letters stacked downwards
+    std::uint16_t border = 0;    // into Workbook::borders (0: none)
+    std::uint32_t rich = 0;      // into Workbook::richTexts (0: one font)
 };
 
 struct Row {
@@ -63,6 +84,9 @@ struct Workbook {
     // Encoded pictures of the drawings, by the key their image items name.
     std::map<std::string, std::string> media;
     bool date1904 = false;
+    float defaultFontSize = 11.0f;              // points: the size of the Normal style's font
+    std::vector<Border> borders;                // [0] is no border
+    std::vector<std::vector<CellRun>> richTexts; // [0] is unused
 };
 
 } // namespace enp::model::viewer
