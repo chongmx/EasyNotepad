@@ -81,6 +81,7 @@ struct TextRun {
     float size = 18.0f;
     std::uint32_t color = kBlack;
     std::uint8_t flags = 0;
+    std::string font; // its typeface ("Calibri"); empty: the view's font
 };
 
 struct TextParagraph {

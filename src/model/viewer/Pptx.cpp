@@ -43,6 +43,7 @@ struct LevelStyle {
     float spaceBeforePct = -1.0f; // of the text size; -1 not set
     float lineSpacing = -1.0f; // multiple of the line; -1 not set
     std::string bullet; // a character, "auto" for numbering, "" for none set, "none"
+    std::string font;   // the latin typeface, as written ("+mn-lt": the theme's minor font); "" not set
 
     // What `o` sets, over this.
     void over(const LevelStyle& o)
@@ -67,8 +68,21 @@ struct LevelStyle {
             lineSpacing = o.lineSpacing;
         if (!o.bullet.empty())
             bullet = o.bullet;
+        if (!o.font.empty())
+            font = o.font;
     }
 };
+
+// A typeface as DrawingML names it: the theme's major or minor font for +mj-lt / +mn-lt (and the
+// minor font when none is named), else itself.
+std::string typeface(std::string_view face, const ooxml::Theme& theme)
+{
+    if (face.empty() || face == "+mn-lt" || face.substr(0, 3) == "+mn")
+        return theme.minorFont;
+    if (face == "+mj-lt" || face.substr(0, 3) == "+mj")
+        return theme.majorFont;
+    return std::string(face);
+}
 
 struct TextStyle {
     LevelStyle levels[9];
@@ -375,6 +389,8 @@ private:
                     l.italic = x.attribute("i") == "1" ? 1 : 0;
                 if (x.hasAttribute("cap"))
                     l.caps = x.attribute("cap") == "all" ? 1 : 0;
+            } else if (level >= 0 && n == "latin") {
+                style.levels[level].font = x.attribute("typeface");
             } else if (level >= 0 && n == "solidFill") {
                 bool found = false;
                 const std::uint32_t c = ooxml::readFillIn(x, theme, clrMap, &found);
@@ -1099,6 +1115,7 @@ private:
         TextRun run;
         run.size = level.size > 0 ? level.size : 18.0f;
         run.color = level.hasColor ? level.color : defaultColor;
+        run.font = typeface(level.font, theme);
         if (level.bold == 1)
             run.flags |= Bold;
         if (level.italic == 1)
@@ -1141,6 +1158,7 @@ private:
                         if (face.find("Courier") != std::string::npos || face.find("Consolas") != std::string::npos ||
                             face.find("Mono") != std::string::npos)
                             run.flags |= Mono;
+                        run.font = typeface(face, theme);
                     } else if (m == "hlinkClick") {
                         link = !x.attribute("r:id").empty();
                         x.skip();

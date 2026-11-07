@@ -913,6 +913,7 @@ TEST(viewer_draws_slides_as_office_does)
     // The theme's third background fill style: a radial gradient in the referenced colour (phClr).
     const std::string theme = R"(<a:theme xmlns:a="a"><a:themeElements><a:clrScheme name="t"><a:dk1><a:srgbClr val="000000"/></a:dk1>
 <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1></a:clrScheme>
+<a:fontScheme name="s"><a:majorFont><a:latin typeface="Georgia"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme>
 <a:fmtScheme name="f"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>
 <a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
 <a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="80000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="30000"/></a:schemeClr></a:gs></a:gsLst>
@@ -927,14 +928,15 @@ TEST(viewer_draws_slides_as_office_does)
 <p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>)";
     const std::string layout = R"(<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1003"><a:schemeClr val="bg2"/></p:bgRef></p:bg><p:spTree>
 <p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="600000"/></a:xfrm></p:spPr>
-<p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr cap="all"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
+<p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr cap="all"><a:latin typeface="+mj-lt"/></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="700000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm></p:spPr>
 <p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="tx1"><a:tint val="75000"/></a:schemeClr></a:solidFill></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sldLayout>)";
     const std::string slide = R"(<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
 <p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Section title</a:t></a:r></a:p></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Grey subtitle</a:t></a:r></a:p>
-<a:p><a:r><a:rPr i="1"/><a:t>Slanted</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="rId9"/></a:rPr><a:t>link</a:t></a:r></a:p></p:txBody></p:sp>
+<a:p><a:r><a:rPr i="1"/><a:t>Slanted</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="rId9"/></a:rPr><a:t>link</a:t></a:r>
+<a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>In Arial</a:t></a:r></a:p></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="5000000" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr>
 <p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>
 <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:p><a:r><a:t>White text</a:t></a:r></a:p></p:txBody></p:sp>
@@ -983,6 +985,11 @@ TEST(viewer_draws_slides_as_office_does)
     CHECK(grey && std::abs(int(grey->color & 0xFF) - 0x89) <= 2 && std::abs(int((grey->color >> 8) & 0xFF) - 0x89) <= 2);
     const mv::TextRun* slanted = find("Slanted");
     CHECK(slanted && (slanted->flags & mv::Italic));
+    // Typefaces: the layout's +mj-lt (the theme's major font), the theme's minor font when none is
+    // named, a run's own.
+    CHECK(find("SECTION TITLE") && find("SECTION TITLE")->font == "Georgia");
+    CHECK(grey && grey->font == "Calibri");
+    CHECK(find("In Arial") && find("In Arial")->font == "Arial");
     const mv::TextRun* link = find("link");
     CHECK(link && link->color == mv::rgba(0x05, 0x63, 0xC1) && (link->flags & mv::Underline)); // the theme's hlink
     const mv::TextRun* white = find("White text");

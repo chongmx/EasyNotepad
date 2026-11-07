@@ -387,6 +387,7 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
                     run = &para.runs.back();
                     run->size = 11.0f;
                     run->color = fontColor ? fontColor : theme.color("dk1", kBlack);
+                    run->font = theme.minorFont;
                 } else if (m == "rPr" && run) {
                     if (x.hasAttribute("sz"))
                         run->size = std::max(1.0f, float(std::atof(x.attribute("sz").c_str()) / 100.0));
@@ -396,6 +397,11 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
                         run->flags |= Italic;
                     if (!x.attribute("u").empty() && x.attribute("u") != "none")
                         run->flags |= Underline;
+                } else if (m == "latin" && run) {
+                    const std::string face = x.attribute("typeface");
+                    run->font = face.empty() || face.compare(0, 3, "+mn") == 0 ? theme.minorFont
+                              : face.compare(0, 3, "+mj") == 0                 ? theme.majorFont
+                                                                               : face;
                 } else if (m == "solidFill" && run) {
                     bool found = false;
                     const std::uint32_t c = ooxml::readFillIn(x, theme, nullptr, &found);

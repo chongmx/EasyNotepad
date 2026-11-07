@@ -1,6 +1,7 @@
 #include "enp/view/viewer/PagePainter.h"
 
 #include "enp/os/Memory.h"
+#include "enp/view/DocumentFonts.h"
 #include "enp/view/MarkdownImages.h"
 
 #include <algorithm>
@@ -20,6 +21,23 @@ std::size_t utf8Length(unsigned char c)
 ImFont* fontFor(const Fonts& fonts, std::uint8_t flags)
 {
     return (flags & mv::Mono) && fonts.mono ? fonts.mono : fonts.ui;
+}
+
+// The face a slide's run is drawn in: its typeface with the face's own weight and slant (the
+// flags left are the ones to fake), or the view's font when the typeface is not there or lacks
+// one of the run's letters.
+struct Ink {
+    ImFont* font;
+    std::uint8_t flags;
+};
+Ink inkFor(const Fonts& fonts, const mv::TextRun& r)
+{
+    if (!r.font.empty() && fonts.documents && !(r.flags & mv::Mono)) {
+        const DocumentFonts::Face face = fonts.documents->face(r.font, (r.flags & mv::Bold) != 0, (r.flags & mv::Italic) != 0);
+        if (face.font && DocumentFonts::covers(face.font, r.text.data(), r.text.data() + r.text.size()))
+            return Ink{face.font, std::uint8_t(r.flags & ~((face.bold ? mv::Bold : 0) | (face.italic ? mv::Italic : 0)))};
+    }
+    return Ink{fontFor(fonts, r.flags), r.flags};
 }
 
 float measure(ImFont* font, float px, const char* b, const char* e)
@@ -450,7 +468,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         breakAt = p;
                         continue;
                     }
-                    ImFont* font = fontFor(fonts, r.flags);
+                    ImFont* font = inkFor(fonts, r).font;
                     const float px = r.size * scale;
                     maxSize = std::max(maxSize, r.size);
                     const char* s = r.text.data();
@@ -486,7 +504,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         x += std::max(0.0f, avail - width);
                     if (firstLine && !para.bullet.empty() && !runs.empty()) {
                         const mv::TextRun& r0 = runs[0];
-                        ImFont* font = fontFor(fonts, r0.flags);
+                        ImFont* font = inkFor(fonts, r0).font;
                         const float px = r0.size * scale;
                         const float bw = measure(font, px, para.bullet.data(), para.bullet.data() + para.bullet.size());
                         dl->AddText(font, px, ImVec2(lineLeft - bw - 6.0f * scale, y + (lineH - px) * 0.5f), r0.color, para.bullet.data(),
@@ -501,13 +519,13 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                             std::size_t e = stop;
                             if (e > q.at && r.text[e - 1] == '\n')
                                 --e;
-                            ImFont* font = fontFor(fonts, r.flags);
+                            const Ink ink = inkFor(fonts, r);
                             const float px = r.size * scale;
                             const char* b = r.text.data() + q.at;
                             const char* en = r.text.data() + e;
-                            const float w = measure(font, px, b, en);
+                            const float w = measure(ink.font, px, b, en);
                             if (px >= 1.0f && en > b)
-                                styledText(dl, font, px, ImVec2(x, y + (lineH - px * 1.2f) * 0.5f + px * 0.1f), r.color, r.flags, b, en, w);
+                                styledText(dl, ink.font, px, ImVec2(x, y + (lineH - px * 1.2f) * 0.5f + px * 0.1f), r.color, ink.flags, b, en, w);
                             x += w;
                         }
                         q = Pos{q.run + 1, 0};
