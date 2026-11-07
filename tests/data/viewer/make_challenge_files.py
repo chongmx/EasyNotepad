@@ -160,6 +160,13 @@ def make_docx(path):
                       '<wp:docPr id="10" name="Gradient" descr="A blue gradient"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
                       '<pic:pic><pic:nvPicPr><pic:cNvPr id="10" name="g.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
                       '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    # A floating picture: right-aligned to the margin, level with its paragraph, text wrapping around it.
+    floating_picture = ('<w:r><w:drawing><wp:anchor behindDoc="0" distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="2" locked="0" layoutInCell="1" allowOverlap="1">'
+                        '<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH>'
+                        '<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="914400"/><wp:wrapSquare wrapText="bothSides"/>'
+                        '<wp:docPr id="13" name="Floating" descr="A floating gradient"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+                        '<pic:pic><pic:nvPicPr><pic:cNvPr id="13" name="f.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+                        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>')
     chart_run = ('<w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="3200400"/><wp:docPr id="11" name="Chart 1"/><a:graphic>'
                  '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
     # A text box (wps), with a VML fallback that must not be read twice.
@@ -216,6 +223,7 @@ def make_docx(path):
              '<w:tabs><w:tab w:val="center" w:pos="4500"/><w:tab w:val="decimal" w:pos="8000"/></w:tabs>'),
         para(run("Unicode: 中文, العربية, é vs é, \U0001F600, ∑ x².")),
         para(inline_picture + run(" inline after a picture.")),
+        para(floating_picture + run("A paragraph with a floating picture at the right margin, set level with its first line; Word wraps the text around it, the reflowed view shows it after the text.")),
         table,
         para(text_box + run("Text beside the text box.")),
         para(chart_run),

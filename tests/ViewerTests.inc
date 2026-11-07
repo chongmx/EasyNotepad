@@ -754,6 +754,16 @@ TEST(viewer_reads_the_challenge_files)
             CHECK(footer);
             CHECK(mv::plainText(doc).find("stop, line\nbreak") != std::string::npos);
         }
+        // The floating picture: one inch, at the right margin, level with its paragraph, the text
+        // beside it 0.125 inch away.
+        CHECK(doc.flow.floats.size() == 1);
+        if (doc.flow.floats.size() == 1) {
+            const mv::FlowDocument::Float& f = doc.flow.floats[0];
+            CHECK(std::fabs(f.width - 72.0f) < 0.01f && std::fabs(f.height - 72.0f) < 0.01f);
+            CHECK(f.fromH == 1 && f.alignH == 2 && f.fromV == 2 && f.alignV == -1 && f.wrap == 1 && !f.behind);
+            CHECK(std::fabs(f.dist[0] - 9.0f) < 0.01f && f.dist[1] == 0.0f);
+            CHECK(f.block < doc.flow.blocks.size() && md::plainText(doc.flow.blocks[f.block].spans).find("floating picture") != std::string::npos);
+        }
     }
 
     // Excel: number format colours and fractions, rich text, sizes, borders, wrapping, rotation,

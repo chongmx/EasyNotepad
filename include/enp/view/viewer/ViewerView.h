@@ -79,7 +79,15 @@ private:
         // Word: the page view (else reflowed); its pages as laid out at `wordScale` for `wordGeneration`.
         bool reflow = false;
         struct WordPage {
-            std::vector<std::pair<std::size_t, float>> blocks; // block, its top in the page's text area (pixels; < 0: continued)
+            struct Placed {
+                std::size_t block = 0;
+                float top = 0.0f;    // in the page's text area (pixels; < 0: continued from the page before)
+                float height = 0.0f; // at its width
+                float inset = 0.0f;  // beside a floating picture: from the text area's left edge
+                float width = 0.0f;  // and narrowed to (0: the text area's width)
+            };
+            std::vector<Placed> blocks;
+            std::vector<std::pair<std::size_t, float>> floats; // floating pictures (into the document's), their paragraph's top
             std::vector<std::size_t> notes;                    // its footnotes' blocks
             float notesH = 0.0f;
         };
@@ -118,7 +126,8 @@ private:
     void toolbar(model::Document& doc, Entry& e, const model::viewer::ViewerDocument& d, float width);
     void flow(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void wordPages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size, const Palette& paper);
-    void paginate(Entry& e, const model::viewer::ViewerDocument& d, float textHeight, float pxPerPoint);
+    void paginate(Entry& e, const model::viewer::ViewerDocument& d, float textWidth, float textHeight, float pxPerPoint, const Palette& paper,
+                  float fontSize);
     void sheet(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void sheetTabs(Entry& e, const model::viewer::Workbook& book, ImVec2 size);
     void pages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);

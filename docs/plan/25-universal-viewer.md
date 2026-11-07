@@ -60,14 +60,31 @@ is to be checked and ranked against it. Priority: **A** visible in most real fil
 
 ### Word
 
+Done on `feature/word-rendering`:
+
+- **The document's own fonts:** `rFonts` and the theme's fonts, from the system when installed,
+  else the bundled metric-compatible pack (`resources/fonts/document-fonts.zip`: Carlito for
+  Calibri, Caladea for Cambria, Liberation for Times New Roman / Arial / Courier New), bold and
+  italic faces, loaded when first drawn and given back when idle (`view::DocumentFonts`).
+- **Tab stops:** left, centre, right and decimal, with dot, dash and line leaders (tables of contents).
+- **Tables:** column widths from `tblGrid`, `gridSpan`, `vMerge`, cell shading, borders from the
+  table, the cell and the table style's conditional parts (`tblLook`: header row, banded rows, first
+  column...), cell alignment per paragraph, Word's automatic white text on dark shading.
+- **Spacing:** before / after, line spacing (multiple, exact, at least), contextual spacing, list
+  level indents with the marker at the hanging indent.
+- **Pages** (the default; the toolbar's Reflow button reflows to the window): page size and margins,
+  page breaks, section breaks, keep with next, headers and footers on every page with PAGE and
+  NUMPAGES fields, footnotes at the foot of their page, page navigation.
+- **Floating pictures:** placed from their anchor (page, margin or paragraph; offset or aligned), in
+  front of or behind the text; text beside them (square, tight, through) is narrowed to the wider
+  side, or goes under them (top and bottom, or no room beside).
+
 | Pri | Gap | What it takes |
 |---|---|---|
-| A | **No pages:** the document is one reflowed column; page size, margins, page breaks, section breaks and columns are ignored | a paginated layout (25 "Later": print layout) on the display list; reflowed stays the reading default |
-| A | **Floating pictures, shapes and text boxes** (anchored, with text wrapping) are put after their paragraph | position anchors relative to page / margin / paragraph and wrap text around them; needs pages |
-| A | **Tab stops** become four spaces: right, centre and decimal tabs and dot leaders (tables of contents) are lost | read `w:tabs` per paragraph and lay text out to them |
-| B | Table column widths come from the content, not `tblGrid` / `tcW`; text alignment inside cells is not applied; nested tables are flattened; pictures in cells move after the table; table style borders and shading partly | table layout from the grid; cells holding blocks (the shared renderer's table cell model, 25.1) |
-| B | Headers and footers: only the last section's default, shown once; first-page and even-page headers and page-number fields per page | with pages |
-| B | Footnotes at the end instead of at the page bottom; comments as a list instead of margin balloons; tracked changes: deletions hidden, insertions plain (Word shows markup) | a markup mode: insertions underlined and coloured, deletions struck |
+| B | Text beside a floating picture is narrowed for the whole paragraph: Word narrows only the lines beside the picture; floating shapes and text boxes are still put after their paragraph | line-by-line wrap in the paragraph layout (each line's room from the floats it meets); shapes through the slide painter |
+| B | Nested tables are flattened; pictures in cells move after the table | cells holding blocks (the shared renderer's table cell model, 25.1) |
+| B | Headers and footers: only the last section's default; first-page and even-page headers, columns | per section |
+| B | Comments as a list instead of margin balloons; tracked changes: deletions hidden, insertions plain (Word shows markup) | a markup mode: insertions underlined and coloured, deletions struck |
 | C | Paragraph borders, drop caps, `w:sym` symbol characters (drawn as a box), equations (OMML) laid out as math, line numbers, watermarks | per item |
 
 ### Excel
@@ -120,7 +137,7 @@ wrong; the rest confirm gaps listed above. **Fixed** rows were fixed the same da
 | A | Fixed | Text in a shape takes its colour from the shape's style (`p:style/a:fontRef` with a scheme colour): white text on a green box; ours black | poi-themes 4 ("Text in a autoshape is white") (fixed: fontRef colours the shape's text over the master's text styles (Pptx textBody)) |
 | A | Fixed | Italic text in slides is upright (title placeholders of the Austin theme, "This bit is in italic green") | poi-SampleShow 1, poi-themes 4-5 (fixed: italic runs slanted by the painter (styledText)) |
 | A | Gap (fonts) | Calibri / Century Gothic are lighter and narrower than our Roboto Medium: every slide's text looks bolder and breaks lines elsewhere ("Nunc at risus vel erat tempus / posuere." breaks after "tempus" in Office) | all decks, poi-sample 1 |
-| A | Gap | Word table styles: the tables' orange header rows and lines (a built-in "Grid Table" style) are not drawn | poi-table-alignment |
+| A | Fixed | Word table styles: the tables' orange header rows and lines (a built-in "Grid Table" style) are not drawn | poi-table-alignment (fixed: table styles with their conditional parts (Docx tableStyle)) |
 | A | Fixed | A layout's radial gradient background is drawn as one flat colour | poi-themes 3 ("Radial Gradient Fill On Slide Layout") (fixed: bgRef / fillRef resolve the theme's fill style lists with phClr (themeFill); radial centre from fillToRect; gradient fills drawn on a subdivided mesh (PagePainter subdivide)) |
 | B | Fixed | Comparison layout: the right column's bullet sits apart from its text, which is pushed right, and its heading is centred; Office left-aligns both columns | poi-layouts 5 (fixed: a placeholder matches the master by type only, the layout by idx) |
 | B | Fixed | Elbow connectors (`bentConnector3`) are drawn as one straight line | poi-shapes 1 (cloud to picture) (fixed: bent and curved connectors routed (dml::connectorPath)) |

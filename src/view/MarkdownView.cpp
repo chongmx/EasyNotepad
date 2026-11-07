@@ -26,6 +26,7 @@ struct MarkdownView::Style {
     ImFont* mono = nullptr;
     DocumentFonts* documentFonts = nullptr;               // a document's own fonts (Span::font), when set
     int pageNumber = 0, pageCount = 0;                   // the page drawn on (PageNumber / PageCount spans); 0: as saved
+    bool pages = false;                                   // a document's page view: floating pictures are placed by it, not in the text
     const std::vector<std::string>* fontNames = nullptr; // the document's font families, as Span::font numbers them
     float size = 15.0f; // body text, in pixels
     bool paper = false; // a document read for viewing: its own colours; italics not dimmed
@@ -174,6 +175,8 @@ private:
     // An image on lines of its own, at its pixel size (scaled with the UI) within the column.
     void image(const md::Span& span)
     {
+        if ((span.style & md::Floating) && st_.pages)
+            return; // the page view places it
         const MarkdownImage* img = st_.images && *st_.images ? (*st_.images)(span.url) : nullptr;
         if (!img || img->failed || !img->texture) {
             placeholder(span, img ? img->note : std::string("images are not shown here"));
@@ -181,6 +184,11 @@ private:
         }
         const float maxW = right_ - left_;
         float w = float(img->width) * st_.s, h = float(img->height) * st_.s;
+        if (span.width > 0.0f && span.height > 0.0f) { // the document's own size
+            const float ppp = pxPerPoint_ > 0.0f ? pxPerPoint_ : st_.size / 11.0f;
+            w = span.width * ppp;
+            h = span.height * ppp;
+        }
         if (w > maxW) {
             h *= maxW / w;
             w = maxW;
@@ -1279,6 +1287,7 @@ void MarkdownView::measureBlocks(const std::vector<md::Block>& blocks, std::uint
     Style st;
     styleFor(st, fonts, palette, fontSize, uiScale);
     st.fontNames = fontNames;
+    st.pages = true;
     use(blocks, generation);
     measure(st, std::max(width, 40.0f * uiScale));
 }
@@ -1288,6 +1297,19 @@ float MarkdownView::blockGap(std::size_t index) const
     if (index == 0 || index >= tops_.size())
         return 0.0f;
     return std::max(0.0f, tops_[index] - (tops_[index - 1] + heights_[index - 1]));
+}
+
+float MarkdownView::measureBlockAt(std::size_t index, float width, const Fonts& fonts, const Palette& palette, float fontSize,
+                                   float uiScale, const std::vector<std::string>* fontNames)
+{
+    const std::vector<md::Block>& blocks = shown();
+    if (index >= blocks.size())
+        return 0.0f;
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    st.fontNames = fontNames;
+    st.pages = true;
+    return drawBlock(blocks[index], ImVec2(0.0f, 0.0f), std::max(width, 40.0f * uiScale), st, false);
 }
 
 void MarkdownView::drawBlockAt(std::size_t index, ImVec2 at, float width, const Fonts& fonts, const Palette& palette, float fontSize,
@@ -1301,16 +1323,18 @@ void MarkdownView::drawBlockAt(std::size_t index, ImVec2 at, float width, const 
     st.fontNames = fontNames;
     st.pageNumber = pageNumber;
     st.pageCount = pageCount;
+    st.pages = true;
     drawBlock(blocks[index], at, std::max(width, 40.0f * uiScale), st, true);
 }
 
 void MarkdownView::measure(const Style& st, float width)
 {
     const std::vector<md::Block>& blocks = shown();
-    // Measure every block when the layout changed (text, width or size).
-    if (width != width_ || st.size != fontSize_ || tops_.size() != blocks.size()) {
+    // Measure every block when the layout changed (text, width, size, or pages and reflowed).
+    if (width != width_ || st.size != fontSize_ || tops_.size() != blocks.size() || st.pages != measuredPages_) {
         width_ = width;
         fontSize_ = st.size;
+        measuredPages_ = st.pages;
         tops_.assign(blocks.size(), 0.0f);
         heights_.assign(blocks.size(), 0.0f);
         float y = 0.0f;

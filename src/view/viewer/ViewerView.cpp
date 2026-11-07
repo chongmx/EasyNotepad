@@ -46,6 +46,19 @@ const char* iconFor(mv::Shape shape, const std::string& format)
     }
 }
 
+// A floating picture's box (left, top, right, bottom) in pixels from the page's text area, its
+// paragraph `anchorTop` into the text area.
+ImVec4 floatBox(const mv::FlowDocument::Float& f, const mv::FlowDocument::PageSetup& ps, float ppp, float anchorTop)
+{
+    const float w = f.width * ppp, h = f.height * ppp;
+    const float areaX = f.fromH == 0 ? -ps.left * ppp : 0.0f, areaW = (f.fromH == 0 ? ps.width : ps.width - ps.left - ps.right) * ppp;
+    const float areaY = f.fromV == 0 ? -ps.top * ppp : f.fromV == 1 ? 0.0f : anchorTop;
+    const float areaH = (f.fromV == 0 ? ps.height : ps.height - ps.top - ps.bottom) * ppp;
+    const float x = f.alignH >= 0 ? areaX + (areaW - w) * (f.alignH * 0.5f) : areaX + f.x * ppp;
+    const float y = f.alignV >= 0 && f.fromV != 2 ? areaY + (areaH - h) * (f.alignV * 0.5f) : areaY + f.y * ppp;
+    return ImVec4(x, y, x + w, y + h);
+}
+
 } // namespace
 
 ViewerView::ViewerView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale, MarkdownImages& images,
@@ -232,8 +245,9 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
             e.reflow = !e.reflow;
         registerLastItem("viewer:word-layout", "button", e.reflow ? "Show as pages" : "Reflow to the window", [&e]() { e.reflow = !e.reflow; });
     }
-    if (d.shape == mv::Shape::Pages) {
-        const int pageCount = int(d.pages.pages.size());
+    const bool printedPages = d.shape == mv::Shape::Flow && !e.reflow && !d.flow.printed.empty();
+    if (d.shape == mv::Shape::Pages || printedPages) {
+        const int pageCount = printedPages ? int(e.wordPages.size()) : int(d.pages.pages.size());
         auto go = [&e, pageCount](int delta) { e.goToPage = std::clamp(e.currentPage + delta, 0, std::max(0, pageCount - 1)); };
         ImGui::SameLine();
         ImGui::BeginDisabled(e.currentPage <= 0);
@@ -247,18 +261,20 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
             go(1);
         ImGui::EndDisabled();
         registerLastItem("viewer:next-page", "button", "Next page", [go]() { go(1); });
-        ImGui::SameLine();
-        if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_MINUS "##viewerZoomOut"))
-            e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f);
-        registerLastItem("viewer:zoom-out", "button", "Zoom out", [&e]() { e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f); });
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Fit##viewerZoomFit"))
-            e.zoom = 0.0f;
-        registerLastItem("viewer:zoom-fit", "button", d.format == "PDF document" ? "Fit to width" : "Fit the slide", [&e]() { e.zoom = 0.0f; });
-        ImGui::SameLine();
-        if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_PLUS "##viewerZoomIn"))
-            e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f);
-        registerLastItem("viewer:zoom-in", "button", "Zoom in", [&e]() { e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f); });
+        if (!printedPages) { // slides and PDF pages: their own zoom (Word follows the editor's)
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_MINUS "##viewerZoomOut"))
+                e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f);
+            registerLastItem("viewer:zoom-out", "button", "Zoom out", [&e]() { e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f); });
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Fit##viewerZoomFit"))
+                e.zoom = 0.0f;
+            registerLastItem("viewer:zoom-fit", "button", d.format == "PDF document" ? "Fit to width" : "Fit the slide", [&e]() { e.zoom = 0.0f; });
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_PLUS "##viewerZoomIn"))
+                e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f);
+            registerLastItem("viewer:zoom-in", "button", "Zoom in", [&e]() { e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f); });
+        }
     }
     if (!d.notShown.empty()) {
         std::size_t at = 0;
@@ -386,7 +402,7 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
     const float textH = std::max(20.0f, (ps.height - ps.top - ps.bottom) * ppp);
     e.flow.measureBlocks(d.flow.blocks, e.generation, textW, fonts_, paper, fontSize, s_, &d.flow.fonts);
     if (e.wordScale != ppp || e.wordGeneration != e.generation || e.wordPages.empty())
-        paginate(e, d, textH, ppp);
+        paginate(e, d, textW, textH, ppp, paper, fontSize);
     e.wordScale = ppp;
     e.wordGeneration = e.generation;
     const int count = int(e.wordPages.size());
@@ -432,12 +448,30 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
             e.footer.drawBlockAt(i, ImVec2(text.x, y), textW, fonts_, paper, fontSize, s_, &d.flow.fonts, p + 1, count);
             y += e.footer.blockHeight(i);
         }
+        // Floating pictures where the document places them on the page: behind the text, or over it.
+        auto floats = [&](bool behind) {
+            dl->PushClipRect(ImVec2(left, top), ImVec2(left + pageW, top + pageH), true);
+            for (const auto& [index, at] : page.floats) {
+                const mv::FlowDocument::Float& f = d.flow.floats[index];
+                if (f.behind != behind)
+                    continue;
+                const MarkdownImage* img = image(e, e.images, f.media);
+                if (!img || !img->texture)
+                    continue;
+                const ImVec4 b = floatBox(f, ps, ppp, at);
+                dl->AddImage(img->texture->GetTexRef(), ImVec2(text.x + b.x, text.y + b.y), ImVec2(text.x + b.z, text.y + b.w));
+            }
+            dl->PopClipRect();
+        };
+        floats(true);
         // The body inside the margins; a block continued from the page before is cut at its top.
         dl->PushClipRect(ImVec2(text.x - 4.0f * s_, text.y), ImVec2(text.x + textW + 4.0f * s_, text.y + textH), true);
-        for (const auto& [block, at] : page.blocks)
-            if (text.y + at < win.y + view.y && text.y + at + e.flow.blockHeight(block) > win.y)
-                e.flow.drawBlockAt(block, ImVec2(text.x, text.y + at), textW, fonts_, paper, fontSize, s_, &d.flow.fonts, p + 1, count);
+        for (const Entry::WordPage::Placed& b : page.blocks)
+            if (text.y + b.top < win.y + view.y && text.y + b.top + b.height > win.y)
+                e.flow.drawBlockAt(b.block, ImVec2(text.x + b.inset, text.y + b.top), b.width > 0.0f ? b.width : textW, fonts_, paper, fontSize,
+                                   s_, &d.flow.fonts, p + 1, count);
         dl->PopClipRect();
+        floats(false);
         // Footnotes at the foot of the text area, under a short rule.
         if (!page.notes.empty()) {
             float ny = text.y + textH - page.notesH;
@@ -452,7 +486,8 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
     ImGui::EndChild();
 }
 
-void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textHeight, float pxPerPoint)
+void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textWidth, float textHeight, float pxPerPoint, const Palette& paper,
+                          float fontSize)
 {
     os::mem::release(e.wordPages);
     const std::vector<model::markdown::Block>& blocks = d.flow.blocks;
@@ -467,52 +502,119 @@ void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textHeigh
             }
         return h;
     };
+    // The page's floating pictures that the text goes round: their boxes in the text area, widened
+    // by the distance they keep from the text.
+    struct Keep {
+        ImVec4 box;
+        bool below = false; // the text goes on under it (else beside it)
+    };
+    std::vector<Keep> keeps;
     Entry::WordPage page;
+    auto anchor = [&](std::size_t block, float top) {
+        for (std::size_t f = 0; f < d.flow.floats.size(); ++f) {
+            const mv::FlowDocument::Float& fl = d.flow.floats[f];
+            if (fl.block != block)
+                continue;
+            page.floats.emplace_back(f, top);
+            if (fl.wrap == 0)
+                continue;
+            const ImVec4 b = floatBox(fl, d.flow.page, pxPerPoint, top);
+            keeps.push_back({ImVec4(b.x - fl.dist[0] * pxPerPoint, b.y - fl.dist[1] * pxPerPoint, b.z + fl.dist[2] * pxPerPoint,
+                                    b.w + fl.dist[3] * pxPerPoint),
+                             fl.wrap == 2});
+        }
+    };
+    auto unanchor = [&](std::size_t block, std::size_t keepsFrom) {
+        keeps.erase(keeps.begin() + std::ptrdiff_t(keepsFrom), keeps.end());
+        page.floats.erase(std::remove_if(page.floats.begin(), page.floats.end(),
+                                         [&](const std::pair<std::size_t, float>& f) { return d.flow.floats[f.first].block == block; }),
+                          page.floats.end());
+    };
+    // A block at `top`: narrowed beside the pictures it would run into (on their wider side), or
+    // under them (one the text goes under, or no room beside it).
+    auto place = [&](std::size_t i, float top) {
+        Entry::WordPage::Placed p{i, top, e.flow.blockHeight(i), 0.0f, 0.0f};
+        auto meets = [&](const Keep& k) { return k.box.y < p.top + p.height && k.box.w > p.top; };
+        for (const Keep& k : keeps)
+            if (k.below && meets(k))
+                p.top = k.box.w;
+        float l = 0.0f, r = textWidth;
+        for (const Keep& k : keeps) {
+            if (k.below || !meets(k) || k.box.z <= l || k.box.x >= r)
+                continue;
+            if (k.box.x - l >= r - k.box.z)
+                r = k.box.x; // the text on its left
+            else
+                l = k.box.z;
+        }
+        if (r - l < 72.0f * pxPerPoint) { // no room beside them: under them
+            for (const Keep& k : keeps)
+                if (meets(k))
+                    p.top = std::max(p.top, k.box.w);
+            l = 0.0f;
+            r = textWidth;
+        }
+        if (l > 0.0f || r < textWidth) {
+            p.inset = l;
+            p.width = r - l;
+            p.height = e.flow.measureBlockAt(i, p.width, fonts_, paper, fontSize, s_, &d.flow.fonts);
+        }
+        return p;
+    };
     float y = 0.0f;
     for (std::size_t k = 0; k < d.flow.printed.size(); ++k) {
         const std::size_t i = d.flow.printed[k];
         if (i >= blocks.size())
             continue;
-        const float h = e.flow.blockHeight(i);
         const float notes = notesOf(i, nullptr);
         const float room = [&]() {
             const float all = page.notesH + notes;
             return textHeight - (all > 0.0f ? all + rule : 0.0f);
         }();
         float g = page.blocks.empty() ? 0.0f : e.flow.blockGap(i);
+        const std::size_t keepsFrom = keeps.size();
+        anchor(i, y + g);
+        Entry::WordPage::Placed placed = place(i, y + g);
         const bool forced = blocks[i].pageBreakBefore && !page.blocks.empty();
-        if (!page.blocks.empty() && (forced || y + g + h > room)) {
+        if (!page.blocks.empty() && (forced || placed.top + placed.height > room)) {
+            unanchor(i, keepsFrom);
             // A paragraph kept with the next one goes on with it (when it is not alone on its page).
-            std::pair<std::size_t, float> carried{0, -1.0f};
+            Entry::WordPage::Placed carried{0, -1.0f};
             if (!forced && page.blocks.size() > 1) {
-                const std::size_t last = page.blocks.back().first;
+                const std::size_t last = page.blocks.back().block;
                 if (blocks[last].keepNext && notesOf(last, nullptr) == 0.0f) {
                     carried = page.blocks.back();
                     page.blocks.pop_back();
+                    unanchor(last, keeps.size());
                 }
             }
             e.wordPages.push_back(std::move(page));
             page = Entry::WordPage();
+            keeps.clear();
             y = 0.0f;
             g = 0.0f;
-            if (carried.second >= 0.0f) {
-                page.blocks.emplace_back(carried.first, 0.0f);
-                y = e.flow.blockHeight(carried.first);
+            if (carried.top >= 0.0f) {
+                anchor(carried.block, 0.0f);
+                carried = place(carried.block, 0.0f);
+                page.blocks.push_back(carried);
+                y = carried.top + carried.height;
                 g = e.flow.blockGap(i);
             }
+            anchor(i, y + g);
+            placed = place(i, y + g);
         }
-        float blockTop = y + g;
-        page.blocks.emplace_back(i, blockTop);
-        y = blockTop + h;
+        page.blocks.push_back(placed);
+        y = placed.top + placed.height;
         page.notesH += notesOf(i, &page.notes);
         // A block taller than the room left on an empty page: continued on the next pages.
         float avail = textHeight - (page.notesH > 0.0f ? page.notesH + rule : 0.0f);
         while (y > avail + 0.5f && page.blocks.size() == 1 && avail > 20.0f) {
             e.wordPages.push_back(std::move(page));
             page = Entry::WordPage();
-            blockTop -= avail;
-            page.blocks.emplace_back(i, blockTop);
-            y = blockTop + h;
+            keeps.clear();
+            placed.top -= avail;
+            page.blocks.push_back(placed);
+            y = placed.top + placed.height;
             avail = textHeight;
         }
     }

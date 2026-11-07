@@ -25,6 +25,7 @@ enum Style : unsigned {
     Underline = 1u << 9,
     PageNumber = 1u << 10, // documents: the number of the page it is drawn on (a PAGE field); text: the saved one
     PageCount = 1u << 11,  // documents: the number of pages (NUMPAGES)
+    Floating = 1u << 12,   // with Image: placed on the page by the document (FlowDocument::floats), not in the line
 };
 
 struct Span {
@@ -37,6 +38,7 @@ struct Span {
     std::uint32_t highlight = 0; // background behind the text; 0: none
     float size = 0.0f;           // points; 0: the block's size
     std::uint8_t font = 0;       // 1-based into the document's font names (FlowDocument::fonts); 0: the view's
+    float width = 0.0f, height = 0.0f; // Image: its size in points as the document sets it (0: its pixels')
 };
 using Spans = std::vector<Span>;
 

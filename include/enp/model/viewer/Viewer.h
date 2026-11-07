@@ -43,6 +43,24 @@ struct FlowDocument {
     std::vector<markdown::Block> header, footer;
     std::vector<std::size_t> printed;
     std::vector<std::pair<std::size_t, std::size_t>> footnotes; // (footnote block, referring block), into `blocks`
+    // A floating picture (wp:anchor): where it sits on the page of the paragraph that anchors it.
+    // Offsets in points from its reference: horizontally 0 the page, 1 the margin, 2 the column /
+    // character (the text's left edge); vertically 0 the page, 1 the margin, 2 the paragraph / line.
+    // An alignment (0 start, 1 centre, 2 end) replaces the offset; -1 none.
+    struct Float {
+        std::size_t block = 0; // into `blocks`
+        std::string media;
+        float x = 0.0f, y = 0.0f, width = 0.0f, height = 0.0f;
+        std::uint8_t fromH = 2, fromV = 2;
+        std::int8_t alignH = -1, alignV = -1;
+        bool behind = false; // behind the text (else over it)
+        // How the text goes round it: 0 not at all (in front of it or behind it), 1 beside it
+        // (square, tight, through), 2 above and below it; keeping `dist` (points: left, top,
+        // right, bottom) from it.
+        std::uint8_t wrap = 0;
+        float dist[4] = {9.0f, 0.0f, 9.0f, 0.0f};
+    };
+    std::vector<Float> floats;
 };
 
 // Scripts whose letters the bundled fonts lack: the views merge a system font in while a document

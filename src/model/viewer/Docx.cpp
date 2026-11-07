@@ -409,6 +409,9 @@ public:
         }
         for (std::size_t i = 0; i < bodyBlocks; ++i)
             doc.flow.printed.push_back(shift + i);
+        for (FlowDocument::Float& f : doc.flow.floats)
+            f.block += shift;
+        pendingFloats_.clear(); // a header's own: not placed
         if (!x.error().empty() && doc.flow.blocks.empty())
             doc.error = "the document's XML is broken: " + x.error();
         // Footnotes and endnotes, in the order they were referenced.
@@ -926,6 +929,11 @@ private:
         for (const std::string& key : paragraphNotes_)
             noteBlocks_.emplace(key, doc_->flow.blocks.size());
         paragraphNotes_.clear();
+        for (FlowDocument::Float& f : pendingFloats_) {
+            f.block = doc_->flow.blocks.size();
+            doc_->flow.floats.push_back(std::move(f));
+        }
+        pendingFloats_.clear();
         if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
             b.spans.push_back(textSpan(" ")); // an empty paragraph keeps its line, as in Word
         doc_->flow.blocks.push_back(std::move(b));
@@ -1233,14 +1241,46 @@ private:
     {
         std::string alt, embed;
         float width = 0.0f, height = 0.0f; // points, from wp:extent
+        bool floating = false;
+        FlowDocument::Float place;
+        char axis = 0; // in wp:positionH ('h') or wp:positionV ('v')
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End && x.depth() < depth)
                 break;
+            if (e == Event::End) {
+                if (x.localName() == "positionH" || x.localName() == "positionV")
+                    axis = 0;
+                continue;
+            }
             if (e != Event::Start)
                 continue;
             const std::string_view n = x.localName();
-            if (n == "extent" && width == 0.0f) {
+            if (n == "anchor") { // floating: placed on the page (wp:inline: in the line)
+                floating = true;
+                place.behind = x.attribute("behindDoc") == "1" || x.attribute("behindDoc") == "true";
+                const char* sides[4] = {"distL", "distT", "distR", "distB"};
+                for (int k = 0; k < 4; ++k) {
+                    const std::string d = x.attribute(sides[k]);
+                    if (!d.empty())
+                        place.dist[k] = float(std::atof(d.c_str()) / 12700.0);
+                }
+            } else if (n == "wrapSquare" || n == "wrapTight" || n == "wrapThrough") {
+                place.wrap = 1;
+            } else if (n == "wrapTopAndBottom") {
+                place.wrap = 2;
+            } else if (n == "positionH" || n == "positionV") {
+                axis = n == "positionH" ? 'h' : 'v';
+                const std::string from = x.attribute("relativeFrom");
+                const std::uint8_t ref = from == "page" ? 0 : from == "margin" || from == "leftMargin" || from == "topMargin" ? 1 : 2;
+                (axis == 'h' ? place.fromH : place.fromV) = ref;
+            } else if (n == "posOffset" && axis) {
+                (axis == 'h' ? place.x : place.y) = float(std::atof(x.elementText().c_str()) / 12700.0);
+            } else if (n == "align" && axis) {
+                const std::string a = x.elementText();
+                (axis == 'h' ? place.alignH : place.alignV) =
+                    std::int8_t(a == "center" ? 1 : a == "right" || a == "bottom" || a == "outside" ? 2 : 0);
+            } else if (n == "extent" && width == 0.0f) {
                 width = float(std::atof(x.attribute("cx").c_str()) / 12700.0);
                 height = float(std::atof(x.attribute("cy").c_str()) / 12700.0);
             } else if (n == "docPr") {
@@ -1275,10 +1315,18 @@ private:
             doc_->flow.media[target] = std::move(*bytes);
         }
         md::Span s;
-        s.style = md::Image;
+        s.style = md::Image | (floating ? unsigned(md::Floating) : 0u);
         s.text = alt.empty() ? "image" : alt;
         s.url = target;
+        s.width = width;
+        s.height = height;
         spans.push_back(std::move(s));
+        if (floating && pendingFloats_.size() < 256) { // its paragraph's block, once pushed
+            place.media = target;
+            place.width = width;
+            place.height = height;
+            pendingFloats_.push_back(std::move(place));
+        }
     }
 
     // At the Start of w:tbl: a table block of the cells' text (nested tables flattened into their cell).
@@ -1561,6 +1609,7 @@ private:
     std::map<std::string, std::uint16_t> styleNumbers_;
     bool pendingPageBreak_ = false; // a page break ended the last paragraph: the next starts a page
     std::vector<std::string> paragraphNotes_;          // the footnotes the paragraph being read refers to
+    std::vector<FlowDocument::Float> pendingFloats_;   // the floating pictures of the paragraph being read
     std::map<std::string, std::size_t> noteBlocks_;    // footnote key -> the body block that refers to it
     Numbering numbering_;
     std::map<std::string, md::Spans> footnotes_, endnotes_, comments_;

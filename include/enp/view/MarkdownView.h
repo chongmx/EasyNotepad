@@ -41,6 +41,9 @@ public:
                        const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
     float blockHeight(std::size_t index) const { return index < heights_.size() ? heights_[index] : 0.0f; }
     float blockGap(std::size_t index) const;
+    // The height of one of the measured blocks at another width (beside a floating picture).
+    float measureBlockAt(std::size_t index, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
+                         const std::vector<std::string>* fontNames = nullptr);
     void drawBlockAt(std::size_t index, ImVec2 at, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
                      const std::vector<std::string>* fontNames = nullptr, int pageNumber = 0, int pageCount = 0);
 
@@ -76,6 +79,7 @@ private:
     std::vector<float> heights_;
     float width_ = -1.0f;
     float fontSize_ = 0.0f;
+    bool measuredPages_ = false; // tops_ and heights_ are the page view's (floating pictures left out)
     int hoveredLine_ = -1;
     std::map<std::string, model::math::Node> math_; // parsed formulas by source (cleared with the text)
 
