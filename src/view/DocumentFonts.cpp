@@ -5,6 +5,8 @@
 #include "enp/os/Os.h"
 #include "enp/view/Fonts.h"
 
+#include "imgui_internal.h" // ImTextCharFromUtf8
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -226,6 +228,25 @@ DocumentFonts::Loaded* DocumentFonts::load(const std::string& key)
     }
     loaded_.push_back(std::move(l));
     return loaded_.back().get();
+}
+
+bool DocumentFonts::covers(ImFont* font, const char* b, const char* e)
+{
+    for (const char* p = b; p < e;) {
+        const unsigned char lead = static_cast<unsigned char>(*p);
+        if (lead < 0xC9) { // below U+0250: Latin, always there
+            p += lead < 0x80 ? 1 : (lead >> 5) == 0x6 ? 2 : (lead >> 4) == 0xE ? 3 : (lead >> 3) == 0x1E ? 4 : 1;
+            continue;
+        }
+        unsigned int c = 0;
+        const int n = ImTextCharFromUtf8(&c, p, e);
+        if (n <= 0)
+            break;
+        p += n;
+        if (c >= 0x250 && c <= 0xFFFF && !font->IsGlyphInFont(ImWchar(c)))
+            return false;
+    }
+    return true;
 }
 
 void DocumentFonts::trim(double now, double idleSeconds)

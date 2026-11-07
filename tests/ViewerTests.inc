@@ -798,6 +798,38 @@ TEST(viewer_reads_the_challenge_files)
               book.borders[total->border].style[3] == mv::Border::Double);
         CHECK(s.cell(11, 2) && (s.cell(11, 2)->flags & mv::Cell::Wrap) && s.cell(19, 1) && (s.cell(19, 1)->flags & mv::Cell::Wrap));
         CHECK(s.cell(19, 0) && s.cell(19, 0)->rotation == 90);
+        // The Looks sheet: fonts by name, pattern and gradient fills, diagonals, indent, shrink to fit.
+        CHECK(book.defaultFont == "Calibri" && book.sheets.size() == 4);
+        if (book.sheets.size() == 4) {
+            const mv::Sheet& looks = book.sheets[3];
+            auto named = [&](std::uint32_t r, std::uint32_t c) {
+                const mv::Cell* cell = looks.cell(r, c);
+                return cell && cell->font > 0 && cell->font <= book.fontNames.size() ? book.fontNames[cell->font - 1u] : std::string();
+            };
+            CHECK(named(0, 0) == "Cambria" && named(0, 1) == "Arial" && looks.cell(0, 1) && (looks.cell(0, 1)->flags & mv::Cell::Italic));
+            auto style = [&](std::uint32_t r, std::uint32_t c) -> const mv::FillStyle* {
+                const mv::Cell* cell = looks.cell(r, c);
+                return cell && cell->fillStyle > 0 && cell->fillStyle < book.fills.size() ? &book.fills[cell->fillStyle] : nullptr;
+            };
+            const mv::FillStyle* grid = style(1, 0);
+            CHECK(grid && grid->kind == mv::FillStyle::Hatch && grid->lines == mv::FillStyle::Grid && grid->dark &&
+                  grid->color == mv::rgba(255, 0, 0) && looks.cell(1, 0)->fill == mv::rgba(255, 255, 255));
+            const mv::FillStyle* down = style(1, 1);
+            CHECK(down && down->lines == mv::FillStyle::Down && !down->dark);
+            CHECK(looks.cell(1, 2) && looks.cell(1, 2)->fillStyle == 0 && looks.cell(1, 2)->fill == mv::rgba(128, 128, 128)); // medium grey: half
+            const mv::FillStyle* linear = style(2, 0);
+            CHECK(linear && linear->kind == mv::FillStyle::Linear && linear->degree == 90.0f && linear->stopCount == 2 &&
+                  linear->stop[0] == mv::rgba(255, 255, 255) && linear->position[1] == 1.0f);
+            CHECK(style(2, 1) && style(2, 1)->kind == mv::FillStyle::Path);
+            const mv::Cell* diagonal = looks.cell(3, 0);
+            CHECK(diagonal && diagonal->border > 0 && diagonal->border < book.borders.size());
+            if (diagonal && diagonal->border > 0 && diagonal->border < book.borders.size()) {
+                const mv::Border& b = book.borders[diagonal->border];
+                CHECK(b.style[4] == mv::Border::Thin && b.diagonalUp && b.diagonalDown && b.color[4] == mv::rgba(0xC0, 0, 0));
+            }
+            CHECK(looks.cell(3, 1) && looks.cell(3, 1)->indent == 2);
+            CHECK(looks.cell(4, 0) && (looks.cell(4, 0)->flags & mv::Cell::Shrink));
+        }
     }
 
     // PDF: a page's scripts are found when it is read.

@@ -519,23 +519,7 @@ private:
 
     // Whether `font` has every letter of [b, e) beyond the Latin, Greek and Cyrillic ones all
     // document fonts here have.
-    static bool covers(ImFont* font, const char* b, const char* e)
-    {
-        for (const char* p = b; p < e;) {
-            if (static_cast<unsigned char>(*p) < 0xC9) { // below U+0250: Latin, always there
-                p += utf8Length(static_cast<unsigned char>(*p));
-                continue;
-            }
-            unsigned int c = 0;
-            const int n = ImTextCharFromUtf8(&c, p, e);
-            if (n <= 0)
-                break;
-            p += n;
-            if (c >= 0x250 && c <= 0xFFFF && !font->IsGlyphInFont(ImWchar(c)))
-                return false;
-        }
-        return true;
-    }
+    static bool covers(ImFont* font, const char* b, const char* e) { return DocumentFonts::covers(font, b, e); }
 
     float measure(ImFont* font, float size, const char* b, const char* e) const
     {

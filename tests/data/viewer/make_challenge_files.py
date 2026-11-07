@@ -265,14 +265,21 @@ def make_xlsx(path):
 <numFmt numFmtId="166" formatCode="#,##0.00;[Red]\\(#,##0.00\\);\\-"/><numFmt numFmtId="167" formatCode="0.0%"/>
 <numFmt numFmtId="168" formatCode="[$€-407] #,##0.00"/><numFmt numFmtId="169" formatCode="&quot;Qty: &quot;0"/></numFmts>
 <fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="14"/><color theme="4"/><name val="Calibri"/></font>
-<font><i/><u/><sz val="11"/><color rgb="FF7030A0"/><name val="Calibri"/></font><font><sz val="9"/><color theme="1" tint="0.5"/><name val="Calibri"/></font></fonts>
+<font><i/><u/><sz val="11"/><color rgb="FF7030A0"/><name val="Calibri"/></font><font><sz val="9"/><color theme="1" tint="0.5"/><name val="Calibri"/></font>
+<font><sz val="12"/><name val="Cambria"/></font><font><i/><sz val="10"/><name val="Arial"/></font></fonts>
 <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/><bgColor indexed="64"/></patternFill></fill>
-<fill><patternFill patternType="solid"><fgColor theme="4" tint="0.7999816888943144"/></patternFill></fill></fills>
+<fill><patternFill patternType="solid"><fgColor theme="4" tint="0.7999816888943144"/></patternFill></fill>
+<fill><patternFill patternType="darkGrid"><fgColor rgb="FFFF0000"/><bgColor rgb="FFFFFFFF"/></patternFill></fill>
+<fill><patternFill patternType="lightDown"><fgColor rgb="FF0070C0"/></patternFill></fill>
+<fill><gradientFill degree="90"><stop position="0"><color rgb="FFFFFFFF"/></stop><stop position="1"><color theme="4"/></stop></gradientFill></fill>
+<fill><gradientFill type="path" left="0.5" right="0.5" top="0.5" bottom="0.5"><stop position="0"><color rgb="FFFFFFFF"/></stop><stop position="1"><color rgb="FF70AD47"/></stop></gradientFill></fill>
+<fill><patternFill patternType="mediumGray"><fgColor rgb="FF000000"/><bgColor rgb="FFFFFFFF"/></patternFill></fill></fills>
 <borders count="3"><border/><border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right><top style="thin"><color auto="1"/></top><bottom style="medium"><color rgb="FF2E75B6"/></bottom></border>
-<border><bottom style="double"><color auto="1"/></bottom></border></borders>
+<border><bottom style="double"><color auto="1"/></bottom></border>
+<border diagonalUp="1" diagonalDown="1"><diagonal style="thin"><color rgb="FFC00000"/></diagonal></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="14">
+<cellXfs count="27">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
@@ -287,6 +294,19 @@ def make_xlsx(path):
 <xf numFmtId="0" fontId="3" fillId="0" borderId="2" xfId="0" applyFont="1" applyBorder="1"><alignment textRotation="90"/></xf>
 <xf numFmtId="18" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="4" fontId="1" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>
+<xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="6" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="7" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="3" xfId="0" applyBorder="1"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment indent="2"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment shrinkToFit="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="0" fontId="0" fillId="8" borderId="0" xfId="0" applyFill="1"/>
 </cellXfs></styleSheet>'''
 
     def c(ref, value, t=None, s=None, f=None):
@@ -330,8 +350,23 @@ def make_xlsx(path):
                         for i, (m, v, w) in enumerate([("Jan", 10, 4), ("Feb", 14, 9), ("Mar", 9, 12), ("Apr", 18, 7)]))
     sheet2 = CT_HEAD + f'<worksheet {X}><sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c></row>{data_rows}</sheetData></worksheet>'
     sheet3 = CT_HEAD + f'<worksheet {X}><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>'
+    # Cell looks: fonts, pattern and gradient fills, diagonals, indent, shrink to fit, a number too
+    # wide for its column, text running on to the left and both ways.
+    looks = [
+        (1, [c("A1", "Cambria 12", "inlineStr", 14), c("B1", "Arial italic 10", "inlineStr", 15)]),
+        (2, [c("A2", "dark grid", "inlineStr", 16), c("B2", "light down", "inlineStr", 17), c("C2", None, s=26)]),
+        (3, [c("A3", "gradient down", "inlineStr", 18), c("B3", "from the centre", "inlineStr", 19)]),
+        (4, [c("A4", "diagonals", "inlineStr", 20), c("B4", "indented twice", "inlineStr", 21)]),
+        (5, [c("A5", "shrunk to fit into this one cell", "inlineStr", 22), c("C5", 1234567.891, s=25)]),
+        (7, [c("B7", "right-aligned text runs on to the left", "inlineStr", 23)]),
+        (9, [c("B9", "centred text runs on both ways", "inlineStr", 24)]),
+    ]
+    sheet4 = CT_HEAD + f'''<worksheet {X}><sheetFormatPr defaultRowHeight="15"/>
+<cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="3" width="6" customWidth="1"/></cols>
+<sheetData>''' + "".join(f'<row r="{r}" ht="24" customHeight="1">' + "".join(cells) + "</row>" for r, cells in looks) + '''</sheetData></worksheet>'''
     workbook = CT_HEAD + f'''<workbook {X}><workbookPr date1904="0"/><bookViews><workbookView activeTab="0"/></bookViews><sheets>
 <sheet name="Formats &amp; cells" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Hidden" sheetId="3" state="veryHidden" r:id="rId3"/>
+<sheet name="Looks" sheetId="4" r:id="rId7"/>
 </sheets><definedNames><definedName name="Total">'Formats &amp; cells'!$B$15</definedName></definedNames></workbook>'''
     drawing = CT_HEAD + '''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
@@ -356,9 +391,11 @@ def make_xlsx(path):
         ("_rels/.rels", rels([("rId1", "officeDocument", "xl/workbook.xml")])),
         ("xl/_rels/workbook.xml.rels", rels([("rId1", "worksheet", "worksheets/sheet1.xml"), ("rId2", "worksheet", "worksheets/sheet2.xml"),
                                              ("rId3", "worksheet", "worksheets/sheet3.xml"), ("rId4", "sharedStrings", "sharedStrings.xml"),
-                                             ("rId5", "styles", "styles.xml"), ("rId6", "theme", "theme/theme1.xml")])),
+                                             ("rId5", "styles", "styles.xml"), ("rId6", "theme", "theme/theme1.xml"),
+                                             ("rId7", "worksheet", "worksheets/sheet4.xml")])),
         ("xl/workbook.xml", workbook), ("xl/sharedStrings.xml", sst), ("xl/styles.xml", styles), ("xl/theme/theme1.xml", THEME),
         ("xl/worksheets/sheet1.xml", sheet1), ("xl/worksheets/sheet2.xml", sheet2), ("xl/worksheets/sheet3.xml", sheet3),
+        ("xl/worksheets/sheet4.xml", sheet4),
         ("xl/worksheets/_rels/sheet1.xml.rels", rels([("rId1", "drawing", "../drawings/drawing1.xml")])),
         ("xl/drawings/drawing1.xml", drawing),
         ("xl/drawings/_rels/drawing1.xml.rels", rels([("rId1", "chart", "../charts/chart1.xml"), ("rId2", "image", "../media/checker.png")])),

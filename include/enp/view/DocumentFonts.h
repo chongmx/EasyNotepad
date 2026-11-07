@@ -41,6 +41,10 @@ public:
 
     std::size_t loadedCount() const { return loaded_.size(); }
 
+    // Whether `font` draws every letter of [b, e) (Latin below U+0250 taken as there): a word it
+    // cannot draw (Chinese in a Calibri run) takes the UI font, which has the fallbacks merged in.
+    static bool covers(ImFont* font, const char* b, const char* e);
+
 private:
     struct Loaded {
         std::string key;         // the source: a system path, or "pack:" + the bundled file's name

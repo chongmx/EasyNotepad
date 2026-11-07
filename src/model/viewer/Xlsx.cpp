@@ -47,16 +47,39 @@ struct CellFormat {
     std::uint8_t flags = 0; // Cell::Bold / Italic / Underline / Strike / Wrap
     std::uint32_t color = 0, fill = 0;
     std::int8_t align = -1, valign = -1;
-    std::uint8_t halfPoints = 0;
+    std::uint8_t halfPoints = 0, indent = 0, font = 0;
     std::int16_t rotation = 0;
-    std::uint16_t border = 0;
+    std::uint16_t border = 0, fillStyle = 0;
 };
 
 struct Font {
     std::uint8_t flags = 0;
     std::uint32_t color = 0;
     float size = 0.0f;
+    std::string name;
 };
+
+// A fill once read: its colour, and the pattern or gradient over it.
+struct Fill {
+    std::uint32_t color = 0;
+    std::uint16_t style = 0; // into Workbook::fills
+};
+
+// The share of the pattern's colour in the grey patterns (dots too fine to draw as dots).
+float greyShare(std::string_view pattern)
+{
+    return pattern == "darkGray" ? 0.75f : pattern == "mediumGray" ? 0.5f : pattern == "lightGray" ? 0.25f
+         : pattern == "gray125" ? 0.125f : pattern == "gray0625" ? 0.0625f : -1.0f;
+}
+
+std::uint32_t mix(std::uint32_t a, std::uint32_t b, float t) // a toward b by t, packed like Page colours
+{
+    auto ch = [&](int shift) {
+        const float x = float((a >> shift) & 0xFF), y = float((b >> shift) & 0xFF);
+        return std::uint32_t(std::lround(x + (y - x) * t)) << shift;
+    };
+    return ch(0) | ch(8) | ch(16) | 0xFF000000u;
+}
 
 // "B12" -> row 11, column 1. False when it is not a cell reference.
 bool parseReference(std::string_view ref, std::uint32_t& row, std::uint32_t& column)
@@ -108,8 +131,8 @@ public:
         }
         const ooxml::Relationships rels = ooxml::readRelationships(zip_, main);
         theme_ = ooxml::readTheme(zip_, ooxml::targetOfType(rels, "theme"));
+        readStyles(ooxml::targetOfType(rels, "styles")); // first: runs name fonts against the default one
         readSharedStrings(ooxml::targetOfType(rels, "sharedStrings"));
-        readStyles(ooxml::targetOfType(rels, "styles"));
 
         struct SheetRef {
             std::string name, part;
@@ -222,6 +245,8 @@ private:
                     run->halfPoints = std::uint8_t(std::clamp(std::lround(std::atof(v.c_str()) * 2.0), 1L, 255L));
                 else if (n == "color")
                     run->color = textColor(colorOf(x));
+                else if (n == "rFont")
+                    run->font = fontNumber(v);
             }
         }
         if (rich && anyOwn && runs.size() <= 4096) {
@@ -239,6 +264,20 @@ private:
         return c == theme_.color("dk1") || c == ooxml::hexColor("000000") ? 0 : c;
     }
 
+    // A font's number in Workbook::fontNames (from 1; 0: the default font, or too many).
+    std::uint8_t fontNumber(const std::string& name)
+    {
+        if (name.empty() || name == book_->defaultFont)
+            return 0;
+        for (std::size_t i = 0; i < book_->fontNames.size(); ++i)
+            if (book_->fontNames[i] == name)
+                return std::uint8_t(i + 1);
+        if (book_->fontNames.size() >= 255)
+            return 0;
+        book_->fontNames.push_back(name);
+        return std::uint8_t(book_->fontNames.size());
+    }
+
     std::uint32_t colorOf(const XmlReader& x) const
     {
         std::uint32_t c = 0;
@@ -252,11 +291,17 @@ private:
             if (i >= 0 && i < 12)
                 c = theme_.color(kNames[i]);
         } else if (x.hasAttribute("indexed")) {
-            static const char* const kIndexed[] = {"000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF"};
+            // Excel's default palette (8-63; 0-7 repeat 8-15); 64 and up: the system's colours (automatic).
+            static const char* const kIndexed[] = {
+                "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF", "800000", "008000", "000080", "808000",
+                "800080", "008080", "C0C0C0", "808080", "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
+                "000080", "FF00FF", "FFFF00", "00FFFF", "800080", "800000", "008080", "0000FF", "00CCFF", "CCFFFF", "CCFFCC", "FFFF99",
+                "99CCFF", "FF99CC", "CC99FF", "FFCC99", "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600", "666699", "969696",
+                "003366", "339966", "003300", "333300", "993300", "993366", "333399", "333333"};
             const int i = std::atoi(x.attribute("indexed").c_str());
             if (i >= 0 && i < 8)
                 c = ooxml::hexColor(kIndexed[i]);
-            else if (i >= 8 && i < 16)
+            else if (i >= 8 && i < 64)
                 c = ooxml::hexColor(kIndexed[i - 8]);
         }
         if (c && x.hasAttribute("tint"))
@@ -273,13 +318,58 @@ private:
             return;
         std::map<int, std::string> codes;
         std::vector<Font> fonts;
-        std::vector<std::uint32_t> fills;
+        std::vector<Fill> fills;
         std::vector<Border> borders;
         std::map<int, std::uint16_t> borderIndex; // borderId -> Workbook::borders
         int edge = -1;                            // the border edge being read
         XmlReader x(*xml);
         enum class In { None, Fonts, Fills, Borders, CellXfs, Other } in = In::None;
-        bool solid = false;
+        // The fill being read: its pattern's colours, or its gradient.
+        std::string pattern;
+        std::uint32_t fg = 0, bg = 0;
+        bool hasFg = false, hasBg = false;
+        FillStyle gradient;
+        bool inGradient = false;
+        float stopAt = 0.0f;
+        auto endFill = [&]() {
+            if (fills.empty())
+                return;
+            Fill& f = fills.back();
+            const FillStyle* style = nullptr;
+            FillStyle hatch;
+            if (inGradient) {
+                if (gradient.stopCount == 0)
+                    return;
+                f.color = gradient.stop[0];
+                style = &gradient;
+            } else if (pattern == "solid") {
+                f.color = hasFg ? fg : hasBg ? bg : 0;
+            } else if (pattern.empty() || pattern == "none") {
+                f.color = 0;
+            } else {
+                // The pattern's colour (black when not given) over the background (white).
+                const std::uint32_t ink = hasFg ? fg : ooxml::hexColor("000000"), paper = hasBg ? bg : ooxml::hexColor("FFFFFF");
+                const float share = greyShare(pattern);
+                if (share >= 0.0f) {
+                    f.color = mix(paper, ink, share);
+                } else {
+                    f.color = paper;
+                    const std::string_view p = pattern;
+                    hatch.dark = p.substr(0, 4) == "dark";
+                    const std::string_view kind = p.substr(hatch.dark ? 4 : std::min<std::size_t>(5, p.size()));
+                    hatch.lines = kind == "Vertical" ? FillStyle::Vertical : kind == "Down" ? FillStyle::Down : kind == "Up" ? FillStyle::Up
+                                : kind == "Grid" ? FillStyle::Grid : kind == "Trellis" ? FillStyle::Trellis : FillStyle::Horizontal;
+                    hatch.color = ink;
+                    style = &hatch;
+                }
+            }
+            if (style && book_->fills.size() < 65535) {
+                if (book_->fills.empty())
+                    book_->fills.emplace_back(); // [0]: none
+                f.style = std::uint16_t(book_->fills.size());
+                book_->fills.push_back(*style);
+            }
+        };
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
                 const std::string_view n = x.localName();
@@ -287,6 +377,8 @@ private:
                     in = In::None;
                 else if (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end" || n == "diagonal")
                     edge = -1;
+                else if (in == In::Fills && n == "fill")
+                    endFill();
                 continue;
             }
             if (e != Event::Start)
@@ -303,9 +395,11 @@ private:
             } else if (in == In::Borders && n == "border") {
                 borders.emplace_back();
                 edge = -1;
+                borders.back().diagonalUp = x.attribute("diagonalUp") == "1" || x.attribute("diagonalUp") == "true";
+                borders.back().diagonalDown = x.attribute("diagonalDown") == "1" || x.attribute("diagonalDown") == "true";
             } else if (in == In::Borders && !borders.empty() &&
-                       (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end")) {
-                edge = n == "left" || n == "start" ? 0 : n == "right" || n == "end" ? 1 : n == "top" ? 2 : 3;
+                       (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end" || n == "diagonal")) {
+                edge = n == "left" || n == "start" ? 0 : n == "right" || n == "end" ? 1 : n == "top" ? 2 : n == "bottom" ? 3 : 4;
                 const std::string st = x.attribute("style");
                 borders.back().style[edge] = st.empty() || st == "none" ? Border::None
                                              : st == "medium" || st == "mediumDashed" || st == "mediumDashDot" || st == "mediumDashDotDot" || st == "slantDashDot" ? Border::Medium
@@ -337,12 +431,29 @@ private:
                     fonts.back().size = float(std::atof(v.c_str()));
                 else if (n == "color")
                     fonts.back().color = colorOf(x);
+                else if (n == "name")
+                    fonts.back().name = v;
             } else if (in == In::Fills && n == "fill") {
-                fills.push_back(0);
+                fills.emplace_back();
+                pattern.clear();
+                hasFg = hasBg = inGradient = false;
+                gradient = FillStyle();
             } else if (in == In::Fills && n == "patternFill" && !fills.empty()) {
-                solid = x.attribute("patternType") == "solid";
-            } else if (in == In::Fills && n == "fgColor" && !fills.empty() && solid) {
-                fills.back() = colorOf(x);
+                pattern = x.attribute("patternType");
+            } else if (in == In::Fills && (n == "fgColor" || n == "bgColor") && !fills.empty() && !inGradient) {
+                const bool automatic = x.attribute("auto") == "1" || (x.hasAttribute("indexed") && std::atoi(x.attribute("indexed").c_str()) >= 64);
+                if (!automatic)
+                    (n == "fgColor" ? fg : bg) = colorOf(x);
+                (n == "fgColor" ? hasFg : hasBg) = !automatic;
+            } else if (in == In::Fills && n == "gradientFill" && !fills.empty()) {
+                inGradient = true;
+                gradient.kind = x.attribute("type") == "path" ? FillStyle::Path : FillStyle::Linear;
+                gradient.degree = float(std::atof(x.attribute("degree").c_str()));
+            } else if (in == In::Fills && n == "stop" && inGradient) {
+                stopAt = std::clamp(float(std::atof(x.attribute("position").c_str())), 0.0f, 1.0f);
+            } else if (in == In::Fills && n == "color" && inGradient && gradient.stopCount < 4) {
+                gradient.position[gradient.stopCount] = stopAt;
+                gradient.stop[gradient.stopCount++] = colorOf(x);
             } else if (in == In::CellXfs && n == "xf") {
                 CellFormat f;
                 const int numFmt = std::atoi(x.attribute("numFmtId").c_str());
@@ -352,8 +463,11 @@ private:
                 const int font = std::atoi(x.attribute("fontId").c_str());
                 if (!fonts.empty() && fonts[0].size > 0.0f)
                     book_->defaultFontSize = fonts[0].size;
+                if (!fonts.empty() && !fonts[0].name.empty())
+                    book_->defaultFont = fonts[0].name;
                 if (font >= 0 && font < int(fonts.size())) {
                     f.flags = fonts[size_t(font)].flags;
+                    f.font = fontNumber(fonts[size_t(font)].name);
                     f.color = textColor(fonts[size_t(font)].color); // black: the view picks a readable colour
                     const float size = fonts[size_t(font)].size;
                     if (size > 0.0f && std::fabs(size - book_->defaultFontSize) > 0.01f)
@@ -362,7 +476,7 @@ private:
                 const int border = std::atoi(x.attribute("borderId").c_str());
                 if (border > 0 && border < int(borders.size())) {
                     const Border& b = borders[size_t(border)];
-                    if (b.style[0] || b.style[1] || b.style[2] || b.style[3]) {
+                    if (b.style[0] || b.style[1] || b.style[2] || b.style[3] || (b.style[4] && (b.diagonalUp || b.diagonalDown))) {
                         auto [it, added] = borderIndex.emplace(border, std::uint16_t(0));
                         if (added && book_->borders.size() < 65535) {
                             if (book_->borders.empty())
@@ -374,8 +488,10 @@ private:
                     }
                 }
                 const int fill = std::atoi(x.attribute("fillId").c_str());
-                if (fill >= 2 && fill < int(fills.size())) // 0 and 1 are reserved (none, gray125)
-                    f.fill = fills[size_t(fill)];
+                if (fill >= 2 && fill < int(fills.size())) { // 0 and 1 are reserved (none, gray125)
+                    f.fill = fills[size_t(fill)].color;
+                    f.fillStyle = fills[size_t(fill)].style;
+                }
                 formats_.push_back(std::move(f));
             } else if (in == In::CellXfs && n == "alignment" && !formats_.empty()) {
                 CellFormat& f = formats_.back();
@@ -383,9 +499,12 @@ private:
                 f.align = h == "center" || h == "centerContinuous" ? 1 : h == "right" ? 2 : h == "left" ? 0 : -1;
                 const std::string v = x.attribute("vertical");
                 f.valign = v == "top" ? 0 : v == "center" || v == "justify" || v == "distributed" ? 1 : -1;
-                const std::string wrap = x.attribute("wrapText");
+                const std::string wrap = x.attribute("wrapText"), shrink = x.attribute("shrinkToFit");
                 if (wrap == "1" || wrap == "true")
                     f.flags |= Cell::Wrap;
+                else if (shrink == "1" || shrink == "true")
+                    f.flags |= Cell::Shrink;
+                f.indent = std::uint8_t(std::clamp(std::atoi(x.attribute("indent").c_str()), 0, 250));
                 // 0-90 anticlockwise, 91-180 clockwise (as 90 - n), 255 stacked.
                 const int rot = std::atoi(x.attribute("textRotation").c_str());
                 f.rotation = std::int16_t(rot == 255 ? 255 : rot > 90 && rot <= 180 ? 90 - rot : std::clamp(rot, 0, 90));
@@ -687,6 +806,9 @@ private:
             c.halfPoints = f->halfPoints;
             c.rotation = f->rotation;
             c.border = f->border;
+            c.indent = f->indent;
+            c.font = f->font;
+            c.fillStyle = f->fillStyle;
         }
         if (type == "s") {
             const long i = std::atol(value.c_str());
@@ -724,7 +846,7 @@ private:
                 c.text = std::move(value);
             }
         }
-        if (c.text.empty() && c.formula.empty() && c.fill == 0 && c.border == 0)
+        if (c.text.empty() && c.formula.empty() && c.fill == 0 && c.fillStyle == 0 && c.border == 0)
             return;
         if (!row.cells.empty() && row.cells.back().column >= column) // out of order: ignored
             return;
