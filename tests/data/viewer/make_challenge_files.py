@@ -307,7 +307,10 @@ def make_xlsx(path):
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center"/></xf>
 <xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="0" fontId="0" fillId="8" borderId="0" xfId="0" applyFill="1"/>
-</cellXfs></styleSheet>'''
+</cellXfs>
+<dxfs count="3"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+<dxf><font><b/><color rgb="FF006100"/></font><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf>
+<dxf><font><i/></font><fill><patternFill><bgColor rgb="FFFFEB9C"/></patternFill></fill></dxf></dxfs></styleSheet>'''
 
     def c(ref, value, t=None, s=None, f=None):
         attrs = f' r="{ref}"' + (f' t="{t}"' if t else "") + (f' s="{s}"' if s is not None else "")
@@ -361,12 +364,31 @@ def make_xlsx(path):
         (7, [c("B7", "right-aligned text runs on to the left", "inlineStr", 23)]),
         (9, [c("B9", "centred text runs on both ways", "inlineStr", 24)]),
     ]
+    # Conditional formats on the saved values: a colour scale, data bars, icon sets, cell rules, top 3, text.
+    fruit = ["apple", "banana", "cherry", "mango", "kiwi", "orange", "grape", "lime", "melon", "pear"]
+    stars = [1, 5, 9, 2, 8, 4, 6, 3, 7, 10]
+    rule_rows = "".join(f'<row r="{r}">' + "".join(f'<c r="{col}{r}"><v>{v}</v></c>' for col, v in
+                                                     (("A", r), ("B", r * r), ("C", 11 - r), ("D", r), ("E", stars[r - 1]))) +
+                        f'<c r="F{r}" t="inlineStr"><is><t>{fruit[r - 1]}</t></is></c>' +
+                        "".join(f'<c r="{col}{r}"><v>{v}</v></c>' for col, v in (("G", stars[r - 1]), ("H", r))) + '</row>' for r in range(1, 11))
+    sheet5 = CT_HEAD + f'''<worksheet {X}><sheetFormatPr defaultRowHeight="15"/><sheetData>{rule_rows}</sheetData>
+<conditionalFormatting sqref="A1:A10"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>
+<color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="B1:B10"><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="C1:C10"><cfRule type="iconSet" priority="3"><iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="D1:D10"><cfRule type="cellIs" dxfId="0" priority="4" operator="greaterThan"><formula>5</formula></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="E1:E10"><cfRule type="top10" dxfId="1" priority="5" rank="3"/></conditionalFormatting>
+<conditionalFormatting sqref="F1:F10"><cfRule type="containsText" dxfId="2" priority="6" operator="containsText" text="an"><formula>NOT(ISERROR(SEARCH("an",F1)))</formula></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="G1:G10"><cfRule type="iconSet" priority="7"><iconSet iconSet="3Stars"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="H1:H10"><cfRule type="iconSet" priority="8"><iconSet iconSet="5Quarters"><cfvo type="percent" val="0"/><cfvo type="percent" val="20"/><cfvo type="percent" val="40"/><cfvo type="percent" val="60"/><cfvo type="percent" val="80"/></iconSet></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="A12"><cfRule type="expression" dxfId="0" priority="9"><formula>MOD(ROW(),2)=0</formula></cfRule></conditionalFormatting>
+</worksheet>'''
     sheet4 = CT_HEAD + f'''<worksheet {X}><sheetFormatPr defaultRowHeight="15"/>
 <cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="3" width="6" customWidth="1"/></cols>
 <sheetData>''' + "".join(f'<row r="{r}" ht="24" customHeight="1">' + "".join(cells) + "</row>" for r, cells in looks) + '''</sheetData></worksheet>'''
     workbook = CT_HEAD + f'''<workbook {X}><workbookPr date1904="0"/><bookViews><workbookView activeTab="0"/></bookViews><sheets>
 <sheet name="Formats &amp; cells" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Hidden" sheetId="3" state="veryHidden" r:id="rId3"/>
-<sheet name="Looks" sheetId="4" r:id="rId7"/>
+<sheet name="Looks" sheetId="4" r:id="rId7"/><sheet name="Rules" sheetId="5" r:id="rId8"/>
 </sheets><definedNames><definedName name="Total">'Formats &amp; cells'!$B$15</definedName></definedNames></workbook>'''
     drawing = CT_HEAD + '''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
@@ -392,10 +414,10 @@ def make_xlsx(path):
         ("xl/_rels/workbook.xml.rels", rels([("rId1", "worksheet", "worksheets/sheet1.xml"), ("rId2", "worksheet", "worksheets/sheet2.xml"),
                                              ("rId3", "worksheet", "worksheets/sheet3.xml"), ("rId4", "sharedStrings", "sharedStrings.xml"),
                                              ("rId5", "styles", "styles.xml"), ("rId6", "theme", "theme/theme1.xml"),
-                                             ("rId7", "worksheet", "worksheets/sheet4.xml")])),
+                                             ("rId7", "worksheet", "worksheets/sheet4.xml"), ("rId8", "worksheet", "worksheets/sheet5.xml")])),
         ("xl/workbook.xml", workbook), ("xl/sharedStrings.xml", sst), ("xl/styles.xml", styles), ("xl/theme/theme1.xml", THEME),
         ("xl/worksheets/sheet1.xml", sheet1), ("xl/worksheets/sheet2.xml", sheet2), ("xl/worksheets/sheet3.xml", sheet3),
-        ("xl/worksheets/sheet4.xml", sheet4),
+        ("xl/worksheets/sheet4.xml", sheet4), ("xl/worksheets/sheet5.xml", sheet5),
         ("xl/worksheets/_rels/sheet1.xml.rels", rels([("rId1", "drawing", "../drawings/drawing1.xml")])),
         ("xl/drawings/drawing1.xml", drawing),
         ("xl/drawings/_rels/drawing1.xml.rels", rels([("rId1", "chart", "../charts/chart1.xml"), ("rId2", "image", "../media/checker.png")])),

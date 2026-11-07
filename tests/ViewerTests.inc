@@ -776,7 +776,9 @@ TEST(viewer_reads_the_challenge_files)
         const mv::Workbook& book = doc.book;
         const mv::Sheet& s = book.sheets[0];
         const mv::Cell* negative = s.cell(4, 1);
-        CHECK(negative && negative->text == "(1,234.50)" && negative->color == mv::rgba(255, 0, 0));
+        // [Red] from the format; the conditional format (below 0: dark red on pink) takes the colour over.
+        CHECK(negative && negative->text == "(1,234.50)" && negative->color == mv::rgba(0x9C, 0, 6) && negative->fill == mv::rgba(0xFF, 0xC7, 0xCE));
+        CHECK(s.cell(6, 1) && s.cell(6, 1)->fill == 0); // 12.3%: not below 0
         CHECK(s.cell(9, 1) && s.cell(9, 1)->text == "3  1/4 "); // built-in 13, "# ?\?/?\?": padded
         const mv::Cell* rich = s.cell(11, 0);
         CHECK(rich && rich->text == "Rich text" && rich->rich > 0 && rich->rich < book.richTexts.size());
@@ -799,8 +801,32 @@ TEST(viewer_reads_the_challenge_files)
         CHECK(s.cell(11, 2) && (s.cell(11, 2)->flags & mv::Cell::Wrap) && s.cell(19, 1) && (s.cell(19, 1)->flags & mv::Cell::Wrap));
         CHECK(s.cell(19, 0) && s.cell(19, 0)->rotation == 90);
         // The Looks sheet: fonts by name, pattern and gradient fills, diagonals, indent, shrink to fit.
-        CHECK(book.defaultFont == "Calibri" && book.sheets.size() == 4);
-        if (book.sheets.size() == 4) {
+        CHECK(book.defaultFont == "Calibri" && book.sheets.size() == 5);
+        if (book.sheets.size() == 5) {
+            // The Rules sheet's conditional formats, on the saved values.
+            const mv::Sheet& rules = book.sheets[4];
+            CHECK(rules.cell(0, 0) && rules.cell(0, 0)->fill == mv::rgba(0xF8, 0x69, 0x6B));  // colour scale: the lowest red
+            CHECK(rules.cell(9, 0) && rules.cell(9, 0)->fill == mv::rgba(0x63, 0xBE, 0x7B));  // the highest green
+            CHECK(rules.cell(4, 0) && rules.cell(4, 0)->fill != 0 && rules.cell(4, 0)->fill != rules.cell(0, 0)->fill);
+            const mv::CellMark* low = rules.mark(0, 1);
+            const mv::CellMark* high = rules.mark(9, 1);
+            CHECK(low && high && std::fabs(low->bar - 0.1f) < 0.001f && std::fabs(high->bar - 0.9f) < 0.001f && high->barColor == mv::rgba(0x63, 0x8E, 0xC6));
+            const mv::CellMark* rising = rules.mark(0, 2);   // 10 of 1..10: the top third
+            const mv::CellMark* falling = rules.mark(9, 2); // 1
+            CHECK(rising && rising->icon == mv::CellMark::ArrowUp && falling && falling->icon == mv::CellMark::ArrowDown);
+            CHECK(rules.cell(5, 3) && rules.cell(5, 3)->fill == mv::rgba(0xFF, 0xC7, 0xCE) && rules.cell(4, 3) && rules.cell(4, 3)->fill == 0); // > 5
+            int top = 0;
+            for (std::uint32_t r = 0; r < 10; ++r)
+                if (const mv::Cell* c = rules.cell(r, 4); c && (c->flags & mv::Cell::Bold) && c->fill == mv::rgba(0xC6, 0xEF, 0xCE))
+                    ++top;
+            CHECK(top == 3);
+            CHECK(rules.cell(1, 5) && (rules.cell(1, 5)->flags & mv::Cell::Italic) && rules.cell(0, 5) && !(rules.cell(0, 5)->flags & mv::Cell::Italic)); // banana, apple
+            CHECK(rules.mark(9, 6) && rules.mark(9, 6)->icon == mv::CellMark::Star && rules.mark(9, 6)->level == 2);
+            CHECK(rules.mark(0, 7) && rules.mark(0, 7)->icon == mv::CellMark::Quarters && rules.mark(0, 7)->level == 0);
+            bool reported = false; // the expression rule
+            for (const std::string& n : doc.notShown)
+                reported = reported || n.find("conditional format") != std::string::npos;
+            CHECK(reported);
             const mv::Sheet& looks = book.sheets[3];
             auto named = [&](std::uint32_t r, std::uint32_t c) {
                 const mv::Cell* cell = looks.cell(r, c);

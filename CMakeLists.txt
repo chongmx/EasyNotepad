@@ -332,6 +332,7 @@ add_library(enp_model STATIC
     src/model/viewer/NumberFormat.cpp
     src/model/viewer/Ooxml.cpp
     src/model/viewer/Chart.cpp
+    src/model/viewer/ConditionalFormat.cpp
     src/model/viewer/Shapes.cpp
     src/model/viewer/Docx.cpp
     src/model/viewer/Xlsx.cpp

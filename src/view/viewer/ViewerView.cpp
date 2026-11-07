@@ -1084,6 +1084,115 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         dl->AddRectFilledMultiColor(a, b, at(0), at(1), at(2), at(3));
     };
 
+    // What conditional formatting draws in a cell: a data bar (Excel 2007's, fading to the right)
+    // and an icon at the cell's left, about 16 pixels (at 96 dpi) high.
+    auto mark = [&](const mv::CellMark& m, ImVec2 a, ImVec2 b) {
+        const float pixel = 0.75f * pxPerPoint;
+        if (m.bar >= 0.0f) {
+            const ImVec2 p0(a.x + pixel, a.y + 2.0f * pixel), p1(a.x + pixel + (b.x - a.x - 3.0f * pixel) * m.bar, b.y - 3.0f * pixel);
+            if (p1.x > p0.x && p1.y > p0.y) {
+                const ImVec4 c = ImGui::ColorConvertU32ToFloat4(m.barColor);
+                const ImU32 light = ImGui::ColorConvertFloat4ToU32(ImLerp(c, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 0.85f));
+                dl->AddRectFilledMultiColor(p0, p1, m.barColor, light, light, m.barColor);
+            }
+        }
+        if (m.icon == mv::CellMark::NoIcon)
+            return;
+        const float r = std::max(2.0f, std::min(8.0f * pixel, (b.y - a.y) * 0.5f - 2.0f * pixel));
+        const ImVec2 c(a.x + 2.0f * pixel + r, (a.y + b.y) * 0.5f);
+        const ImU32 col = m.iconColor, off = IM_COL32(210, 210, 210, 255), white = IM_COL32(255, 255, 255, 255);
+        auto at = [&](float x, float y, float scale = 1.0f) { return ImVec2(c.x + x * r * scale, c.y + y * r * scale); };
+        // The symbols, also drawn white inside a circle (scale < 1).
+        auto check = [&](ImU32 ink, float k) {
+            const ImVec2 pts[3] = {at(-0.7f, 0.0f, k), at(-0.2f, 0.5f, k), at(0.75f, -0.6f, k)};
+            dl->AddPolyline(pts, 3, ink, r * 0.35f * k, ImDrawFlags_None);
+        };
+        auto cross = [&](ImU32 ink, float k) {
+            dl->AddLine(at(-0.6f, -0.6f, k), at(0.6f, 0.6f, k), ink, r * 0.35f * k);
+            dl->AddLine(at(-0.6f, 0.6f, k), at(0.6f, -0.6f, k), ink, r * 0.35f * k);
+        };
+        auto exclamation = [&](ImU32 ink, float k) {
+            dl->AddRectFilled(at(-0.15f, -0.9f, k), at(0.15f, 0.3f, k), ink);
+            dl->AddCircleFilled(at(0.0f, 0.7f, k), r * 0.18f * k, ink);
+        };
+        switch (m.icon) {
+        case mv::CellMark::ArrowUp:
+        case mv::CellMark::ArrowUpRight:
+        case mv::CellMark::ArrowRight:
+        case mv::CellMark::ArrowDownRight:
+        case mv::CellMark::ArrowDown: {
+            const float angle = float(int(m.icon) - int(mv::CellMark::ArrowRight)) * 0.785398f; // -90 up .. 90 down
+            const ImVec2 d(std::cos(angle), std::sin(angle)), n(-d.y, d.x);
+            const ImVec2 tip = at(d.x, d.y), base = at(d.x * 0.05f, d.y * 0.05f), tail = at(-d.x * 0.9f, -d.y * 0.9f);
+            dl->AddLine(tail, base, col, r * 0.5f);
+            dl->AddTriangleFilled(tip, ImVec2(base.x + n.x * r * 0.85f, base.y + n.y * r * 0.85f), ImVec2(base.x - n.x * r * 0.85f, base.y - n.y * r * 0.85f), col);
+            break;
+        }
+        case mv::CellMark::Circle: dl->AddCircleFilled(c, r * 0.9f, col); break;
+        case mv::CellMark::Flag:
+            dl->AddLine(at(-0.6f, -0.95f), at(-0.6f, 0.95f), IM_COL32(90, 90, 90, 255), std::max(1.0f, r * 0.15f));
+            dl->AddRectFilled(at(-0.55f, -0.95f), at(0.8f, 0.05f), col);
+            break;
+        case mv::CellMark::Check: check(col, 1.0f); break;
+        case mv::CellMark::Cross: cross(col, 1.0f); break;
+        case mv::CellMark::Exclamation: exclamation(col, 1.0f); break;
+        case mv::CellMark::CheckCircled:
+        case mv::CellMark::CrossCircled:
+        case mv::CellMark::ExclamationCircled:
+            dl->AddCircleFilled(c, r * 0.95f, col);
+            if (m.icon == mv::CellMark::CheckCircled)
+                check(white, 0.6f);
+            else if (m.icon == mv::CellMark::CrossCircled)
+                cross(white, 0.6f);
+            else
+                exclamation(white, 0.6f);
+            break;
+        case mv::CellMark::Diamond: dl->AddQuadFilled(at(0.0f, -0.95f), at(0.95f, 0.0f), at(0.0f, 0.95f), at(-0.95f, 0.0f), col); break;
+        case mv::CellMark::TriangleUp: dl->AddTriangleFilled(at(0.0f, -0.85f), at(0.9f, 0.75f), at(-0.9f, 0.75f), col); break;
+        case mv::CellMark::TriangleDown: dl->AddTriangleFilled(at(-0.9f, -0.75f), at(0.9f, -0.75f), at(0.0f, 0.85f), col); break;
+        case mv::CellMark::Dash: dl->AddRectFilled(at(-0.8f, -0.25f), at(0.8f, 0.25f), col); break;
+        case mv::CellMark::Star: {
+            ImVec2 pts[10];
+            for (int i = 0; i < 10; ++i) {
+                const float t = -1.5707963f + float(i) * 0.6283185f, k = i % 2 ? 0.42f : 1.0f;
+                pts[i] = at(std::cos(t) * k, std::sin(t) * k);
+            }
+            if (m.level > 0) { // full, or its left half
+                if (m.level == 1)
+                    dl->PushClipRect(ImVec2(c.x - r, c.y - r), ImVec2(c.x, c.y + r), true);
+                for (int i = 0; i < 10; ++i)
+                    dl->AddTriangleFilled(c, pts[i], pts[(i + 1) % 10], col);
+                if (m.level == 1)
+                    dl->PopClipRect();
+            }
+            dl->AddPolyline(pts, 10, col, std::max(1.0f, r * 0.12f), ImDrawFlags_Closed);
+            break;
+        }
+        case mv::CellMark::Rating: // four bars rising left to right, `level` of them lit
+            for (int i = 0; i < 4; ++i) {
+                const float x0 = -0.95f + float(i) * 0.5f, top = 0.8f - float(i + 1) * 0.42f;
+                dl->AddRectFilled(at(x0, top), at(x0 + 0.38f, 0.85f), i < m.level ? col : off);
+            }
+            break;
+        case mv::CellMark::Quarters: // a circle filled a quarter at a time, clockwise from the top
+            dl->AddCircleFilled(c, r * 0.9f, white);
+            for (int q = 0; q < m.level && q < 4; ++q) {
+                dl->PathLineTo(c);
+                dl->PathArcTo(c, r * 0.9f, -1.5707963f + float(q) * 1.5707963f, float(q) * 1.5707963f, 8);
+                dl->PathFillConvex(col);
+            }
+            dl->AddCircle(c, r * 0.9f, col, 0, std::max(1.0f, r * 0.12f));
+            break;
+        case mv::CellMark::Boxes: // four small boxes, `level` of them filled
+            for (int i = 0; i < 4; ++i) {
+                const float x0 = i % 2 ? 0.08f : -0.9f, y0 = i < 2 ? -0.9f : 0.08f;
+                dl->AddRectFilled(at(x0, y0), at(x0 + 0.82f, y0 + 0.82f), i < m.level ? col : off);
+            }
+            break;
+        default: break;
+        }
+    };
+
     // One region of cells: rows [r0, r1), columns [c0, c1), placed so that row `rBase` / column
     // `cBase` is at (x0, y0), clipped to `clip`.
     auto region = [&](std::uint32_t r0, std::uint32_t r1, std::uint32_t c0, std::uint32_t c1, std::uint32_t rBase, std::uint32_t cBase, float x0,
@@ -1120,6 +1229,9 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
                 dl->AddRectFilled(a, ImVec2(b.x - 1.0f, b.y - 1.0f), cell.fill);
             if (cell.fillStyle && cell.fillStyle < book.fills.size())
                 styledFill(book.fills[cell.fillStyle], a, ImVec2(b.x - 1.0f, b.y - 1.0f));
+            if (!sh.marks.empty())
+                if (const mv::CellMark* m = sh.mark(r, cell.column))
+                    mark(*m, a, b);
             if (cell.border && cell.border < book.borders.size())
                 edges(book.borders[cell.border], a, b);
             if (cell.text.empty() || cw < 2.0f)

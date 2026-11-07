@@ -5,6 +5,7 @@
 #include "enp/model/viewer/Viewer.h"
 
 #include "Chart.h"
+#include "ConditionalFormat.h"
 #include "Ooxml.h"
 #include "Shapes.h"
 
@@ -28,6 +29,14 @@ const Cell* Sheet::cell(std::uint32_t r, std::uint32_t c) const
         return nullptr;
     const auto it = std::lower_bound(rw->cells.begin(), rw->cells.end(), c, [](const Cell& cell, std::uint32_t i) { return cell.column < i; });
     return it != rw->cells.end() && it->column == c ? &*it : nullptr;
+}
+
+const CellMark* Sheet::mark(std::uint32_t r, std::uint32_t c) const
+{
+    const auto it = std::lower_bound(marks.begin(), marks.end(), std::make_pair(r, c), [](const CellMark& m, std::pair<std::uint32_t, std::uint32_t> at) {
+        return m.row != at.first ? m.row < at.first : m.column < at.second;
+    });
+    return it != marks.end() && it->row == r && it->column == c ? &*it : nullptr;
 }
 
 float Sheet::columnWidth(std::uint32_t column) const
@@ -81,38 +90,7 @@ std::uint32_t mix(std::uint32_t a, std::uint32_t b, float t) // a toward b by t,
     return ch(0) | ch(8) | ch(16) | 0xFF000000u;
 }
 
-// "B12" -> row 11, column 1. False when it is not a cell reference.
-bool parseReference(std::string_view ref, std::uint32_t& row, std::uint32_t& column)
-{
-    std::size_t i = 0;
-    std::uint64_t col = 0;
-    while (i < ref.size() && ref[i] == '$')
-        ++i;
-    const std::size_t letters = i;
-    while (i < ref.size() && std::isalpha(static_cast<unsigned char>(ref[i]))) {
-        col = col * 26 + std::uint64_t(std::toupper(static_cast<unsigned char>(ref[i])) - 'A' + 1);
-        ++i;
-        if (col > 16384)
-            return false;
-    }
-    if (i == letters)
-        return false;
-    while (i < ref.size() && ref[i] == '$')
-        ++i;
-    std::uint64_t r = 0;
-    const std::size_t digits = i;
-    while (i < ref.size() && std::isdigit(static_cast<unsigned char>(ref[i]))) {
-        r = r * 10 + std::uint64_t(ref[i] - '0');
-        ++i;
-        if (r > 1048576)
-            return false;
-    }
-    if (i == digits || i != ref.size() || r == 0)
-        return false;
-    row = std::uint32_t(r - 1);
-    column = std::uint32_t(col - 1);
-    return true;
-}
+using cf::parseReference;
 
 class XlsxReader {
 public:
@@ -176,6 +154,9 @@ public:
             doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart or drawing" : " charts or drawings"));
         if (truncated_)
             doc.notShown.push_back("cells beyond the first 2,000,000");
+        if (unsupportedRules_)
+            doc.notShown.push_back(std::to_string(unsupportedRules_) +
+                                   (unsupportedRules_ == 1 ? " conditional format (a formula)" : " conditional formats (formulas)"));
         doc.shape = Shape::Sheet;
         return doc;
     }
@@ -323,7 +304,8 @@ private:
         std::map<int, std::uint16_t> borderIndex; // borderId -> Workbook::borders
         int edge = -1;                            // the border edge being read
         XmlReader x(*xml);
-        enum class In { None, Fonts, Fills, Borders, CellXfs, Other } in = In::None;
+        enum class In { None, Fonts, Fills, Borders, CellXfs, Dxfs, Other } in = In::None;
+        enum class DxfPart { None, Font, Fill } dxfPart = DxfPart::None; // in a dxf: its font or its fill
         // The fill being read: its pattern's colours, or its gradient.
         std::string pattern;
         std::uint32_t fg = 0, bg = 0;
@@ -379,6 +361,8 @@ private:
                     edge = -1;
                 else if (in == In::Fills && n == "fill")
                     endFill();
+                else if (in == In::Dxfs && (n == "font" || n == "fill"))
+                    dxfPart = DxfPart::None;
                 continue;
             }
             if (e != Event::Start)
@@ -412,7 +396,37 @@ private:
                 borders.back().color[edge] = textColor(colorOf(x));
             } else if (n == "cellXfs") {
                 in = In::CellXfs;
-            } else if (n == "cellStyleXfs" || n == "dxfs") {
+            } else if (n == "dxfs") {
+                in = In::Dxfs;
+            } else if (in == In::Dxfs && n == "dxf") {
+                dxfs_.emplace_back();
+                dxfPart = DxfPart::None;
+            } else if (in == In::Dxfs && !dxfs_.empty()) {
+                cf::Dxf& d = dxfs_.back();
+                const std::string v = x.attribute("val");
+                const bool set = v.empty() || (v != "0" && v != "false" && v != "none");
+                const std::uint8_t flag = n == "b" ? Cell::Bold : n == "i" ? Cell::Italic : n == "u" ? Cell::Underline : n == "strike" ? Cell::Strike : 0;
+                if (n == "font") {
+                    dxfPart = DxfPart::Font;
+                } else if (n == "fill") {
+                    dxfPart = DxfPart::Fill;
+                } else if (n == "numFmt") {
+                    d.format = x.attribute("formatCode");
+                    if (d.format.empty())
+                        d.format = std::string(builtinNumberFormat(std::atoi(x.attribute("numFmtId").c_str())));
+                } else if (dxfPart == DxfPart::Font && flag) {
+                    (set ? d.setFlags : d.clearFlags) |= flag;
+                } else if (dxfPart == DxfPart::Font && n == "color") {
+                    d.hasColor = true;
+                    d.color = textColor(colorOf(x));
+                } else if (dxfPart == DxfPart::Fill && (n == "bgColor" || n == "fgColor")) {
+                    // A differential fill's colour is its background (the pattern colour when that is all it has).
+                    if (n == "bgColor" || !d.hasFill) {
+                        d.hasFill = true;
+                        d.fill = colorOf(x);
+                    }
+                }
+            } else if (n == "cellStyleXfs") {
                 in = In::Other;
             } else if (in == In::Fonts && n == "font") {
                 fonts.emplace_back();
@@ -518,6 +532,9 @@ private:
         if (!xml)
             return;
         const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
+        // Conditional formats are evaluated on the saved numbers: kept while the sheet is read when it has any.
+        collectValues_ = xml->find("conditionalFormatting") != std::string::npos;
+        std::vector<cf::Rule> rules;
         XmlReader x(*xml);
         Row* row = nullptr;
         std::uint32_t nextRow = 0, nextColumn = 0;
@@ -591,8 +608,16 @@ private:
                 if (colon != std::string::npos && parseReference(std::string_view(ref).substr(0, colon), m.row0, m.col0) &&
                     parseReference(std::string_view(ref).substr(colon + 1), m.row1, m.col1) && m.row1 >= m.row0 && m.col1 >= m.col0)
                     sheet.merges.push_back(m);
+            } else if (n == "conditionalFormatting") {
+                conditionalFormatting(x, rules);
+            } else if (n == "extLst") { // Excel 2010's own rules (x14) repeat or extend these
+                x.skip();
             }
         }
+        if (!rules.empty())
+            unsupportedRules_ += cf::apply(rules, dxfs_, values_, sheet, date1904_);
+        std::vector<cf::Value>().swap(values_); // given back
+        collectValues_ = false;
         // Rows that hold nothing and keep the default height add nothing.
         sheet.rows.erase(std::remove_if(sheet.rows.begin(), sheet.rows.end(), [](const Row& r) { return r.cells.empty() && r.height == 0.0f; }),
                          sheet.rows.end());
@@ -604,6 +629,65 @@ private:
         for (const auto& [id, r] : rels)
             if (r.type == "drawing" && !r.external)
                 readDrawing(r.target, sheet);
+    }
+
+    // At the Start of conditionalFormatting: its rules over its ranges.
+    void conditionalFormatting(XmlReader& x, std::vector<cf::Rule>& rules)
+    {
+        std::vector<Merge> ranges;
+        cf::parseRanges(x.attribute("sqref"), ranges);
+        cf::Rule* rule = nullptr;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "cfRule") {
+                if (rules.size() >= 4096) {
+                    x.skip();
+                    rule = nullptr;
+                    continue;
+                }
+                rules.emplace_back();
+                rule = &rules.back();
+                rule->ranges = ranges;
+                auto flag = [&](const char* name, bool otherwise) {
+                    const std::string v = x.attribute(name);
+                    return v.empty() ? otherwise : v == "1" || v == "true";
+                };
+                rule->type = x.attribute("type");
+                rule->op = x.attribute("operator");
+                rule->text = x.attribute("text");
+                rule->dxf = x.hasAttribute("dxfId") ? std::atoi(x.attribute("dxfId").c_str()) : -1;
+                rule->priority = std::atoi(x.attribute("priority").c_str());
+                if (x.hasAttribute("rank"))
+                    rule->rank = std::atoi(x.attribute("rank").c_str());
+                rule->stdDev = std::atoi(x.attribute("stdDev").c_str());
+                rule->stop = flag("stopIfTrue", false);
+                rule->percent = flag("percent", false);
+                rule->bottom = flag("bottom", false);
+                rule->above = flag("aboveAverage", true);
+                rule->equal = flag("equalAverage", false);
+            } else if (!rule) {
+                continue;
+            } else if (n == "formula") {
+                rule->formulas.push_back(x.elementText());
+            } else if (n == "iconSet") {
+                rule->iconSet = x.attribute("iconSet");
+                rule->reverse = x.attribute("reverse") == "1" || x.attribute("reverse") == "true";
+                rule->showValue = x.attribute("showValue") != "0" && x.attribute("showValue") != "false";
+            } else if (n == "dataBar") {
+                rule->showValue = x.attribute("showValue") != "0" && x.attribute("showValue") != "false";
+            } else if (n == "cfvo") {
+                rule->cfvos.push_back(cf::Cfvo{x.attribute("type"), x.attribute("val"), x.attribute("gte") != "0" && x.attribute("gte") != "false"});
+            } else if (n == "color") {
+                rule->colors.push_back(colorOf(x));
+            } else if (n == "extLst") {
+                x.skip();
+            }
+        }
     }
 
     // A sheet's size in points from its start to column `c` / row `r` (Excel's widths: characters
@@ -840,6 +924,8 @@ private:
                 std::uint32_t tag = 0; // [Red] and the like
                 c.text = formatNumber(v, f ? f->code : std::string_view(), date1904_, &tag);
                 c.flags |= Cell::Number;
+                if (collectValues_ && values_.size() < 2000000)
+                    values_.push_back(cf::Value{row.index, column, v});
                 if (tag)
                     c.color = textColor(tag);
             } else {
@@ -860,6 +946,10 @@ private:
     std::vector<std::string> strings_;
     std::vector<std::uint32_t> stringRich_; // per shared string: its Workbook::richTexts index (0: none)
     std::vector<CellFormat> formats_;
+    std::vector<cf::Dxf> dxfs_;      // the conditional formats' formats
+    std::vector<cf::Value> values_;  // the sheet being read's numbers, while it has conditional formats
+    bool collectValues_ = false;
+    int unsupportedRules_ = 0;
     bool date1904_ = false;
     int otherSheets_ = 0, charts_ = 0;
     std::size_t cellCount_ = 0;

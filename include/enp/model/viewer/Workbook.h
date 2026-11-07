@@ -83,6 +83,20 @@ struct SheetDrawing {
     Page page;
 };
 
+// What conditional formatting draws in a cell besides its colours and font: a data bar and an icon.
+struct CellMark {
+    enum Icon : std::uint8_t {
+        NoIcon, ArrowUp, ArrowUpRight, ArrowRight, ArrowDownRight, ArrowDown, Circle, Flag, Check, Exclamation, Cross,
+        CheckCircled, ExclamationCircled, CrossCircled, Diamond, TriangleUp, TriangleDown, Dash, Star, Rating, Quarters, Boxes
+    };
+    std::uint32_t row = 0, column = 0;
+    float bar = -1.0f;         // the bar's length (0..1 of the cell's width; < 0: none)
+    std::uint32_t barColor = 0;
+    std::uint8_t icon = NoIcon;
+    std::uint8_t level = 0;    // Star: 0 empty, 1 half, 2 full; Rating, Quarters, Boxes: how many parts are lit (0..4)
+    std::uint32_t iconColor = 0;
+};
+
 struct Sheet {
     std::string name;
     std::vector<Row> rows; // ascending, only rows with cells or a height
@@ -95,8 +109,10 @@ struct Sheet {
     bool hidden = false;
     bool showGrid = true;
     std::vector<SheetDrawing> drawings;
+    std::vector<CellMark> marks; // by row, then column
 
     const Row* row(std::uint32_t index) const;
+    const CellMark* mark(std::uint32_t row, std::uint32_t column) const;
     const Cell* cell(std::uint32_t row, std::uint32_t column) const;
     float columnWidth(std::uint32_t column) const;
 };
