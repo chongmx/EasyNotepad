@@ -576,14 +576,14 @@ void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textWidth
         const std::size_t keepsFrom = keeps.size();
         anchor(i, y + g);
         Entry::WordPage::Placed placed = place(i, y + g);
-        const bool forced = blocks[i].pageBreakBefore && !page.blocks.empty();
+        const bool forced = blocks[i].doc().pageBreakBefore && !page.blocks.empty();
         if (!page.blocks.empty() && (forced || placed.top + placed.height > room)) {
             unanchor(i, keepsFrom);
             // A paragraph kept with the next one goes on with it (when it is not alone on its page).
             Entry::WordPage::Placed carried{0, -1.0f};
             if (!forced && page.blocks.size() > 1) {
                 const std::size_t last = page.blocks.back().block;
-                if (blocks[last].keepNext && notesOf(last, nullptr) == 0.0f) {
+                if (blocks[last].doc().keepNext && notesOf(last, nullptr) == 0.0f) {
                     carried = page.blocks.back();
                     page.blocks.pop_back();
                     unanchor(last, keeps.size());

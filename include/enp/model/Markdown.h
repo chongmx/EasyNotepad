@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -72,6 +73,43 @@ struct CellLook {
     CellEdge edges[4];         // left, top, right, bottom
 };
 
+// What a document's block (Word) adds to its layout: tab stops, spacing as the author set it,
+// where pages break, a table's grid and cells. Kept beside the block and made only for documents,
+// so Markdown's blocks stay small: within the allocators' small sizes (macOS's nano malloc, 256
+// bytes), where a parsed file's many blocks come and go without growing the footprint.
+struct DocumentLayout {
+    std::vector<TabStop> tabs;    // its tab stops, by position (none: every half inch)
+    // Spacing as the author set it (points), used instead of the renderer's gaps when
+    // `documentSpacing` is set; and where pages break (the page view).
+    bool documentSpacing = false;
+    float spaceAfter = 0.0f;
+    float lineMultiple = 0.0f;    // lines this many times the font's single line; 0: single
+    float lineExact = 0.0f;       // > 0: lines exactly (with lineAtLeast: at least) this tall
+    bool lineAtLeast = false;
+    bool contextual = false;      // no spacing to a neighbour of the same paragraph style (lists)
+    std::uint16_t style = 0;      // its paragraph style, numbered (contextual spacing compares them)
+    bool pageBreakBefore = false; // starts a new page
+    bool keepNext = false;        // kept on the page of the block after it
+    std::vector<float> columns;   // Table: Word's grid, the columns' widths in points (empty: by their text)
+    std::vector<std::vector<CellLook>> looks; // Table: each cell's look, as `rows` (empty: the renderer's own)
+};
+
+// An owning pointer that copies what it points to (a block copied is a block of its own).
+template <class T>
+struct DeepPointer {
+    std::unique_ptr<T> p;
+    DeepPointer() = default;
+    DeepPointer(const DeepPointer& o) : p(o.p ? std::make_unique<T>(*o.p) : nullptr) {}
+    DeepPointer& operator=(const DeepPointer& o)
+    {
+        if (this != &o)
+            p = o.p ? std::make_unique<T>(*o.p) : nullptr;
+        return *this;
+    }
+    DeepPointer(DeepPointer&&) noexcept = default;
+    DeepPointer& operator=(DeepPointer&&) noexcept = default;
+};
+
 struct Block {
     BlockKind kind = BlockKind::Paragraph;
     int level = 0;          // heading 1..6; list nesting depth (0 = top)
@@ -90,20 +128,20 @@ struct Block {
     float indentLeft = 0.0f, indentRight = 0.0f, firstLine = 0.0f; // firstLine < 0: a hanging indent
     float spaceBefore = 0.0f;     // above the paragraph, beyond the renderer's own gap
     std::uint32_t shading = 0;    // the paragraph's background (0: none)
-    std::vector<TabStop> tabs;    // its tab stops, by position (none: every half inch)
-    // Spacing as the author set it (points), used instead of the renderer's gaps when
-    // `documentSpacing` is set; and where pages break (the page view).
-    bool documentSpacing = false;
-    float spaceAfter = 0.0f;
-    float lineMultiple = 0.0f;    // lines this many times the font's single line; 0: single
-    float lineExact = 0.0f;       // > 0: lines exactly (with lineAtLeast: at least) this tall
-    bool lineAtLeast = false;
-    bool contextual = false;      // no spacing to a neighbour of the same paragraph style (lists)
-    std::uint16_t style = 0;      // its paragraph style, numbered (contextual spacing compares them)
-    bool pageBreakBefore = false; // starts a new page
-    bool keepNext = false;        // kept on the page of the block after it
-    std::vector<float> columns;   // Table: Word's grid, the columns' widths in points (empty: by their text)
-    std::vector<std::vector<CellLook>> looks; // Table: each cell's look, as `rows` (empty: the renderer's own)
+    DeepPointer<DocumentLayout> layout; // a document's block: the rest of its layout (null: Markdown's)
+
+    // The document layout: made on the first write; read from a block without one, an empty one.
+    DocumentLayout& doc()
+    {
+        if (!layout.p)
+            layout.p = std::make_unique<DocumentLayout>();
+        return *layout.p;
+    }
+    const DocumentLayout& doc() const
+    {
+        static const DocumentLayout none;
+        return layout.p ? *layout.p : none;
+    }
 };
 
 std::vector<Block> parse(std::string_view text);

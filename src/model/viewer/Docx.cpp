@@ -923,7 +923,7 @@ private:
     void push(md::Block b)
     {
         if (pendingPageBreak_) { // a page break ended the paragraph before
-            b.pageBreakBefore = true;
+            b.doc().pageBreakBefore = true;
             pendingPageBreak_ = false;
         }
         for (const std::string& key : paragraphNotes_)
@@ -1088,7 +1088,7 @@ private:
                 const std::string type = x.attribute("w:type");
                 if (type == "page") { // the page view starts a new page: before this paragraph, or after it
                     if (spans.empty())
-                        b.pageBreakBefore = true;
+                        b.doc().pageBreakBefore = true;
                     else
                         pendingPageBreak_ = true;
                 } else if (type != "column") {
@@ -1214,23 +1214,23 @@ private:
             b.indentRight = std::clamp(para.right, 0.0f, 288.0f);
         }
         // Word's spacing: before and after the paragraph, its line height, contextual spacing.
-        b.documentSpacing = true;
+        b.doc().documentSpacing = true;
         b.spaceBefore = std::clamp(para.before, 0.0f, 400.0f);
-        b.spaceAfter = std::clamp(para.after, 0.0f, 400.0f);
+        b.doc().spaceAfter = std::clamp(para.after, 0.0f, 400.0f);
         if (para.hasLine) {
             if (para.lineRule == 0)
-                b.lineMultiple = para.line;
+                b.doc().lineMultiple = para.line;
             else
-                b.lineExact = para.line, b.lineAtLeast = para.lineRule == 2;
+                b.doc().lineExact = para.line, b.doc().lineAtLeast = para.lineRule == 2;
         }
-        b.contextual = para.contextual == 1;
-        b.style = styleNumber(styleId.empty() ? defaultStyle_ : styleId);
-        b.pageBreakBefore = b.pageBreakBefore || para.pageBreakBefore == 1;
-        b.keepNext = para.keepNext == 1;
+        b.doc().contextual = para.contextual == 1;
+        b.doc().style = styleNumber(styleId.empty() ? defaultStyle_ : styleId);
+        b.doc().pageBreakBefore = b.doc().pageBreakBefore || para.pageBreakBefore == 1;
+        b.doc().keepNext = para.keepNext == 1;
         b.shading = para.shading;
         for (const md::TabStop& t : para.tabs) // the stops left after the styles' and the paragraph's own clears
             if (t.kind != 4)
-                b.tabs.push_back(t);
+                b.doc().tabs.push_back(t);
         return b;
     }
 
@@ -1409,7 +1409,7 @@ private:
                 target.side[i] = readEdge(x);
                 target.set[i] = true;
             } else if (n == "gridCol" && x.depth() == depth + 2) {
-                t.columns.push_back(float(std::atof(x.attribute("w:w").c_str()) / 20.0));
+                t.doc().columns.push_back(float(std::atof(x.attribute("w:w").c_str()) / 20.0));
             } else if (n == "gridSpan" && cell) {
                 own.back().back().span = std::clamp(std::atoi(x.attribute("w:val").c_str()), 1, 64);
             } else if (n == "vMerge" && cell) {
@@ -1464,8 +1464,8 @@ private:
             own[r].resize(columns);
         }
         t.align.assign(columns, -1);
-        if (t.columns.size() != columns)
-            t.columns.clear(); // a grid that does not fit the cells: widths by their text
+        if (t.doc().columns.size() != columns)
+            t.doc().columns.clear(); // a grid that does not fit the cells: widths by their text
 
         // Each cell's look: the style's whole table, then its parts as tblLook selects them
         // (bands, first / last column, first / last row), then the table's and the cell's own.
@@ -1474,11 +1474,11 @@ private:
         tableStyle(styleId, whole, parts);
         whole.borders.over(tableBorders);
         const int rows = int(t.rows.size()), cols = int(columns);
-        t.looks.assign(t.rows.size(), std::vector<md::CellLook>(columns));
+        t.doc().looks.assign(t.rows.size(), std::vector<md::CellLook>(columns));
         for (int r = 0; r < rows; ++r)
             for (int c = 0; c < cols; ++c) {
                 const Own& o = own[size_t(r)][size_t(c)];
-                md::CellLook& look = t.looks[size_t(r)][size_t(c)];
+                md::CellLook& look = t.doc().looks[size_t(r)][size_t(c)];
                 if (o.span == 0) {
                     look.covered = true;
                     continue;

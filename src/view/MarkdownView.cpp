@@ -647,10 +647,10 @@ float gapBefore(const md::Block* previous, const md::Block& block, float lineH, 
         return 0.0f;
     // A document's own spacing: the space after the one before and before this one, none between
     // two paragraphs of the same style that ask for contextual spacing (a list's items).
-    if (block.documentSpacing || previous->documentSpacing) {
-        const bool same = previous->documentSpacing && block.documentSpacing && previous->style == block.style;
-        const float after = previous->documentSpacing && !(same && previous->contextual) ? previous->spaceAfter : 0.0f;
-        const float before = block.documentSpacing && !(same && block.contextual) ? block.spaceBefore : 0.0f;
+    if (block.doc().documentSpacing || previous->doc().documentSpacing) {
+        const bool same = previous->doc().documentSpacing && block.doc().documentSpacing && previous->doc().style == block.doc().style;
+        const float after = previous->doc().documentSpacing && !(same && previous->doc().contextual) ? previous->doc().spaceAfter : 0.0f;
+        const float before = block.doc().documentSpacing && !(same && block.doc().contextual) ? block.spaceBefore : 0.0f;
         return (after + before) * pxPerPoint;
     }
     // A document's empty paragraph (a blank line) is the spacing itself: no gap around it.
@@ -713,9 +713,9 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
     const float lineH = st.paper ? std::floor(st.size * single) : st.lineH();
     const float padX = 5.4f * ppp, padY = 0.5f * ppp; // Word's default cell margins (0.08 inch at the sides)
     std::vector<float> widths(columns, 0.0f);
-    if (block.columns.size() == columns) {
+    if (block.doc().columns.size() == columns) {
         for (std::size_t c = 0; c < columns; ++c)
-            widths[c] = std::max(block.columns[c] * ppp, padX * 2.0f + 4.0f * st.s);
+            widths[c] = std::max(block.doc().columns[c] * ppp, padX * 2.0f + 4.0f * st.s);
     } else { // no grid: by the cells' text on one line
         for (std::size_t r = 0; r < rows; ++r)
             for (std::size_t c = 0; c < columns; ++c) {
@@ -757,7 +757,7 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
         // Measure the row: its height is its tallest cell's text (merged continuations add none).
         float rowH = lineH + padY * 2.0f;
         for (std::size_t c = 0; c < columns; ++c) {
-            const md::CellLook& look = block.looks[r][c];
+            const md::CellLook& look = block.doc().looks[r][c];
             textH[c] = 0.0f;
             lineWidths[c].clear();
             if (look.covered || look.merged)
@@ -770,12 +770,12 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
         }
         if (draw) {
             for (std::size_t c = 0; c < columns; ++c) { // shading first, under the text and the lines
-                const md::CellLook& look = block.looks[r][c];
+                const md::CellLook& look = block.doc().looks[r][c];
                 if (!look.covered && look.fill)
                     dl->AddRectFilled(ImVec2(xs[c], y), ImVec2(cellRight(c, look), y + rowH), look.fill);
             }
             for (std::size_t c = 0; c < columns; ++c) {
-                const md::CellLook& look = block.looks[r][c];
+                const md::CellLook& look = block.doc().looks[r][c];
                 if (look.covered || look.merged)
                     continue;
                 const float room = rowH - padY * 2.0f - textH[c];
@@ -792,11 +792,11 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
                 dl->AddLine(a, b, e.color ? ImU32(e.color) : st.text, std::max(1.0f, e.width * ppp));
             };
             for (std::size_t c = 0; c < columns; ++c) {
-                const md::CellLook& look = block.looks[r][c];
+                const md::CellLook& look = block.doc().looks[r][c];
                 if (look.covered)
                     continue;
                 const float x0 = xs[c], x1 = cellRight(c, look);
-                const bool continued = r + 1 < rows && block.looks[r + 1][c].merged;
+                const bool continued = r + 1 < rows && block.doc().looks[r + 1][c].merged;
                 edge(look.edges[0], ImVec2(x0, y), ImVec2(x0, y + rowH));
                 if (!look.merged)
                     edge(look.edges[1], ImVec2(x0, y), ImVec2(x1, y));
@@ -822,7 +822,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     // points: 11 points is the renderer's body size.
     const float pxPerPoint = st.size / 11.0f;
     // (Word's spacing between paragraphs is the gap before the block: gapBefore.)
-    const float spaceBefore = block.documentSpacing ? 0.0f : block.spaceBefore * pxPerPoint;
+    const float spaceBefore = block.doc().documentSpacing ? 0.0f : block.spaceBefore * pxPerPoint;
     at.y += spaceBefore;
     const float left = at.x + quoteIndent + block.indentLeft * pxPerPoint;
     const float right = std::max(left + 20.0f * st.s, at.x + width - block.indentRight * pxPerPoint);
@@ -832,7 +832,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     for (const md::Span& span : block.spans)
         maxSpan = std::max(maxSpan, span.size);
     // A Word list item's hanging indent places its marker; its text starts at the indent.
-    const bool wordList = block.documentSpacing && (block.kind == md::BlockKind::Bullet || block.kind == md::BlockKind::Numbered);
+    const bool wordList = block.doc().documentSpacing && (block.kind == md::BlockKind::Bullet || block.kind == md::BlockKind::Numbered);
     float firstLine = wordList ? 0.0f : block.firstLine;
     bool own = block.textAlign != 0 || firstLine != 0.0f || block.size > 0.0f || maxSpan > 0.0f || block.shading != 0;
     // Runs a flow over the block's spans: with its layout, measured first when it is aligned (the
@@ -843,7 +843,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     auto flowSpans = [&](float textLeft, float size, float lineH, ImU32 color, bool bold) {
         if (!own) {
             Flow flow(st, dl, draw, textLeft, right, at.y, size, lineH, color, bold, &links);
-            flow.tabs(&block.tabs, tabOrigin, hanging, pxPerPoint);
+            flow.tabs(&block.doc().tabs, tabOrigin, hanging, pxPerPoint);
             flow.spans(block.spans);
             return flow.bottom() - at.y;
         }
@@ -852,7 +852,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         if (draw && (block.textAlign != 0 || block.shading != 0)) {
             Flow measure(st, dl, false, textLeft, right, at.y, size, lineH, color, bold, nullptr);
             measure.layout(0, firstLine * pxPerPoint, nullptr, &widths, pxPerPoint);
-            measure.tabs(&block.tabs, tabOrigin, hanging, pxPerPoint);
+            measure.tabs(&block.doc().tabs, tabOrigin, hanging, pxPerPoint);
             measure.spans(block.spans);
             measuredH = measure.bottom() - at.y;
             if (block.shading)
@@ -861,7 +861,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         }
         Flow flow(st, dl, draw, textLeft, right, at.y, size, lineH, color, bold, &links);
         flow.layout(block.textAlign, firstLine * pxPerPoint, draw ? &widths : nullptr, nullptr, pxPerPoint);
-        flow.tabs(&block.tabs, tabOrigin, hanging, pxPerPoint);
+        flow.tabs(&block.doc().tabs, tabOrigin, hanging, pxPerPoint);
         flow.spans(block.spans);
         return flow.bottom() - at.y;
     };
@@ -877,14 +877,14 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                 break;
             }
         const float natural = std::max(size, maxSpan * pxPerPoint) * single;
-        if (block.lineExact > 0.0f)
-            return block.lineAtLeast ? std::max(natural, block.lineExact * pxPerPoint) : block.lineExact * pxPerPoint;
-        return natural * (block.lineMultiple > 0.0f ? block.lineMultiple : 1.0f);
+        if (block.doc().lineExact > 0.0f)
+            return block.doc().lineAtLeast ? std::max(natural, block.doc().lineExact * pxPerPoint) : block.doc().lineExact * pxPerPoint;
+        return natural * (block.doc().lineMultiple > 0.0f ? block.doc().lineMultiple : 1.0f);
     };
 
     switch (block.kind) {
     case md::BlockKind::Heading: {
-        if (block.documentSpacing) { // a Word heading: a paragraph in its style (its runs bold or not)
+        if (block.doc().documentSpacing) { // a Word heading: a paragraph in its style (its runs bold or not)
             const float size = sized(st.size * headingScale(block.level));
             height = flowSpans(left, size, documentLine(size), textColor, false);
             break;
@@ -902,7 +902,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
     }
     case md::BlockKind::Paragraph: {
         const float size = sized(st.size);
-        height = flowSpans(left, size, block.documentSpacing ? documentLine(size) : own ? lineFor(size, 1.45f) : lineH, textColor, false);
+        height = flowSpans(left, size, block.doc().documentSpacing ? documentLine(size) : own ? lineFor(size, 1.45f) : lineH, textColor, false);
         break;
     }
     case md::BlockKind::Bullet:
@@ -914,8 +914,8 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         if (block.kind == md::BlockKind::Numbered)
             markerW = std::max(indentW, st.ui->CalcTextSizeA(st.size, FLT_MAX, 0.0f, block.marker.c_str()).x + st.size * 0.5f);
         float textX = markerX + markerW;
-        const float itemLine = block.documentSpacing ? documentLine(sized(st.size)) : lineH;
-        if (block.documentSpacing) { // a Word list: the marker at the hanging indent, the text at the indent
+        const float itemLine = block.doc().documentSpacing ? documentLine(sized(st.size)) : lineH;
+        if (block.doc().documentSpacing) { // a Word list: the marker at the hanging indent, the text at the indent
             textX = left;
             markerX = std::max(at.x, left + block.firstLine * pxPerPoint);
             markerW = std::max(0.0f, textX - markerX);
@@ -943,7 +943,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                     dl->AddRectFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), textColor);
             } else if (block.kind == md::BlockKind::Numbered) {
                 const float w = st.ui->CalcTextSizeA(st.size, FLT_MAX, 0.0f, block.marker.c_str()).x;
-                if (block.documentSpacing) // Word: the number at the hanging indent, in the text's colour
+                if (block.doc().documentSpacing) // Word: the number at the hanging indent, in the text's colour
                     dl->AddText(st.ui, st.size, ImVec2(markerX, at.y + (itemLine - st.size) * 0.5f), textColor, block.marker.c_str());
                 else
                     dl->AddText(st.ui, st.size, ImVec2(textX - w - st.size * 0.35f, at.y + (lineH - st.size) * 0.5f), st.dim,
@@ -955,7 +955,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
             }
         }
         const float size = sized(st.size);
-        height = flowSpans(textX, size, block.documentSpacing ? itemLine : own ? lineFor(size, 1.45f) : lineH,
+        height = flowSpans(textX, size, block.doc().documentSpacing ? itemLine : own ? lineFor(size, 1.45f) : lineH,
                            block.checked ? st.dim : textColor, false);
         break;
     }
@@ -1106,7 +1106,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         const size_t columns = block.align.size();
         if (columns == 0 || block.rows.empty())
             break;
-        if (block.looks.size() == block.rows.size()) { // a document's table: its own grid and looks
+        if (block.doc().looks.size() == block.rows.size()) { // a document's table: its own grid and looks
             height = documentTable(block, at, left, right, st, draw, links);
             break;
         }

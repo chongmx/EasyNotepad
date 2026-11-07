@@ -1109,6 +1109,20 @@ TEST(viewer_reads_word_run_fonts)
     CHECK(plain.flow.fonts.size() == 1 && plain.flow.fonts[0] == "Times New Roman");
 }
 
+TEST(markdown_blocks_stay_small)
+{
+    // A parsed Markdown file is many blocks, made and freed as it is edited and shown. Over 256
+    // bytes they leave macOS's nano allocator, and its footprint creeps on every open and close
+    // (the CI memory benchmark failed so): a document's own layout lives beside the block.
+    namespace md = model::markdown;
+    CHECK(sizeof(md::Block) <= 256);
+    const std::vector<md::Block> blocks = md::parse("# Title\n\nText with a\ttab.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+    bool any = false;
+    for (const md::Block& b : blocks)
+        any = any || b.layout.p != nullptr;
+    CHECK(!blocks.empty() && !any); // Markdown's blocks have none
+}
+
 TEST(viewer_reads_word_layout)
 {
     // Tab stops, Word's spacing, list indents, page breaks and tables with a table style.
@@ -1144,28 +1158,28 @@ TEST(viewer_reads_word_layout)
     if (b.size() != 4)
         return;
     // The tab stop, the paragraph's spacing (its own before and exact line, the defaults' after).
-    CHECK(b[0].tabs.size() == 1 && b[0].tabs[0].kind == 2 && b[0].tabs[0].leader == '.' && std::fabs(b[0].tabs[0].pos - 450.0f) < 0.01f);
+    CHECK(b[0].doc().tabs.size() == 1 && b[0].doc().tabs[0].kind == 2 && b[0].doc().tabs[0].leader == '.' && std::fabs(b[0].doc().tabs[0].pos - 450.0f) < 0.01f);
     CHECK(md::plainText(b[0].spans) == "Chapter\t7");
-    CHECK(b[0].documentSpacing && std::fabs(b[0].spaceBefore - 12.0f) < 0.01f && std::fabs(b[0].spaceAfter - 8.0f) < 0.01f);
-    CHECK(std::fabs(b[0].lineExact - 18.0f) < 0.01f && !b[0].lineAtLeast);
+    CHECK(b[0].doc().documentSpacing && std::fabs(b[0].spaceBefore - 12.0f) < 0.01f && std::fabs(b[0].doc().spaceAfter - 8.0f) < 0.01f);
+    CHECK(std::fabs(b[0].doc().lineExact - 18.0f) < 0.01f && !b[0].doc().lineAtLeast);
     // The list item: its level's indents, contextual spacing from its style.
     CHECK(b[1].kind == md::BlockKind::Numbered && std::fabs(b[1].indentLeft - 36.0f) < 0.01f && std::fabs(b[1].firstLine + 18.0f) < 0.01f);
-    CHECK(b[1].contextual && std::fabs(b[1].lineMultiple - 259.0f / 240.0f) < 0.001f);
+    CHECK(b[1].doc().contextual && std::fabs(b[1].doc().lineMultiple - 259.0f / 240.0f) < 0.001f);
     // A page break at the start of a paragraph.
-    CHECK(b[2].pageBreakBefore && !b[1].pageBreakBefore);
+    CHECK(b[2].doc().pageBreakBefore && !b[1].doc().pageBreakBefore);
     // The table: its grid, the style's header row and bands, spans, merges, the cell's own shading.
     const md::Block& t = b[3];
-    CHECK(t.kind == md::BlockKind::Table && t.columns.size() == 2 && std::fabs(t.columns[1] - 200.0f) < 0.01f);
-    CHECK(t.looks.size() == 4 && t.looks[0].size() == 2);
-    if (t.looks.size() != 4)
+    CHECK(t.kind == md::BlockKind::Table && t.doc().columns.size() == 2 && std::fabs(t.doc().columns[1] - 200.0f) < 0.01f);
+    CHECK(t.doc().looks.size() == 4 && t.doc().looks[0].size() == 2);
+    if (t.doc().looks.size() != 4)
         return;
-    const md::CellLook& head = t.looks[0][0];
+    const md::CellLook& head = t.doc().looks[0][0];
     CHECK(head.fill == mv::rgba(0x44, 0x72, 0xC4) && head.bold && head.color == mv::rgba(255, 255, 255));
     CHECK(std::fabs(head.edges[1].width - 1.0f) < 0.01f && head.edges[1].color == mv::rgba(255, 0, 0)); // the table's top line
-    CHECK(t.looks[1][0].span == 2 && t.looks[1][1].covered && t.looks[1][0].align == 1);
-    CHECK(t.looks[1][0].fill == mv::rgba(0xD9, 0xE2, 0xF3));                                   // band 1
-    CHECK(t.looks[2][0].fill == mv::rgba(255, 255, 0) && !t.looks[2][0].merged && t.looks[3][0].merged); // own shading; vMerge
-    CHECK(t.looks[2][0].edges[3].width > 0.0f);                                                // insideH between rows
+    CHECK(t.doc().looks[1][0].span == 2 && t.doc().looks[1][1].covered && t.doc().looks[1][0].align == 1);
+    CHECK(t.doc().looks[1][0].fill == mv::rgba(0xD9, 0xE2, 0xF3));                                   // band 1
+    CHECK(t.doc().looks[2][0].fill == mv::rgba(255, 255, 0) && !t.doc().looks[2][0].merged && t.doc().looks[3][0].merged); // own shading; vMerge
+    CHECK(t.doc().looks[2][0].edges[3].width > 0.0f);                                                // insideH between rows
 }
 
 TEST(viewer_lays_out_smartart_from_its_data)
