@@ -26,9 +26,11 @@ public:
     // when the text changes; blocks outside the visible area are skipped once measured.
     void render(const std::string& text, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale);
     // The same for blocks read elsewhere (a Word document's: model::viewer). They are not copied:
-    // `blocks` must stay alive and unchanged while `generation` is the same.
+    // `blocks` must stay alive and unchanged while `generation` is the same. `fontNames`: the
+    // document's font families its spans' `font` numbers name (drawn in those fonts when the
+    // fonts have DocumentFonts), and the same while `generation` is.
     void renderBlocks(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
-                      const Palette& palette, float fontSize, float uiScale);
+                      const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
 
     // A link was clicked (its target).
     std::function<void(const std::string& url)> onLink;

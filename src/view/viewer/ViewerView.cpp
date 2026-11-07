@@ -346,7 +346,7 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     dl->ChannelsSplit(2); // the page goes under the text, once its height is known
     dl->ChannelsSetCurrent(1);
     const ImVec2 top = ImGui::GetCursorScreenPos();
-    e.flow.renderBlocks(d.flow.blocks, e.generation, column, fonts_, paper, Fonts::kUiSize * 1.08f * zoom, s_);
+    e.flow.renderBlocks(d.flow.blocks, e.generation, column, fonts_, paper, Fonts::kUiSize * 1.08f * zoom, s_, &d.flow.fonts);
     const float bottom = ImGui::GetCursorScreenPos().y;
     dl->ChannelsSetCurrent(0);
     dl->AddRectFilled(ImVec2(top.x - margin + 3.0f * s_, top.y - margin + 3.0f * s_), ImVec2(top.x + column + margin + 3.0f * s_, bottom + margin + 3.0f * s_),

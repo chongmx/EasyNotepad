@@ -4,6 +4,7 @@
 
 #include "enp/services/AutomationServer.h"
 #include "enp/services/ServiceContainer.h"
+#include "enp/view/DocumentFonts.h"
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
@@ -67,6 +68,7 @@ private:
     void giveMemoryBack();
     view::Fonts fonts_;
     view::ScriptFonts scriptFonts_; // Chinese, Japanese and Korean, while a document shown needs them
+    view::DocumentFonts documentFonts_; // Calibri, Times New Roman, ...: while documents set in them are drawn
     std::unique_ptr<view::MainView> view_;
     // Local endpoint for the MCP connector (`EasyNotepad --mcp`); stopped before the view-model goes.
     std::unique_ptr<services::AutomationServer> automation_;

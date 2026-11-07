@@ -11,10 +11,15 @@
 
 namespace enp::view {
 
+class DocumentFonts;
+
 struct Fonts {
     ImFont* ui = nullptr;   // proportional UI text + icons
     ImFont* mono = nullptr; // editor and diff text + icons
     bool hasIcons = false;
+    // The fonts documents are set in, loaded as they are drawn (owned by the Application; null in
+    // tests without one: documents then use the UI font).
+    DocumentFonts* documents = nullptr;
 
     static constexpr float kUiSize = 15.0f;
     static constexpr float kEditorSize = 15.0f;

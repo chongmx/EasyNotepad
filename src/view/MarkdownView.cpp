@@ -4,11 +4,13 @@
 #include "enp/model/Highlighter.h"
 #include "enp/model/Language.h"
 #include "enp/view/CodeGrid.h"
+#include "enp/view/DocumentFonts.h"
 #include "enp/view/MathView.h"
 #include "enp/view/UiStyle.h"
 #include "enp/os/Memory.h"
 
 #include "IconsFontAwesome6.h"
+#include "imgui_internal.h" // ImTextCharFromUtf8
 
 #include <algorithm>
 #include <cfloat>
@@ -22,6 +24,8 @@ namespace md = model::markdown;
 struct MarkdownView::Style {
     ImFont* ui = nullptr;
     ImFont* mono = nullptr;
+    DocumentFonts* documentFonts = nullptr;               // a document's own fonts (Span::font), when set
+    const std::vector<std::string>* fontNames = nullptr; // the document's font families, as Span::font numbers them
     float size = 15.0f; // body text, in pixels
     bool paper = false; // a document read for viewing: its own colours; italics not dimmed
     float s = 1.0f;     // UI scale
@@ -88,6 +92,14 @@ public:
     float widest() const { return std::max(widest_, x_); } // the longest line's end (cells with line breaks)
 
 private:
+    // The face a run's words are drawn in: a document's own (with its real weight and slant), or
+    // the view's font.
+    struct Ink {
+        ImFont* font = nullptr;
+        bool document = false;
+        bool realBold = false, realItalic = false;
+    };
+
     const MarkdownView::Style& st_;
     ImDrawList* dl_;
     bool draw_;
@@ -325,7 +337,20 @@ private:
         if (lineEmpty_ && !span.text.empty())
             lineEmpty_ = false;
         const bool code = (span.style & md::Code) != 0;
-        ImFont* font = code ? st_.mono : st_.ui;
+        Ink ink;
+        ink.font = code ? st_.mono : st_.ui;
+        // A document's run in its own font: the face's weight and slant are real (else faked).
+        if (!code && span.font > 0 && st_.documentFonts && st_.fontNames && span.font <= st_.fontNames->size()) {
+            const DocumentFonts::Face face = st_.documentFonts->face((*st_.fontNames)[span.font - 1], bold_ || (span.style & md::Bold) != 0,
+                                                                     (span.style & md::Italic) != 0);
+            if (face.font) {
+                ink.font = face.font;
+                ink.document = true;
+                ink.realBold = face.bold;
+                ink.realItalic = face.italic;
+            }
+        }
+        ImFont* font = ink.font;
         const float own = span.size > 0.0f && pxPerPoint_ > 0.0f ? span.size * pxPerPoint_ : size_;
         const float size = code ? own * 0.92f : own;
         const std::string& t = span.text;
@@ -347,9 +372,34 @@ private:
                 end = spaces; // inside code the spaces keep the background (one box, not one per word)
             spanStart_ = i == 0 || t[i - 1] == '\n';
             spanEnd_ = end >= t.size() || t[end] == '\n' || spaces >= t.size();
-            word(t.data() + i, t.data() + end, spaces - end, font, size, span);
+            // A word the document's face cannot draw (Chinese in a Calibri run) takes the UI font,
+            // which has the fallbacks merged in.
+            Ink wordInk = ink;
+            if (ink.document && !covers(font, t.data() + i, t.data() + end))
+                wordInk = Ink{st_.ui, false, false, false};
+            word(t.data() + i, t.data() + end, spaces - end, wordInk, size, span);
             i = spaces;
         }
+    }
+
+    // Whether `font` has every letter of [b, e) beyond the Latin, Greek and Cyrillic ones all
+    // document fonts here have.
+    static bool covers(ImFont* font, const char* b, const char* e)
+    {
+        for (const char* p = b; p < e;) {
+            if (static_cast<unsigned char>(*p) < 0xC9) { // below U+0250: Latin, always there
+                p += utf8Length(static_cast<unsigned char>(*p));
+                continue;
+            }
+            unsigned int c = 0;
+            const int n = ImTextCharFromUtf8(&c, p, e);
+            if (n <= 0)
+                break;
+            p += n;
+            if (c >= 0x250 && c <= 0xFFFF && !font->IsGlyphInFont(ImWchar(c)))
+                return false;
+        }
+        return true;
     }
 
     float measure(ImFont* font, float size, const char* b, const char* e) const
@@ -357,13 +407,16 @@ private:
         return font->CalcTextSizeA(size, FLT_MAX, 0.0f, b, e).x;
     }
 
-    void word(const char* b, const char* e, size_t spaces, ImFont* font, float size, const md::Span& span)
+    void word(const char* b, const char* e, size_t spaces, const Ink& ink, float size, const md::Span& span)
     {
+        ImFont* font = ink.font;
         const bool bold = bold_ || (span.style & md::Bold) != 0;
-        // Bold is the text drawn twice, the second copy whole pixels to the right: ImGui starts text
-        // on a whole pixel, so a fractional offset fell on the same pixel for some words (normal
-        // weight) and on the next for others (heavy).
-        const float extra = bold ? std::max(1.0f, std::round(size / 22.0f)) : 0.0f;
+        // Bold without a bold face is the text drawn twice, the second copy whole pixels to the
+        // right: ImGui starts text on a whole pixel, so a fractional offset fell on the same pixel
+        // for some words (normal weight) and on the next for others (heavy).
+        const float extra = bold && !ink.realBold ? std::max(1.0f, std::round(size / 22.0f)) : 0.0f;
+        // Italic without an italic face: slanted (a document's; Markdown dims it instead).
+        const bool slant = (span.style & md::Italic) != 0 && !ink.realItalic && st_.paper;
         const float spaceW = measure(font, size, " ", " " + 1);
         float w = measure(font, size, b, e) + extra;
         const float avail = right_ - left_;
@@ -382,13 +435,13 @@ private:
                 used += cw;
                 cut += n;
             }
-            piece(b, cut, used + extra, font, size, span, bold, extra);
+            piece(b, cut, used + extra, font, size, span, bold, extra, slant);
             newline();
             b = cut;
             w = measure(font, size, b, e) + extra;
         }
         if (b < e)
-            piece(b, e, w, font, size, span, bold, extra);
+            piece(b, e, w, font, size, span, bold, extra, slant);
         // Spaces: dropped at the end of a line.
         const float trailing = spaceW * float(spaces);
         if (spaces > 0 && x_ + trailing <= right_) {
@@ -401,7 +454,7 @@ private:
         }
     }
 
-    void piece(const char* b, const char* e, float w, ImFont* font, float size, const md::Span& span, bool bold, float extra)
+    void piece(const char* b, const char* e, float w, ImFont* font, float size, const md::Span& span, bool bold, float extra, bool slant)
     {
         const float top = y_ + (lineH_ - size) * 0.5f;
         if (draw_) {
@@ -432,9 +485,15 @@ private:
                 spanStart_ = false;
             }
             const float textX = std::floor(x_); // where ImGui starts it; the bold copy keeps its offset
+            const int firstVertex = dl_->VtxBuffer.Size;
             dl_->AddText(font, size, ImVec2(textX, top), color, b, e);
-            if (bold)
+            if (extra > 0.0f)
                 dl_->AddText(font, size, ImVec2(textX + extra, top), color, b, e);
+            if (slant) { // about 12 degrees, about the baseline
+                const float baseline = top + size * 0.8f;
+                for (int i = firstVertex; i < dl_->VtxBuffer.Size; ++i)
+                    dl_->VtxBuffer[i].pos.x += (baseline - dl_->VtxBuffer[i].pos.y) * 0.21f;
+            }
             decorate(x_, x_ + w, span, color, size);
             if (link && links_)
                 links_->push_back({ImVec2(x_, y_), ImVec2(x_ + w, y_ + lineH_), span.url});
@@ -466,6 +525,10 @@ float headingScale(int level)
 float gapBefore(const md::Block* previous, const md::Block& block, float lineH)
 {
     if (!previous)
+        return 0.0f;
+    // A document's empty paragraph (a blank line) is the spacing itself: no gap around it.
+    auto blank = [](const md::Block& b) { return b.kind == md::BlockKind::Paragraph && b.spans.size() == 1 && b.spans[0].text == " "; };
+    if (blank(block) || blank(*previous))
         return 0.0f;
     auto listy = [](const md::Block& b) {
         return b.kind == md::BlockKind::Bullet || b.kind == md::BlockKind::Numbered || b.kind == md::BlockKind::Task;
@@ -844,6 +907,7 @@ void MarkdownView::styleFor(Style& st, const Fonts& fonts, const Palette& palett
 {
     st.ui = fonts.ui;
     st.mono = fonts.mono ? fonts.mono : fonts.ui;
+    st.documentFonts = fonts.documents;
     ImGui::PushFont(fonts.ui, fontSize);
     st.size = ImGui::GetFontSize(); // with the global scale applied
     ImGui::PopFont();
@@ -878,10 +942,11 @@ void MarkdownView::render(const std::string& text, float width, const Fonts& fon
 }
 
 void MarkdownView::renderBlocks(const std::vector<md::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
-                                const Palette& palette, float fontSize, float uiScale)
+                                const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames)
 {
     Style st;
     styleFor(st, fonts, palette, fontSize, uiScale);
+    st.fontNames = fontNames;
     if (external_ != &blocks || generation != generation_) {
         os::mem::release(text_); // no own text: the blocks are the caller's
         os::mem::release(blocks_);

@@ -27,6 +27,8 @@ struct FlowDocument {
     std::map<std::string, std::string> media;
     // Fixed drawings (charts, shapes) between the blocks, sized in points: a Drawing block names one.
     std::vector<Page> drawings;
+    // The font families the runs are in ("Calibri", "Times New Roman"), as Span::font numbers them.
+    std::vector<std::string> fonts;
 };
 
 // Scripts whose letters the bundled fonts lack: the views merge a system font in while a document

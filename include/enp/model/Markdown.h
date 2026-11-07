@@ -34,6 +34,7 @@ struct Span {
     std::uint32_t color = 0;     // text colour (packed like ImU32); 0: the block's
     std::uint32_t highlight = 0; // background behind the text; 0: none
     float size = 0.0f;           // points; 0: the block's size
+    std::uint8_t font = 0;       // 1-based into the document's font names (FlowDocument::fonts); 0: the view's
 };
 using Spans = std::vector<Span>;
 

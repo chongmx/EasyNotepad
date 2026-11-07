@@ -410,6 +410,7 @@ target_link_libraries(enp_viewmodel PUBLIC enp_interfaces)
 add_library(enp_view STATIC
     src/view/Theme.cpp
     src/view/Fonts.cpp
+    src/view/DocumentFonts.cpp
     src/view/Icons.cpp
     src/view/RibbonView.cpp
     src/view/EditorView.cpp

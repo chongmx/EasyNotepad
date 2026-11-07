@@ -35,11 +35,14 @@ struct RunProps {
     std::uint32_t highlight = 0;
     bool hasHighlight = false;
     signed char bold = -1, italic = -1, underline = -1, strike = -1, code = -1;
+    std::string font; // w:rFonts' family; "+major" / "+minor": the theme's heading / body font; empty: not set
 
     void over(const RunProps& o)
     {
         if (o.size > 0.0f)
             size = o.size;
+        if (!o.font.empty())
+            font = o.font;
         if (o.color || o.autoColor)
             color = o.color, autoColor = o.autoColor;
         if (o.hasHighlight)
@@ -198,9 +201,21 @@ bool readRunProperty(const XmlReader& x, std::string_view n, RunProps& r)
             r.hasHighlight = true;
         }
     } else if (n == "rFonts") {
-        const std::string font = x.attribute("w:ascii");
-        if (font.find("Courier") != std::string::npos || font.find("Consolas") != std::string::npos || font.find("Mono") != std::string::npos)
-            r.code = 1;
+        // The family Latin text is set in: its name, else the theme's font it refers to.
+        std::string font = x.attribute("w:ascii");
+        if (font.empty())
+            font = x.attribute("w:hAnsi");
+        if (font.empty()) {
+            std::string theme = x.attribute("w:asciiTheme");
+            if (theme.empty())
+                theme = x.attribute("w:hAnsiTheme");
+            if (theme.rfind("major", 0) == 0)
+                font = "+major";
+            else if (theme.rfind("minor", 0) == 0)
+                font = "+minor";
+        }
+        if (!font.empty())
+            r.font = std::move(font);
     } else {
         return false;
     }
@@ -655,6 +670,24 @@ private:
         return out;
     }
 
+    // The number of a run's font family in the document's list (Span::font), adding it the first
+    // time; theme references resolved. 0 when the document names none (Word then uses Times New
+    // Roman) or the list is full.
+    std::uint8_t fontNumber(const std::string& font)
+    {
+        std::string family = font == "+major" ? theme_.majorFont : font == "+minor" ? theme_.minorFont : font;
+        if (family.empty())
+            family = "Times New Roman";
+        std::vector<std::string>& fonts = doc_->flow.fonts;
+        for (std::size_t i = 0; i < fonts.size(); ++i)
+            if (fonts[i] == family)
+                return std::uint8_t(i + 1);
+        if (fonts.size() >= 255)
+            return 0;
+        fonts.push_back(std::move(family));
+        return std::uint8_t(fonts.size());
+    }
+
     void push(md::Block b)
     {
         if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
@@ -669,7 +702,7 @@ private:
         if (!spans.empty()) {
             const md::Span& last = spans.back();
             if (last.style == look.style && last.url == look.url && last.color == look.color && last.highlight == look.highlight &&
-                last.size == look.size && !(look.style & md::Image)) {
+                last.size == look.size && last.font == look.font && !(look.style & md::Image)) {
                 spans.back().text += text;
                 return;
             }
@@ -711,6 +744,7 @@ private:
             look.color = asLink ? 0u : r.color;
             look.highlight = r.highlight;
             look.size = r.size;
+            look.font = fontNumber(r.font);
             look.url = url;
             appendText(spans, text, look);
         };

@@ -946,3 +946,38 @@ TEST(viewer_numbers_word_headings_through_their_styles)
     CHECK(b[2].kind == md::BlockKind::Paragraph && md::plainText(b[2].spans) == " "); // an empty paragraph keeps its line
     CHECK_EQ(md::plainText(b[3].spans), std::string("A.2 Directives"));
 }
+
+TEST(viewer_reads_word_run_fonts)
+{
+    using namespace viewertest;
+    namespace md = model::markdown;
+    // docDefaults name the theme's body font; a run names its own; a document naming none is in
+    // Times New Roman, as Word sets it.
+    const std::string theme = R"(<a:theme xmlns:a="a"><a:themeElements><a:fontScheme name="f"><a:majorFont><a:latin typeface="Cambria"/></a:majorFont>
+<a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>)";
+    const std::string styles = R"(<w:styles xmlns:w="w"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:rFonts w:asciiTheme="majorHAnsi"/></w:rPr></w:style></w:styles>)";
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Body </w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr><w:t>code</w:t></w:r></w:p></w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rId1", "styles", "styles.xml"}, {"rId2", "theme", "theme/theme1.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/theme/theme1.xml", theme}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    const std::vector<std::string>& fonts = doc.flow.fonts;
+    CHECK(b.size() == 2);
+    if (b.size() != 2 || b[1].spans.size() != 2)
+        return;
+    auto family = [&](const md::Span& s) { return s.font > 0 && s.font <= fonts.size() ? fonts[s.font - 1] : std::string(); };
+    CHECK_EQ(family(b[0].spans[0]), std::string("Cambria"));     // the heading style: the theme's major font
+    CHECK_EQ(family(b[1].spans[0]), std::string("Calibri"));     // docDefaults: the theme's minor font
+    CHECK_EQ(family(b[1].spans[1]), std::string("Courier New")); // the run's own
+    CHECK(!(b[1].spans[1].style & md::Code));                    // a fixed-pitch font is not code
+    // No fonts named anywhere: Word's own default.
+    const mv::ViewerDocument plain = mv::readDocx(zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                                       {"word/document.xml", R"(<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>)"}}));
+    CHECK(plain.flow.fonts.size() == 1 && plain.flow.fonts[0] == "Times New Roman");
+}

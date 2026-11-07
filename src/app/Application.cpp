@@ -77,6 +77,7 @@ void Application::attachUi(float uiScale, std::string rendererInfo, view::IWindo
     style.FontSizeBase = view::Fonts::kUiSize;
 
     fonts_ = view::Fonts::load();
+    fonts_.documents = &documentFonts_;
     view_ = std::make_unique<view::MainView>(*viewModel_, fonts_, uiScale, frame);
     view_->setRendererInfo(std::move(rendererInfo));
 }
@@ -159,8 +160,10 @@ void Application::frame()
 void Application::endFrame()
 {
     const double now = os::now();
-    // Between frames: the atlas takes or gives back a font for the scripts the documents need.
+    // Between frames: the atlas takes or gives back a font for the scripts the documents need, and
+    // gives back document fonts no longer drawn.
     scriptFonts_.update(fonts_.ui, view_ ? view_->viewerScripts() : 0);
+    documentFonts_.trim(ImGui::GetTime(), 30.0);
     if (viewModel_->takeMemoryTrimRequest()) {
         trimFrames_ = 4; // (re)start: textures released this frame are destroyed by the backend next frame, freed the one after
         lateTrimAt_ = now + 1.5;
@@ -179,6 +182,7 @@ void Application::giveMemoryBack()
 {
     if (view_)
         view_->compactCaches(); // emoji pictures no longer on screen
+    documentFonts_.trim(ImGui::GetTime(), 0.0); // the fonts of documents no longer shown
     // A folder or the last document closed. ImGui keeps every window's vertex buffers at the size
     // they once needed and every glyph ever drawn: shrink them to what is in use now (they grow
     // back on demand), then give the freed heap back to the OS so the release shows.
