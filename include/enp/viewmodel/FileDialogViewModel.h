@@ -40,6 +40,13 @@ public:
     // Computed when the dialog opens: checking drives can be slow (network, empty card readers).
     const std::vector<std::pair<std::string, std::string>>& places() const { return places_; }
 
+    // Android without "All files access": only the app's own folders can be listed. The view says
+    // so and offers requestStorageAccess() (the system settings); checkStorageAccess(), called
+    // every frame, shows the user's files once the access is turned on.
+    bool storageAccessMissing() const { return !storageAccess_; }
+    void requestStorageAccess();
+    void checkStorageAccess();
+
     void goTo(const std::string& folder); // absolute, or relative to the current folder
     void up();
     void back();
@@ -68,6 +75,7 @@ private:
     std::vector<Entry> entries_;
     std::vector<std::string> history_;
     std::vector<std::pair<std::string, std::string>> places_;
+    bool storageAccess_ = true;
     void findPlaces();
 };
 

@@ -49,11 +49,21 @@ bool deletePath(const std::string& path, bool* recycled = nullptr, std::string* 
 
 std::string currentDirectory();
 std::string executableDirectory();
+// Android: the shared storage ("/storage/emulated/0") once the app may read it, else the app's own folder.
 std::string homeDirectory();
 // Per-user writable directory for settings (created on demand).
 std::string appDataDirectory();
-// Starting points for a file browser: drive letters on Windows, "/" and well-known folders elsewhere.
+// Starting points for a file browser: drive letters on Windows, "/" and well-known folders elsewhere
+// (Android: the shared storage, its Download and Documents folders, SD cards, the app's own folders).
 std::vector<std::string> rootDirectories();
+
+// Whether the app may read and write files outside its own folders. Android 11 and later: the
+// "All files access" the user turns on in the system settings; Android 6 to 10: the storage
+// permission. True on every other platform.
+bool hasStorageAccess();
+// Asks the user for that access and returns at once: Android opens the app's "All files access"
+// page in the system settings (or the permission prompt before Android 11). Nothing elsewhere.
+void requestStorageAccess();
 
 // Read-only resources bundled with the application (fonts, sample documents).
 // `relativePath` uses '/' separators, e.g. "fonts/Roboto-Medium.ttf".

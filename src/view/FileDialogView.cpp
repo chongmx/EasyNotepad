@@ -101,6 +101,19 @@ void FileDialogView::render()
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("##entries", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders);
+    vm_.checkStorageAccess();
+    if (vm_.storageAccessMissing()) { // Android: only the app's own folders until the user allows more
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(palette_.severityWarning));
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  EasyNotepad can only see its own files. To open files "
+                           "and folders elsewhere on the device (Download, Documents, an SD card), allow it "
+                           "access to all files (Android's \"All files access\"), then come back here.");
+        ImGui::PopStyleColor();
+        if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Allow access to all files"))
+            vm_.requestStorageAccess();
+        registerLastItem("file-dialog:storage-access", "button", "Allow access to all files",
+                         [this]() { vm_.requestStorageAccess(); });
+        ImGui::Separator();
+    }
     const auto entries = vm_.visibleEntries();
     if (entries.empty())
         ImGui::TextDisabled(vm_.mode() == FileDialogMode::OpenFolder ? "No folders here" : "Nothing here");

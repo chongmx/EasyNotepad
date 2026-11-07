@@ -18,6 +18,8 @@ public:
     bool createDirectories(const std::string& path) override;
     std::string homeDirectory() override;
     std::vector<std::string> roots() override;
+    bool hasStorageAccess() override;
+    void requestStorageAccess() override;
     bool rename(const std::string& from, const std::string& to, std::string* error = nullptr) override;
     bool remove(const std::string& path, bool* recycled = nullptr, std::string* error = nullptr) override;
     bool reveal(const std::string& path) override;

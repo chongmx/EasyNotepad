@@ -326,6 +326,7 @@ std::string currentDirectory()
     return "/";
 }
 
+#if !defined(__ANDROID__) // Android: OsAndroid.cpp (no HOME; the shared storage instead)
 std::string homeDirectory()
 {
     if (auto home = getEnv("HOME"))
@@ -336,6 +337,7 @@ std::string homeDirectory()
 #endif
     return "/";
 }
+#endif
 
 } // namespace fs
 
