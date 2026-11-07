@@ -948,6 +948,10 @@ TEST(viewer_draws_slides_as_office_does)
 <a:tr h="381000"><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>c</a:t></a:r></a:p></a:txBody>
 <a:tcPr><a:lnB w="38100"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnB></a:tcPr></a:tc>
 <a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>d</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+<p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6000000" y="3000000"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"/>
+<a:pattFill prst="pct50"><a:fgClr><a:srgbClr val="000000"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></p:spPr></p:sp>
+<p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6000000" y="5000000"/><a:ext cx="1270000" cy="635000"/></a:xfrm><a:prstGeom prst="rect"/>
+<a:blipFill><a:blip r:embed="rId5"/><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:ln><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:sp>
 </p:spTree></p:cSld></p:sld>)";
     // A table style with a 2-point green line under its first row and none elsewhere.
     const std::string tableStyles = R"(<a:tblStyleLst xmlns:a="a"><a:tblStyle styleId="{LINES}" styleName="Lines">
@@ -958,7 +962,9 @@ TEST(viewer_draws_slides_as_office_does)
                                    {"ppt/tableStyles.xml", tableStyles},
                                    {"ppt/presentation.xml", presentation},
                                    {"ppt/slides/_rels/slide1.xml.rels",
-                                    rels({{"rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"}, {"rId9", "hyperlink", "https://example.com/"}})},
+                                    rels({{"rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"}, {"rId9", "hyperlink", "https://example.com/"},
+                                          {"rId5", "image", "../media/fill.png"}})},
+                                   {"ppt/media/fill.png", "not decoded here"},
                                    {"ppt/slides/slide1.xml", slide},
                                    {"ppt/slideLayouts/_rels/slideLayout1.xml.rels", rels({{"rId1", "slideMaster", "../slideMasters/slideMaster1.xml"}})},
                                    {"ppt/slideLayouts/slideLayout1.xml", layout},
@@ -1023,6 +1029,12 @@ TEST(viewer_draws_slides_as_office_does)
             ++other;
     }
     CHECK(green == 2 && red == 1 && other == 0);
+    // Fills: a 50% pattern as its two colours mixed; a picture fill as the picture in the box, under its outline.
+    bool grey50 = false;
+    for (const mv::PathItem& path : p.paths)
+        grey50 = grey50 || path.fill == mv::rgba(128, 128, 128);
+    CHECK(grey50);
+    CHECK(p.images.size() == 1 && p.images[0].media == "ppt/media/fill.png" && std::fabs(p.images[0].box.w - 100.0f) < 0.01f);
 }
 
 TEST(viewer_numbers_word_headings_through_their_styles)

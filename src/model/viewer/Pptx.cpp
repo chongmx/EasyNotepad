@@ -179,6 +179,7 @@ struct ShapeProps {
     Gradient gradient;        // with a gradFill
     dml::LineStyle lineStyle; // its dashes and ends
     Rect crop{0.0f, 0.0f, 1.0f, 1.0f}; // a picture's srcRect
+    std::string fillImage;             // a picture fill's r:embed (blipFill in spPr)
     // From <p:style>: what the theme's references give when spPr says nothing.
     std::uint32_t styleFill = 0, styleLine = 0, styleFont = 0;
     bool hasStyleFill = false, hasStyleLine = false, hasStyleFont = false;
@@ -674,8 +675,56 @@ private:
             } else if (n == "gradFill") {
                 p.fill = ooxml::readGradientFill(x, theme, map, p.gradient);
                 p.hasFill = !p.gradient.stops.empty();
-            } else if (n == "blipFill" || n == "pattFill") {
-                x.skip(); // an image or pattern fill: left unfilled
+            } else if (n == "blipFill") { // a picture filling the shape
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    if (x.localName() == "blip") {
+                        p.fillImage = x.attribute("r:embed");
+                    } else if (x.localName() == "srcRect") {
+                        auto pct = [&](const char* name) { return float(std::atof(x.attribute(name).c_str()) / 100000.0); };
+                        const float l = pct("l"), t = pct("t"), r = pct("r"), b = pct("b");
+                        if (l + r < 0.99f && t + b < 0.99f)
+                            p.crop = Rect{l, t, 1.0f - l - r, 1.0f - t - b};
+                    }
+                }
+                p.hasFill = true;
+                p.fill = 0;
+                p.gradient = Gradient();
+            } else if (n == "pattFill") { // a pattern: its two colours mixed by how much of it is ink
+                const std::string prst = x.attribute("prst");
+                const float ink = prst.compare(0, 3, "pct") == 0 ? float(std::atof(prst.c_str() + 3) / 100.0)
+                                : prst.compare(0, 2, "dk") == 0  ? 0.5f
+                                : prst.compare(0, 2, "lt") == 0  ? 0.25f
+                                                                 : 0.4f;
+                std::uint32_t fg = kBlack, bg = kWhite;
+                const int d2 = x.depth();
+                int which = 0; // 1 in fgClr, 2 in bgClr
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f == Event::End) {
+                        if (x.localName() == "fgClr" || x.localName() == "bgClr")
+                            which = 0;
+                        continue;
+                    }
+                    if (f != Event::Start)
+                        continue;
+                    if (x.localName() == "fgClr" || x.localName() == "bgClr")
+                        which = x.localName() == "fgClr" ? 1 : 2;
+                    else if (which)
+                        (which == 1 ? fg : bg) = ooxml::readColor(x, theme, map);
+                }
+                auto ch = [&](int shift) {
+                    const float a = float((bg >> shift) & 0xFF), b = float((fg >> shift) & 0xFF);
+                    return std::uint32_t(std::lround(a + (b - a) * std::clamp(ink, 0.0f, 1.0f))) << shift;
+                };
+                p.fill = ch(0) | ch(8) | ch(16) | 0xFF000000u;
+                p.hasFill = true;
+                p.gradient = Gradient();
             } else if (n == "ln") {
                 dml::readLine(x, theme, map, p.lineStyle);
                 if (p.lineStyle.hasWidth)
@@ -928,6 +977,21 @@ private:
         }
         if (!placed)
             return;
+        // A picture fill in a rectangular shape: the picture in its box, under its outline.
+        const bool square = p.geometry == "rect" || p.geometry == "roundRect" || p.geometry.compare(0, 4, "snip") == 0;
+        if (!p.fillImage.empty() && square && c.rels) {
+            const auto it = c.rels->find(p.fillImage);
+            if (it != c.rels->end() && !it->second.external && addMedia(it->second.target)) {
+                ImageItem img;
+                img.box = r;
+                img.media = it->second.target;
+                img.crop = p.crop;
+                img.rotation = p.rotation;
+                img.flipH = p.flipH;
+                img.flipV = p.flipV;
+                page.add(img);
+            }
+        }
         emitGeometry(p, r, page);
         if (hasText) {
             const bool vertical = std::fabs(std::fmod(box.rotation, 180.0f)) > 45.0f; // textBody's vert: 90 or 270
