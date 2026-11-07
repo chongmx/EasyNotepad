@@ -1167,3 +1167,64 @@ TEST(viewer_reads_word_layout)
     CHECK(t.looks[2][0].fill == mv::rgba(255, 255, 0) && !t.looks[2][0].merged && t.looks[3][0].merged); // own shading; vMerge
     CHECK(t.looks[2][0].edges[3].width > 0.0f);                                                // insideH between rows
 }
+
+TEST(viewer_lays_out_smartart_from_its_data)
+{
+    // SmartArt saved without its drawing: laid out from the data model by the layout's kind.
+    using namespace viewertest;
+    const std::string presentation = R"(<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>)";
+    const std::string slide = R"(<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
+<p:graphicFrame><p:nvGraphicFramePr/><p:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="2540000"/></p:xfrm><a:graphic><a:graphicData>
+<dgm:relIds xmlns:dgm="d" r:dm="rId3" r:lo="rId4" r:qs="rId5" r:cs="rId6"/></a:graphicData></a:graphic></p:graphicFrame>
+</p:spTree></p:cSld></p:sld>)";
+    // Three steps; the second has a child (a bullet in its box); a transition and a presentation point are not nodes.
+    const std::string data = R"(<dgm:dataModel xmlns:dgm="d" xmlns:a="a"><dgm:ptLst>
+<dgm:pt modelId="0" type="doc"/>
+<dgm:pt modelId="1"><dgm:t><a:p><a:r><a:t>Plan</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="2"><dgm:t><a:p><a:r><a:t>Build</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="3"><dgm:t><a:p><a:r><a:t>Ship</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="4"><dgm:t><a:p><a:r><a:t>tests first</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="5" type="sibTrans"><dgm:t><a:p><a:r><a:t>NOT A NODE</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="6" type="pres"/></dgm:ptLst><dgm:cxnLst>
+<dgm:cxn modelId="10" srcId="0" destId="3" srcOrd="2"/><dgm:cxn modelId="11" srcId="0" destId="1" srcOrd="0"/>
+<dgm:cxn modelId="12" srcId="0" destId="2" srcOrd="1"/><dgm:cxn modelId="13" srcId="2" destId="4" srcOrd="0"/>
+<dgm:cxn modelId="14" srcId="1" destId="5" srcOrd="0"/><dgm:cxn modelId="15" type="presOf" srcId="1" destId="6"/></dgm:cxnLst></dgm:dataModel>)";
+    const std::string layout = R"(<dgm:layoutDef xmlns:dgm="d" uniqueId="urn:microsoft.com/office/officeart/2005/8/layout/process1"/>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("ppt/presentation.xml")},
+                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}})},
+                                   {"ppt/presentation.xml", presentation},
+                                   {"ppt/slides/_rels/slide1.xml.rels",
+                                    rels({{"rId3", "diagramData", "../diagrams/data1.xml"}, {"rId4", "diagramLayout", "../diagrams/layout1.xml"}})},
+                                   {"ppt/slides/slide1.xml", slide},
+                                   {"ppt/diagrams/data1.xml", data},
+                                   {"ppt/diagrams/layout1.xml", layout}});
+    const mv::ViewerDocument doc = mv::readViewerDocument("smart.pptx", bytes);
+    CHECK(doc.pages.pages.size() == 1);
+    if (doc.pages.pages.size() != 1)
+        return;
+    const mv::Page& p = doc.pages.pages[0];
+    // The steps left to right, in their order, each in a box; the child as a bullet under its parent.
+    std::vector<std::pair<float, std::string>> texts;
+    bool bullet = false, transition = false;
+    for (const mv::TextBox& b : p.boxes)
+        for (const mv::TextParagraph& para : b.paragraphs)
+            for (const mv::TextRun& r : para.runs) {
+                if (para.bullet.empty())
+                    texts.emplace_back(b.box.x, r.text);
+                bullet = bullet || (r.text == "tests first" && !para.bullet.empty());
+                transition = transition || r.text == "NOT A NODE";
+            }
+    std::sort(texts.begin(), texts.end());
+    CHECK(texts.size() == 3 && texts[0].second == "Plan" && texts[1].second == "Build" && texts[2].second == "Ship");
+    CHECK(bullet && !transition);
+    // Three boxes and two arrows between them.
+    int boxes = 0;
+    for (const mv::PathItem& path : p.paths)
+        boxes += path.fill != 0;
+    CHECK(boxes == 5);
+    bool said = false;
+    for (const std::string& n : doc.notShown)
+        said = said || n.find("SmartArt") != std::string::npos;
+    CHECK(said);
+}

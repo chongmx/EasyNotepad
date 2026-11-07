@@ -116,14 +116,26 @@ Done on `feature/word-rendering`:
 
 ### PowerPoint
 
+Done on `feature/word-rendering`:
+
+- **The deck's own fonts:** each run's latin typeface through the list styles and the theme (`+mj-lt`,
+  `+mn-lt`), drawn in the document fonts with real bold and italic faces; charts and sheet shapes
+  in the theme's minor font.
+- **SmartArt without a cached drawing** (`model/viewer/SmartArt.cpp`): laid out from the data model
+  by the layout's kind (block list, list, horizontal list, process, vertical process, chevrons,
+  cycle, hierarchy, pyramid; others as a block list) in the default look: the first accent, white
+  text, one text size for all. `lo-smartart1.pptx` now matches PowerPoint's render (five blocks, 2-2-1).
+- **Autofit:** `fontScale` and `lnSpcReduction` as PowerPoint last fitted the text.
+- **Table lines:** the cell's own (`lnL`...) over the table style's (`tcBdr`, by part outline and inside lines).
+- **Fills:** picture fills in rectangular shapes; pattern fills as their two colours mixed.
+- **Text:** superscript, subscript, letter spacing (`spc`).
+
 | Pri | Gap | What it takes |
 |---|---|---|
-| A | **SmartArt without a cached drawing** is an outline of its text (38 of LibreOffice's samples; `lo-smartart1.pptx`: PowerPoint draws five blue blocks, we draw a bulleted list) | lay out from the data model by the layout's `uniqueId`: the common layouts first (basic block list, process, cycle, hierarchy, pyramid), the quick style and colour parts for the look |
-| A | **Text autofit** (`normAutofit fontScale`, `lnSpcReduction`) and the substituted font make text overflow or break differently | apply the scale; with metric-compatible fonts, breaks match |
-| B | 40 of about 180 preset shapes; the others fall back to a simpler outline | port the preset geometry definitions (`presetShapeDefinitions.xml` formulas) instead of hand-written outlines |
-| B | Picture, texture and pattern fills inside shapes; picture bullets | image fill clipped to the shape path |
-| B | Text effects: gradient or outlined text, letter spacing (`spc`), columns in text boxes, superscript / subscript offsets | per item |
-| C | Table borders from the table style (`tcBdr`) are skipped; diagonal cell borders | read them with the fills |
+| B | SmartArt: the exact layout (sizes, spacing, connector shapes), quick styles and colour variations, layouts outside the families above | the layout part's own algorithm and constraints (`dgm:layoutNode`), a large piece of work |
+| B | 60 of about 180 preset shapes; the others fall back to a rectangle | port the preset geometry definitions (`presetShapeDefinitions.xml` formulas) |
+| B | Picture fills in non-rectangular shapes (clipped to the shape), tiled pictures, picture bullets | a clip to the shape's path in the painter |
+| B | Gradient or outlined text, columns in text boxes, shadows and glow | per item |
 | C | Video and audio show at most their poster frame; OLE objects their preview image | say so in "not shown" (done for media) |
 | C | Charts are drawn flat: 3D charts, chart styles, data labels positions, trendlines and error bars, `chartex` (waterfall, treemap, sunburst, histogram, box) | per chart kind |
 

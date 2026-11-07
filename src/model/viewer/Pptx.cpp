@@ -8,6 +8,7 @@
 #include "Chart.h"
 #include "Ooxml.h"
 #include "Shapes.h"
+#include "SmartArt.h"
 
 #include <algorithm>
 #include <cmath>
@@ -248,7 +249,8 @@ public:
         if (charts_)
             doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart" : " charts") + " (shown as boxes)");
         if (diagrams_)
-            doc.notShown.push_back(std::to_string(diagrams_) + " SmartArt diagrams (their text shown as an outline)");
+            doc.notShown.push_back(std::to_string(diagrams_) + (diagrams_ == 1 ? " SmartArt diagram" : " SmartArt diagrams") +
+                                   " (laid out by the kind of layout, not as saved)");
         if (media_)
             doc.notShown.push_back(std::to_string(media_) + " videos or sounds");
         doc.shape = Shape::Pages;
@@ -1372,11 +1374,11 @@ private:
                 }
                 x.skip();
             } else if (n == "relIds" && p.hasXfrm) {
-                const std::string data = x.attribute("r:dm");
+                const std::string data = x.attribute("r:dm"), layout = x.attribute("r:lo");
                 x.skip();
                 if (!diagram(data, c, page, xf, p)) {
                     ++diagrams_;
-                    if (!diagramText(data, c, page, xf.map(p.x, p.y, p.w, p.h)))
+                    if (!diagramLayout(data, layout, c, page, xf.map(p.x, p.y, p.w, p.h)))
                         placeholder(page, xf.map(p.x, p.y, p.w, p.h), "SmartArt diagram");
                 }
             } else if (n == "oleObj" && p.hasXfrm) {
@@ -1409,106 +1411,32 @@ private:
         page.add(std::move(t));
     }
 
-    // SmartArt without a drawing of it (written by other programs): its text as an outline in the
-    // frame, by the data model's parent-child links, so what it says is there to read.
-    bool diagramText(const std::string& dataId, const Context& c, Page& page, Rect r)
+    // SmartArt without a drawing of it (written by other programs): laid out from its data model
+    // by the kind of its layout part (r:lo).
+    bool diagramLayout(const std::string& dataId, const std::string& layoutId, const Context& c, Page& page, Rect r)
     {
         if (!c.rels)
             return false;
-        const auto it = c.rels->find(dataId);
-        if (it == c.rels->end() || it->second.external)
-            return false;
-        const std::optional<std::string> data = zip_.read(it->second.target, std::size_t(16) << 20);
-        if (!data)
-            return false;
-        struct Node {
-            std::string type, text;
-            std::vector<std::pair<int, std::string>> children; // (order, id)
+        auto part = [&](const std::string& id) -> std::optional<std::string> {
+            const auto it = c.rels->find(id);
+            if (it == c.rels->end() || it->second.external)
+                return std::nullopt;
+            return zip_.read(it->second.target, std::size_t(16) << 20);
         };
-        std::map<std::string, Node> nodes;
-        std::string root;
-        XmlReader d(*data);
-        for (Event e; (e = d.next()) != Event::Eof && e != Event::Error;) {
-            if (e != Event::Start)
-                continue;
-            const std::string_view n = d.localName();
-            if (n == "pt") {
-                const std::string id = d.attribute("modelId");
-                Node& node = nodes[id];
-                node.type = d.hasAttribute("type") ? d.attribute("type") : "node";
-                if (node.type == "doc")
-                    root = id;
-                // Its dgm:t holds the text: a:p paragraphs of a:r runs of a:t.
-                const int depth = d.depth();
-                for (Event f; (f = d.next()) != Event::Eof && f != Event::Error;) {
-                    if (f == Event::End && d.depth() < depth)
-                        break;
-                    if (f != Event::Start || d.localName() != "t" || d.depth() != depth + 1)
-                        continue;
-                    const int textDepth = d.depth();
-                    for (Event g; (g = d.next()) != Event::Eof && g != Event::Error;) {
-                        if (g == Event::End && d.depth() < textDepth)
-                            break;
-                        if (g != Event::Start)
-                            continue;
-                        if (d.localName() == "p" && !node.text.empty())
-                            node.text += ' ';
-                        else if (d.localName() == "t")
-                            node.text += d.elementText();
-                    }
+        const std::optional<std::string> data = part(dataId);
+        smartart::Tree tree;
+        if (!data || !smartart::readTree(*data, tree))
+            return false;
+        std::string uniqueId;
+        if (const std::optional<std::string> layout = part(layoutId)) {
+            XmlReader x(*layout);
+            for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;)
+                if (e == Event::Start) { // the root: dgm:layoutDef
+                    uniqueId = x.attribute("uniqueId");
+                    break;
                 }
-            } else if (n == "cxn") {
-                const std::string type = d.hasAttribute("type") ? d.attribute("type") : "parOf";
-                if (type == "parOf")
-                    nodes[d.attribute("srcId")].children.push_back({std::atoi(d.attribute("srcOrd").c_str()), d.attribute("destId")});
-            }
         }
-        if (root.empty())
-            return false;
-        TextBox box;
-        box.box = r;
-        box.anchor = 1;
-        const ooxml::Theme& theme = c.master->theme;
-        int lines = 0;
-        std::function<void(const std::string&, int)> walk = [&](const std::string& id, int level) {
-            if (level > 8 || lines > 200)
-                return;
-            auto found = nodes.find(id);
-            if (found == nodes.end())
-                return;
-            std::vector<std::pair<int, std::string>> children = found->second.children;
-            std::sort(children.begin(), children.end());
-            for (const auto& [order, child] : children) {
-                const auto node = nodes.find(child);
-                if (node == nodes.end() || node->second.type != "node")
-                    continue;
-                if (!node->second.text.empty()) {
-                    TextParagraph para;
-                    para.level = level;
-                    para.bullet = level == 0 ? "\xE2\x96\xA0" : "\xE2\x80\xA2";
-                    TextRun run;
-                    run.text = node->second.text;
-                    run.size = level == 0 ? 16.0f : 13.0f;
-                    run.color = theme.color("dk1", kBlack);
-                    run.flags = level == 0 ? Bold : 0;
-                    para.runs.push_back(std::move(run));
-                    box.paragraphs.push_back(std::move(para));
-                    ++lines;
-                }
-                walk(child, level + 1);
-            }
-        };
-        walk(root, 0);
-        if (box.paragraphs.empty())
-            return false;
-        PathItem frame;
-        frame.fill = ooxml::lumModOff(theme.color("accent1", rgba(68, 114, 196)), 0.2, 0.8);
-        frame.stroke = theme.color("accent1", rgba(68, 114, 196));
-        frame.subpaths.push_back({{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}});
-        frame.closed.push_back(true);
-        page.add(std::move(frame));
-        page.add(std::move(box));
-        return true;
+        return smartart::draw(tree, smartart::kindOf(uniqueId), c.master->theme, r, page);
     }
 
     // SmartArt: PowerPoint keeps the diagram drawn as plain shapes (a "diagramDrawing" part, in the
