@@ -4,7 +4,9 @@
 #include "enp/model/viewer/NumberFormat.h"
 #include "enp/model/viewer/Viewer.h"
 
+#include "Chart.h"
 #include "Ooxml.h"
+#include "Shapes.h"
 
 #include <algorithm>
 #include <cctype>
@@ -92,6 +94,7 @@ public:
     {
         ViewerDocument doc;
         doc.format = "Excel workbook";
+        book_ = &doc.book;
         const std::string main = ooxml::mainPart(zip_, "xl/workbook.xml");
         const std::optional<std::string> xml = zip_.read(main);
         if (!xml) {
@@ -290,9 +293,6 @@ private:
         if (!xml)
             return;
         const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
-        for (const auto& [id, r] : rels)
-            if (r.type == "drawing")
-                ++charts_;
         XmlReader x(*xml);
         Row* row = nullptr;
         std::uint32_t nextRow = 0, nextColumn = 0;
@@ -375,6 +375,170 @@ private:
             sheet.rowCount = std::max(sheet.rowCount, m.row1 + 1);
             sheet.columnCount = std::max(sheet.columnCount, m.col1 + 1);
         }
+        // Pictures and charts over the cells (after the columns and rows: they size the drawings).
+        for (const auto& [id, r] : rels)
+            if (r.type == "drawing" && !r.external)
+                readDrawing(r.target, sheet);
+    }
+
+    // A sheet's size in points from its start to column `c` / row `r` (Excel's widths: characters
+    // of 7 pixels plus 5 pixels of padding, at 96 dpi).
+    static float columnX(const Sheet& sheet, std::uint32_t c)
+    {
+        float x = 0.0f;
+        for (std::uint32_t i = 0; i < c && i < 16384; ++i) {
+            const float w = sheet.columnWidth(i);
+            x += w <= 0.0f ? 0.0f : (w * 7.0f + 5.0f) * 0.75f;
+        }
+        return x;
+    }
+    static float rowY(const Sheet& sheet, std::uint32_t r)
+    {
+        float y = float(r) * sheet.defaultRowHeight;
+        for (const Row& row : sheet.rows) {
+            if (row.index >= r)
+                break;
+            if (row.height > 0.0f)
+                y += row.height - sheet.defaultRowHeight;
+        }
+        return y;
+    }
+
+    // A drawing part (xdr:wsDr): each anchor's picture or chart becomes a SheetDrawing. Shapes and
+    // anything else are counted as not shown.
+    void readDrawing(const std::string& part, Sheet& sheet)
+    {
+        const std::optional<std::string> xml = zip_.read(part, std::size_t(16) << 20);
+        if (!xml)
+            return;
+        const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
+        constexpr double kEmu = 12700.0;
+        XmlReader x(*xml);
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            const std::string_view kind = x.localName();
+            if (kind != "twoCellAnchor" && kind != "oneCellAnchor" && kind != "absoluteAnchor")
+                continue;
+            SheetDrawing d;
+            float width = 0.0f, height = 0.0f, absX = 0.0f, absY = 0.0f;
+            bool absolute = kind == "absoluteAnchor", twoCell = kind == "twoCellAnchor";
+            std::string picture, chartId;
+            bool other = false;
+            Page shapes; // a shape anchored here, drawn filling the anchor
+            int corner = -1; // 0 from, 1 to
+            const int depth = x.depth();
+            for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                if (f == Event::End) {
+                    if (x.depth() < depth)
+                        break;
+                    if (x.localName() == "from" || x.localName() == "to")
+                        corner = -1;
+                    continue;
+                }
+                if (f != Event::Start)
+                    continue;
+                const std::string_view n = x.localName();
+                if (n == "from" || n == "to") {
+                    corner = n == "from" ? 0 : 1;
+                } else if (corner >= 0 && (n == "col" || n == "row" || n == "colOff" || n == "rowOff")) {
+                    const std::string text = x.elementText();
+                    const double v = std::atof(text.c_str());
+                    const std::uint32_t index = std::uint32_t(std::clamp(v, 0.0, 1048575.0));
+                    if (n == "col")
+                        (corner == 0 ? d.col0 : d.col1) = index;
+                    else if (n == "row")
+                        (corner == 0 ? d.row0 : d.row1) = index;
+                    else if (n == "colOff")
+                        (corner == 0 ? d.dx0 : d.dx1) = float(v / kEmu);
+                    else
+                        (corner == 0 ? d.dy0 : d.dy1) = float(v / kEmu);
+                } else if (n == "pos" && absolute) {
+                    absX = float(std::atof(x.attribute("x").c_str()) / kEmu);
+                    absY = float(std::atof(x.attribute("y").c_str()) / kEmu);
+                } else if (n == "ext" && width == 0.0f && x.hasAttribute("cx") && !twoCell) {
+                    width = float(std::atof(x.attribute("cx").c_str()) / kEmu);
+                    height = float(std::atof(x.attribute("cy").c_str()) / kEmu);
+                } else if (n == "blip" && picture.empty()) {
+                    picture = x.attribute("r:embed");
+                } else if (n == "chart" && chartId.empty()) {
+                    chartId = x.attribute("r:id");
+                } else if (n == "sp" || n == "cxnSp") {
+                    // from / to (and ext) come before the shape: its rectangle is known here.
+                    const float sx0 = absolute ? absX : columnX(sheet, d.col0) + d.dx0;
+                    const float sy0 = absolute ? absY : rowY(sheet, d.row0) + d.dy0;
+                    const float sw = twoCell ? columnX(sheet, d.col1) + d.dx1 - sx0 : width;
+                    const float sh = twoCell ? rowY(sheet, d.row1) + d.dy1 - sy0 : height;
+                    if (sw < 1.0f || sh < 1.0f)
+                        x.skip();
+                    else if (dml::shape(x, theme_, Rect{0.0f, 0.0f, sw, sh}, shapes)) // reads the element to its end
+                        continue;
+                    other = true;
+                } else if (n == "Fallback") {
+                    x.skip();
+                }
+            }
+            // Where it is and how big, in points.
+            const float x0 = absolute ? absX : columnX(sheet, d.col0) + d.dx0;
+            const float y0 = absolute ? absY : rowY(sheet, d.row0) + d.dy0;
+            if (twoCell) {
+                width = columnX(sheet, d.col1) + d.dx1 - x0;
+                height = rowY(sheet, d.row1) + d.dy1 - y0;
+            }
+            if (absolute) {
+                d.col0 = d.row0 = 0;
+                d.dx0 = absX;
+                d.dy0 = absY;
+            }
+            if (!shapes.items.empty() && width >= 1.0f && height >= 1.0f && picture.empty() && chartId.empty()) {
+                shapes.width = width;
+                shapes.height = height;
+                shapes.background = 0;
+                d.page = std::move(shapes);
+                sheet.rowCount = std::max(sheet.rowCount, (twoCell ? d.row1 : d.row0) + 1);
+                sheet.columnCount = std::max(sheet.columnCount, (twoCell ? d.col1 : d.col0) + 1);
+                if (sheet.drawings.size() < 1000)
+                    sheet.drawings.push_back(std::move(d));
+                continue;
+            }
+            if (width < 2.0f || height < 2.0f || (picture.empty() && chartId.empty())) {
+                if (other || !chartId.empty())
+                    ++charts_;
+                continue;
+            }
+            d.page.width = width;
+            d.page.height = height;
+            d.page.background = 0;
+            bool drawn = false;
+            if (!chartId.empty()) {
+                const auto it = rels.find(chartId);
+                chart::Chart c;
+                if (it != rels.end() && !it->second.external && chart::read(zip_, it->second.target, theme_, c)) {
+                    chart::draw(c, theme_, Rect{0.0f, 0.0f, width, height}, d.page);
+                    drawn = true;
+                }
+            } else {
+                const auto it = rels.find(picture);
+                if (it != rels.end() && !it->second.external) {
+                    if (!book_->media.count(it->second.target))
+                        if (std::optional<std::string> bytes = zip_.read(it->second.target, std::size_t(64) << 20))
+                            book_->media[it->second.target] = std::move(*bytes);
+                    if (book_->media.count(it->second.target)) {
+                        d.page.add(ImageItem{Rect{0.0f, 0.0f, width, height}, it->second.target});
+                        drawn = true;
+                    }
+                }
+            }
+            if (!drawn) {
+                ++charts_;
+                continue;
+            }
+            // The used range reaches the drawing (so the grid scrolls to it).
+            sheet.rowCount = std::max(sheet.rowCount, (twoCell ? d.row1 : d.row0) + 1);
+            sheet.columnCount = std::max(sheet.columnCount, (twoCell ? d.col1 : d.col0) + 1);
+            if (sheet.drawings.size() < 1000)
+                sheet.drawings.push_back(std::move(d));
+        }
     }
 
     // At the Start of c: the cell's value, formula and format.
@@ -452,6 +616,7 @@ private:
     }
 
     ooxml::ZipArchive& zip_;
+    Workbook* book_ = nullptr; // the workbook being read (its pictures)
     ooxml::Theme theme_;
     std::vector<std::string> strings_;
     std::vector<CellFormat> formats_;

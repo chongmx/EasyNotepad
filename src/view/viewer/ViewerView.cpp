@@ -286,6 +286,20 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     // `e` is a map node: its address holds until the document closes and the entry is erased.
     if (!e.flow.onImage) // set once: `e` is a map node, its address holds until the entry is erased
         e.flow.onImage = [this, &e](const std::string& source) { return image(e, e.images, source); };
+    // A drawing (a chart): its page at its size in points, smaller when the column is narrower.
+    if (!e.flow.onDrawing)
+        e.flow.onDrawing = [this, &e](int index, ImVec2 at, float width, bool draw) {
+            const viewmodel::ViewerViewModel::Entry* model = vm_.viewer().find(e.id);
+            if (!model || index < 0 || std::size_t(index) >= model->doc.flow.drawings.size())
+                return 0.0f;
+            const mv::Page& page = model->doc.flow.drawings[std::size_t(index)];
+            const float scale = std::min(width / std::max(1.0f, page.width), 96.0f / 72.0f * s_ * vm_.zoom.get());
+            if (draw) {
+                EntryImageSource images(*this, e);
+                painter_.draw(page, at, scale, fonts_, &images);
+            }
+            return page.height * scale + 6.0f * s_;
+        };
     e.flow.emoji = emoji_;
     panel::beginChild("##viewerFlow", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     const float viewW = ImGui::GetContentRegionAvail().x;
@@ -515,11 +529,24 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     const std::uint32_t r0 = std::max(fr, rowAt(frozenH + scrollY));
     const std::uint32_t r1 = std::min(rows, rowAt(frozenH + scrollY + (viewBottom - bodyY)) + 2);
     // The scrolled body, the frozen columns beside it, the frozen rows above it and their corner.
-    const float scrolledX = bodyX - (e.columnX[c0] - e.columnX[fc]) - (scrollX - (e.columnX[c0] - frozenW - e.columnX[fc] + e.columnX[fc]));
-    (void)scrolledX;
     const float sx = bodyX - scrollX; // x of column fc in the scrolled part
     const float sy = bodyY - scrollY; // y of row fr
     region(r0, r1, c0, c1, fr, fc, sx, sy, ImVec4(bodyX, bodyY, viewRight, viewBottom));
+    // Pictures and charts over the cells, placed by their anchor cells (in the scrolled part).
+    if (!sh.drawings.empty()) {
+        EntryImageSource images(*this, e);
+        dl->PushClipRect(ImVec2(bodyX, bodyY), ImVec2(viewRight, viewBottom), true);
+        for (const mv::SheetDrawing& drawing : sh.drawings) {
+            const std::uint32_t col = std::min(drawing.col0, columns);
+            const ImVec2 at(sx + e.columnX[col] - e.columnX[fc] + drawing.dx0 * pxPerPoint,
+                            sy + rowTop(drawing.row0) - rowTop(fr) + drawing.dy0 * pxPerPoint);
+            const ImVec2 end(at.x + drawing.page.width * pxPerPoint, at.y + drawing.page.height * pxPerPoint);
+            if (end.x < bodyX || end.y < bodyY || at.x > viewRight || at.y > viewBottom)
+                continue;
+            painter_.draw(drawing.page, at, pxPerPoint, fonts_, &images);
+        }
+        dl->PopClipRect();
+    }
     if (fc > 0)
         region(r0, r1, 0, fc, fr, 0, win.x + headerW, sy, ImVec4(win.x + headerW, bodyY, bodyX, viewBottom));
     if (fr > 0)

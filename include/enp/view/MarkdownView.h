@@ -35,6 +35,9 @@ public:
     // Resolves an image's source (as written) to a decoded image; null, or a null result, shows
     // the alt text instead. Called while laying out, so it must be cheap after the first time.
     std::function<const MarkdownImage*(const std::string& source)> onImage;
+    // Draws (when `draw`) or measures drawing block `index` at `at`, `width` wide; returns its height.
+    // Unset: drawing blocks take no room.
+    std::function<float(int index, ImVec2 at, float width, bool draw)> onDrawing;
     // Emoji pictures (shared by every view; owned by MainView). Null: emoji show as their text.
     EmojiCache* emoji = nullptr;
     // The source line of the block under the mouse in the last frame, or -1.

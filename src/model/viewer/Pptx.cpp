@@ -5,11 +5,14 @@
 // master's colour map. Charts, SmartArt and media are drawn as labelled boxes.
 #include "enp/model/viewer/Viewer.h"
 
+#include "Chart.h"
 #include "Ooxml.h"
+#include "Shapes.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <memory>
 
@@ -75,6 +78,7 @@ struct ShapeProps {
     bool hasXfrm = false;
     double x = 0, y = 0, w = 0, h = 0;
     bool flipH = false, flipV = false;
+    float rotation = 0.0f; // degrees clockwise
     std::string geometry = "rect";
     std::vector<std::vector<Point>> custom; // custGeom paths in 0..1 of the box
     std::vector<bool> customClosed;
@@ -95,31 +99,6 @@ std::string phKey(const std::string& type)
     if (type == "ctrTitle")
         return "title";
     return type;
-}
-
-void flattenEllipse(std::vector<Point>& out, Rect r)
-{
-    const int n = 48;
-    for (int i = 0; i < n; ++i) {
-        const double a = 2.0 * 3.14159265358979 * i / n;
-        out.push_back({float(r.x + r.w * 0.5 * (1.0 + std::cos(a))), float(r.y + r.h * 0.5 * (1.0 + std::sin(a)))});
-    }
-}
-
-void roundedRect(std::vector<Point>& out, Rect r, float radius)
-{
-    radius = std::min({radius, r.w * 0.5f, r.h * 0.5f});
-    const int n = 6;
-    auto corner = [&](float cx, float cy, double start) {
-        for (int i = 0; i <= n; ++i) {
-            const double a = start + (3.14159265358979 / 2.0) * i / n;
-            out.push_back({float(cx + radius * std::cos(a)), float(cy + radius * std::sin(a))});
-        }
-    };
-    corner(r.x + r.w - radius, r.y + radius, -3.14159265358979 / 2.0);
-    corner(r.x + r.w - radius, r.y + r.h - radius, 0.0);
-    corner(r.x + radius, r.y + r.h - radius, 3.14159265358979 / 2.0);
-    corner(r.x + radius, r.y + radius, 3.14159265358979);
 }
 
 class PptxReader {
@@ -173,7 +152,7 @@ public:
         if (charts_)
             doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart" : " charts") + " (shown as boxes)");
         if (diagrams_)
-            doc.notShown.push_back(std::to_string(diagrams_) + " SmartArt diagrams (shown as boxes)");
+            doc.notShown.push_back(std::to_string(diagrams_) + " SmartArt diagrams (their text shown as an outline)");
         if (media_)
             doc.notShown.push_back(std::to_string(media_) + " videos or sounds");
         doc.shape = Shape::Pages;
@@ -501,6 +480,7 @@ private:
         p.hasXfrm = true;
         p.flipH = x.attribute("flipH") == "1";
         p.flipV = x.attribute("flipV") == "1";
+        p.rotation = float(std::atof(x.attribute("rot").c_str()) / 60000.0);
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End && x.depth() < depth)
@@ -716,37 +696,12 @@ private:
                 return;
         } else {
             std::vector<Point> pts;
-            if (g == "ellipse" || g == "circle" || g == "donut" || g == "pie" || g == "chord") {
-                flattenEllipse(pts, r);
-            } else if (g == "roundRect" || g == "round2SameRect" || g == "snipRoundRect") {
-                roundedRect(pts, r, std::min(r.w, r.h) * 0.1667f);
-            } else if (g == "triangle") {
-                pts = {{r.x + r.w * 0.5f, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}};
-            } else if (g == "rtTriangle") {
-                pts = {{r.x, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}};
-            } else if (g == "diamond") {
-                pts = {{r.x + r.w * 0.5f, r.y}, {r.x + r.w, r.y + r.h * 0.5f}, {r.x + r.w * 0.5f, r.y + r.h}, {r.x, r.y + r.h * 0.5f}};
-            } else if (g == "parallelogram") {
-                const float k = r.w * 0.25f;
-                pts = {{r.x + k, r.y}, {r.x + r.w, r.y}, {r.x + r.w - k, r.y + r.h}, {r.x, r.y + r.h}};
-            } else if (g == "hexagon") {
-                const float k = r.w * 0.25f;
-                pts = {{r.x + k, r.y}, {r.x + r.w - k, r.y}, {r.x + r.w, r.y + r.h * 0.5f}, {r.x + r.w - k, r.y + r.h}, {r.x + k, r.y + r.h}, {r.x, r.y + r.h * 0.5f}};
-            } else if (g == "chevron" || g == "homePlate") {
-                const float k = std::min(r.w, r.h) * 0.5f;
-                pts = {{r.x, r.y}, {r.x + r.w - k, r.y}, {r.x + r.w, r.y + r.h * 0.5f}, {r.x + r.w - k, r.y + r.h}, {r.x, r.y + r.h}};
-                if (g == "chevron")
-                    pts.push_back({r.x + k, r.y + r.h * 0.5f});
-            } else if (g == "rightArrow") {
-                const float head = std::min(r.w * 0.5f, r.h);
-                pts = {{r.x, r.y + r.h * 0.25f}, {r.x + r.w - head, r.y + r.h * 0.25f}, {r.x + r.w - head, r.y}, {r.x + r.w, r.y + r.h * 0.5f},
-                       {r.x + r.w - head, r.y + r.h}, {r.x + r.w - head, r.y + r.h * 0.75f}, {r.x, r.y + r.h * 0.75f}};
-            } else {
-                pts = {{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}};
-            }
+            dml::presetOutline(g, r, pts);
             path.subpaths.push_back(std::move(pts));
             path.closed.push_back(true);
         }
+        for (std::vector<Point>& sub : path.subpaths)
+            dml::rotate(sub, r, p.rotation);
         page.add(std::move(path));
     }
 
@@ -758,6 +713,7 @@ private:
         bool isPlaceholder = false;
         TextBox box;
         bool hasText = false;
+        ShapeProps textArea; // SmartArt's dsp:txXfrm: the text's own rectangle
         const int depth = x.depth();
         // The text body comes after spPr: read it once the shape's placeholder and box are known.
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
@@ -785,6 +741,8 @@ private:
                 readStyleRefs(x, c, p);
             } else if (n == "txBody") {
                 hasText = textBody(x, c, phType, isPlaceholder, p, box);
+            } else if (n == "txXfrm") {
+                readXfrm(x, textArea);
             }
         }
         // Position: its own, else the layout's placeholder, else the master's.
@@ -821,7 +779,8 @@ private:
             return;
         emitGeometry(p, r, page);
         if (hasText) {
-            box.box = r;
+            box.box = textArea.hasXfrm && textArea.w > 0.0 && textArea.h > 0.0 ? xf.map(textArea.x, textArea.y, textArea.w, textArea.h)
+                                                                                : dml::turnedBox(r, p.rotation);
             if (box.anchor < 0)
                 box.anchor = (phKey(phType) == "title" && phType == "ctrTitle") ? 1 : (phKey(phType) == "title" ? 1 : 0);
             if ((phType == "title" || phType == "ctrTitle") && title_.empty())
@@ -1080,34 +1039,206 @@ private:
                 readXfrm(x, p);
             } else if (n == "tbl" && p.hasXfrm) {
                 table(x, c, page, xf.map(p.x, p.y, p.w, p.h), xf);
-            } else if ((n == "chart" || n == "relIds" || n == "oleObj") && p.hasXfrm) {
-                const char* label = n == "chart" ? "Chart" : n == "relIds" ? "SmartArt diagram" : "Embedded object";
-                if (n == "chart")
-                    ++charts_;
-                else if (n == "relIds")
-                    ++diagrams_;
+            } else if (n == "chart" && p.hasXfrm) {
                 const Rect r = xf.map(p.x, p.y, p.w, p.h);
-                PathItem frameBox;
-                frameBox.fill = rgba(128, 128, 128, 30);
-                frameBox.stroke = rgba(128, 128, 128, 140);
-                frameBox.subpaths.push_back({{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}});
-                frameBox.closed.push_back(true);
-                page.add(std::move(frameBox));
-                TextBox t;
-                t.box = r;
-                t.anchor = 1;
-                TextParagraph para;
-                para.align = 1;
-                TextRun run;
-                run.text = std::string(label) + " (not shown yet)";
-                run.size = 14.0f;
-                run.color = rgba(110, 110, 110);
-                para.runs.push_back(run);
-                t.paragraphs.push_back(para);
-                page.add(std::move(t));
+                chart::Chart chart;
+                bool read = false;
+                if (c.rels)
+                    if (const auto it = c.rels->find(x.attribute("r:id")); it != c.rels->end() && !it->second.external)
+                        read = chart::read(zip_, it->second.target, c.master->theme, chart);
+                if (read) {
+                    chart::draw(chart, c.master->theme, r, page);
+                } else {
+                    ++charts_;
+                    placeholder(page, r, "Chart");
+                }
+                x.skip();
+            } else if (n == "relIds" && p.hasXfrm) {
+                const std::string data = x.attribute("r:dm");
+                x.skip();
+                if (!diagram(data, c, page, xf, p)) {
+                    ++diagrams_;
+                    if (!diagramText(data, c, page, xf.map(p.x, p.y, p.w, p.h)))
+                        placeholder(page, xf.map(p.x, p.y, p.w, p.h), "SmartArt diagram");
+                }
+            } else if (n == "oleObj" && p.hasXfrm) {
+                placeholder(page, xf.map(p.x, p.y, p.w, p.h), "Embedded object");
                 x.skip();
             }
         }
+    }
+
+    // A labelled box where something is not drawn.
+    static void placeholder(Page& page, Rect r, const char* label)
+    {
+        PathItem frameBox;
+        frameBox.fill = rgba(128, 128, 128, 30);
+        frameBox.stroke = rgba(128, 128, 128, 140);
+        frameBox.subpaths.push_back({{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}});
+        frameBox.closed.push_back(true);
+        page.add(std::move(frameBox));
+        TextBox t;
+        t.box = r;
+        t.anchor = 1;
+        TextParagraph para;
+        para.align = 1;
+        TextRun run;
+        run.text = std::string(label) + " (not shown yet)";
+        run.size = 14.0f;
+        run.color = rgba(110, 110, 110);
+        para.runs.push_back(run);
+        t.paragraphs.push_back(para);
+        page.add(std::move(t));
+    }
+
+    // SmartArt without a drawing of it (written by other programs): its text as an outline in the
+    // frame, by the data model's parent-child links, so what it says is there to read.
+    bool diagramText(const std::string& dataId, const Context& c, Page& page, Rect r)
+    {
+        if (!c.rels)
+            return false;
+        const auto it = c.rels->find(dataId);
+        if (it == c.rels->end() || it->second.external)
+            return false;
+        const std::optional<std::string> data = zip_.read(it->second.target, std::size_t(16) << 20);
+        if (!data)
+            return false;
+        struct Node {
+            std::string type, text;
+            std::vector<std::pair<int, std::string>> children; // (order, id)
+        };
+        std::map<std::string, Node> nodes;
+        std::string root;
+        XmlReader d(*data);
+        for (Event e; (e = d.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = d.localName();
+            if (n == "pt") {
+                const std::string id = d.attribute("modelId");
+                Node& node = nodes[id];
+                node.type = d.hasAttribute("type") ? d.attribute("type") : "node";
+                if (node.type == "doc")
+                    root = id;
+                // Its dgm:t holds the text: a:p paragraphs of a:r runs of a:t.
+                const int depth = d.depth();
+                for (Event f; (f = d.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && d.depth() < depth)
+                        break;
+                    if (f != Event::Start || d.localName() != "t" || d.depth() != depth + 1)
+                        continue;
+                    const int textDepth = d.depth();
+                    for (Event g; (g = d.next()) != Event::Eof && g != Event::Error;) {
+                        if (g == Event::End && d.depth() < textDepth)
+                            break;
+                        if (g != Event::Start)
+                            continue;
+                        if (d.localName() == "p" && !node.text.empty())
+                            node.text += ' ';
+                        else if (d.localName() == "t")
+                            node.text += d.elementText();
+                    }
+                }
+            } else if (n == "cxn") {
+                const std::string type = d.hasAttribute("type") ? d.attribute("type") : "parOf";
+                if (type == "parOf")
+                    nodes[d.attribute("srcId")].children.push_back({std::atoi(d.attribute("srcOrd").c_str()), d.attribute("destId")});
+            }
+        }
+        if (root.empty())
+            return false;
+        TextBox box;
+        box.box = r;
+        box.anchor = 1;
+        const ooxml::Theme& theme = c.master->theme;
+        int lines = 0;
+        std::function<void(const std::string&, int)> walk = [&](const std::string& id, int level) {
+            if (level > 8 || lines > 200)
+                return;
+            auto found = nodes.find(id);
+            if (found == nodes.end())
+                return;
+            std::vector<std::pair<int, std::string>> children = found->second.children;
+            std::sort(children.begin(), children.end());
+            for (const auto& [order, child] : children) {
+                const auto node = nodes.find(child);
+                if (node == nodes.end() || node->second.type != "node")
+                    continue;
+                if (!node->second.text.empty()) {
+                    TextParagraph para;
+                    para.level = level;
+                    para.bullet = level == 0 ? "\xE2\x96\xA0" : "\xE2\x80\xA2";
+                    TextRun run;
+                    run.text = node->second.text;
+                    run.size = level == 0 ? 16.0f : 13.0f;
+                    run.color = theme.color("dk1", kBlack);
+                    run.flags = level == 0 ? Bold : 0;
+                    para.runs.push_back(std::move(run));
+                    box.paragraphs.push_back(std::move(para));
+                    ++lines;
+                }
+                walk(child, level + 1);
+            }
+        };
+        walk(root, 0);
+        if (box.paragraphs.empty())
+            return false;
+        PathItem frame;
+        frame.fill = ooxml::lumModOff(theme.color("accent1", rgba(68, 114, 196)), 0.2, 0.8);
+        frame.stroke = theme.color("accent1", rgba(68, 114, 196));
+        frame.subpaths.push_back({{r.x, r.y}, {r.x + r.w, r.y}, {r.x + r.w, r.y + r.h}, {r.x, r.y + r.h}});
+        frame.closed.push_back(true);
+        page.add(std::move(frame));
+        page.add(std::move(box));
+        return true;
+    }
+
+    // SmartArt: PowerPoint keeps the diagram drawn as plain shapes (a "diagramDrawing" part, in the
+    // frame's coordinates), which are drawn like the slide's own. The data part names it.
+    bool diagram(const std::string& dataId, const Context& c, Page& page, const Xf& xf, const ShapeProps& frame)
+    {
+        if (!c.rels)
+            return false;
+        std::string drawing;
+        if (const auto it = c.rels->find(dataId); it != c.rels->end() && !it->second.external)
+            if (const std::optional<std::string> data = zip_.read(it->second.target, std::size_t(16) << 20)) {
+                XmlReader d(*data);
+                for (Event e; (e = d.next()) != Event::Eof && e != Event::Error;)
+                    if (e == Event::Start && d.localName() == "dataModelExt") {
+                        const auto rel = c.rels->find(d.attribute("relId"));
+                        if (rel != c.rels->end() && !rel->second.external)
+                            drawing = rel->second.target;
+                        break;
+                    }
+            }
+        if (drawing.empty()) { // no link in the data part: the slide's only diagram drawing
+            int found = 0;
+            for (const auto& [id, r] : *c.rels)
+                if (r.type == "diagramDrawing") {
+                    drawing = r.target;
+                    ++found;
+                }
+            if (found != 1)
+                return false;
+        }
+        const std::optional<std::string> xml = zip_.read(drawing, std::size_t(16) << 20);
+        if (!xml)
+            return false;
+        const ooxml::Relationships rels = ooxml::readRelationships(zip_, drawing);
+        Context inner = c;
+        inner.rels = &rels;
+        inner.skipPlaceholders = false;
+        Xf at = xf;
+        at.ox = xf.ox + frame.x * xf.sx;
+        at.oy = xf.oy + frame.y * xf.sy;
+        XmlReader d(*xml);
+        const std::size_t before = page.items.size();
+        for (Event e; (e = d.next()) != Event::Eof && e != Event::Error;)
+            if (e == Event::Start && d.localName() == "spTree") {
+                tree(d, inner, page, at);
+                break;
+            }
+        return page.items.size() > before;
     }
 
     // At the Start of a:tbl.

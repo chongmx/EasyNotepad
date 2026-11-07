@@ -23,10 +23,19 @@ Page / Plot / Pitch workspaces unchanged:
 | PDF (added to the plan): xref tables and streams, object streams, a rebuilt xref for damaged files, Flate / LZW / ASCII85 / hex / run-length with predictors; paths, text placed by the fonts' widths (ToUnicode, standard encodings, glyph names, CID widths), images (JPEG, raw samples, masks, soft masks), forms; pages read when shown | `model/viewer/PdfObjects.cpp`, `Pdf.cpp` | unit tests |
 | Reading off the UI thread, in MVVM layers: `IDocumentReaderService` / `DocumentReaderService` read and parse on one kept thread (whole documents, then PDF pages on request; cancellable); `ViewerViewModel` owns the documents by id, asks for the pages near the view and drops far ones; the UI thread reads only a file's first 4 KB to know it is a document | `services/DocumentReaderService.cpp`, `viewmodel/ViewerViewModel.cpp` | unit test (loading, failure, close while reading, reopen, destroyed with reads in flight); UI test waits for the reads |
 | One renderer for flowing text (`MarkdownView::renderBlocks`), one painter for pages (`PagePainter`), a cell grid; `ViewerView` only draws ("Reading" while a document or a page is read) and keeps view caches by id | `view/MarkdownView.cpp`, `view/viewer/` | UI test: drawn, swept, closed, nothing held in the view, the view-model or the service |
-| Robustness: LibreOffice's own test documents (`ENP_VIEWER_SAMPLES`) | `tests/ViewerTests.inc` | 3,269 of 3,285 read, none crashed or hung (the rest: encrypted PDFs, ZIP64, fuzzed files) |
+| Robustness: LibreOffice's own test documents (`ENP_VIEWER_SAMPLES`) | `tests/ViewerTests.inc` | 3,269 of 3,285 read, none crashed or hung (the rest: encrypted PDFs, ZIP64, fuzzed files); the run also counts, by kind, what each file says it did not show |
+| Charts in all three formats, from the values the file caches: column, bar, line, area, pie, doughnut, scatter, radar; clustered, stacked and 100% stacked; title, legend, value axis with gridlines and its number format, category labels; theme colours. Drawn as page items, so the page painter draws them | `model/viewer/Chart.cpp` | unit test (geometry, every kind and grouping, a broken chart) |
+| Word: charts as drawing blocks between the paragraphs (a fixed page in the flow), text boxes as quoted blocks after their paragraph, comments listed at the end under their marks | `model/viewer/Docx.cpp` | unit test, UI test |
+| Excel: pictures, charts and shapes over the cells, placed by their anchors (two-cell, one-cell, absolute) | `model/viewer/Xlsx.cpp`, `model/viewer/Shapes.cpp` | unit test, UI test |
+| PowerPoint: charts in their frames; SmartArt from the drawing PowerPoint keeps of it, or, when there is none, its text as an outline from the data model; shape rotation; 40 preset shapes shared with Excel | `model/viewer/Pptx.cpp`, `model/viewer/Shapes.cpp` | unit test, UI test |
 
-Not yet: encrypted PDFs, ZIP64, PDF clipping / shadings / embedded font outlines, charts, the
-workspaces themselves (25.0).
+What LibreOffice's sample documents still report as not shown: Word charts 2 files (of 52), Excel
+charts or drawings 8 files (of 75; group shapes and chartex charts), PowerPoint SmartArt laid out
+only as text 38 files (they carry no drawing, only data), videos and sounds 7, PDF annotations 4.
+
+Not yet: encrypted PDFs, ZIP64, PDF clipping / shadings / embedded font outlines, SmartArt layout
+from data alone, rotated text, gradients (their first colour is used), the workspaces themselves
+(25.0).
 
 ## LibreOffice: what it is, and the essence worth extracting
 

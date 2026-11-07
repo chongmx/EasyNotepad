@@ -4,6 +4,7 @@
 // follow the body as notes. Tracked deletions, field instructions and fallbacks are left out.
 #include "enp/model/viewer/Viewer.h"
 
+#include "Chart.h"
 #include "Ooxml.h"
 
 #include <algorithm>
@@ -115,6 +116,8 @@ public:
         readNumbering(ooxml::targetOfType(rels_, "numbering"));
         readNotes(ooxml::targetOfType(rels_, "footnotes"), "footnote", footnotes_);
         readNotes(ooxml::targetOfType(rels_, "endnotes"), "endnote", endnotes_);
+        readNotes(ooxml::targetOfType(rels_, "comments"), "comment", comments_);
+        theme_ = ooxml::readTheme(zip_, ooxml::targetOfType(rels_, "theme"));
         XmlReader x(*xml);
         body(x, rels_, main_);
         if (!x.error().empty() && doc.flow.blocks.empty())
@@ -136,12 +139,33 @@ public:
                 doc.flow.blocks.push_back(std::move(b));
             }
         }
+        // Comments, in the order they were referenced: "c1." and who wrote them.
+        if (!commentOrder_.empty()) {
+            md::Block heading;
+            heading.kind = md::BlockKind::Heading;
+            heading.level = 3;
+            heading.spans.push_back(textSpan("Comments"));
+            doc.flow.blocks.push_back(std::move(heading));
+            for (std::size_t i = 0; i < commentOrder_.size(); ++i) {
+                const auto it = comments_.find(commentOrder_[i]);
+                if (it == comments_.end())
+                    continue;
+                md::Block b;
+                b.kind = md::BlockKind::Numbered;
+                b.marker = "c" + std::to_string(i + 1) + ".";
+                const auto author = commentAuthors_.find(commentOrder_[i]);
+                if (author != commentAuthors_.end() && !author->second.empty()) {
+                    md::Span who = textSpan(author->second + ": ");
+                    who.style = md::Bold;
+                    b.spans.push_back(std::move(who));
+                }
+                for (const md::Span& span : it->second)
+                    b.spans.push_back(span);
+                doc.flow.blocks.push_back(std::move(b));
+            }
+        }
         if (charts_)
             doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart" : " charts"));
-        if (textBoxes_)
-            doc.notShown.push_back(std::to_string(textBoxes_) + (textBoxes_ == 1 ? " text box" : " text boxes"));
-        if (comments_)
-            doc.notShown.push_back("comments");
         if (unresolvedImages_)
             doc.notShown.push_back(std::to_string(unresolvedImages_) + " images (missing from the file)");
         for (std::size_t i = 0; i < doc.flow.blocks.size(); ++i)
@@ -334,6 +358,8 @@ private:
                 continue;
             const std::string id = x.attribute("w:id");
             const std::string type = x.attribute("w:type");
+            if (element == "comment")
+                commentAuthors_[id] = x.attribute("w:author");
             if (!type.empty() && type != "normal") { // separators
                 x.skip();
                 continue;
@@ -369,7 +395,10 @@ private:
                 for (md::Block& more : extra)
                     push(std::move(more));
             } else if (n == "tbl") {
-                table(x, rels, part);
+                std::vector<md::Block> blocks;
+                table(x, rels, part, blocks);
+                for (md::Block& b : blocks)
+                    push(std::move(b));
             } else if (n == "sectPr" || n == "Fallback") {
                 x.skip();
             }
@@ -403,7 +432,6 @@ private:
     // it stay inline as Image spans. `extra`: blocks that follow it (none yet).
     md::Block paragraph(XmlReader& x, const ooxml::Relationships& rels, const std::string& part, std::vector<md::Block>* extra)
     {
-        (void)extra;
         md::Block b;
         std::string styleId, numId;
         int ilvl = -1, outline = -1;
@@ -504,7 +532,13 @@ private:
                        n == "commentRangeStart" || n == "commentRangeEnd") {
                 x.skip();
             } else if (n == "commentReference") {
-                ++comments_;
+                const std::string id = x.attribute("w:id");
+                auto at = std::find(commentOrder_.begin(), commentOrder_.end(), id);
+                if (at == commentOrder_.end()) {
+                    commentOrder_.push_back(id);
+                    at = commentOrder_.end() - 1;
+                }
+                appendText(spans, "[c" + std::to_string(at - commentOrder_.begin() + 1) + "]", runStyle, {});
             } else if (n == "hyperlink") {
                 const std::string id = x.attribute("r:id");
                 const auto it = rels.find(id);
@@ -523,7 +557,7 @@ private:
                 }
                 appendText(spans, "[" + noteNumbers_[key] + "]", runStyle, {});
             } else if (n == "drawing" || n == "pict" || n == "object") {
-                drawing(x, rels, spans);
+                drawing(x, rels, part, spans, extra);
             }
         }
 
@@ -563,10 +597,12 @@ private:
     }
 
     // At the Start of w:drawing / w:pict / w:object: its image (blip or VML imagedata) as an
-    // Image span; charts and text boxes are counted.
-    void drawing(XmlReader& x, const ooxml::Relationships& rels, md::Spans& spans)
+    // Image span; a chart as a drawing block and a text box's paragraphs as quoted blocks, both
+    // after the paragraph (in `extra`; dropped where there is none: in notes).
+    void drawing(XmlReader& x, const ooxml::Relationships& rels, const std::string& part, md::Spans& spans, std::vector<md::Block>* extra)
     {
         std::string alt, embed;
+        float width = 0.0f, height = 0.0f; // points, from wp:extent
         const int depth = x.depth();
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End && x.depth() < depth)
@@ -574,7 +610,10 @@ private:
             if (e != Event::Start)
                 continue;
             const std::string_view n = x.localName();
-            if (n == "docPr") {
+            if (n == "extent" && width == 0.0f) {
+                width = float(std::atof(x.attribute("cx").c_str()) / 12700.0);
+                height = float(std::atof(x.attribute("cy").c_str()) / 12700.0);
+            } else if (n == "docPr") {
                 alt = x.attribute("descr");
                 if (alt.empty())
                     alt = x.attribute("title");
@@ -583,10 +622,9 @@ private:
             } else if (n == "imagedata" && embed.empty()) {
                 embed = x.attribute("r:id");
             } else if (n == "chart") {
-                ++charts_;
+                chartBlock(rels, x.attribute("r:id"), width, height, extra);
             } else if (n == "txbxContent") {
-                ++textBoxes_;
-                x.skip();
+                textBox(x, rels, part, extra);
             }
         }
         if (embed.empty())
@@ -614,7 +652,7 @@ private:
     }
 
     // At the Start of w:tbl: a table block of the cells' text (nested tables flattened into their cell).
-    void table(XmlReader& x, const ooxml::Relationships& rels, const std::string& part)
+    void table(XmlReader& x, const ooxml::Relationships& rels, const std::string& part, std::vector<md::Block>& out)
     {
         md::Block t;
         t.kind = md::BlockKind::Table;
@@ -650,7 +688,7 @@ private:
             } else if (n == "gridSpan") {
                 span = std::clamp(std::atoi(x.attribute("w:val").c_str()), 1, 64);
             } else if (n == "p" && cell) {
-                md::Block p = paragraph(x, rels, part, nullptr);
+                md::Block p = paragraph(x, rels, part, &images); // a chart or text box in a cell follows the table
                 if (!p.marker.empty())
                     p.spans.insert(p.spans.begin(), textSpan(p.marker + " "));
                 else if (p.kind == md::BlockKind::Bullet)
@@ -684,10 +722,62 @@ private:
         if (!t.rows.empty() && columns > 0) {
             if (t.rows.size() == 1) // the renderer's first row is the header: a one-row table gets an empty body
                 t.rows.emplace_back(columns);
-            doc_->flow.blocks.push_back(std::move(t));
+            out.push_back(std::move(t));
         }
         for (md::Block& img : images)
-            doc_->flow.blocks.push_back(std::move(img));
+            out.push_back(std::move(img));
+    }
+
+    // A chart (c:chart r:id) as a drawing block of the drawing's size.
+    void chartBlock(const ooxml::Relationships& rels, const std::string& id, float width, float height, std::vector<md::Block>* extra)
+    {
+        const auto it = rels.find(id);
+        chart::Chart c;
+        if (!extra || it == rels.end() || it->second.external || !chart::read(zip_, it->second.target, theme_, c)) {
+            ++charts_;
+            return;
+        }
+        Page page;
+        page.width = width > 16.0f ? width : 432.0f;
+        page.height = height > 16.0f ? height : 252.0f;
+        page.background = 0;
+        chart::draw(c, theme_, Rect{0.0f, 0.0f, page.width, page.height}, page);
+        md::Block b;
+        b.kind = md::BlockKind::Drawing;
+        b.level = int(doc_->flow.drawings.size());
+        doc_->flow.drawings.push_back(std::move(page));
+        extra->push_back(std::move(b));
+    }
+
+    // At the Start of w:txbxContent: its paragraphs and tables, quoted (set apart from the text).
+    void textBox(XmlReader& x, const ooxml::Relationships& rels, const std::string& part, std::vector<md::Block>* extra)
+    {
+        std::vector<md::Block> blocks;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "p") {
+                std::vector<md::Block> more;
+                md::Block b = paragraph(x, rels, part, &more);
+                blocks.push_back(std::move(b));
+                for (md::Block& m : more)
+                    blocks.push_back(std::move(m));
+            } else if (n == "tbl") {
+                table(x, rels, part, blocks);
+            }
+        }
+        if (!extra)
+            return;
+        for (md::Block& b : blocks) {
+            if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
+                continue;
+            b.quote = std::max(1, b.quote + 1);
+            extra->push_back(std::move(b));
+        }
     }
 
     ooxml::ZipArchive& zip_;
@@ -695,11 +785,14 @@ private:
     ooxml::Relationships rels_;
     std::map<std::string, Style> styles_;
     Numbering numbering_;
-    std::map<std::string, md::Spans> footnotes_, endnotes_;
+    std::map<std::string, md::Spans> footnotes_, endnotes_, comments_;
+    std::map<std::string, std::string> commentAuthors_;
+    std::vector<std::string> commentOrder_;
+    ooxml::Theme theme_;
     std::vector<std::pair<char, std::string>> noteOrder_;
     std::map<std::string, std::string> noteNumbers_;
     ViewerDocument* doc_ = nullptr;
-    int charts_ = 0, textBoxes_ = 0, comments_ = 0, images_ = 0, unresolvedImages_ = 0;
+    int charts_ = 0, images_ = 0, unresolvedImages_ = 0;
 };
 
 } // namespace

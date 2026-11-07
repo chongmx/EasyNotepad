@@ -31,7 +31,9 @@ struct Span {
 };
 using Spans = std::vector<Span>;
 
-enum class BlockKind { Paragraph, Heading, Bullet, Numbered, Task, Code, Rule, Table, Math };
+// Drawing: a fixed drawing of a document read for viewing (a chart, a shape): `level` is its index in
+// the document's drawings. The Markdown parser never makes one.
+enum class BlockKind { Paragraph, Heading, Bullet, Numbered, Task, Code, Rule, Table, Math, Drawing };
 
 struct Block {
     BlockKind kind = BlockKind::Paragraph;

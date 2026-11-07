@@ -537,6 +537,9 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
             drawMath(dl, node, ImVec2(left + (width - box.width) * 0.5f, at.y + pad + box.ascent), ms, width);
         break;
     }
+    case md::BlockKind::Drawing:
+        height = onDrawing ? onDrawing(block.level, ImVec2(left, at.y), right - left, draw) : 0.0f;
+        break;
     case md::BlockKind::Rule:
         height = lineH * 0.6f;
         if (draw)

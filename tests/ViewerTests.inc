@@ -447,6 +447,7 @@ TEST(viewer_reads_sample_folder)
     if (!folder || !*folder)
         return;
     std::map<std::string, std::array<int, 2>> counts; // format -> read, failed
+    std::map<std::string, int> notShown;              // "Word document: text boxes" -> files that have them
     std::vector<std::string> failures;
     std::function<void(const std::string&, int)> walk = [&](const std::string& dir, int depth) {
         if (depth > 12)
@@ -468,6 +469,11 @@ TEST(viewer_reads_sample_folder)
                 doc.pages.load(i);
             const bool ok = doc.shape != model::viewer::Shape::None;
             ++counts[format][ok ? 0 : 1];
+            for (const std::string& n : doc.notShown) { // "3 charts" -> "charts"
+                const std::size_t space = n.find(' ');
+                const bool numbered = !n.empty() && n[0] >= '0' && n[0] <= '9' && space != std::string::npos;
+                ++notShown[format + ": " + (numbered ? n.substr(space + 1) : n)];
+            }
             if (!ok && failures.size() < 40)
                 failures.push_back(path + ": " + doc.error);
         }
@@ -475,6 +481,8 @@ TEST(viewer_reads_sample_folder)
     walk(folder, 0);
     for (const auto& [format, n] : counts)
         std::printf("  %-24s %5d read, %4d not read\n", format.c_str(), n[0], n[1]);
+    for (const auto& [what, files] : notShown)
+        std::printf("  not shown in %5d files: %s\n", files, what.c_str());
     for (const std::string& f : failures)
         std::printf("    %s\n", f.c_str());
 }
@@ -577,4 +585,121 @@ TEST(viewer_reads_documents_off_the_ui_thread)
         viewer.open(5, "/docs/sample.xlsx");
     }
     CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+}
+
+// ---- Charts, text boxes, comments, shapes and SmartArt ---------------------------------------------
+
+namespace viewertest {
+
+// The chart page of a Word document whose only content is chart `xml`.
+inline mv::Page wordChart(const std::string& xml)
+{
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rId6", "chart", "charts/chart1.xml"}})},
+                                   {"word/charts/chart1.xml", xml},
+                                   {"word/document.xml",
+                                    R"(<w:document xmlns:w="w" xmlns:r="r" xmlns:a="a"><w:body><w:p><w:r><w:drawing><wp:inline xmlns:wp="wp"><wp:extent cx="4572000" cy="2743200"/>
+<a:graphic><a:graphicData><c:chart xmlns:c="c" r:id="rId6"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>)"}});
+    mv::ViewerDocument doc = mv::readDocx(bytes);
+    return doc.flow.drawings.empty() ? mv::Page() : std::move(doc.flow.drawings.front());
+}
+
+inline std::size_t filledWith(const mv::Page& page, std::uint32_t color)
+{
+    std::size_t n = 0;
+    for (const mv::PathItem& p : page.paths)
+        n += p.fill == color ? 1 : 0;
+    return n;
+}
+
+} // namespace viewertest
+
+TEST(viewer_draws_charts_from_their_cached_values)
+{
+    using namespace viewertest;
+    // Office's default theme colours: accent1 and accent2 for the two series.
+    const std::uint32_t accent1 = mv::rgba(0x44, 0x72, 0xC4), accent2 = mv::rgba(0xED, 0x7D, 0x31);
+    const mv::Page column = wordChart(chartXml());
+    CHECK(column.width > 300.0f && column.height > 200.0f); // the drawing's extent: 360 x 216 points
+    CHECK(filledWith(column, accent1) >= 3 + 1 && filledWith(column, accent2) >= 3 + 1); // three bars each, and the legend's swatch
+    CHECK(column.plainText().find("Sales") != std::string::npos && column.plainText().find("South") != std::string::npos);
+    CHECK(column.plainText().find("2026") != std::string::npos); // the legend
+    // The tallest bar is the largest value (30, the second series' third): its top is the highest.
+    float top1 = 1e9f, top2 = 1e9f;
+    for (const mv::PathItem& p : column.paths) {
+        if (p.subpaths.empty() || p.subpaths[0].size() != 4)
+            continue;
+        if (p.fill == accent1)
+            top1 = std::min(top1, p.subpaths[0][0].y);
+        if (p.fill == accent2)
+            top2 = std::min(top2, p.subpaths[0][0].y);
+    }
+    CHECK(top2 < top1);
+
+    // Every kind draws something, and nothing crashes on any grouping.
+    for (const char* kind : {"barChart", "lineChart", "areaChart", "pieChart", "doughnutChart", "radarChart", "scatterChart"})
+        for (const char* grouping : {"clustered", "stacked", "percentStacked", "standard"}) {
+            const mv::Page page = wordChart(chartXml(kind, grouping));
+            CHECK(page.paths.size() >= 3);
+        }
+    const mv::Page pie = wordChart(chartXml("pieChart", "standard"));
+    CHECK(filledWith(pie, accent1) >= 1 && filledWith(pie, accent2) >= 1); // slices take the accents in turn
+    CHECK(pie.plainText().find("North") != std::string::npos);              // a pie's legend names its categories
+    // Not a chart: nothing drawn, and the document says so.
+    const mv::ViewerDocument broken = mv::readDocx(zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                                        {"word/_rels/document.xml.rels", rels({{"rId6", "chart", "charts/chart1.xml"}})},
+                                                        {"word/charts/chart1.xml", "<c:chartSpace xmlns:c=\"c\"/>"},
+                                                        {"word/document.xml", R"(<w:document xmlns:w="w" xmlns:r="r"><w:body><w:p><w:r><w:drawing><c:chart xmlns:c="c" r:id="rId6"/></w:drawing></w:r></w:p></w:body></w:document>)"}}));
+    CHECK(broken.flow.drawings.empty() && !broken.notShown.empty());
+}
+
+TEST(viewer_shows_text_boxes_comments_shapes_and_smartart)
+{
+    using namespace viewertest;
+    namespace md = model::markdown;
+    std::map<std::string, std::string> samples;
+    for (auto& [name, bytes] : sampleDocuments())
+        samples[name] = bytes;
+
+    const mv::ViewerDocument word = mv::readDocx(samples["sample.docx"]);
+    CHECK(word.notShown.empty());
+    CHECK(word.flow.drawings.size() == 1);
+    bool drawing = false, quoted = false, heading = false, comment = false;
+    for (const md::Block& b : word.flow.blocks) {
+        drawing = drawing || (b.kind == md::BlockKind::Drawing && b.level == 0);
+        quoted = quoted || (b.quote > 0 && md::plainText(b.spans) == "Inside a text box");
+        heading = heading || (b.kind == md::BlockKind::Heading && md::plainText(b.spans) == "Comments");
+        comment = comment || (b.marker == "c1." && md::plainText(b.spans) == "Ana: Check this.");
+    }
+    CHECK(drawing && quoted && heading && comment);
+    CHECK(mv::plainText(word).find("Reviewed[c1]") != std::string::npos); // the comment's mark where it was made
+
+    const mv::ViewerDocument book = mv::readXlsx(samples["sample.xlsx"]);
+    CHECK(book.notShown.empty());
+    CHECK(book.shape == mv::Shape::Sheet && book.book.sheets.size() == 2 && book.book.sheets[0].drawings.size() == 2);
+    if (book.book.sheets[0].drawings.size() == 2) {
+        const mv::SheetDrawing& chart = book.book.sheets[0].drawings[0];
+        CHECK(chart.row0 == 5 && chart.col0 == 2 && chart.row1 == 20 && chart.col1 == 8);
+        CHECK(chart.page.width > 100.0f && chart.page.height > 100.0f && chart.page.plainText().find("Sales") != std::string::npos);
+        const mv::SheetDrawing& arrow = book.book.sheets[0].drawings[1];
+        CHECK(std::fabs(arrow.page.width - 150.0f) < 0.01f && std::fabs(arrow.page.height - 60.0f) < 0.01f);
+        CHECK(filledWith(arrow.page, mv::rgba(0xFF, 0xC0, 0x00)) == 1 && arrow.page.plainText() == "Look here");
+        CHECK(!arrow.page.paths.empty() && arrow.page.paths[0].subpaths[0].size() == 7); // a right arrow's outline
+    }
+    CHECK(book.book.sheets[0].rowCount >= 21); // the grid reaches the drawings
+
+    const mv::ViewerDocument deck = mv::readPptx(samples["sample.pptx"]);
+    CHECK(deck.notShown.empty());
+    if (!deck.pages.pages.empty()) {
+        const std::string text = deck.pages.pages[0].plainText();
+        CHECK(text.find("Sales") != std::string::npos);    // the chart
+        CHECK(text.find("Step one") != std::string::npos); // the SmartArt diagram's drawn shape
+        CHECK(filledWith(deck.pages.pages[0], mv::rgba(0x70, 0xAD, 0x47)) >= 1);
+        // The diagram's shape is placed in its frame: at x = 5,000,000 EMU = 393.7 points.
+        bool placed = false;
+        for (const mv::TextBox& b : deck.pages.pages[0].boxes)
+            if (!b.paragraphs.empty() && !b.paragraphs[0].runs.empty() && b.paragraphs[0].runs[0].text == "Step one")
+                placed = std::fabs(b.box.x - (5000000.0f + 100000.0f) / 12700.0f) < 0.1f; // its txXfrm
+        CHECK(placed);
+    }
 }

@@ -84,6 +84,17 @@ private:
         std::size_t page_;
     };
 
+    // The pictures of a Word or Excel document's drawings: held for the whole document.
+    class EntryImageSource final : public PageImages {
+    public:
+        EntryImageSource(ViewerView& view, Entry& entry) : view_(view), entry_(entry) {}
+        const MarkdownImage* image(const std::string& media) override { return view_.image(entry_, entry_.images, media); }
+
+    private:
+        ViewerView& view_;
+        Entry& entry_;
+    };
+
     Entry& entryFor(const model::Document& doc, const viewmodel::ViewerViewModel::Entry& model);
     void releaseImages(std::map<std::string, HeldImage>& held);
     void releaseEntry(Entry& e);

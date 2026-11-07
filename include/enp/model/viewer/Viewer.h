@@ -23,8 +23,10 @@ enum class Shape { None, Flow, Sheet, Pages };
 
 struct FlowDocument {
     std::vector<markdown::Block> blocks;
-    // Encoded images by the source their Image spans name.
+    // Encoded images by the source their Image spans (and the drawings' images) name.
     std::map<std::string, std::string> media;
+    // Fixed drawings (charts, shapes) between the blocks, sized in points: a Drawing block names one.
+    std::vector<Page> drawings;
 };
 
 struct ViewerDocument {

@@ -2,6 +2,8 @@
 // shows (its saved value, formatted) and its formula. Values are as saved; nothing is recalculated.
 #pragma once
 
+#include "enp/model/viewer/Page.h"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -30,6 +32,14 @@ struct Merge {
     std::uint32_t row0 = 0, col0 = 0, row1 = 0, col1 = 0; // inclusive
 };
 
+// A picture or chart over the cells: drawn as a page from cell (row0, col0) plus an offset to cell
+// (row1, col1) plus an offset (points); the page is sized for the sheet's own column widths.
+struct SheetDrawing {
+    std::uint32_t row0 = 0, col0 = 0, row1 = 0, col1 = 0;
+    float dx0 = 0.0f, dy0 = 0.0f, dx1 = 0.0f, dy1 = 0.0f;
+    Page page;
+};
+
 struct Sheet {
     std::string name;
     std::vector<Row> rows; // ascending, only rows with cells or a height
@@ -41,6 +51,7 @@ struct Sheet {
     std::uint32_t frozenRows = 0, frozenColumns = 0;
     bool hidden = false;
     bool showGrid = true;
+    std::vector<SheetDrawing> drawings;
 
     const Row* row(std::uint32_t index) const;
     const Cell* cell(std::uint32_t row, std::uint32_t column) const;
@@ -49,6 +60,8 @@ struct Sheet {
 
 struct Workbook {
     std::vector<Sheet> sheets;
+    // Encoded pictures of the drawings, by the key their image items name.
+    std::map<std::string, std::string> media;
     bool date1904 = false;
 };
 

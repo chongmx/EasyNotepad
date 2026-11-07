@@ -81,6 +81,11 @@ Fonts Fonts::load()
 {
     Fonts fonts;
     ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    // The atlas is used for as long as the app runs: its texture is made 512 x 512 from the start
+    // (1 MB of pixels) and kept, instead of growing from 512 x 128 as documents bring new sizes
+    // and staying grown after they close. Replacing a texture costs memory in some GL drivers, so
+    // it is not shrunk back either (docs/MEMORY.md rule 9).
+    atlas->TexMinHeight = 512;
 
     ImFontConfig textConfig;
     textConfig.OversampleH = 2;

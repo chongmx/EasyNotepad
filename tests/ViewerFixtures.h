@@ -165,6 +165,23 @@ inline std::string tinyPicture()
     return std::string("P6\n2 2\n255\n") + std::string("\xFF\x00\x00\x00\xFF\x00\x00\x00\xFF\xFF\xFF\xFF", 12);
 }
 
+// A chart part: `kind` is barChart (with barDir col), lineChart, pieChart, ...; two series of three
+// categories, cached values only (as Office writes them).
+inline std::string chartXml(const std::string& kind = "barChart", const std::string& grouping = "clustered")
+{
+    auto series = [](int idx, const char* name, const char* values) {
+        return std::string("<c:ser><c:idx val=\"") + std::to_string(idx) + "\"/><c:tx><c:strRef><c:strCache><c:pt idx=\"0\"><c:v>" + name +
+               "</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:strCache><c:ptCount val=\"3\"/>"
+               "<c:pt idx=\"0\"><c:v>North</c:v></c:pt><c:pt idx=\"1\"><c:v>South</c:v></c:pt><c:pt idx=\"2\"><c:v>West</c:v></c:pt>"
+               "</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:ptCount val=\"3\"/>" + values + "</c:numCache></c:numRef></c:val></c:ser>";
+    };
+    return "<c:chartSpace xmlns:c=\"c\" xmlns:a=\"a\"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Sales</a:t></a:r></a:p></c:rich></c:tx></c:title>"
+           "<c:plotArea><c:" + kind + ">" + (kind == "barChart" ? "<c:barDir val=\"col\"/>" : "") + "<c:grouping val=\"" + grouping + "\"/>" +
+           series(0, "2025", "<c:pt idx=\"0\"><c:v>10</c:v></c:pt><c:pt idx=\"1\"><c:v>25</c:v></c:pt><c:pt idx=\"2\"><c:v>15</c:v></c:pt>") +
+           series(1, "2026", "<c:pt idx=\"0\"><c:v>12</c:v></c:pt><c:pt idx=\"1\"><c:v>20</c:v></c:pt><c:pt idx=\"2\"><c:v>30</c:v></c:pt>") +
+           "</c:" + kind + "><c:catAx/><c:valAx><c:majorGridlines/></c:valAx></c:plotArea><c:legend><c:legendPos val=\"b\"/></c:legend></c:chart></c:chartSpace>";
+}
+
 // One small document of each format, with a picture where the format has them: for the UI test,
 // which opens, draws and closes them.
 inline std::vector<std::pair<std::string, std::string>> sampleDocuments()
@@ -172,12 +189,19 @@ inline std::vector<std::pair<std::string, std::string>> sampleDocuments()
     std::vector<std::pair<std::string, std::string>> out;
     out.push_back({"sample.docx",
                    zip({{"_rels/.rels", packageRels("word/document.xml")},
-                        {"word/_rels/document.xml.rels", rels({{"rId5", "image", "media/image1.png"}, {"rId9", "hyperlink", "https://example.com/"}})},
+                        {"word/_rels/document.xml.rels", rels({{"rId5", "image", "media/image1.png"}, {"rId9", "hyperlink", "https://example.com/"},
+                                                                 {"rId6", "chart", "charts/chart1.xml"}, {"rId7", "comments", "comments.xml"}})},
+                        {"word/charts/chart1.xml", chartXml()},
+                        {"word/comments.xml", R"(<w:comments xmlns:w="w"><w:comment w:id="0" w:author="Ana"><w:p><w:r><w:t>Check this.</w:t></w:r></w:p></w:comment></w:comments>)"},
                         {"word/document.xml",
                          R"(<w:document xmlns:w="w" xmlns:r="r" xmlns:a="a"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Sample</w:t></w:r></w:p>
 <w:p><w:hyperlink r:id="rId9"><w:r><w:t>a link</w:t></w:r></w:hyperlink></w:p>
 <w:tbl><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
-<w:p><w:r><w:drawing><a:blip r:embed="rId5"/></w:drawing></w:r></w:p></w:body></w:document>)"},
+<w:p><w:r><w:drawing><a:blip r:embed="rId5"/></w:drawing></w:r></w:p>
+<w:p><w:r><w:t>Reviewed</w:t></w:r><w:r><w:commentReference w:id="0"/></w:r></w:p>
+<w:p><w:r><w:drawing><wp:inline xmlns:wp="wp"><wp:extent cx="4572000" cy="2743200"/><a:graphic><a:graphicData><c:chart xmlns:c="c" r:id="rId6"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+<w:p><w:r><w:drawing><wps:wsp xmlns:wps="wps"><wps:txbx><w:txbxContent><w:p><w:r><w:t>Inside a text box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>
+</w:body></w:document>)"},
                         {"word/media/image1.png", tinyPicture()}})});
     out.push_back({"sample.xlsx",
                    zip({{"_rels/.rels", packageRels("xl/workbook.xml")},
@@ -187,18 +211,41 @@ inline std::vector<std::pair<std::string, std::string>> sampleDocuments()
                          R"(<worksheet><sheetViews><sheetView><pane xSplit="1" ySplit="1" state="frozen"/></sheetView></sheetViews><sheetData>
 <row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c><c r="B1"><v>1.5</v></c></row><row r="300"><c r="Z300"><f>B1*2</f><v>3</v></c></row>
 </sheetData><mergeCells><mergeCell ref="C3:D4"/></mergeCells></worksheet>)"},
-                        {"xl/worksheets/sheet2.xml", R"(<worksheet><sheetData><row r="1"><c r="A1"><v>7</v></c></row></sheetData></worksheet>)"}})});
+                        {"xl/worksheets/sheet2.xml", R"(<worksheet><sheetData><row r="1"><c r="A1"><v>7</v></c></row></sheetData></worksheet>)"},
+                        {"xl/worksheets/_rels/sheet1.xml.rels", rels({{"rId1", "drawing", "../drawings/drawing1.xml"}})},
+                        {"xl/drawings/_rels/drawing1.xml.rels", rels({{"rId1", "chart", "../charts/chart1.xml"}})},
+                        {"xl/charts/chart1.xml", chartXml("lineChart", "standard")},
+                        {"xl/drawings/drawing1.xml",
+                         R"(<xdr:wsDr xmlns:xdr="xdr" xmlns:a="a" xmlns:c="c" xmlns:r="r">
+<xdr:twoCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>20</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+<xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>
+<xdr:oneCellAnchor><xdr:from><xdr:col>9</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="1905000" cy="762000"/>
+<xdr:sp><xdr:spPr><a:prstGeom prst="rightArrow"/><a:solidFill><a:srgbClr val="FFC000"/></a:solidFill></xdr:spPr>
+<xdr:txBody><a:bodyPr anchor="ctr"/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="1200" b="1"/><a:t>Look here</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+</xdr:wsDr>)"}})});
     out.push_back({"sample.pptx",
                    zip({{"_rels/.rels", packageRels("ppt/presentation.xml")},
                         {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}, {"rId3", "slide", "slides/slide1.xml"}})},
                         {"ppt/presentation.xml",
                          R"(<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId3"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>)"},
-                        {"ppt/slides/_rels/slide1.xml.rels", rels({{"rId3", "image", "../media/image1.png"}})},
+                        {"ppt/slides/_rels/slide1.xml.rels", rels({{"rId3", "image", "../media/image1.png"}, {"rId4", "chart", "../charts/chart1.xml"},
+                                                                   {"rId5", "diagramData", "../diagrams/data1.xml"},
+                                                                   {"rId6", "diagramDrawing", "../diagrams/drawing1.xml"}})},
+                        {"ppt/charts/chart1.xml", chartXml("pieChart", "standard")},
+                        {"ppt/diagrams/data1.xml", R"(<dgm:dataModel xmlns:dgm="dgm" xmlns:dsp="dsp"><dgm:extLst><a:ext xmlns:a="a"><dsp:dataModelExt relId="rId6"/></a:ext></dgm:extLst></dgm:dataModel>)"},
+                        {"ppt/diagrams/drawing1.xml",
+                         R"(<dsp:drawing xmlns:dsp="dsp" xmlns:a="a"><dsp:spTree>
+<dsp:sp><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="600000"/></a:xfrm><a:prstGeom prst="chevron"/><a:solidFill><a:srgbClr val="70AD47"/></a:solidFill></dsp:spPr>
+<dsp:txBody><a:bodyPr anchor="ctr"/><a:p><a:pPr algn="ctr"/><a:r><a:t>Step one</a:t></a:r></a:p></dsp:txBody><dsp:txXfrm><a:off x="100000" y="0"/><a:ext cx="800000" cy="600000"/></dsp:txXfrm></dsp:sp>
+</dsp:spTree></dsp:drawing>)"},
                         {"ppt/slides/slide1.xml",
                          R"(<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
 <p:sp><p:spPr><a:xfrm><a:off x="457200" y="457200"/><a:ext cx="4000000" cy="2000000"/></a:xfrm><a:prstGeom prst="roundRect"/><a:solidFill><a:srgbClr val="3366CC"/></a:solidFill></p:spPr>
 <p:txBody><a:bodyPr anchor="ctr"/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"/><a:t>A slide with a long title that wraps over several lines</a:t></a:r></a:p></p:txBody></p:sp>
 <p:pic><p:blipFill><a:blip r:embed="rId3"/></p:blipFill><p:spPr><a:xfrm><a:off x="5000000" y="3000000"/><a:ext cx="2000000" cy="2000000"/></a:xfrm></p:spPr></p:pic>
+<p:graphicFrame><p:xfrm><a:off x="457200" y="2743200"/><a:ext cx="3600000" cy="2400000"/></p:xfrm><a:graphic><a:graphicData><c:chart xmlns:c="c" r:id="rId4"/></a:graphicData></a:graphic></p:graphicFrame>
+<p:graphicFrame><p:xfrm><a:off x="5000000" y="457200"/><a:ext cx="3000000" cy="1800000"/></p:xfrm><a:graphic><a:graphicData><dgm:relIds xmlns:dgm="dgm" r:dm="rId5"/></a:graphicData></a:graphic></p:graphicFrame>
 </p:spTree></p:cSld></p:sld>)"},
                         {"ppt/media/image1.png", tinyPicture()}})});
     const std::string picture = "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Length 12 >>\nstream\n" +

@@ -147,7 +147,7 @@ std::string ViewerViewModel::takeMedia(int id, const std::string& key)
     if (it == entries_.end())
         return {};
     mv::ViewerDocument& d = it->second.doc;
-    std::map<std::string, std::string>& media = d.shape == mv::Shape::Flow ? d.flow.media : d.pages.media;
+    std::map<std::string, std::string>& media = d.shape == mv::Shape::Flow ? d.flow.media : d.shape == mv::Shape::Sheet ? d.book.media : d.pages.media;
     const auto m = media.find(key);
     if (m == media.end())
         return {};
