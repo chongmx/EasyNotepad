@@ -94,13 +94,33 @@ struct TextStyle {
 };
 
 // A table style's look for one part of a table (the whole table, the header row, banded rows, ...).
+// A table line: set, and then drawn when its width is above 0 (noFill: set, 0 wide).
+struct TableLine {
+    bool set = false;
+    float width = 0.0f; // points
+    std::uint32_t color = 0;
+};
 struct TablePart {
     std::uint32_t fill = 0;
     bool hasFill = false;
     std::uint32_t text = 0;
     bool hasText = false;
     int bold = -1;
+    TableLine edge[6]; // tcBdr: left, right, top, bottom (the part's outline), insideH, insideV
 };
+
+// At the Start of a:ln (or an element holding one's fill): its width and colour, to its End.
+TableLine readLine(XmlReader& x, const ooxml::Theme& theme, const std::map<std::string, std::string>* map)
+{
+    TableLine line;
+    line.set = true;
+    line.width = x.hasAttribute("w") ? float(std::atof(x.attribute("w").c_str()) / 12700.0) : 0.75f;
+    bool found = false;
+    line.color = ooxml::readFillIn(x, theme, map, &found);
+    if (found && line.color == 0) // noFill
+        line.width = 0.0f;
+    return line;
+}
 struct TableStyle {
     std::map<std::string, TablePart> parts; // wholeTbl firstRow lastRow firstCol lastCol band1H band2H band1V band2V
     std::uint32_t border = 0;               // the lines between cells (0: a light grey)
@@ -1004,13 +1024,18 @@ private:
                 inset("rIns", box.insetR);
                 inset("bIns", box.insetB);
                 box.wrap = x.attribute("wrap") != "none";
-                // normAutofit fontScale: the text shrunk to fit
+                // normAutofit: the text shrunk to fit as PowerPoint last fitted it (fontScale), its
+                // lines closer (lnSpcReduction, percentage points off the line spacing)
                 const int d2 = x.depth();
                 for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
                     if (f == Event::End && x.depth() < d2)
                         break;
-                    if (f == Event::Start && x.localName() == "normAutofit" && x.hasAttribute("fontScale"))
-                        fontScale_ = float(std::atof(x.attribute("fontScale").c_str()) / 100000.0);
+                    if (f == Event::Start && x.localName() == "normAutofit") {
+                        if (x.hasAttribute("fontScale"))
+                            fontScale_ = float(std::atof(x.attribute("fontScale").c_str()) / 100000.0);
+                        if (x.hasAttribute("lnSpcReduction"))
+                            lineReduction_ = std::clamp(float(std::atof(x.attribute("lnSpcReduction").c_str()) / 100000.0), 0.0f, 0.5f);
+                    }
                 }
             } else if (n == "lstStyle") {
                 TextStyle own;
@@ -1098,13 +1123,18 @@ private:
                     para.runs.push_back(run);
                     para.bullet.clear();
                 }
-                if (fontScale_ < 1.0f)
+                if (fontScale_ < 1.0f) {
                     for (TextRun& run : para.runs)
                         run.size *= fontScale_;
+                    para.spaceBefore *= fontScale_;
+                }
+                if (lineReduction_ > 0.0f)
+                    para.lineSpacing = std::max(0.4f, para.lineSpacing - lineReduction_);
                 box.paragraphs.push_back(std::move(para));
             }
         }
         fontScale_ = 1.0f;
+        lineReduction_ = 0.0f;
         return any;
     }
 
@@ -1472,7 +1502,8 @@ private:
                 XmlReader x(*xml);
                 TableStyle* style = nullptr;
                 TablePart* cur = nullptr;
-                bool inText = false, inFill = false;
+                bool inText = false, inFill = false, inBorder = false;
+                int side = -1; // the tcBdr side being read
                 for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
                     if (e == Event::End) {
                         const std::string_view n = x.localName();
@@ -1480,6 +1511,8 @@ private:
                             inText = false;
                         else if (n == "fill")
                             inFill = false;
+                        else if (n == "tcBdr")
+                            inBorder = false;
                         continue;
                     }
                     if (e != Event::Start)
@@ -1503,7 +1536,20 @@ private:
                     } else if (cur && inText && (n == "schemeClr" || n == "srgbClr" || n == "prstClr" || n == "sysClr")) {
                         cur->text = ooxml::readColor(x, theme, map);
                         cur->hasText = true;
-                    } else if (cur && (n == "tcBdr" || n == "effect")) {
+                    } else if (cur && n == "tcBdr") {
+                        inBorder = true;
+                    } else if (cur && inBorder && (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "insideH" || n == "insideV")) {
+                        side = n == "left" ? 0 : n == "right" ? 1 : n == "top" ? 2 : n == "bottom" ? 3 : n == "insideH" ? 4 : 5;
+                    } else if (cur && inBorder && side >= 0 && n == "ln") {
+                        cur->edge[side] = readLine(x, theme, map);
+                    } else if (cur && inBorder && side >= 0 && n == "lnRef") { // a theme line: about 1 point in its colour
+                        TableLine line;
+                        line.set = true;
+                        line.width = 1.0f;
+                        bool found = false;
+                        line.color = ooxml::readFillIn(x, theme, map, &found);
+                        cur->edge[side] = line;
+                    } else if (cur && n == "effect") {
                         x.skip();
                     }
                 }
@@ -1517,11 +1563,13 @@ private:
         // (a strong header row, light banded rows, white lines between cells).
         TableStyle& built = tableStyles_[id];
         const std::uint32_t accent = theme.color("accent1", rgba(68, 114, 196)), light = theme.color("lt1", kWhite);
-        built.parts["wholeTbl"] = TablePart{ooxml::lumModOff(accent, 0.2, 0.8), true, 0, false, -1};
-        built.parts["band1H"] = TablePart{ooxml::lumModOff(accent, 0.4, 0.6), true, 0, false, -1};
+        built.parts["wholeTbl"] = TablePart{ooxml::lumModOff(accent, 0.2, 0.8), true, 0, false, -1, {}};
+        built.parts["band1H"] = TablePart{ooxml::lumModOff(accent, 0.4, 0.6), true, 0, false, -1, {}};
         built.parts["band1V"] = built.parts["band1H"];
         for (const char* strong : {"firstRow", "lastRow", "firstCol", "lastCol"})
-            built.parts[strong] = TablePart{accent, true, light, true, 1};
+            built.parts[strong] = TablePart{accent, true, light, true, 1, {}};
+        for (TableLine& line : built.parts["wholeTbl"].edge)
+            line = TableLine{true, 1.0f, light};
         built.border = light;
         return &built;
     }
@@ -1537,6 +1585,7 @@ private:
             bool merged = false;
             std::uint32_t fill = 0;
             bool hasFill = false; // its own (tcPr), over the table style's
+            TableLine line[4];    // its own lines (lnL, lnR, lnT, lnB), over the style's
             TextBox text;
             bool hasText = false;
         };
@@ -1589,12 +1638,16 @@ private:
                                 break;
                             if (g != Event::Start)
                                 continue;
-                            if ((x.localName() == "solidFill" || x.localName() == "noFill") && x.depth() == d3 + 1) {
+                            const std::string_view g3 = x.localName();
+                            if ((g3 == "solidFill" || g3 == "noFill") && x.depth() == d3 + 1) {
                                 bool found = false;
-                                cell.fill = x.localName() == "noFill" ? 0 : ooxml::readFillIn(x, c.master->theme, &c.master->clrMap, &found);
+                                cell.fill = g3 == "noFill" ? 0 : ooxml::readFillIn(x, c.master->theme, &c.master->clrMap, &found);
                                 cell.hasFill = true;
+                            } else if ((g3 == "lnL" || g3 == "lnR" || g3 == "lnT" || g3 == "lnB") && x.depth() == d3 + 1) {
+                                const int side = g3 == "lnL" ? 0 : g3 == "lnR" ? 1 : g3 == "lnT" ? 2 : 3;
+                                cell.line[side] = readLine(x, c.master->theme, &c.master->clrMap);
                             } else if (x.depth() == d3 + 1) {
-                                x.skip(); // borders (lnL, lnR, ...): drawn as thin lines below
+                                x.skip(); // diagonals, cell 3D
                             }
                         }
                     }
@@ -1615,6 +1668,7 @@ private:
         if (const auto it = c.master->clrMap.find("tx1"); it != c.master->clrMap.end())
             tx1 = it->second;
         const std::uint32_t defaultText = c.master->theme.color(tx1, kBlack);
+        std::vector<PathItem> lines; // drawn after every cell's fill
         for (CellBox& cell : cells) {
             if (cell.merged || cell.col >= int(columns.size()))
                 continue;
@@ -1623,32 +1677,40 @@ private:
             const Rect box{xs[size_t(cell.col)], ys[size_t(cell.row)], xs[size_t(c1)] - xs[size_t(cell.col)], ys[size_t(r1)] - ys[size_t(cell.row)]};
             // The table style's parts, weakest first: the whole table, bands, first / last column, first / last row.
             TablePart look;
+            TableLine edge[4]; // the style's lines on this cell's sides
             if (style) {
-                auto apply = [&](const char* name) {
+                // A part over rows [pr0, pr1) and columns [pc0, pc1): its outline on the cells at its
+                // sides, its inside lines between the others.
+                auto apply = [&](const char* name, int pr0, int pr1, int pc0, int pc1) {
                     const auto it = style->parts.find(name);
                     if (it == style->parts.end())
                         return;
-                    if (it->second.hasFill)
-                        look.fill = it->second.fill, look.hasFill = true;
-                    if (it->second.hasText)
-                        look.text = it->second.text, look.hasText = true;
-                    if (it->second.bold >= 0)
-                        look.bold = it->second.bold;
+                    const TablePart& part = it->second;
+                    if (part.hasFill)
+                        look.fill = part.fill, look.hasFill = true;
+                    if (part.hasText)
+                        look.text = part.text, look.hasText = true;
+                    if (part.bold >= 0)
+                        look.bold = part.bold;
+                    const int from[4] = {cell.col == pc0 ? 0 : 5, c1 == pc1 ? 1 : 5, cell.row == pr0 ? 2 : 4, r1 == pr1 ? 3 : 4};
+                    for (int i = 0; i < 4; ++i)
+                        if (part.edge[from[i]].set)
+                            edge[i] = part.edge[from[i]];
                 };
-                apply("wholeTbl");
+                apply("wholeTbl", 0, rowCount, 0, columnCount);
                 const int bodyRow = cell.row - (firstRow ? 1 : 0), bodyCol = cell.col - (firstCol ? 1 : 0);
                 if (bandCol && bodyCol >= 0)
-                    apply(bodyCol % 2 == 0 ? "band1V" : "band2V");
+                    apply(bodyCol % 2 == 0 ? "band1V" : "band2V", 0, rowCount, cell.col, c1);
                 if (bandRow && bodyRow >= 0)
-                    apply(bodyRow % 2 == 0 ? "band1H" : "band2H");
+                    apply(bodyRow % 2 == 0 ? "band1H" : "band2H", cell.row, r1, 0, columnCount);
                 if (firstCol && cell.col == 0)
-                    apply("firstCol");
+                    apply("firstCol", 0, rowCount, 0, 1);
                 if (lastCol && c1 == columnCount)
-                    apply("lastCol");
+                    apply("lastCol", 0, rowCount, columnCount - 1, columnCount);
                 if (firstRow && cell.row == 0)
-                    apply("firstRow");
+                    apply("firstRow", 0, 1, 0, columnCount);
                 if (lastRow && r1 == rowCount)
-                    apply("lastRow");
+                    apply("lastRow", rowCount - 1, rowCount, 0, columnCount);
             }
             if (look.hasText || look.bold == 1)
                 for (TextParagraph& para : cell.text.paragraphs)
@@ -1660,11 +1722,28 @@ private:
                     }
             PathItem bg;
             bg.fill = cell.hasFill ? cell.fill : look.hasFill ? look.fill : 0;
-            bg.stroke = style && style->border ? style->border : rgba(160, 160, 160);
-            bg.lineWidth = 0.75f;
             bg.subpaths.push_back({{box.x, box.y}, {box.x + box.w, box.y}, {box.x + box.w, box.y + box.h}, {box.x, box.y + box.h}});
             bg.closed.push_back(true);
-            page.add(std::move(bg));
+            if (bg.fill)
+                page.add(std::move(bg));
+            // Its sides: its own lines, else the style's; a table without a style gets light grey lines.
+            const Point corners[4][2] = {{{box.x, box.y}, {box.x, box.y + box.h}},
+                                         {{box.x + box.w, box.y}, {box.x + box.w, box.y + box.h}},
+                                         {{box.x, box.y}, {box.x + box.w, box.y}},
+                                         {{box.x, box.y + box.h}, {box.x + box.w, box.y + box.h}}};
+            for (int i = 0; i < 4; ++i) {
+                TableLine line = cell.line[i].set ? cell.line[i] : edge[i];
+                if (!line.set && !style)
+                    line = TableLine{true, 0.75f, rgba(160, 160, 160)};
+                if (!line.set || line.width <= 0.0f || lines.size() >= 20000)
+                    continue;
+                PathItem p;
+                p.stroke = line.color ? line.color : defaultText;
+                p.lineWidth = line.width;
+                p.subpaths.push_back({corners[i][0], corners[i][1]});
+                p.closed.push_back(false);
+                lines.push_back(std::move(p));
+            }
             if (cell.hasText) {
                 cell.text.box = box;
                 if (cell.text.anchor < 0)
@@ -1672,6 +1751,8 @@ private:
                 page.add(std::move(cell.text));
             }
         }
+        for (PathItem& line : lines)
+            page.add(std::move(line));
     }
 
     bool addMedia(const std::string& part)
@@ -1724,7 +1805,7 @@ private:
     std::map<std::string, std::unique_ptr<Master>> masters_;
     std::map<std::string, std::unique_ptr<Template>> layouts_;
     std::string title_;
-    float fontScale_ = 1.0f;
+    float fontScale_ = 1.0f, lineReduction_ = 0.0f; // the txBody being read's normAutofit
     int slideNumber_ = 0; // the slide being read, from 1 (slide-number fields)
     ooxml::Relationships presentationRels_;
     bool tableStylesRead_ = false;

@@ -942,9 +942,20 @@ TEST(viewer_draws_slides_as_office_does)
 <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:p><a:r><a:t>White text</a:t></a:r></a:p></p:txBody></p:sp>
 <p:cxnSp><p:nvCxnSpPr/><p:spPr><a:xfrm><a:off x="0" y="5000000"/><a:ext cx="2540000" cy="1270000"/></a:xfrm><a:prstGeom prst="bentConnector3"/>
 <a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr></p:cxnSp>
+<p:graphicFrame><p:nvGraphicFramePr/><p:xfrm><a:off x="0" y="3000000"/><a:ext cx="2540000" cy="762000"/></p:xfrm><a:graphic><a:graphicData><a:tbl>
+<a:tblPr firstRow="1"><a:tableStyleId>{LINES}</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w="1270000"/><a:gridCol w="1270000"/></a:tblGrid>
+<a:tr h="381000"><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>a</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>b</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr>
+<a:tr h="381000"><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>c</a:t></a:r></a:p></a:txBody>
+<a:tcPr><a:lnB w="38100"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnB></a:tcPr></a:tc>
+<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>d</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>
 </p:spTree></p:cSld></p:sld>)";
+    // A table style with a 2-point green line under its first row and none elsewhere.
+    const std::string tableStyles = R"(<a:tblStyleLst xmlns:a="a"><a:tblStyle styleId="{LINES}" styleName="Lines">
+<a:firstRow><a:tcStyle><a:tcBdr><a:bottom><a:ln w="25400"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln></a:bottom></a:tcBdr></a:tcStyle></a:firstRow>
+</a:tblStyle></a:tblStyleLst>)";
     const std::string bytes = zip({{"_rels/.rels", packageRels("ppt/presentation.xml")},
-                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}})},
+                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}, {"rId3", "tableStyles", "tableStyles.xml"}})},
+                                   {"ppt/tableStyles.xml", tableStyles},
                                    {"ppt/presentation.xml", presentation},
                                    {"ppt/slides/_rels/slide1.xml.rels",
                                     rels({{"rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"}, {"rId9", "hyperlink", "https://example.com/"}})},
@@ -999,6 +1010,19 @@ TEST(viewer_draws_slides_as_office_does)
         if (path.stroke && path.subpaths.size() == 1 && path.subpaths[0].size() == 4)
             elbow = std::fabs(path.subpaths[0][1].x - path.subpaths[0][2].x) < 0.01f; // across, down, across
     CHECK(elbow);
+    // Table lines: the style's under its first row (both cells), the cell's own under "c"; no others.
+    int green = 0, red = 0, other = 0;
+    for (const mv::PathItem& path : p.paths) {
+        if (!path.stroke || path.fill || path.subpaths.size() != 1 || path.subpaths[0].size() != 2 || path.subpaths[0][0].y < 230.0f)
+            continue;
+        if (path.stroke == mv::rgba(0, 0xB0, 0x50) && std::fabs(path.lineWidth - 2.0f) < 0.01f)
+            ++green;
+        else if (path.stroke == mv::rgba(255, 0, 0) && std::fabs(path.lineWidth - 3.0f) < 0.01f)
+            ++red;
+        else
+            ++other;
+    }
+    CHECK(green == 2 && red == 1 && other == 0);
 }
 
 TEST(viewer_numbers_word_headings_through_their_styles)
