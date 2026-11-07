@@ -667,6 +667,106 @@ float MarkdownView::offsetOfLine(int line) const
     return y;
 }
 
+namespace {
+
+// A document's table (Word) as its author set it: the grid's column widths (narrowed to fit),
+// each cell's shading, text colour and weight, alignment and borders, spans and vertical merges.
+// Returns its height.
+float documentTable(const md::Block& block, ImVec2 at, float left, float right, const MarkdownView::Style& st, bool draw,
+                    std::vector<LinkHit>& links)
+{
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const std::size_t columns = block.align.size(), rows = block.rows.size();
+    const float ppp = st.size / 11.0f, lineH = st.lineH();
+    const float padX = 5.4f * ppp, padY = 1.5f * ppp; // Word's default cell margins (0.08 inch at the sides)
+    std::vector<float> widths(columns, 0.0f);
+    if (block.columns.size() == columns) {
+        for (std::size_t c = 0; c < columns; ++c)
+            widths[c] = std::max(block.columns[c] * ppp, padX * 2.0f + 4.0f * st.s);
+    } else { // no grid: by the cells' text on one line
+        for (std::size_t r = 0; r < rows; ++r)
+            for (std::size_t c = 0; c < columns; ++c) {
+                Flow line(st, dl, false, 0.0f, FLT_MAX * 0.25f, 0.0f, st.size, lineH, st.text, false, nullptr);
+                line.layout(0, 0.0f, nullptr, nullptr, ppp);
+                line.spans(block.rows[r][c]);
+                widths[c] = std::max(widths[c], line.widest() + padX * 2.0f);
+            }
+    }
+    float tableW = std::accumulate(widths.begin(), widths.end(), 0.0f);
+    const float avail = right - left;
+    if (tableW > avail && tableW > 0.0f) { // wider than the column: narrowed in proportion
+        for (float& w : widths)
+            w *= avail / tableW;
+        tableW = avail;
+    }
+    const float tableLeft = left + (block.textAlign == 1 ? std::max(0.0f, (avail - tableW) * 0.5f)
+                                    : block.textAlign == 2 ? std::max(0.0f, avail - tableW) : 0.0f);
+    std::vector<float> xs(columns + 1, tableLeft);
+    for (std::size_t c = 0; c < columns; ++c)
+        xs[c + 1] = xs[c] + widths[c];
+    auto cellRight = [&](std::size_t c, const md::CellLook& look) { return xs[std::min(columns, c + std::max<std::size_t>(1, look.span))]; };
+    auto textColor = [&](const md::CellLook& look) { return look.color ? ImU32(look.color) : st.text; };
+    std::vector<float> textH(columns, 0.0f);
+    std::vector<std::vector<float>> lineWidths(columns);
+    float y = at.y;
+    for (std::size_t r = 0; r < rows; ++r) {
+        // Measure the row: its height is its tallest cell's text (merged continuations add none).
+        float rowH = lineH + padY * 2.0f;
+        for (std::size_t c = 0; c < columns; ++c) {
+            const md::CellLook& look = block.looks[r][c];
+            textH[c] = 0.0f;
+            lineWidths[c].clear();
+            if (look.covered || look.merged)
+                continue;
+            Flow measure(st, dl, false, xs[c] + padX, cellRight(c, look) - padX, y + padY, st.size, lineH, textColor(look), look.bold, nullptr);
+            measure.layout(0, 0.0f, nullptr, &lineWidths[c], ppp);
+            measure.spans(block.rows[r][c]);
+            textH[c] = measure.bottom() - (y + padY);
+            rowH = std::max(rowH, textH[c] + padY * 2.0f);
+        }
+        if (draw) {
+            for (std::size_t c = 0; c < columns; ++c) { // shading first, under the text and the lines
+                const md::CellLook& look = block.looks[r][c];
+                if (!look.covered && look.fill)
+                    dl->AddRectFilled(ImVec2(xs[c], y), ImVec2(cellRight(c, look), y + rowH), look.fill);
+            }
+            for (std::size_t c = 0; c < columns; ++c) {
+                const md::CellLook& look = block.looks[r][c];
+                if (look.covered || look.merged)
+                    continue;
+                const float room = rowH - padY * 2.0f - textH[c];
+                const float top = y + padY + (look.valign == 1 ? room * 0.5f : look.valign == 2 ? room : 0.0f);
+                Flow cell(st, dl, true, xs[c] + padX, cellRight(c, look) - padX, top, st.size, lineH, textColor(look), look.bold, &links);
+                cell.layout(std::max(0, int(look.align)), 0.0f, &lineWidths[c], nullptr, ppp);
+                cell.spans(block.rows[r][c]);
+            }
+            // Lines: each cell's edges; none between a cell and the one continuing it below.
+            auto edge = [&](const md::CellEdge& e, ImVec2 a, ImVec2 b) {
+                if (e.width <= 0.0f)
+                    return;
+                dl->AddLine(a, b, e.color ? ImU32(e.color) : st.text, std::max(1.0f, e.width * ppp));
+            };
+            for (std::size_t c = 0; c < columns; ++c) {
+                const md::CellLook& look = block.looks[r][c];
+                if (look.covered)
+                    continue;
+                const float x0 = xs[c], x1 = cellRight(c, look);
+                const bool continued = r + 1 < rows && block.looks[r + 1][c].merged;
+                edge(look.edges[0], ImVec2(x0, y), ImVec2(x0, y + rowH));
+                if (!look.merged)
+                    edge(look.edges[1], ImVec2(x0, y), ImVec2(x1, y));
+                edge(look.edges[2], ImVec2(x1, y), ImVec2(x1, y + rowH));
+                if (!continued)
+                    edge(look.edges[3], ImVec2(x0, y + rowH), ImVec2(x1, y + rowH));
+            }
+        }
+        y += rowH;
+    }
+    return y - at.y;
+}
+
+} // namespace
+
 float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, const Style& st, bool draw)
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -918,6 +1018,10 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         const size_t columns = block.align.size();
         if (columns == 0 || block.rows.empty())
             break;
+        if (block.looks.size() == block.rows.size()) { // a document's table: its own grid and looks
+            height = documentTable(block, at, left, right, st, draw, links);
+            break;
+        }
         const float pad = 6.0f * st.s;
         // A cell's width on one line, as drawn (code font, bold header).
         auto oneLine = [&](size_t r, size_t c) {

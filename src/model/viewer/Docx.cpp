@@ -116,6 +116,65 @@ struct Style {
     int numLevel = -1;   // its list level; -1: the level whose pStyle names it (else 0)
 };
 
+// A table's borders as a table style, its parts or the table sets them: top, left, bottom, right,
+// insideH, insideV (a cell's tcBorders use the first four). Width in points: < 0 not set, 0 none.
+struct Borders {
+    md::CellEdge side[6];
+    bool set[6] = {false, false, false, false, false, false};
+    void over(const Borders& o)
+    {
+        for (int i = 0; i < 6; ++i)
+            if (o.set[i])
+                side[i] = o.side[i], set[i] = true;
+    }
+};
+
+// A table style's look for the whole table or one of its parts (firstRow, band1Horz, ...).
+struct TablePart {
+    std::uint32_t fill = 0;
+    bool hasFill = false;
+    std::uint32_t color = 0; // text
+    signed char bold = -1;
+    Borders borders;
+    void over(const TablePart& o)
+    {
+        if (o.hasFill)
+            fill = o.fill, hasFill = true;
+        if (o.color)
+            color = o.color;
+        if (o.bold >= 0)
+            bold = o.bold;
+        borders.over(o.borders);
+    }
+};
+
+struct TableStyle {
+    std::string basedOn;
+    TablePart whole;
+    std::map<std::string, TablePart> parts; // by w:tblStylePr w:type
+};
+
+// At the Start of a border element (top, left, ..., insideV): its width and colour.
+md::CellEdge readEdge(const XmlReader& x)
+{
+    md::CellEdge e;
+    const std::string v = x.attribute("w:val");
+    if (v.empty() || v == "nil" || v == "none")
+        return e;
+    const double eighths = std::atof(x.attribute("w:sz").c_str());
+    e.width = float(std::clamp(eighths > 0.0 ? eighths / 8.0 : 0.5, 0.25, 6.0));
+    if (v == "double")
+        e.width = std::max(e.width, 1.5f);
+    const std::string c = x.attribute("w:color");
+    e.color = c.empty() || c == "auto" ? 0 : ooxml::hexColor(c);
+    return e;
+}
+
+int borderIndex(std::string_view n)
+{
+    return n == "top" ? 0 : n == "left" || n == "start" ? 1 : n == "bottom" ? 2 : n == "right" || n == "end" ? 3 : n == "insideH" ? 4 : n == "insideV" ? 5 : -1;
+}
+
 struct Level {
     std::string format = "decimal"; // bullet, decimal, lowerLetter, upperLetter, lowerRoman, upperRoman, none
     std::string text = "%1.";
@@ -379,6 +438,74 @@ public:
 
 private:
     // ---- styles and numbering ------------------------------------------------------------------
+    // The table styles of styles.xml: borders, shading and text of the whole table and its parts.
+    void readTableStyles(const std::string& xml)
+    {
+        XmlReader x(xml);
+        TableStyle* ts = nullptr;
+        TablePart* part = nullptr;
+        bool inBorders = false, inRun = false;
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            const std::string_view n = x.localName();
+            if (e == Event::End) {
+                if (n == "style")
+                    ts = nullptr, part = nullptr;
+                else if (n == "tblStylePr")
+                    part = ts ? &ts->whole : nullptr;
+                else if (n == "tblBorders" || n == "tcBorders")
+                    inBorders = false;
+                else if (n == "rPr")
+                    inRun = false;
+                continue;
+            }
+            if (e != Event::Start)
+                continue;
+            if (n == "style") {
+                if (x.attribute("w:type") == "table") {
+                    ts = &tableStyles_[x.attribute("w:styleId")];
+                    part = &ts->whole;
+                }
+            } else if (!ts || !part) {
+                continue;
+            } else if (n == "basedOn") {
+                ts->basedOn = x.attribute("w:val");
+            } else if (n == "tblStylePr") {
+                part = &ts->parts[x.attribute("w:type")];
+            } else if (n == "tblBorders" || n == "tcBorders") {
+                inBorders = true;
+            } else if (inBorders && borderIndex(n) >= 0) {
+                const int i = borderIndex(n);
+                part->borders.side[i] = readEdge(x);
+                part->borders.set[i] = true;
+            } else if (n == "shd" && !inRun) {
+                const std::string fill = x.attribute("w:fill");
+                part->fill = fill.empty() || fill == "auto" ? 0 : ooxml::hexColor(fill);
+                part->hasFill = true;
+            } else if (n == "rPr") {
+                inRun = true;
+            } else if (inRun && n == "b") {
+                part->bold = on(x) ? 1 : 0;
+            } else if (inRun && n == "color") {
+                const std::string v = x.attribute("w:val");
+                if (!v.empty() && v != "auto")
+                    part->color = ooxml::hexColor(v);
+            }
+        }
+    }
+
+    // A table style through its basedOn chain: the base first.
+    void tableStyle(const std::string& id, TablePart& whole, std::map<std::string, TablePart>& parts, int depth = 0) const
+    {
+        const auto it = tableStyles_.find(id);
+        if (it == tableStyles_.end() || depth > 16)
+            return;
+        if (!it->second.basedOn.empty() && it->second.basedOn != id)
+            tableStyle(it->second.basedOn, whole, parts, depth + 1);
+        whole.over(it->second.whole);
+        for (const auto& [type, part] : it->second.parts)
+            parts[type].over(part);
+    }
+
     void readStyles(const std::string& part)
     {
         if (part.empty())
@@ -386,6 +513,7 @@ private:
         const std::optional<std::string> xml = zip_.read(part);
         if (!xml)
             return;
+        readTableStyles(*xml);
         XmlReader x(*xml);
         Style* s = nullptr;
         bool inRpr = false, inPpr = false, inDefaults = false;
@@ -997,7 +1125,20 @@ private:
         const int depth = x.depth();
         std::vector<md::Spans>* row = nullptr;
         md::Spans* cell = nullptr;
-        int span = 1;
+        // Per cell, as read: its own shading, borders, alignment, span and merge.
+        struct Own {
+            std::uint32_t fill = 0;
+            bool hasFill = false;
+            Borders borders;
+            int valign = 0, span = 1, align = -1;
+            bool merged = false, firstParagraph = true;
+        };
+        std::vector<std::vector<Own>> own;
+        std::string styleId;
+        Borders tableBorders;
+        // tblLook: which of the style's parts apply (Word's defaults: header row and row bands).
+        bool firstRow = true, lastRow = false, firstCol = true, lastCol = false, bandRows = true, bandCols = false;
+        enum class In { None, TableBorders, CellBorders } in = In::None;
         std::vector<md::Block> images; // images in cells: shown after the table
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
@@ -1005,11 +1146,16 @@ private:
                     break;
                 const std::string_view n = x.localName();
                 if (n == "tc" && row && x.depth() == depth + 1) {
-                    for (int i = 1; i < span && row->size() < 64; ++i)
+                    for (int i = 1; i < own.back().back().span && row->size() < 64; ++i) {
                         row->emplace_back();
+                        own.back().emplace_back();
+                        own.back().back().span = 0; // covered
+                    }
                     cell = nullptr;
                 } else if (n == "tr" && x.depth() == depth) {
                     row = nullptr;
+                } else if (n == "tblBorders" || n == "tcBorders") {
+                    in = In::None;
                 }
                 continue;
             }
@@ -1018,52 +1164,167 @@ private:
             const std::string_view n = x.localName();
             if (n == "tr" && x.depth() == depth + 1) {
                 t.rows.emplace_back();
+                own.emplace_back();
                 row = &t.rows.back();
             } else if (n == "tc" && row && x.depth() == depth + 2) {
                 row->emplace_back();
+                own.back().emplace_back();
                 cell = &row->back();
-                span = 1;
-            } else if (n == "gridSpan") {
-                span = std::clamp(std::atoi(x.attribute("w:val").c_str()), 1, 64);
+            } else if (n == "tblStyle" && x.depth() == depth + 2) {
+                styleId = x.attribute("w:val");
+            } else if (n == "tblLook" && x.depth() == depth + 2) {
+                auto flag = [&](const char* a, unsigned bit, bool fallback) {
+                    if (x.hasAttribute(a))
+                        return x.attribute(a) == "1" || x.attribute(a) == "true";
+                    if (x.hasAttribute("w:val"))
+                        return (std::strtoul(x.attribute("w:val").c_str(), nullptr, 16) & bit) != 0;
+                    return fallback;
+                };
+                firstRow = flag("w:firstRow", 0x0020, true);
+                lastRow = flag("w:lastRow", 0x0040, false);
+                firstCol = flag("w:firstColumn", 0x0080, true);
+                lastCol = flag("w:lastColumn", 0x0100, false);
+                bandRows = !flag("w:noHBand", 0x0200, false);
+                bandCols = !flag("w:noVBand", 0x0400, true);
+            } else if (n == "tblBorders" && x.depth() == depth + 2) {
+                in = In::TableBorders;
+            } else if (n == "tcBorders" && cell) {
+                in = In::CellBorders;
+            } else if (in != In::None && borderIndex(n) >= 0) {
+                const int i = borderIndex(n);
+                Borders& target = in == In::TableBorders ? tableBorders : own.back().back().borders;
+                target.side[i] = readEdge(x);
+                target.set[i] = true;
+            } else if (n == "gridCol" && x.depth() == depth + 2) {
+                t.columns.push_back(float(std::atof(x.attribute("w:w").c_str()) / 20.0));
+            } else if (n == "gridSpan" && cell) {
+                own.back().back().span = std::clamp(std::atoi(x.attribute("w:val").c_str()), 1, 64);
+            } else if (n == "vMerge" && cell) {
+                own.back().back().merged = x.attribute("w:val") != "restart";
+            } else if (n == "vAlign" && cell) {
+                const std::string v = x.attribute("w:val");
+                own.back().back().valign = v == "center" ? 1 : v == "bottom" ? 2 : 0;
+            } else if (n == "shd" && cell && x.depth() == depth + 4) { // tcPr's, not a paragraph's or a run's
+                const std::string fill = x.attribute("w:fill");
+                own.back().back().fill = fill.empty() || fill == "auto" ? 0 : ooxml::hexColor(fill);
+                own.back().back().hasFill = true;
             } else if (n == "p" && cell) {
                 md::Block p = paragraph(x, rels, part, &images); // a chart or text box in a cell follows the table
                 if (!p.marker.empty())
                     p.spans.insert(p.spans.begin(), textSpan(p.marker + " "));
                 else if (p.kind == md::BlockKind::Bullet)
                     p.spans.insert(p.spans.begin(), textSpan("\xE2\x80\xA2 "));
+                Own& o = own.back().back();
+                if (o.firstParagraph) { // the cell's alignment: its first paragraph's
+                    o.align = p.textAlign == 0 ? -1 : p.textAlign;
+                    o.firstParagraph = false;
+                }
                 md::Spans kept;
-                for (md::Span& s : p.spans) {
-                    if (s.style & md::Image) { // the renderer's table cells hold text: the image follows the table
+                for (md::Span& sp : p.spans) {
+                    if (sp.style & md::Image) { // the renderer's table cells hold text: the image follows the table
                         md::Block img;
                         img.kind = md::BlockKind::Paragraph;
-                        img.spans.push_back(std::move(s));
+                        img.spans.push_back(std::move(sp));
                         images.push_back(std::move(img));
                     } else {
-                        kept.push_back(std::move(s));
+                        kept.push_back(std::move(sp));
                     }
                 }
                 if (!cell->empty() && !kept.empty())
                     cell->push_back(textSpan("\n")); // a cell's paragraphs, each on its own line
-                for (md::Span& s : kept)
-                    cell->push_back(std::move(s));
+                for (md::Span& sp : kept)
+                    cell->push_back(std::move(sp));
             } else if (n == "jc" && x.depth() == depth + 2) { // tblPr's: the table's own alignment
                 const std::string v = x.attribute("w:val");
                 t.textAlign = v == "center" ? 1 : v == "right" || v == "end" ? 2 : 0;
-            } else if (n == "tblGrid" || n == "trPr") {
+            } else if (n == "trPr") {
                 x.skip();
             }
         }
         std::size_t columns = 0;
         for (const auto& r : t.rows)
             columns = std::max(columns, r.size());
-        for (auto& r : t.rows)
-            r.resize(columns);
-        t.align.assign(columns, -1);
-        if (!t.rows.empty() && columns > 0) {
-            if (t.rows.size() == 1) // the renderer's first row is the header: a one-row table gets an empty body
-                t.rows.emplace_back(columns);
-            out.push_back(std::move(t));
+        for (std::size_t r = 0; r < t.rows.size(); ++r) {
+            t.rows[r].resize(columns);
+            own[r].resize(columns);
         }
+        t.align.assign(columns, -1);
+        if (t.columns.size() != columns)
+            t.columns.clear(); // a grid that does not fit the cells: widths by their text
+
+        // Each cell's look: the style's whole table, then its parts as tblLook selects them
+        // (bands, first / last column, first / last row), then the table's and the cell's own.
+        TablePart whole;
+        std::map<std::string, TablePart> parts;
+        tableStyle(styleId, whole, parts);
+        whole.borders.over(tableBorders);
+        const int rows = int(t.rows.size()), cols = int(columns);
+        t.looks.assign(t.rows.size(), std::vector<md::CellLook>(columns));
+        for (int r = 0; r < rows; ++r)
+            for (int c = 0; c < cols; ++c) {
+                const Own& o = own[size_t(r)][size_t(c)];
+                md::CellLook& look = t.looks[size_t(r)][size_t(c)];
+                if (o.span == 0) {
+                    look.covered = true;
+                    continue;
+                }
+                const int span = std::max(1, o.span), lastC = std::min(cols - 1, c + span - 1);
+                TablePart p = whole;
+                auto apply = [&](const char* name) {
+                    const auto it = parts.find(name);
+                    if (it != parts.end())
+                        p.over(it->second);
+                };
+                const int bodyRow = r - (firstRow ? 1 : 0), bodyCol = c - (firstCol ? 1 : 0);
+                if (bandCols && bodyCol >= 0)
+                    apply(bodyCol % 2 == 0 ? "band1Vert" : "band2Vert");
+                if (bandRows && bodyRow >= 0 && !(lastRow && r == rows - 1))
+                    apply(bodyRow % 2 == 0 ? "band1Horz" : "band2Horz");
+                if (firstCol && c == 0)
+                    apply("firstCol");
+                if (lastCol && lastC == cols - 1)
+                    apply("lastCol");
+                if (firstRow && r == 0)
+                    apply("firstRow");
+                if (lastRow && r == rows - 1)
+                    apply("lastRow");
+                // Edges: the table's outer lines at its sides, its inside lines between cells;
+                // a part's own sides, then the cell's, over them.
+                const Borders& b = p.borders;
+                md::CellEdge left = c == 0 ? b.side[1] : b.side[5], right = lastC == cols - 1 ? b.side[3] : b.side[5];
+                md::CellEdge top = r == 0 ? b.side[0] : b.side[4], bottom = r == rows - 1 ? b.side[2] : b.side[4];
+                // A part sets its own outer sides (a header row's bottom line, a total row's top).
+                auto sideOf = [&](const char* name, int i, md::CellEdge& edge) {
+                    const auto it = parts.find(name);
+                    if (it != parts.end() && it->second.borders.set[i])
+                        edge = it->second.borders.side[i];
+                };
+                if (firstRow && r == 0)
+                    sideOf("firstRow", 2, bottom);
+                if (lastRow && r == rows - 1)
+                    sideOf("lastRow", 0, top);
+                if (o.borders.set[0])
+                    top = o.borders.side[0];
+                if (o.borders.set[1])
+                    left = o.borders.side[1];
+                if (o.borders.set[2])
+                    bottom = o.borders.side[2];
+                if (o.borders.set[3])
+                    right = o.borders.side[3];
+                look.edges[0] = left;
+                look.edges[1] = top;
+                look.edges[2] = right;
+                look.edges[3] = bottom;
+                look.fill = o.hasFill ? o.fill : p.hasFill ? p.fill : 0;
+                look.color = p.color;
+                look.bold = p.bold == 1;
+                look.align = std::int8_t(o.align);
+                look.valign = std::int8_t(o.valign);
+                look.span = std::uint8_t(span);
+                look.merged = o.merged;
+            }
+        if (!t.rows.empty() && columns > 0)
+            out.push_back(std::move(t));
         for (md::Block& img : images)
             out.push_back(std::move(img));
     }
@@ -1124,6 +1385,7 @@ private:
     std::string main_;
     ooxml::Relationships rels_;
     std::map<std::string, Style> styles_;
+    std::map<std::string, TableStyle> tableStyles_; // by styleId
     Style defaults_;           // w:docDefaults
     std::string headerId_, footerId_; // the document's header and footer (relationship ids)
     std::string defaultStyle_; // the paragraph style a paragraph without one has ("Normal")

@@ -49,6 +49,24 @@ struct TabStop {
     char leader = 0;         // what fills the gap: '.', '-', '_', or 0 nothing
 };
 
+// A document table's cell (Word): its look, as the table's style, its parts (header row, banding)
+// and the cell's own properties give it.
+struct CellEdge {
+    float width = 0.0f;      // points; 0: no line
+    std::uint32_t color = 0; // 0: the text's colour
+};
+struct CellLook {
+    std::uint32_t fill = 0;    // background; 0: none
+    std::uint32_t color = 0;   // text colour where a run sets none; 0: the block's
+    bool bold = false;         // its text bold (a header row's)
+    std::int8_t align = -1;    // its paragraphs' alignment: -1 left, 1 centre, 2 right
+    std::int8_t valign = 0;    // 0 top, 1 centre, 2 bottom
+    std::uint8_t span = 1;     // columns it covers (gridSpan)
+    bool covered = false;      // inside the span of a cell before it on its row: not drawn
+    bool merged = false;       // continues the cell above (vMerge): no text, no line between them
+    CellEdge edges[4];         // left, top, right, bottom
+};
+
 struct Block {
     BlockKind kind = BlockKind::Paragraph;
     int level = 0;          // heading 1..6; list nesting depth (0 = top)
@@ -68,6 +86,8 @@ struct Block {
     float spaceBefore = 0.0f;     // above the paragraph, beyond the renderer's own gap
     std::uint32_t shading = 0;    // the paragraph's background (0: none)
     std::vector<TabStop> tabs;    // its tab stops, by position (none: every half inch)
+    std::vector<float> columns;   // Table: Word's grid, the columns' widths in points (empty: by their text)
+    std::vector<std::vector<CellLook>> looks; // Table: each cell's look, as `rows` (empty: the renderer's own)
 };
 
 std::vector<Block> parse(std::string_view text);
