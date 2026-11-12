@@ -24,6 +24,9 @@ public:
         ImFont* font = nullptr;
         bool bold = false, italic = false;
         float lineHeight = 1.17f; // single line spacing, in ems (the font's ascender, descender and line gap, as Word takes them)
+        // ImGui sizes a font by its height from ascender to descender, Word by its em: text drawn
+        // at `size` points' em asks ImGui for size * emScale (Calibri 1.22, Comic Sans 1.39).
+        float emScale = 1.0f;
     };
 
     DocumentFonts() = default;
@@ -53,6 +56,7 @@ private:
         std::string data;        // a bundled one, inflated from the pack
         double lastUsed = 0.0;
         float lineHeight = 1.17f;
+        float emScale = 1.0f;
     };
     // A family and style asked for, with what answers it: asked each frame for every run drawn, so
     // the answer is kept (by the document's own spelling: no allocation after the first time).

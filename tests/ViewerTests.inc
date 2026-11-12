@@ -1362,3 +1362,43 @@ TEST(viewer_breaks_word_pages_after_a_section)
     CHECK(b[3].kind == md::BlockKind::Table && b[3].doc().pageBreakBefore); // the next section's table
     CHECK(!b[4].doc().pageBreakBefore && b[5].doc().pageBreakBefore);       // a break inside a paragraph: after it
 }
+
+TEST(viewer_reads_word_letterhead_pages)
+{
+    // A job description from a letterhead template, against Word: lines sized by the text on them
+    // (10-point runs in an 11-point style), an empty paragraph by its mark, a header of a logo
+    // between empty paragraphs (they keep their lines), a border round the page.
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w" xmlns:r="r"><w:body>
+<w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>ten</w:t></w:r><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t> points</w:t></w:r></w:p>
+<w:p><w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr></w:p>
+<w:p><w:r><w:t>default</w:t></w:r><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t> mixed</w:t></w:r></w:p>
+<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:headerReference w:type="first" r:id="rIdE"/>
+<w:pgBorders w:offsetFrom="page"><w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="24"/></w:pgBorders></w:sectPr></w:body></w:document>)";
+    const std::string styles = R"(<w:styles xmlns:w="w"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>)";
+    const std::string header = R"(<w:hdr xmlns:w="w"><w:p/><w:p><w:r><w:t>LOGO</w:t></w:r></w:p><w:p/></w:hdr>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels",
+                                    rels({{"rId1", "styles", "styles.xml"}, {"rIdH", "header", "header2.xml"}, {"rIdE", "header", "header3.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/header2.xml", header},
+                                   {"word/header3.xml", R"(<w:hdr xmlns:w="w"><w:p/></w:hdr>)"}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    std::vector<const md::Block*> body;
+    for (std::size_t i : doc.flow.printed)
+        body.push_back(&doc.flow.blocks[i]);
+    CHECK(body.size() == 3);
+    if (body.size() == 3) {
+        CHECK(body[0]->size == 10.0f);                                  // every run 10 points: the paragraph is 10
+        CHECK(body[1]->size == 10.0f);                                  // empty: its mark's size
+        CHECK(body[2]->size == 11.0f && body[2]->spans.size() == 2);    // mixed: the style's, the run its own
+    }
+    // The default header, its empty paragraphs kept around the logo.
+    CHECK(doc.flow.header.size() == 3 && md::plainText(doc.flow.header[1].spans) == "LOGO" && md::plainText(doc.flow.header[0].spans) == " ");
+    // The page border: from the page's edge.
+    const mv::FlowDocument::PageSetup& ps = doc.flow.page;
+    CHECK(ps.bordersFromPage && ps.borders[0].width == 0.5f && ps.borderSpace[0] == 24.0f && ps.borders[1].width == 0.5f &&
+          ps.borders[2].width == 0.0f);
+}

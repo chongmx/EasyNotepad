@@ -29,6 +29,7 @@ ImFont* fontFor(const Fonts& fonts, std::uint8_t flags)
 struct Ink {
     ImFont* font;
     std::uint8_t flags;
+    float emScale; // a document face: ImGui's size for an em
 };
 float measure(ImFont* font, float px, const char* b, const char* e);
 
@@ -53,9 +54,9 @@ Ink inkFor(const Fonts& fonts, const mv::TextRun& r)
     if (!r.font.empty() && fonts.documents && !(r.flags & mv::Mono)) {
         const DocumentFonts::Face face = fonts.documents->face(r.font, (r.flags & mv::Bold) != 0, (r.flags & mv::Italic) != 0);
         if (face.font && DocumentFonts::covers(face.font, r.text.data(), r.text.data() + r.text.size()))
-            return Ink{face.font, std::uint8_t(r.flags & ~((face.bold ? mv::Bold : 0) | (face.italic ? mv::Italic : 0)))};
+            return Ink{face.font, std::uint8_t(r.flags & ~((face.bold ? mv::Bold : 0) | (face.italic ? mv::Italic : 0))), face.emScale};
     }
-    return Ink{fontFor(fonts, r.flags), r.flags};
+    return Ink{fontFor(fonts, r.flags), r.flags, 1.0f};
 }
 
 float measure(ImFont* font, float px, const char* b, const char* e)
@@ -491,8 +492,9 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         breakAt = p;
                         continue;
                     }
-                    ImFont* font = inkFor(fonts, r).font;
-                    const float px = pxOf(r, scale);
+                    const Ink ink = inkFor(fonts, r);
+                    ImFont* font = ink.font;
+                    const float px = pxOf(r, scale) * ink.emScale;
                     maxSize = std::max(maxSize, r.size);
                     const char* s = r.text.data();
                     if (s[p.at] == '\n') {
@@ -543,7 +545,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                             if (e > q.at && r.text[e - 1] == '\n')
                                 --e;
                             const Ink ink = inkFor(fonts, r);
-                            const float px = pxOf(r, scale);
+                            const float px = pxOf(r, scale) * ink.emScale;
                             const char* b = r.text.data() + q.at;
                             const char* en = r.text.data() + e;
                             const float w = runWidth(ink.font, r, px, scale, b, en);

@@ -38,6 +38,11 @@ struct FlowDocument {
         float width = 612.0f, height = 792.0f;
         float top = 72.0f, right = 72.0f, bottom = 72.0f, left = 72.0f;
         float header = 36.0f, footer = 36.0f; // from the page's edge to the header's top / the footer's bottom
+        // A border round the page (pgBorders): top, left, bottom, right, each its space (points)
+        // from the page's edge (`fromPage`) or from the text.
+        markdown::CellEdge borders[4];
+        float borderSpace[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        bool bordersFromPage = false;
     };
     PageSetup page;
     std::vector<markdown::Block> header, footer;

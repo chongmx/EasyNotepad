@@ -873,6 +873,22 @@ private:
                 p.right = std::clamp(twips("w:right", p.right), 0.0f, p.width * 0.45f);
                 p.header = std::clamp(twips("w:header", p.header), 0.0f, p.top);
                 p.footer = std::clamp(twips("w:footer", p.footer), 0.0f, p.bottom);
+            } else if (n == "pgBorders") {
+                FlowDocument::PageSetup& p = doc_->flow.page;
+                p.bordersFromPage = x.attribute("w:offsetFrom") == "page";
+                const int d = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d)
+                        break;
+                    if (f != Event::Start)
+                        continue;
+                    const std::string_view side = x.localName();
+                    const int i = side == "top" ? 0 : side == "left" ? 1 : side == "bottom" ? 2 : side == "right" ? 3 : -1;
+                    if (i < 0)
+                        continue;
+                    p.borders[i] = readEdge(x);
+                    p.borderSpace[i] = std::clamp(float(std::atof(x.attribute("w:space").c_str())), 0.0f, 31.0f);
+                }
             }
         }
         if (!header.empty())
@@ -894,20 +910,30 @@ private:
             return out;
         const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
         XmlReader x(*xml);
+        // Its empty paragraphs keep their lines (a letterhead's space above and below its logo moves
+        // the body down); a header of nothing but empty paragraphs is none.
+        bool content = false;
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e != Event::Start)
                 continue;
             if (x.localName() == "p") {
                 std::vector<md::Block> more;
                 md::Block b = paragraph(x, rels, part, &more);
-                if (!(b.kind == md::BlockKind::Paragraph && b.spans.empty()))
-                    out.push_back(std::move(b));
+                if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
+                    b.spans.push_back(textSpan(" "));
+                else
+                    content = true;
+                out.push_back(std::move(b));
+                content = content || !more.empty();
                 for (md::Block& m : more)
                     out.push_back(std::move(m));
             } else if (x.localName() == "tbl") {
                 table(x, rels, part, out);
+                content = true;
             }
         }
+        if (!content)
+            out.clear();
         return out;
     }
 
@@ -988,6 +1014,7 @@ private:
         std::string styleId, numId;
         int ilvl = -1, outline = -1;
         bool hasNumPr = false;
+        float markSize = 0.0f; // the paragraph mark's size (pPr/rPr sz)
         md::Spans& spans = b.spans;
         std::string link;    // the hyperlink being read
         int linkDepth = -1;
@@ -1081,8 +1108,16 @@ private:
                     }
                     if (!continuous)
                         breakAfter_ = true; // the next block, not this paragraph (read before it is pushed)
-                } else if (n == "rPr" || n == "pPrChange")
-                    x.skip(); // the paragraph mark's format; a tracked format change
+                } else if (n == "rPr") { // the paragraph mark's format: an empty paragraph's line is its size
+                    const int d = x.depth();
+                    for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                        if (f == Event::End && x.depth() < d)
+                            break;
+                        if (f == Event::Start && x.localName() == "sz")
+                            markSize = std::clamp(float(std::atof(x.attribute("w:val").c_str()) / 2.0), 1.0f, 800.0f);
+                    }
+                } else if (n == "pPrChange")
+                    x.skip(); // a tracked format change
                 continue;
             }
             if (inRpr) {
@@ -1219,6 +1254,26 @@ private:
         styleProps(styleId.empty() ? defaultStyle_ : styleId, baseRun, para);
         para.over(paraDirect);
         b.size = baseRun.size;
+        // Word sizes a paragraph's lines by the text on them: when every run sets its own size the
+        // style's reaches no text, and the paragraph's size is its runs' (the largest); an empty
+        // paragraph's is its mark's.
+        {
+            bool text = false, allOwn = true;
+            float largest = 0.0f;
+            for (const md::Span& span : spans) {
+                if ((span.style & md::Image) || span.text.find_first_not_of(" \t\n\v") == std::string::npos)
+                    continue;
+                text = true;
+                if (span.size > 0.0f)
+                    largest = std::max(largest, span.size);
+                else
+                    allOwn = false;
+            }
+            if (text && allOwn && largest > 0.0f)
+                b.size = largest;
+            else if (!text && markSize > 0.0f)
+                b.size = markSize;
+        }
         for (md::Span& span : spans)
             if (span.size == b.size)
                 span.size = 0.0f; // the paragraph's own size

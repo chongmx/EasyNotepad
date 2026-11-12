@@ -145,6 +145,7 @@ private:
         ImFont* font = nullptr;
         bool document = false;
         bool realBold = false, realItalic = false;
+        float emScale = 1.0f; // a document face: ImGui's size for an em (DocumentFonts::Face)
     };
 
     const MarkdownView::Style& st_;
@@ -457,7 +458,7 @@ private:
         const bool code = (span.style & md::Code) != 0;
         const Ink ink = inkFor(span);
         ImFont* font = ink.font;
-        const float size = sizeFor(span);
+        const float size = sizeFor(span) * ink.emScale; // the run's em at its size (line heights stay in ems)
         const std::string& t = span.text;
         size_t i = 0;
         while (i < t.size()) {
@@ -500,8 +501,8 @@ private:
             // which has the fallbacks merged in.
             Ink wordInk = ink;
             if (ink.document && !covers(font, t.data() + i, t.data() + end))
-                wordInk = Ink{st_.ui, false, false, false};
-            word(t.data() + i, t.data() + end, spaces - end, wordInk, size, span);
+                wordInk = Ink{st_.ui, false, false, false, 1.0f};
+            word(t.data() + i, t.data() + end, spaces - end, wordInk, wordInk.document ? size : size / ink.emScale, span);
             i = spaces;
         }
     }
@@ -521,6 +522,7 @@ private:
                 ink.document = true;
                 ink.realBold = face.bold;
                 ink.realItalic = face.italic;
+                ink.emScale = face.emScale;
             }
         }
         return ink;
@@ -593,7 +595,7 @@ private:
             while (e < t.size() && t[e] != '\t' && t[e] != '\n' && t[e] != '\v' && !(decimal && (t[e] == '.' || t[e] == ',')))
                 ++e;
             if (e > b)
-                w += measure(inkFor(s).font, sizeFor(s), t.data() + b, t.data() + e);
+                w += measure(inkFor(s).font, sizeFor(s) * inkFor(s).emScale, t.data() + b, t.data() + e);
             if (e < t.size())
                 return w;
         }
