@@ -1339,3 +1339,26 @@ TEST(viewer_reads_word_letter_templates)
         }
     }
 }
+
+
+TEST(viewer_breaks_word_pages_after_a_section)
+{
+    // A paragraph ending a section (its sectPr) stays on its page: the page breaks after it, before
+    // the next block (a calendar: a month's table, the section's last paragraph, the next month).
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>January</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p/><w:p><w:pPr><w:sectPr><w:pgSz w:w="15840" w:h="12240"/></w:sectPr></w:pPr></w:p>
+<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>February</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>after</w:t></w:r></w:p><w:p><w:r><w:t>next</w:t></w:r></w:p>
+</w:body></w:document>)";
+    const mv::ViewerDocument doc = mv::readDocx(zip({{"_rels/.rels", packageRels("word/document.xml")}, {"word/document.xml", document}}));
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    CHECK(b.size() == 6);
+    if (b.size() != 6)
+        return;
+    CHECK(!b[1].doc().pageBreakBefore && !b[2].doc().pageBreakBefore); // the section's last paragraphs
+    CHECK(b[3].kind == md::BlockKind::Table && b[3].doc().pageBreakBefore); // the next section's table
+    CHECK(!b[4].doc().pageBreakBefore && b[5].doc().pageBreakBefore);       // a break inside a paragraph: after it
+}

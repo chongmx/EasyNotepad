@@ -942,6 +942,8 @@ private:
 
     void push(md::Block b)
     {
+        const bool breakAfter = breakAfter_; // this paragraph ends a section, or breaks the page after its text
+        breakAfter_ = false;
         if (pendingPageBreak_) { // a page break ended the paragraph before
             b.doc().pageBreakBefore = true;
             pendingPageBreak_ = false;
@@ -957,6 +959,8 @@ private:
         if (b.kind == md::BlockKind::Paragraph && b.spans.empty())
             b.spans.push_back(textSpan(" ")); // an empty paragraph keeps its line, as in Word
         doc_->flow.blocks.push_back(std::move(b));
+        if (breakAfter)
+            pendingPageBreak_ = true;
     }
 
     static void appendText(md::Spans& spans, std::string_view text, const md::Span& look)
@@ -1076,7 +1080,7 @@ private:
                             continuous = x.attribute("w:val") == "continuous";
                     }
                     if (!continuous)
-                        pendingPageBreak_ = true;
+                        breakAfter_ = true; // the next block, not this paragraph (read before it is pushed)
                 } else if (n == "rPr" || n == "pPrChange")
                     x.skip(); // the paragraph mark's format; a tracked format change
                 continue;
@@ -1110,7 +1114,7 @@ private:
                     if (spans.empty())
                         b.doc().pageBreakBefore = true;
                     else
-                        pendingPageBreak_ = true;
+                        breakAfter_ = true;
                 } else if (type != "column") {
                     add("\n", link, !link.empty()); // a line break: the renderer starts a new line
                 }
@@ -1716,6 +1720,7 @@ private:
     std::string defaultStyle_; // the paragraph style a paragraph without one has ("Normal")
     std::map<std::string, std::uint16_t> styleNumbers_;
     bool pendingPageBreak_ = false; // a page break ended the last paragraph: the next starts a page
+    bool breakAfter_ = false;       // the paragraph being read ends with a page break (its section's end)
     std::vector<std::string> paragraphNotes_;          // the footnotes the paragraph being read refers to
     std::vector<FlowDocument::Float> pendingFloats_;   // the floating pictures of the paragraph being read
     std::map<std::string, std::size_t> noteBlocks_;    // footnote key -> the body block that refers to it

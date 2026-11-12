@@ -75,6 +75,11 @@ std::optional<std::string> readFileRange(const std::string& path, std::uint64_t 
 std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size,
                                           std::uint64_t* total = nullptr);
 
+// The file of an installed font family in a style ("Cooper Black", bold, italic): its path, or ""
+// when it is not installed. Windows: the fonts the system lists, for everyone and for the user;
+// elsewhere none (documents there use their bundled stand-ins).
+std::string installedFontFile(std::string_view family, bool bold, bool italic);
+
 // A file mapped read-only into memory: its bytes are the system's file cache, not the heap, and
 // go back the moment it is closed (a large file read in place, such as a font). Moves, never copies.
 class MappedFile {

@@ -339,6 +339,11 @@ std::string homeDirectory()
 }
 #endif
 
+std::string installedFontFile(std::string_view, bool, bool)
+{
+    return {}; // no system list read here: the callers' bundled fonts stand in
+}
+
 } // namespace fs
 
 } // namespace enp::os

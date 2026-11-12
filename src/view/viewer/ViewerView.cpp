@@ -484,10 +484,16 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
         floats(true);
         // The body inside the margins; a block continued from the page before is cut at its top.
         dl->PushClipRect(ImVec2(left, text.y), ImVec2(left + pageW, text.y + textH), true); // across the page: tables may sit out in the margin
-        for (const Entry::WordPage::Placed& b : page.blocks)
-            if (text.y + b.top < win.y + view.y && text.y + b.top + b.height > win.y)
-                e.flow.drawBlockAt(b.block, ImVec2(text.x + b.inset, text.y + b.top), b.width > 0.0f ? b.width : textW, fonts_, paper, fontSize,
-                                   s_, &d.flow.fonts, p + 1, count);
+        for (const Entry::WordPage::Placed& b : page.blocks) {
+            if (text.y + b.top >= win.y + view.y || text.y + b.top + b.height <= win.y)
+                continue;
+            if (b.clipBottom > 0.0f) // a table's rows on this page only
+                dl->PushClipRect(ImVec2(left, text.y + b.top + b.clipTop), ImVec2(left + pageW, text.y + b.top + b.clipBottom), true);
+            e.flow.drawBlockAt(b.block, ImVec2(text.x + b.inset, text.y + b.top), b.width > 0.0f ? b.width : textW, fonts_, paper, fontSize, s_,
+                               &d.flow.fonts, p + 1, count);
+            if (b.clipBottom > 0.0f)
+                dl->PopClipRect();
+        }
         dl->PopClipRect();
         floats(false);
         // Footnotes at the foot of the text area, under a short rule.
@@ -528,6 +534,7 @@ void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textWidth
     };
     std::vector<Keep> keeps;
     Entry::WordPage page;
+    std::vector<float> rows; // a table's rows' bottoms, when it is broken between pages
     auto anchor = [&](std::size_t block, float top) {
         for (std::size_t f = 0; f < d.flow.floats.size(); ++f) {
             const mv::FlowDocument::Float& fl = d.flow.floats[f];
@@ -594,7 +601,10 @@ void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textWidth
         anchor(i, y + g);
         Entry::WordPage::Placed placed = place(i, y + g);
         const bool forced = blocks[i].doc().pageBreakBefore && !page.blocks.empty();
-        if (!page.blocks.empty() && (forced || placed.top + placed.height > room)) {
+        // A document table runs on from page to page, broken between its rows (as Word breaks it):
+        // it is not moved whole to the next page.
+        const bool table = blocks[i].kind == model::markdown::BlockKind::Table && blocks[i].layout.p && !blocks[i].doc().looks.empty() && placed.width == 0.0f;
+        if (!page.blocks.empty() && (forced || (placed.top + placed.height > room && !table))) {
             unanchor(i, keepsFrom);
             // A paragraph kept with the next one goes on with it (when it is not alone on its page).
             Entry::WordPage::Placed carried{0, -1.0f};
@@ -620,6 +630,49 @@ void ViewerView::paginate(Entry& e, const mv::ViewerDocument& d, float textWidth
             }
             anchor(i, y + g);
             placed = place(i, y + g);
+        }
+        if (table && placed.top + placed.height > room) {
+            e.flow.tableRows(i, textWidth, fonts_, paper, fontSize, s_, &d.flow.fonts, rows);
+            if (!rows.empty()) {
+                const float total = placed.height;
+                float top = placed.top, offset = 0.0f, avail = room;
+                for (int pieces = 0; pieces < 1000; ++pieces) {
+                    float cut = offset; // the last row ending on this page
+                    for (float bottom : rows) {
+                        if (bottom > offset + (avail - top) + 0.5f)
+                            break;
+                        cut = bottom;
+                    }
+                    if (cut <= offset + 0.5f) {
+                        if (top > 0.5f) { // not even its next row fits here: on to the next page
+                            e.wordPages.push_back(std::move(page));
+                            page = Entry::WordPage();
+                            keeps.clear();
+                            top = 0.0f;
+                            avail = textHeight;
+                            continue;
+                        }
+                        cut = std::min(total, offset + avail); // a row taller than a page: cut inside it
+                    }
+                    Entry::WordPage::Placed piece = placed;
+                    piece.top = top - offset;
+                    piece.clipTop = offset;
+                    piece.clipBottom = cut;
+                    page.blocks.push_back(piece);
+                    if (cut >= total - 0.5f) {
+                        y = top + (total - offset);
+                        break;
+                    }
+                    e.wordPages.push_back(std::move(page));
+                    page = Entry::WordPage();
+                    keeps.clear();
+                    top = 0.0f;
+                    avail = textHeight;
+                    offset = cut;
+                }
+                page.notesH += notesOf(i, &page.notes);
+                continue;
+            }
         }
         page.blocks.push_back(placed);
         y = placed.top + placed.height;

@@ -779,7 +779,7 @@ namespace {
 // each cell's shading, text colour and weight, alignment and borders, spans and vertical merges.
 // Returns its height.
 float documentTable(const md::Block& block, ImVec2 at, float left, float right, const MarkdownView::Style& st, bool draw,
-                    std::vector<LinkHit>& links)
+                    std::vector<LinkHit>& links, std::vector<float>* rowBottoms = nullptr)
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const std::size_t columns = block.align.size(), rows = block.rows.size();
@@ -798,7 +798,7 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
     std::vector<float> widths(columns, 0.0f);
     if (block.doc().columns.size() == columns) {
         for (std::size_t c = 0; c < columns; ++c)
-            widths[c] = std::max(block.doc().columns[c] * ppp, padX * 2.0f + 4.0f * st.s);
+            widths[c] = std::max(block.doc().columns[c] * ppp, 1.0f); // the grid as written, however narrow (a sliver after the last day)
     } else { // no grid: by the cells' text on one line
         for (std::size_t r = 0; r < rows; ++r)
             for (std::size_t c = 0; c < columns; ++c) {
@@ -930,6 +930,8 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
             }
         }
         y += rowH;
+        if (rowBottoms)
+            rowBottoms->push_back(y - at.y);
     }
     return y - at.y;
 }
@@ -1231,7 +1233,7 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
         if (columns == 0 || block.rows.empty())
             break;
         if (block.doc().looks.size() == block.rows.size()) { // a document's table: its own grid and looks
-            height = documentTable(block, at, left, right, st, draw, links);
+            height = documentTable(block, at, left, right, st, draw, links, rowSink_);
             break;
         }
         const float pad = 6.0f * st.s;
@@ -1434,6 +1436,22 @@ float MarkdownView::blockGap(std::size_t index) const
     if (index == 0 || index >= tops_.size())
         return 0.0f;
     return std::max(0.0f, tops_[index] - (tops_[index - 1] + heights_[index - 1]));
+}
+
+void MarkdownView::tableRows(std::size_t index, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
+                             const std::vector<std::string>* fontNames, std::vector<float>& bottoms)
+{
+    bottoms.clear();
+    const std::vector<md::Block>& blocks = shown();
+    if (index >= blocks.size() || blocks[index].kind != md::BlockKind::Table)
+        return;
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    st.fontNames = fontNames;
+    st.pages = true;
+    rowSink_ = &bottoms; // drawBlock's table hands its rows' bottoms to it
+    drawBlock(blocks[index], ImVec2(0.0f, 0.0f), std::max(width, 40.0f * uiScale), st, false);
+    rowSink_ = nullptr;
 }
 
 float MarkdownView::measureBlockAt(std::size_t index, float width, const Fonts& fonts, const Palette& palette, float fontSize,

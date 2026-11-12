@@ -175,11 +175,25 @@ DocumentFonts::Face DocumentFonts::face(std::string_view family, bool bold, bool
 #else
     (void)kSystem;
 #endif
+    // Any other installed family (Cooper Black, Corbel, ...), in this style or else regular.
     if (!request.source)
-        if (Loaded* l = load(std::string("pack:") + bundledFamily(f) + "-" + kStyles[style] + ".ttf")) {
-            request.source = l;
-            request.face = Face{l->font, bold, italic, l->lineHeight};
+        for (const int st : {style, 0}) {
+            const std::string path = os::fs::installedFontFile(family, (st & 1) != 0, (st & 2) != 0);
+            if (Loaded* l = path.empty() ? nullptr : load(path)) {
+                request.source = l;
+                request.face = Face{l->font, (st & 1) != 0, (st & 2) != 0, l->lineHeight};
+                break;
+            }
         }
+    if (!request.source) {
+        // A heavy family (Cooper Black, Arial Black, Franklin Gothic Heavy) stands in as the bold face.
+        const bool heavy = has(f, "black") || has(f, "heavy") || has(f, "ultra");
+        const int packStyle = style | (heavy ? 1 : 0);
+        if (Loaded* l = load(std::string("pack:") + bundledFamily(f) + "-" + kStyles[packStyle] + ".ttf")) {
+            request.source = l;
+            request.face = Face{l->font, bold || heavy, italic, l->lineHeight};
+        }
+    }
     if (request.source)
         request.source->lastUsed = now;
     os::mem::Scope scope("fonts");

@@ -89,6 +89,9 @@ private:
                 float height = 0.0f; // at its width
                 float inset = 0.0f;  // beside a floating picture: from the text area's left edge
                 float width = 0.0f;  // and narrowed to (0: the text area's width)
+                // A table broken between its rows: only [clipTop, clipBottom) of it, from its top, is on
+                // this page (clipBottom 0: all of it).
+                float clipTop = 0.0f, clipBottom = 0.0f;
             };
             std::vector<Placed> blocks;
             std::vector<std::pair<std::size_t, float>> floats; // floating pictures (into the document's), their paragraph's top
