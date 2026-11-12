@@ -287,6 +287,7 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
     };
 
     const MarkdownImage* image = nullptr;
+    RenderedMarkdown::HeldImage* heldImage = nullptr;
     if (doc.kind == model::FileKind::Image) {
         auto held = fileImages_.find(doc.id);
         if (held == fileImages_.end()) {
@@ -295,7 +296,8 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
             const MarkdownImage* acquired = images_.acquire(key, vm_.readWorkspaceFile(doc.path));
             held = fileImages_.emplace(doc.id, RenderedMarkdown::HeldImage{key, acquired}).first;
         }
-        image = held->second.image;
+        heldImage = &held->second;
+        image = heldImage->image;
     }
 
     if (image && image->texture) {
@@ -317,6 +319,8 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
         float scale = 1.0f;
         if (imageFit_)
             scale = std::min({1.0f, avail.x / std::max(1.0f, sourceW), avail.y / std::max(1.0f, sourceH)});
+        touch::zoomView(heldImage->zoom, 0.1f, 16.0f, heldImage->pendingScroll); // a pinch: larger or smaller
+        scale *= heldImage->zoom;
         const ImVec2 shown(sourceW * scale, sourceH * scale);
         const ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(pad + std::max(0.0f, (avail.x - shown.x) * 0.5f), cursor.y + pad * 0.5f));
@@ -847,6 +851,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
         shownMarkdownDoc_ = doc.id;
     }
     panel::beginChild("##markdownText", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    touch::zoomView(md.zoom, 0.4f, 4.0f, md.pendingScroll); // a pinch: the text larger or smaller (it reflows)
     if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
@@ -854,7 +859,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     focused_ = ImGui::IsWindowFocused() && !passive_;
     const ImVec2 winPos = ImGui::GetWindowPos();
     const float viewW = ImGui::GetContentRegionAvail().x;
-    const float zoom = vm_.zoom.get();
+    const float zoom = vm_.zoom.get() * md.zoom;
     // A readable column: centred, at most ~90 characters wide unless the ruler set another width.
     const float pad = 24.0f * s_;
     const float widest = std::max(1.0f, viewW - pad * 2.0f);

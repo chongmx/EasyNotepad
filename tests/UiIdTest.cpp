@@ -13,6 +13,7 @@
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
 #include "enp/view/MathView.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/DummyData.h"
 #include "enp/viewmodel/NotepadViewModel.h"
@@ -1083,6 +1084,40 @@ int main(int argc, char** argv)
                             action();
                             h.settle();
                         }
+                    // Two fingers spread over the reader (a phone's pinch): its content grows.
+                    {
+                        auto reader = []() -> ImGuiWindow* {
+                            ImGuiWindow* found = nullptr;
+                            for (ImGuiWindow* w : GImGui->Windows)
+                                if (w->WasActive && (std::strstr(w->Name, "##viewerPages") || std::strstr(w->Name, "##viewerFlow") ||
+                                                     std::strstr(w->Name, "##viewerSheet_")))
+                                    found = w;
+                            return found;
+                        };
+                        ImGuiWindow* w = reader();
+                        if (!w) {
+                            std::printf("  FAILED document viewer: %s has no reader window to pinch\n", path.c_str());
+                            ++checksFailed;
+                        } else {
+                            const ImVec2 c = w->InnerRect.GetCenter();
+                            const float before = w->ContentSize.x * w->ContentSize.y;
+                            h.setTouch(true);
+                            for (int step = 0; step <= 6; ++step) {
+                                const float d = 40.0f + 20.0f * float(step);
+                                view::touch::pinch(2, c.x - d, c.y, c.x + d, c.y);
+                                h.frame(ImVec2(-100.0f, -100.0f));
+                            }
+                            view::touch::pinch(0, 0.0f, 0.0f, 0.0f, 0.0f);
+                            h.setTouch(false);
+                            h.settle();
+                            h.settle();
+                            w = reader();
+                            const float after = w ? w->ContentSize.x * w->ContentSize.y : 0.0f;
+                            if (!(after > before * 1.5f))
+                                std::printf("  FAILED document viewer: a pinch did not zoom %s in (content %.0f -> %.0f)\n", path.c_str(), before, after),
+                                    ++checksFailed;
+                        }
+                    }
                     h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
                 }
                 if (viewer.entryCount() != paths.size())

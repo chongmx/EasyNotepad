@@ -63,6 +63,10 @@ private:
         std::map<std::size_t, std::map<std::string, HeldImage>> pageImages; // slides and pages: by page
         MarkdownView flow;
         ImVec2 scroll{0.0f, 0.0f};
+        // Pinch zoom (touch::zoomView): Word's and Excel's on top of the editor's zoom (slides and
+        // PDF pages pinch `zoom`), and the scroll it set for next frame.
+        float pinch = 1.0f;
+        ImVec2 pendingScroll{-1.0f, -1.0f};
         // Sheet
         int sheet = -1;
         std::uint32_t selRow = 0, selCol = 0;

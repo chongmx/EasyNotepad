@@ -3,6 +3,7 @@
 #include "enp/os/Memory.h"
 #include "enp/view/DocumentFonts.h"
 #include "enp/view/PanelFrame.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/view/UiStyle.h"
 
@@ -343,7 +344,7 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             if (!model || index < 0 || std::size_t(index) >= model->doc.flow.drawings.size())
                 return 0.0f;
             const mv::Page& page = model->doc.flow.drawings[std::size_t(index)];
-            const float scale = std::min(width / std::max(1.0f, page.width), 96.0f / 72.0f * s_ * vm_.zoom.get());
+            const float scale = std::min(width / std::max(1.0f, page.width), 96.0f / 72.0f * s_ * vm_.zoom.get() * e.pinch);
             if (draw) {
                 EntryImageSource images(*this, e);
                 painter_.draw(page, at, scale, fonts_, &images);
@@ -366,8 +367,9 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         return;
     }
     panel::beginChild("##viewerFlow", size, IM_COL32(128, 128, 128, 70), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    touch::zoomView(e.pinch, 0.3f, 5.0f, e.pendingScroll); // a pinch: the text larger or smaller (it reflows)
     const float viewW = ImGui::GetContentRegionAvail().x;
-    const float zoom = vm_.zoom.get();
+    const float zoom = vm_.zoom.get() * e.pinch;
     const float pad = 24.0f * s_, margin = 36.0f * s_ * zoom;
     const float column = std::min(std::max(1.0f, viewW - pad * 2.0f - margin * 2.0f), 820.0f * s_ * zoom);
     const ImVec2 page(std::max(pad, (viewW - column) * 0.5f - margin), pad);
@@ -393,7 +395,7 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
 void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, const Palette& paper)
 {
     const mv::FlowDocument::PageSetup& ps = d.flow.page;
-    const float zoom = vm_.zoom.get();
+    const float zoom = vm_.zoom.get() * e.pinch;
     const float fontSize = Fonts::kUiSize * 1.08f * zoom;
     ImGui::PushFont(fonts_.ui, fontSize);
     const float ppp = ImGui::GetFontSize() / 11.0f; // the renderer's pixels per point (11 points: its body size)
@@ -409,6 +411,7 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
     const int count = int(e.wordPages.size());
 
     panel::beginChild("##viewerFlow", size, IM_COL32(128, 128, 128, 70), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav | ImGuiWindowFlags_HorizontalScrollbar);
+    touch::zoomView(e.pinch, 0.3f, 5.0f, e.pendingScroll); // a pinch: the pages larger or smaller
     const float gap = 16.0f * s_;
     const ImVec2 view = ImGui::GetWindowSize();
     const float total = gap + float(count) * (pageH + gap);
@@ -676,7 +679,7 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
 
     // Geometry: Excel's column width is in characters of the default font (7 pixels each at 96
     // dpi, plus 5 pixels of padding); row heights are in points.
-    const float zoom = vm_.zoom.get();
+    const float zoom = vm_.zoom.get() * e.pinch;
     const float pxPerPoint = 96.0f / 72.0f * s_ * zoom;
     const std::uint32_t columns = std::min<std::uint32_t>(16384, std::max<std::uint32_t>(sh.columnCount + 8, 26));
     const std::uint32_t rows = std::min<std::uint32_t>(1048576, std::max<std::uint32_t>(sh.rowCount + 20, 60));
@@ -721,6 +724,7 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     const ImU32 paperInk = IM_COL32(0, 0, 0, 255);
     panel::beginChild("##viewerSheet", gridSize, IM_COL32(255, 255, 255, 255), ImGuiChildFlags_None,
                       ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoNav);
+    touch::zoomView(e.pinch, 0.3f, 5.0f, e.pendingScroll); // a pinch: the cells larger or smaller
     ImGui::Dummy(ImVec2(totalW, totalH));
     const float scrollX = ImGui::GetScrollX(), scrollY = ImGui::GetScrollY();
     e.scroll = ImVec2(scrollX, scrollY);
@@ -1468,7 +1472,13 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     const mv::PageDocument& pd = d.pages;
     const int n = int(pd.pages.size());
     const bool slides = d.format != "PDF document";
-    panel::beginChild("##viewerPages", size, IM_COL32(110, 110, 110, 60), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    panel::beginChild("##viewerPages", size, IM_COL32(110, 110, 110, 60), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_HorizontalScrollbar);
+    {
+        float z = e.zoom > 0.0f ? e.zoom : 1.0f; // a pinch: from the fit (0) or the zoom set
+        if (touch::zoomView(z, 0.25f, 8.0f, e.pendingScroll))
+            e.zoom = z;
+    }
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float pad = 16.0f * s_, gap = 14.0f * s_;
     float widest = 1.0f;
