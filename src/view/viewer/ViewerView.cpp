@@ -436,6 +436,25 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
         dl->AddRectFilled(ImVec2(left + 3.0f * s_, top + 3.0f * s_), ImVec2(left + pageW + 3.0f * s_, top + pageH + 3.0f * s_), IM_COL32(0, 0, 0, 40));
         dl->AddRectFilled(ImVec2(left, top), ImVec2(left + pageW, top + pageH), IM_COL32(255, 255, 255, 255));
         const ImVec2 text(left + ps.left * ppp, top + ps.top * ppp);
+        // A float: its picture, or its drawing (a group of shapes), in its box.
+        auto drawFloat = [&](const mv::FlowDocument::Float& f, float at) {
+            const ImVec4 b = floatBox(f, ps, ppp, at);
+            if (!f.drawing.items.empty()) {
+                EntryImageSource images(*this, e);
+                painter_.draw(f.drawing, ImVec2(text.x + b.x, text.y + b.y), ppp, fonts_, &images);
+                return;
+            }
+            const MarkdownImage* img = image(e, e.images, f.media);
+            if (img && img->texture)
+                dl->AddImage(img->texture->GetTexRef(), ImVec2(text.x + b.x, text.y + b.y), ImVec2(text.x + b.z, text.y + b.w));
+        };
+        // The header's floats, behind everything on the page: placed from the header's top.
+        if (!d.flow.headerFloats.empty()) {
+            dl->PushClipRect(ImVec2(left, top), ImVec2(left + pageW, top + pageH), true);
+            for (const mv::FlowDocument::Float& f : d.flow.headerFloats)
+                drawFloat(f, (ps.header - ps.top) * ppp);
+            dl->PopClipRect();
+        }
         // The header from its distance below the page's top edge, the footer up to its distance above the bottom.
         float y = top + ps.header * ppp;
         for (std::size_t i = 0; i < d.flow.header.size(); ++i) {
@@ -454,19 +473,14 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
             dl->PushClipRect(ImVec2(left, top), ImVec2(left + pageW, top + pageH), true);
             for (const auto& [index, at] : page.floats) {
                 const mv::FlowDocument::Float& f = d.flow.floats[index];
-                if (f.behind != behind)
-                    continue;
-                const MarkdownImage* img = image(e, e.images, f.media);
-                if (!img || !img->texture)
-                    continue;
-                const ImVec4 b = floatBox(f, ps, ppp, at);
-                dl->AddImage(img->texture->GetTexRef(), ImVec2(text.x + b.x, text.y + b.y), ImVec2(text.x + b.z, text.y + b.w));
+                if (f.behind == behind)
+                    drawFloat(f, at);
             }
             dl->PopClipRect();
         };
         floats(true);
         // The body inside the margins; a block continued from the page before is cut at its top.
-        dl->PushClipRect(ImVec2(text.x - 4.0f * s_, text.y), ImVec2(text.x + textW + 4.0f * s_, text.y + textH), true);
+        dl->PushClipRect(ImVec2(left, text.y), ImVec2(left + pageW, text.y + textH), true); // across the page: tables may sit out in the margin
         for (const Entry::WordPage::Placed& b : page.blocks)
             if (text.y + b.top < win.y + view.y && text.y + b.top + b.height > win.y)
                 e.flow.drawBlockAt(b.block, ImVec2(text.x + b.inset, text.y + b.top), b.width > 0.0f ? b.width : textW, fonts_, paper, fontSize,

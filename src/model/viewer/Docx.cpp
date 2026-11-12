@@ -6,6 +6,7 @@
 
 #include "Chart.h"
 #include "Ooxml.h"
+#include "Shapes.h"
 
 #include <algorithm>
 #include <cctype>
@@ -72,6 +73,10 @@ struct ParaProps {
     int lineRule = 0;                   // 0 auto, 1 exact, 2 at least
     signed char contextual = -1, pageBreakBefore = -1, keepNext = -1;
     std::uint32_t shading = 0;
+    // Borders (pBdr): top, left, bottom, right, and their space from the text (points).
+    md::CellEdge border[4];
+    float borderSpace[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool hasBorder[4] = {false, false, false, false};
     // Tab stops as set at this level: kind 4 clears an inherited stop at its position.
     std::vector<md::TabStop> tabs;
 
@@ -105,6 +110,12 @@ struct ParaProps {
             keepNext = o.keepNext;
         if (o.hasShading)
             shading = o.shading, hasShading = true;
+        for (int i = 0; i < 4; ++i)
+            if (o.hasBorder[i]) {
+                border[i] = o.border[i];
+                borderSpace[i] = o.borderSpace[i];
+                hasBorder[i] = true;
+            }
     }
 };
 
@@ -360,8 +371,13 @@ bool readParaProperty(const XmlReader& x, std::string_view n, ParaProps& p)
         t.leader = leader == "dot" || leader == "middleDot" ? '.' : leader == "hyphen" ? '-' : leader == "underscore" || leader == "heavy" ? '_' : 0;
         if (p.tabs.size() < 64)
             p.tabs.push_back(t);
-    } else if (n == "tabs") {
-        // its w:tab children are read one by one
+    } else if (n == "tabs" || n == "pBdr") {
+        // their children are read one by one
+    } else if (n == "top" || n == "left" || n == "start" || n == "bottom" || n == "right" || n == "end") { // pBdr's sides
+        const int i = n == "top" ? 0 : n == "left" || n == "start" ? 1 : n == "bottom" ? 2 : 3;
+        p.border[i] = readEdge(x);
+        p.borderSpace[i] = std::clamp(float(std::atof(x.attribute("w:space").c_str())), 0.0f, 31.0f);
+        p.hasBorder[i] = true;
     } else {
         return false;
     }
@@ -411,7 +427,11 @@ public:
             doc.flow.printed.push_back(shift + i);
         for (FlowDocument::Float& f : doc.flow.floats)
             f.block += shift;
-        pendingFloats_.clear(); // a header's own: not placed
+        // The header's own floats (its paragraphs are not the body's blocks): on every page.
+        for (FlowDocument::Float& f : pendingFloats_)
+            if (doc.flow.headerFloats.size() < 64)
+                doc.flow.headerFloats.push_back(std::move(f));
+        pendingFloats_.clear();
         if (!x.error().empty() && doc.flow.blocks.empty())
             doc.error = "the document's XML is broken: " + x.error();
         // Footnotes and endnotes, in the order they were referenced.
@@ -1228,6 +1248,11 @@ private:
         b.doc().pageBreakBefore = b.doc().pageBreakBefore || para.pageBreakBefore == 1;
         b.doc().keepNext = para.keepNext == 1;
         b.shading = para.shading;
+        for (int i = 0; i < 4; ++i)
+            if (para.border[i].width > 0.0f) {
+                b.doc().borders[i] = para.border[i];
+                b.doc().borderSpace[i] = para.borderSpace[i];
+            }
         for (const md::TabStop& t : para.tabs) // the stops left after the styles' and the paragraph's own clears
             if (t.kind != 4)
                 b.doc().tabs.push_back(t);
@@ -1291,11 +1316,21 @@ private:
                 embed = x.attribute("r:embed");
             } else if (n == "imagedata" && embed.empty()) {
                 embed = x.attribute("r:id");
+            } else if (n == "wgp" && floating && place.drawing.items.empty()) { // a group of shapes, drawn
+                group(x, dml::Placement(), place.drawing, 0);
             } else if (n == "chart") {
                 chartBlock(rels, x.attribute("r:id"), width, height, extra);
             } else if (n == "txbxContent") {
                 textBox(x, rels, part, extra);
             }
+        }
+        if (floating && !place.drawing.items.empty() && embed.empty() && width > 0.0f && height > 0.0f) {
+            place.width = place.drawing.width = width;
+            place.height = place.drawing.height = height;
+            place.drawing.background = 0;
+            if (pendingFloats_.size() < 256)
+                pendingFloats_.push_back(std::move(place));
+            return;
         }
         if (embed.empty())
             return;
@@ -1329,6 +1364,48 @@ private:
         }
     }
 
+    // At the Start of a group (wpg:wgp, wpg:grpSp): its shapes and inner groups into `page`, each
+    // where the groups' coordinates put it (`outer`: where this group's own xfrm is measured).
+    void group(XmlReader& x, const dml::Placement& outer, Page& page, int level)
+    {
+        double v[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // off x y, ext cx cy, chOff x y, chExt cx cy
+        bool placed = false;
+        dml::Placement inner = outer;
+        auto place = [&]() {
+            if (!placed)
+                inner = outer.inner(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+            placed = true;
+        };
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (!placed && (n == "off" || n == "ext" || n == "chOff" || n == "chExt")) { // the group's xfrm
+                const int i = n == "off" ? 0 : n == "ext" ? 2 : n == "chOff" ? 4 : 6;
+                const bool size = n == "ext" || n == "chExt";
+                v[i] = std::atof(x.attribute(size ? "cx" : "x").c_str());
+                v[i + 1] = std::atof(x.attribute(size ? "cy" : "y").c_str());
+            } else if (n == "wsp") {
+                place();
+                if (page.items.size() < 4096)
+                    dml::shape(x, theme_, Rect{}, page, &inner);
+                else
+                    x.skip();
+            } else if (n == "grpSp") {
+                place();
+                if (level < 16)
+                    group(x, inner, page, level + 1);
+                else
+                    x.skip();
+            } else if (n == "pic" || n == "graphicFrame") { // pictures and charts in a group: not yet
+                x.skip();
+            }
+        }
+    }
+
     // At the Start of w:tbl: a table block of the cells' text (nested tables flattened into their cell).
     void table(XmlReader& x, const ooxml::Relationships& rels, const std::string& part, std::vector<md::Block>& out)
     {
@@ -1344,6 +1421,9 @@ private:
             Borders borders;
             int valign = 0, span = 1, align = -1;
             std::vector<std::int8_t> aligns; // each paragraph's
+            std::vector<md::CellParagraph> paragraphs;
+            std::uint16_t lastStyle = 0;      // the paragraph before's (contextual spacing)
+            bool lastContextual = false;
             bool merged = false, firstParagraph = true;
         };
         std::vector<std::vector<Own>> own;
@@ -1359,7 +1439,9 @@ private:
                     break;
                 const std::string_view n = x.localName();
                 if (n == "tc" && row && x.depth() == depth + 1) {
-                    for (int i = 1; i < own.back().back().span && row->size() < 64; ++i) {
+                    // (The span read before the loop: each covered cell added becomes own.back().back().)
+                    const int span = own.back().back().span;
+                    for (int i = 1; i < span && row->size() < 64; ++i) {
                         row->emplace_back();
                         own.back().emplace_back();
                         own.back().back().span = 0; // covered
@@ -1431,29 +1513,54 @@ private:
                 const std::int8_t align = std::int8_t(p.textAlign == 0 ? -1 : p.textAlign);
                 if (o.firstParagraph)
                     o.align = align;
-                if (o.aligns.size() < 256)
+                if (o.aligns.size() < 256) {
                     o.aligns.push_back(align);
+                    // Its spacing (none between paragraphs of one style when contextual) and its lines.
+                    md::CellParagraph cp;
+                    const md::DocumentLayout& d = p.doc();
+                    cp.before = p.spaceBefore;
+                    cp.after = d.spaceAfter;
+                    if (!o.paragraphs.empty() && d.contextual && o.lastContextual && d.style == o.lastStyle) {
+                        cp.before = 0.0f;
+                        o.paragraphs.back().after = 0.0f;
+                    }
+                    cp.top = d.borders[0];
+                    cp.topSpace = d.borderSpace[0];
+                    cp.bottom = d.borders[2];
+                    cp.bottomSpace = d.borderSpace[2];
+                    o.paragraphs.push_back(cp);
+                    o.lastStyle = d.style;
+                    o.lastContextual = d.contextual;
+                }
                 if (!o.firstParagraph) // each paragraph on its own line, an empty one a blank line
                     cell->push_back(textSpan("\n"));
                 o.firstParagraph = false;
-                md::Spans kept;
+                // The paragraph's text size (its style's: a Title in a banner cell) goes with its runs;
+                // pictures stay in the cell, laid out on lines of their own.
                 for (md::Span& sp : p.spans) {
-                    if (sp.style & md::Image) { // the renderer's table cells hold text: the image follows the table
-                        md::Block img;
-                        img.kind = md::BlockKind::Paragraph;
-                        img.spans.push_back(std::move(sp));
-                        images.push_back(std::move(img));
-                    } else {
-                        kept.push_back(std::move(sp));
-                    }
-                }
-                for (md::Span& sp : kept)
+                    if (sp.size == 0.0f && p.size > 0.0f && !(sp.style & md::Image))
+                        sp.size = p.size;
+                    if (!(sp.style & md::Image)) // its line breaks: '\v' (in a cell '\n' parts the paragraphs)
+                        std::replace(sp.text.begin(), sp.text.end(), '\n', '\v');
                     cell->push_back(std::move(sp));
+                }
             } else if (n == "jc" && x.depth() == depth + 2) { // tblPr's: the table's own alignment
                 const std::string v = x.attribute("w:val");
                 t.textAlign = v == "center" ? 1 : v == "right" || v == "end" ? 2 : 0;
-            } else if (n == "trPr") {
-                x.skip();
+            } else if (n == "trPr" && row) { // the row's height: at least (or exactly) trHeight
+                const int d2 = x.depth();
+                for (Event f; (f = x.next()) != Event::Eof && f != Event::Error;) {
+                    if (f == Event::End && x.depth() < d2)
+                        break;
+                    if (f != Event::Start || x.localName() != "trHeight")
+                        continue;
+                    const float h = std::clamp(float(std::atof(x.attribute("w:val").c_str()) / 20.0), 0.0f, 1500.0f);
+                    std::vector<float>& heights = t.doc().rowHeights;
+                    heights.resize(t.rows.size(), 0.0f);
+                    heights.back() = x.attribute("w:hRule") == "exact" ? -h : h;
+                }
+            } else if (n == "tblInd" && x.depth() == depth + 2) { // the table's left edge, from the margin (may be out in it)
+                t.indentLeft = std::clamp(float(std::atof(x.attribute("w:w").c_str()) / 20.0), -200.0f, 400.0f);
             }
         }
         std::size_t columns = 0;
@@ -1536,6 +1643,7 @@ private:
                 look.align = std::int8_t(o.align);
                 if (std::any_of(o.aligns.begin(), o.aligns.end(), [&](std::int8_t a) { return a != o.align; }))
                     look.paragraphAligns = o.aligns;
+                look.paragraphs = o.paragraphs;
                 look.valign = std::int8_t(o.valign);
                 look.span = std::uint8_t(span);
                 look.merged = o.merged;

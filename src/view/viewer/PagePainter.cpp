@@ -195,10 +195,15 @@ void subdivide(ImDrawList* dl, int firstVtx, int firstIdx, float step, std::vect
         return out;
     };
     auto length = [](ImVec2 p, ImVec2 q) { return std::sqrt((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)); };
+    // At most about 16k pieces for the whole fill: an outline of hundreds of points (a custom
+    // shape's) is already hundreds of triangles, and 24 x 24 pieces each made a mesh of megabytes
+    // (vertex buffers the GPU driver keeps at their largest).
+    const int count = int(tris.size() / 3);
+    const int most = std::clamp(int(std::sqrt(16384.0 / double(std::max(1, count)))), 1, 24);
     for (std::size_t t = 0; t + 2 < tris.size(); t += 3) {
         const ImDrawVert a = tris[t], b = tris[t + 1], c = tris[t + 2];
         const float edge = std::max({length(a.pos, b.pos), length(b.pos, c.pos), length(c.pos, a.pos)});
-        const int k = std::clamp(int(std::ceil(edge / std::max(1.0f, step))), 1, 24);
+        const int k = std::clamp(int(std::ceil(edge / std::max(1.0f, step))), 1, most);
         const int vertices = (k + 1) * (k + 2) / 2;
         dl->PrimReserve(k * k * 3, vertices);
         const unsigned base = dl->_VtxCurrentIdx; // after the reserve: it may have started a new command

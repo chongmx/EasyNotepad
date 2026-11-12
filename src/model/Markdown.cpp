@@ -924,6 +924,7 @@ std::string plainText(const Spans& spans)
     std::string text;
     for (const Span& span : spans)
         text += span.text;
+    std::replace(text.begin(), text.end(), '\v', '\n'); // a line break inside a table cell's paragraph
     return text;
 }
 

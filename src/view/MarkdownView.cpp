@@ -92,7 +92,13 @@ public:
         tabPx_ = pxPerPoint > 0.0f ? pxPerPoint : size_ / 11.0f;
     }
 
-    // Each paragraph's alignment, when they differ (a table cell's '\n'-separated paragraphs).
+    // Each paragraph's spacing and lines (a document table cell's): applied at its start and end.
+    void paragraphs(const std::vector<md::CellParagraph>* paragraphs)
+    {
+        paras_ = paragraphs && !paragraphs->empty() ? paragraphs : nullptr;
+    }
+
+    // Each paragraph's alignment, when they differ (a table cell's '\n'-separated parts of its text).
     void paragraphAligns(const std::vector<std::int8_t>* aligns)
     {
         aligns_ = aligns;
@@ -102,17 +108,33 @@ public:
         }
     }
 
+    // Each paragraph's lines as tall as its largest text needs (a document table's cell, whose
+    // paragraphs have sizes of their own: a 48-point title over an 18-point subtitle).
+    void growLines()
+    {
+        growLines_ = true;
+        baseLineH_ = lineH_;
+    }
+
     void spans(const md::Spans& spans)
     {
         all_ = &spans;
+        if (growLines_)
+            fitLines(0, 0);
+        if (paras_) { // the first paragraph's spacing and line before it
+            y_ += paragraphTop((*paras_)[0], y_);
+            startLine();
+        }
         for (index_ = 0; index_ < spans.size(); ++index_)
             text(spans[index_]);
         all_ = nullptr;
+        if (paras_ && paragraph_ < paras_->size()) // the last one's after it
+            tail_ = paragraphBottom((*paras_)[paragraph_], y_ + lineH_);
         if (measured_)
             measured_->push_back(std::max(0.0f, ink_ - lineStart_));
     }
 
-    float bottom() const { return lineEmpty_ ? y_ : y_ + lineH_; }
+    float bottom() const { return (lineEmpty_ ? y_ : y_ + lineH_) + tail_; }
     float x() const { return x_; }
     float widest() const { return std::max(widest_, x_); } // the longest line's end (cells with line breaks)
 
@@ -150,6 +172,55 @@ private:
     std::size_t line_ = 0;
     float lineStart_ = 0.0f, ink_ = 0.0f; // where this line starts, and where its last word ends
     float widest_ = 0.0f;                   // the end of the longest line before this one
+
+    bool growLines_ = false;
+    float baseLineH_ = 0.0f;
+    const std::vector<md::CellParagraph>* paras_ = nullptr;
+    float tail_ = 0.0f; // below the last line: its paragraph's spacing and line
+
+    // A paragraph's line over it (drawn its space above the text at `y`) and its spacing before:
+    // how far its text moves down.
+    float paragraphTop(const md::CellParagraph& p, float y)
+    {
+        const float ppp = pxPerPoint_ > 0.0f ? pxPerPoint_ : size_ / 11.0f;
+        float down = p.before * ppp;
+        if (p.top.width > 0.0f) {
+            const float w = p.top.width * ppp, at = y + down + w * 0.5f;
+            if (draw_)
+                dl_->AddLine(ImVec2(left_, at), ImVec2(right_, at), p.top.color ? ImU32(p.top.color) : color_, std::max(1.0f, w));
+            down += w + p.topSpace * ppp;
+        }
+        return down;
+    }
+    // A paragraph's line under it (its space below the text ending at `y`) and its spacing after.
+    float paragraphBottom(const md::CellParagraph& p, float y)
+    {
+        const float ppp = pxPerPoint_ > 0.0f ? pxPerPoint_ : size_ / 11.0f;
+        float down = 0.0f;
+        if (p.bottom.width > 0.0f) {
+            const float w = p.bottom.width * ppp, at = y + p.bottomSpace * ppp + w * 0.5f;
+            if (draw_)
+                dl_->AddLine(ImVec2(left_, at), ImVec2(right_, at), p.bottom.color ? ImU32(p.bottom.color) : color_, std::max(1.0f, w));
+            down += p.bottomSpace * ppp + w;
+        }
+        return down + p.after * ppp;
+    }
+
+    // The paragraph from span `from`, byte `at`, to its end ('\n'): its lines' height for its
+    // largest text, in the proportion of the base line to the base size.
+    void fitLines(std::size_t from, std::size_t at)
+    {
+        float largest = 0.0f;
+        for (std::size_t s = from; all_ && s < all_->size(); ++s, at = 0) {
+            const md::Span& span = (*all_)[s];
+            const std::size_t end = span.text.find('\n', at);
+            if (!(span.style & md::Image) && (end == std::string::npos ? span.text.size() : end) > at)
+                largest = std::max(largest, sizeFor(span));
+            if (end != std::string::npos)
+                break;
+        }
+        lineH_ = largest > size_ && size_ > 0.0f ? std::max(baseLineH_, std::floor(largest * baseLineH_ / size_)) : baseLineH_;
+    }
 
     void startLine()
     {
@@ -390,11 +461,23 @@ private:
         const std::string& t = span.text;
         size_t i = 0;
         while (i < t.size()) {
+            if (t[i] == '\v') { // a line break inside a paragraph (a document table cell's: '\n' parts its paragraphs)
+                newline();
+                ++i;
+                continue;
+            }
             if (t[i] == '\n') {
-                if (aligns_ && ++paragraph_ < aligns_->size())
+                if (paras_ && paragraph_ + 1 < paras_->size()) { // between paragraphs: the one's after, the next's before
+                    float down = paragraphBottom((*paras_)[paragraph_], y_ + lineH_);
+                    down += paragraphTop((*paras_)[paragraph_ + 1], y_ + lineH_ + down);
+                    y_ += down;
+                }
+                if (++paragraph_ < (aligns_ ? aligns_->size() : 0))
                     align_ = std::max(0, int((*aligns_)[paragraph_]));
                 newline();
                 ++i;
+                if (growLines_)
+                    fitLines(index_, i);
                 continue;
             }
             if (t[i] == '\t') {
@@ -404,15 +487,15 @@ private:
             }
             // A word and the spaces after it.
             size_t end = i;
-            while (end < t.size() && t[end] != ' ' && t[end] != '\n' && t[end] != '\t')
+            while (end < t.size() && t[end] != ' ' && t[end] != '\n' && t[end] != '\v' && t[end] != '\t')
                 ++end;
             size_t spaces = end;
             while (spaces < t.size() && t[spaces] == ' ')
                 ++spaces;
-            if (code && spaces < t.size() && t[spaces] != '\n')
+            if (code && spaces < t.size() && t[spaces] != '\n' && t[spaces] != '\v')
                 end = spaces; // inside code the spaces keep the background (one box, not one per word)
-            spanStart_ = i == 0 || t[i - 1] == '\n';
-            spanEnd_ = end >= t.size() || t[end] == '\n' || spaces >= t.size();
+            spanStart_ = i == 0 || t[i - 1] == '\n' || t[i - 1] == '\v';
+            spanEnd_ = end >= t.size() || t[end] == '\n' || t[end] == '\v' || spaces >= t.size();
             // A word the document's face cannot draw (Chinese in a Calibri run) takes the UI font,
             // which has the fallbacks merged in.
             Ink wordInk = ink;
@@ -507,7 +590,7 @@ private:
                 return w;
             const std::string& t = s.text;
             std::size_t b = k == index_ ? at + 1 : 0, e = b;
-            while (e < t.size() && t[e] != '\t' && t[e] != '\n' && !(decimal && (t[e] == '.' || t[e] == ',')))
+            while (e < t.size() && t[e] != '\t' && t[e] != '\n' && t[e] != '\v' && !(decimal && (t[e] == '.' || t[e] == ',')))
                 ++e;
             if (e > b)
                 w += measure(inkFor(s).font, sizeFor(s), t.data() + b, t.data() + e);
@@ -752,10 +835,49 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
     };
     std::vector<float> textH(columns, 0.0f);
     std::vector<std::vector<float>> lineWidths(columns);
+    // The rows' heights, first: each row's tallest cell's text, at least (or exactly) its trHeight;
+    // a cell merged down over rows (vMerge) is held by them together, the last one growing when
+    // they are short of it, as Word lays them out.
+    auto cellHeight = [&](std::size_t r, std::size_t c) {
+        const md::CellLook& look = block.doc().looks[r][c];
+        Flow measure(st, dl, false, xs[c] + padX, cellRight(c, look) - padX, 0.0f, st.size, lineH, textColor(look), look.bold, nullptr);
+        measure.layout(0, 0.0f, nullptr, nullptr, ppp);
+        measure.growLines();
+        measure.paragraphs(&look.paragraphs);
+        measure.spans(block.rows[r][c]);
+        return measure.bottom() + padY * 2.0f;
+    };
+    auto mergedDown = [&](std::size_t r, std::size_t c) { return r + 1 < rows && block.doc().looks[r + 1][c].merged; };
+    std::vector<float> heights(rows, 0.0f);
+    std::vector<bool> exact(rows, false);
+    for (std::size_t r = 0; r < rows; ++r) {
+        float h = lineH + padY * 2.0f;
+        for (std::size_t c = 0; c < columns; ++c) {
+            const md::CellLook& look = block.doc().looks[r][c];
+            if (!look.covered && !look.merged && !mergedDown(r, c))
+                h = std::max(h, cellHeight(r, c));
+        }
+        const float least = r < block.doc().rowHeights.size() ? block.doc().rowHeights[r] * ppp : 0.0f;
+        exact[r] = least < 0.0f;
+        heights[r] = exact[r] ? -least : std::max(h, least);
+    }
+    for (std::size_t r = 0; r < rows; ++r)
+        for (std::size_t c = 0; c < columns; ++c) {
+            const md::CellLook& look = block.doc().looks[r][c];
+            if (look.covered || look.merged || !mergedDown(r, c))
+                continue;
+            std::size_t last = r;
+            float together = heights[r];
+            while (mergedDown(last, c))
+                together += heights[++last];
+            const float need = cellHeight(r, c);
+            if (need > together && !exact[last])
+                heights[last] += need - together;
+        }
     float y = at.y;
     for (std::size_t r = 0; r < rows; ++r) {
-        // Measure the row: its height is its tallest cell's text (merged continuations add none).
-        float rowH = lineH + padY * 2.0f;
+        // Each cell's text height (its vertical alignment within the row) and lines' widths.
+        const float rowH = heights[r];
         for (std::size_t c = 0; c < columns; ++c) {
             const md::CellLook& look = block.doc().looks[r][c];
             textH[c] = 0.0f;
@@ -764,9 +886,9 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
                 continue;
             Flow measure(st, dl, false, xs[c] + padX, cellRight(c, look) - padX, y + padY, st.size, lineH, textColor(look), look.bold, nullptr);
             measure.layout(0, 0.0f, nullptr, &lineWidths[c], ppp);
+            measure.growLines();
             measure.spans(block.rows[r][c]);
             textH[c] = measure.bottom() - (y + padY);
-            rowH = std::max(rowH, textH[c] + padY * 2.0f);
         }
         if (draw) {
             for (std::size_t c = 0; c < columns; ++c) { // shading first, under the text and the lines
@@ -782,7 +904,9 @@ float documentTable(const md::Block& block, ImVec2 at, float left, float right, 
                 const float top = y + padY + (look.valign == 1 ? room * 0.5f : look.valign == 2 ? room : 0.0f);
                 Flow cell(st, dl, true, xs[c] + padX, cellRight(c, look) - padX, top, st.size, lineH, textColor(look), look.bold, &links);
                 cell.layout(std::max(0, int(look.align)), 0.0f, &lineWidths[c], nullptr, ppp);
+                cell.growLines();
                 cell.paragraphAligns(look.paragraphAligns.empty() ? nullptr : &look.paragraphAligns);
+                cell.paragraphs(&look.paragraphs);
                 cell.spans(block.rows[r][c]);
             }
             // Lines: each cell's edges; none between a cell and the one continuing it below.
@@ -1201,6 +1325,35 @@ float MarkdownView::drawBlock(const md::Block& block, ImVec2 at, float width, co
                         onLink(hit.url);
                     break;
                 }
+    }
+    // A document paragraph's borders: a line its space under the text (the paragraph grows by it),
+    // over it, and beside it.
+    if (block.layout.p && block.kind != md::BlockKind::Table) {
+        const md::DocumentLayout& d = block.doc();
+        const float ppp = st.size / 11.0f;
+        const float left = at.x + block.indentLeft * ppp, right = at.x + width - block.indentRight * ppp;
+        const float top = at.y + spaceBefore;
+        auto line = [&](const md::CellEdge& e, ImVec2 a, ImVec2 b) {
+            if (draw && e.width > 0.0f)
+                dl->AddLine(a, b, e.color ? ImU32(e.color) : st.text, std::max(1.0f, e.width * ppp));
+        };
+        if (d.borders[2].width > 0.0f) {
+            const float y = top + height + (d.borderSpace[2] + d.borders[2].width * 0.5f) * ppp;
+            line(d.borders[2], ImVec2(left, y), ImVec2(right, y));
+            height += (d.borderSpace[2] + d.borders[2].width) * ppp;
+        }
+        if (d.borders[0].width > 0.0f) {
+            const float y = top - (d.borderSpace[0] + d.borders[0].width * 0.5f) * ppp;
+            line(d.borders[0], ImVec2(left, y), ImVec2(right, y));
+        }
+        if (d.borders[1].width > 0.0f) {
+            const float x = left - (d.borderSpace[1] + d.borders[1].width * 0.5f) * ppp;
+            line(d.borders[1], ImVec2(x, top), ImVec2(x, top + height));
+        }
+        if (d.borders[3].width > 0.0f) {
+            const float x = right + (d.borderSpace[3] + d.borders[3].width * 0.5f) * ppp;
+            line(d.borders[3], ImVec2(x, top), ImVec2(x, top + height));
+        }
     }
     return height + spaceBefore;
 }

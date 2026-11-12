@@ -1242,3 +1242,100 @@ TEST(viewer_lays_out_smartart_from_its_data)
         said = said || n.find("SmartArt") != std::string::npos;
     CHECK(said);
 }
+
+TEST(viewer_reads_word_cells_spanning_three_columns)
+{
+    // A cell over three grid columns covers the next two: the cell after it starts in the fourth
+    // (Word's letter templates lay out with such tables; a cell short of a column shifted the rest).
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="720"/><w:gridCol w:w="631"/>
+<w:gridCol w:w="2313"/><w:gridCol w:w="424"/><w:gridCol w:w="3305"/></w:tblGrid>
+<w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>wide</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc>
+<w:tc><w:p><w:r><w:t>last</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")}, {"word/document.xml", document}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    CHECK(!doc.flow.blocks.empty() && doc.flow.blocks[0].kind == md::BlockKind::Table);
+    if (doc.flow.blocks.empty() || doc.flow.blocks[0].rows.empty())
+        return;
+    const md::Block& t = doc.flow.blocks[0];
+    CHECK(t.rows[0].size() == 5 && t.doc().columns.size() == 5);
+    if (t.rows[0].size() != 5 || t.doc().looks.empty())
+        return;
+    CHECK(t.doc().looks[0][0].span == 3 && t.doc().looks[0][1].covered && t.doc().looks[0][2].covered && !t.doc().looks[0][3].covered);
+    CHECK(md::plainText(t.rows[0][4]) == "last");
+}
+
+TEST(viewer_reads_word_letter_templates)
+{
+    // What Word's own templates lean on (Welcome to Word, a letter with a picture): paragraph
+    // rules, a layout table out in the margin with row heights, a styled title and a picture in a
+    // cell, and a header drawing of grouped shapes on every page.
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string styles = R"(<w:styles xmlns:w="w">
+<w:style w:type="paragraph" w:styleId="Title"><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="24" w:space="8" w:color="2C567A"/></w:pBdr>
+<w:spacing w:after="480"/></w:pPr><w:rPr><w:sz w:val="48"/></w:rPr></w:style></w:styles>)";
+    const std::string document = R"(<w:document xmlns:w="w" xmlns:r="r" xmlns:wp="wp" xmlns:a="a" xmlns:pic="pic"><w:body>
+<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="24" w:space="4" w:color="FF0000"/></w:pBdr></w:pPr><w:r><w:t>ruled</w:t></w:r></w:p>
+<w:tbl><w:tblPr><w:tblInd w:w="-720" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/></w:tblGrid>
+<w:tr><w:trPr><w:trHeight w:val="2112"/></w:trPr>
+<w:tc><w:p><w:r><w:drawing><wp:inline><wp:extent cx="635000" cy="635000"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:tc>
+<w:tc><w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>First</w:t></w:r><w:r><w:br/><w:t>Last</w:t></w:r></w:p><w:p><w:r><w:t>after</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr></w:body></w:document>)";
+    const std::string header = R"(<w:hdr xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wpg="wpg" xmlns:wps="wps"><w:p><w:r><w:drawing>
+<wp:anchor behindDoc="0"><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+<wp:extent cx="1270000" cy="635000"/><wp:wrapNone/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/>
+<a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm></wpg:grpSpPr>
+<wps:wsp><wps:spPr><a:xfrm><a:off x="1270000" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="2C567A"/></a:solidFill></wps:spPr></wps:wsp>
+</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:hdr>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels",
+                                    rels({{"rId1", "styles", "styles.xml"}, {"rIdH", "header", "header1.xml"}, {"rId5", "image", "media/p.png"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/header1.xml", header},
+                                   {"word/media/p.png", "not decoded here"}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const md::Block* ruled = nullptr;
+    const md::Block* table = nullptr;
+    for (std::size_t i : doc.flow.printed) {
+        const md::Block& b = doc.flow.blocks[i];
+        if (b.kind == md::BlockKind::Table)
+            table = &b;
+        else if (md::plainText(b.spans) == "ruled")
+            ruled = &b;
+    }
+    CHECK(ruled && ruled->doc().borders[0].width == 3.0f && ruled->doc().borders[0].color == mv::rgba(255, 0, 0) && ruled->doc().borderSpace[0] == 4.0f);
+    CHECK(table != nullptr);
+    if (!table || table->rows.size() != 1 || table->rows[0].size() != 2)
+        return;
+    CHECK(table->indentLeft == -36.0f && table->doc().rowHeights.size() == 1 && std::fabs(table->doc().rowHeights[0] - 105.6f) < 0.01f);
+    // The picture stays in its cell; the title's size goes with its runs, its line break a '\v'.
+    const md::Spans& left = table->rows[0][0];
+    CHECK(left.size() == 1 && (left[0].style & md::Image) && left[0].width == 50.0f);
+    const md::Spans& right = table->rows[0][1];
+    bool sized = false, lineBreak = false;
+    for (const md::Span& s : right) {
+        sized = sized || (s.text.rfind("First", 0) == 0 && s.size == 24.0f); // the runs joined: "First\vLast"
+        lineBreak = lineBreak || s.text.find('\v') != std::string::npos;
+    }
+    CHECK(sized);
+    CHECK(lineBreak);
+    CHECK(md::plainText(right).find("First\nLast") != std::string::npos);
+    // Each of the cell's paragraphs: the title's spacing after and its rule under it.
+    const std::vector<md::CellParagraph>& paras = table->doc().looks[0][1].paragraphs;
+    CHECK(paras.size() == 2 && paras[0].after == 24.0f && paras[0].bottom.width == 3.0f && paras[0].bottomSpace == 8.0f && paras[1].bottom.width == 0.0f);
+    // The header's group: its shape placed through the group's coordinates (half scale).
+    CHECK(doc.flow.headerFloats.size() == 1);
+    if (doc.flow.headerFloats.size() == 1) {
+        const mv::FlowDocument::Float& f = doc.flow.headerFloats[0];
+        CHECK(f.width == 100.0f && f.height == 50.0f && f.drawing.paths.size() == 1);
+        if (f.drawing.paths.size() == 1 && !f.drawing.paths[0].subpaths.empty()) {
+            float minX = 1e9f, maxX = -1e9f;
+            for (const mv::Point& p : f.drawing.paths[0].subpaths[0])
+                minX = std::min(minX, p.x), maxX = std::max(maxX, p.x);
+            CHECK(std::fabs(minX - 50.0f) < 0.01f && std::fabs(maxX - 100.0f) < 0.01f && f.drawing.paths[0].fill == mv::rgba(0x2C, 0x56, 0x7A));
+        }
+    }
+}

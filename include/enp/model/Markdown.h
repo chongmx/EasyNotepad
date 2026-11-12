@@ -60,12 +60,21 @@ struct CellEdge {
     float width = 0.0f;      // points; 0: no line
     std::uint32_t color = 0; // 0: the text's colour
 };
+
+// A paragraph of a document's table cell: its spacing and its lines over and under it (points).
+struct CellParagraph {
+    float before = 0.0f, after = 0.0f;
+    CellEdge top, bottom;
+    float topSpace = 0.0f, bottomSpace = 0.0f; // the lines' distance from the text
+};
+
 struct CellLook {
     std::uint32_t fill = 0;    // background; 0: none
     std::uint32_t color = 0;   // text colour where a run sets none; 0: the block's
     bool bold = false;         // its text bold (a header row's)
     std::int8_t align = -1;    // its first paragraph's alignment: -1 left, 1 centre, 2 right
     std::vector<std::int8_t> paragraphAligns; // each paragraph's (the '\n'-separated parts of its text)
+    std::vector<CellParagraph> paragraphs;    // each paragraph's spacing and lines (empty: none)
     std::int8_t valign = 0;    // 0 top, 1 centre, 2 bottom
     std::uint8_t span = 1;     // columns it covers (gridSpan)
     bool covered = false;      // inside the span of a cell before it on its row: not drawn
@@ -92,6 +101,10 @@ struct DocumentLayout {
     bool keepNext = false;        // kept on the page of the block after it
     std::vector<float> columns;   // Table: Word's grid, the columns' widths in points (empty: by their text)
     std::vector<std::vector<CellLook>> looks; // Table: each cell's look, as `rows` (empty: the renderer's own)
+    std::vector<float> rowHeights;   // Table: each row's least height in points (< 0: exactly that; 0: by its text)
+    // A paragraph's borders (pBdr): top, left, bottom, right, each its space (points) from the text.
+    CellEdge borders[4];
+    float borderSpace[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // An owning pointer that copies what it points to (a block copied is a block of its own).

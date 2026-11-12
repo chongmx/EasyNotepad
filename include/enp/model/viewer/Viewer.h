@@ -59,8 +59,12 @@ struct FlowDocument {
         // right, bottom) from it.
         std::uint8_t wrap = 0;
         float dist[4] = {9.0f, 0.0f, 9.0f, 0.0f};
+        Page drawing; // a group of drawn shapes (wpg), in points from its box's top left: drawn instead of a picture
     };
     std::vector<Float> floats;
+    // The header's floating pictures and drawings: on every page, behind the text, placed from
+    // the header's first paragraph.
+    std::vector<Float> headerFloats;
 };
 
 // Scripts whose letters the bundled fonts lack: the views merge a system font in while a document
