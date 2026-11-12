@@ -3,7 +3,9 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include <cfloat>
 #include <cmath>
+#include <initializer_list>
 
 namespace enp::view::touch {
 
@@ -67,6 +69,24 @@ bool scrollBy(ImGuiWindow* w, int axis, float delta)
     return after != before;
 }
 
+// Scrolls `w` to `to` for this frame's content too, not from the next frame as SetScroll does: the
+// window's content has not been submitted yet, so its start and cursor move with the scroll. Without
+// it a zoomed frame is drawn at the new size from the old scroll, a jump of (scroll × change) that
+// grows with the zoom: thousands of pixels deep in a magnified page.
+void scrollNow(ImGuiWindow* w, ImVec2 to)
+{
+    const ImVec2 d(to.x - w->Scroll.x, to.y - w->Scroll.y);
+    if (d.x == 0.0f && d.y == 0.0f)
+        return;
+    w->Scroll = to;
+    w->ScrollTarget = ImVec2(FLT_MAX, FLT_MAX); // nothing left to apply next frame
+    for (ImVec2* v : {&w->WorkRect.Min, &w->WorkRect.Max, &w->ContentRegionRect.Min, &w->ContentRegionRect.Max, &w->DC.CursorStartPos,
+                      &w->DC.CursorPos, &w->DC.CursorPosPrevLine, &w->DC.CursorMaxPos, &w->DC.IdealMaxPos})
+        *v = ImVec2(v->x - d.x, v->y - d.y);
+    w->ParentWorkRect = w->WorkRect;
+    w->DC.Indent.x -= d.x;
+}
+
 } // namespace
 
 void pinch(int fingers, float x0, float y0, float x1, float y1)
@@ -89,8 +109,10 @@ bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
 {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (pending.x >= 0.0f) { // last frame's zoom: its scroll, now that the content has its size
-        ImGui::SetScrollX(window, pending.x);
-        ImGui::SetScrollY(window, pending.y);
+        if (window->Scroll.x != pending.x || window->Scroll.y != pending.y) { // cut short by last frame's range
+            ImGui::SetScrollX(window, pending.x);
+            ImGui::SetScrollY(window, pending.y);
+        }
         pending = ImVec2(-1.0f, -1.0f);
     }
     if (p.factor == 1.0f)
@@ -107,9 +129,8 @@ bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
     // The point under the fingers stays: its place in the content grows with the zoom.
     const float k = zoom / before;
     const ImVec2 at(c.x - window->Pos.x, c.y - window->Pos.y);
-    pending = ImVec2(ImMax(0.0f, (window->Scroll.x + at.x) * k - at.x), ImMax(0.0f, (window->Scroll.y + at.y) * k - at.y));
-    ImGui::SetScrollX(window, pending.x);
-    ImGui::SetScrollY(window, pending.y);
+    pending = ImVec2(ImMax(0.0f, IM_TRUNC((window->Scroll.x + at.x) * k - at.x)), ImMax(0.0f, IM_TRUNC((window->Scroll.y + at.y) * k - at.y)));
+    scrollNow(window, pending);
     return true;
 }
 

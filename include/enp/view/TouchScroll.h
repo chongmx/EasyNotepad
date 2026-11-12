@@ -24,8 +24,8 @@ bool pinching();
 // For a reader's view (the current window): takes this frame's zoom when it is centred in the
 // window (the pinch between the fingers, or Ctrl+wheel over it on a desktop) and zooms `zoom`
 // (kept within [lowest, highest]) about that point, keeping it where it is: the window's scroll
-// is set for the new size, now and once more next frame (`pending`, when the content has its new
-// size). Call each frame inside the window, before the content; returns whether `zoom` changed.
+// is moved for the new size at once, so this frame's content is drawn from it, and set again next
+// frame if the old content's range cut it short (`pending`). Call each frame inside the window, before the content; returns whether `zoom` changed.
 bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending);
 
 } // namespace enp::view::touch

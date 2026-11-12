@@ -1105,7 +1105,16 @@ int main(int argc, char** argv)
                             for (int step = 0; step <= 6; ++step) {
                                 const float d = 40.0f + 20.0f * float(step);
                                 view::touch::pinch(2, c.x - d, c.y, c.x + d, c.y);
+                                const ImVec2 scrolled = w->Scroll;
                                 h.frame(ImVec2(-100.0f, -100.0f));
+                                // The zoomed frame is drawn from its new scroll, not the old one for a frame
+                                // (a jump that grows with the zoom).
+                                if (step > 0 && ((w->Scroll.x == scrolled.x && w->Scroll.y == scrolled.y) || w->ScrollTarget.x != FLT_MAX ||
+                                                 w->ScrollTarget.y != FLT_MAX)) {
+                                    std::printf("  FAILED document viewer: a pinch on %s drew a frame from the old scroll\n", path.c_str());
+                                    ++checksFailed;
+                                    break;
+                                }
                             }
                             view::touch::pinch(0, 0.0f, 0.0f, 0.0f, 0.0f);
                             h.setTouch(false);
