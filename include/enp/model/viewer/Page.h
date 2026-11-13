@@ -49,10 +49,22 @@ struct Gradient {
 // The end of a line: none, or a filled triangle, an open arrow, a stealth arrow, a diamond or a dot.
 enum class LineEnd : std::uint8_t { None, Triangle, Arrow, Stealth, Diamond, Oval };
 
+// A strip of a filled area between two heights: its left and right edges at the top (y0) and at
+// the bottom (y1). Page points.
+struct FillBand {
+    float y0 = 0.0f, y1 = 0.0f;
+    float left0 = 0.0f, right0 = 0.0f, left1 = 0.0f, right1 = 0.0f;
+};
+
 // Filled and / or stroked outlines, already flattened to polygons.
 struct PathItem {
     std::vector<std::vector<Point>> subpaths;
     std::vector<bool> closed; // per subpath
+    // The fill of outlines taken together (a frame, a ring, a letter's counter: holes cut by the
+    // fill rule, non-zero or even-odd), as bands; made by Page::add when there is more than one
+    // outline. Empty: each outline is filled on its own.
+    bool evenOdd = false;
+    std::vector<FillBand> bands;
     std::uint32_t fill = kNone; // with a gradient: its first colour (a painter without gradients uses it)
     std::uint32_t stroke = kNone;
     float lineWidth = 1.0f;

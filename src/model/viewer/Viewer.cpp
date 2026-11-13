@@ -29,8 +29,100 @@ std::uint32_t Gradient::at(float t) const
     return stops.back().color;
 }
 
+namespace {
+
+struct Edge {
+    float x0, y0, x1, y1; // y0 < y1
+    int dir;              // +1 drawn downwards, -1 upwards
+    float at(float y) const { return x0 + (x1 - x0) * (y - y0) / (y1 - y0); }
+};
+
+// One band of the sweep, [ya, yb], crossed by `active` edges: its spans by the fill rule. Edges
+// that cross inside the band split it in two (a self-crossing outline), down to a small height.
+void bandSpans(const std::vector<const Edge*>& active, float ya, float yb, bool evenOdd, int depth, std::vector<std::pair<float, const Edge*>>& order,
+               std::vector<FillBand>& out)
+{
+    const float ym = (ya + yb) * 0.5f;
+    order.clear();
+    for (const Edge* e : active)
+        order.emplace_back(e->at(ym), e);
+    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    if (depth < 10 && yb - ya > 0.02f)
+        for (std::size_t i = 1; i < order.size(); ++i) {
+            const Edge& a = *order[i - 1].second;
+            const Edge& b = *order[i].second;
+            if (a.at(ya) > b.at(ya) + 0.01f || a.at(yb) > b.at(yb) + 0.01f) {
+                std::vector<std::pair<float, const Edge*>> inner;
+                bandSpans(active, ya, ym, evenOdd, depth + 1, inner, out);
+                bandSpans(active, ym, yb, evenOdd, depth + 1, inner, out);
+                return;
+            }
+        }
+    int winding = 0;
+    const Edge* left = nullptr;
+    for (const auto& [x, e] : order) {
+        const bool before = evenOdd ? (winding & 1) != 0 : winding != 0;
+        winding += evenOdd ? 1 : e->dir;
+        const bool after = evenOdd ? (winding & 1) != 0 : winding != 0;
+        if (!before && after) {
+            left = e;
+        } else if (before && !after && left) {
+            out.push_back(FillBand{ya, yb, left->at(ya), e->at(ya), left->at(yb), e->at(yb)});
+            left = nullptr;
+        }
+    }
+}
+
+// The outlines' fill as bands: a sweep down the page from vertex height to vertex height. Too
+// big a path keeps no bands (each outline is filled on its own, as before).
+void fillBands(PathItem& p)
+{
+    constexpr std::size_t kMaxEdges = 50000, kMaxBands = 200000;
+    std::vector<Edge> edges;
+    std::vector<float> ys;
+    for (const std::vector<Point>& sub : p.subpaths) {
+        if (sub.size() < 3)
+            continue;
+        for (std::size_t i = 0; i < sub.size(); ++i) {
+            const Point& a = sub[i];
+            const Point& b = sub[(i + 1) % sub.size()]; // closed for filling
+            if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y) || a.y == b.y)
+                continue;
+            edges.push_back(a.y < b.y ? Edge{a.x, a.y, b.x, b.y, 1} : Edge{b.x, b.y, a.x, a.y, -1});
+            ys.push_back(a.y);
+        }
+        if (edges.size() > kMaxEdges)
+            return;
+    }
+    if (edges.empty())
+        return;
+    std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) { return a.y0 < b.y0; });
+    std::sort(ys.begin(), ys.end());
+    ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+    std::vector<FillBand> bands;
+    std::vector<const Edge*> active;
+    std::vector<std::pair<float, const Edge*>> order;
+    std::size_t next = 0;
+    for (std::size_t i = 0; i + 1 < ys.size(); ++i) {
+        const float ya = ys[i], yb = ys[i + 1];
+        active.erase(std::remove_if(active.begin(), active.end(), [ya](const Edge* e) { return e->y1 <= ya; }), active.end());
+        while (next < edges.size() && edges[next].y0 <= ya)
+            active.push_back(&edges[next++]);
+        if (active.size() >= 2)
+            bandSpans(active, ya, yb, p.evenOdd, 0, order, bands);
+        if (bands.size() > kMaxBands)
+            return;
+    }
+    bands.shrink_to_fit();
+    p.bands = std::move(bands);
+}
+
+} // namespace
+
 void Page::add(PathItem p)
 {
+    if (p.fill != kNone && p.subpaths.size() > 1)
+        fillBands(p);
     items.push_back({PageItem::Kind::Path, std::uint32_t(paths.size()), clip});
     paths.push_back(std::move(p));
 }

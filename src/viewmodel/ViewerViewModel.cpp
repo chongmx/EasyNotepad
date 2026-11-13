@@ -93,6 +93,8 @@ void ViewerViewModel::readPage(Entry& e, std::size_t index)
         target.glyphs = std::move(page.glyphs);
         target.boxes = std::move(page.boxes);
         target.images = std::move(page.images);
+        target.clips = std::move(page.clips);
+        target.scripts = page.scripts;
         target.loaded = true;
         for (auto& [key, bytes] : media)
             doc.media.emplace(key, std::move(bytes)); // an image already waiting keeps its bytes

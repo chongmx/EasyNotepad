@@ -4,6 +4,8 @@
 #include "enp/view/DocumentFonts.h"
 #include "enp/view/MarkdownImages.h"
 
+#include "imgui_internal.h"
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -341,6 +343,9 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
 
 void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin, float scale)
 {
+    const bool banded = p.fill && !p.bands.empty();
+    if (banded) // outlines filled together, holes cut out: the bands the reader made, those in view
+        drawBands(dl, p, origin, scale);
     for (std::size_t s = 0; s < p.subpaths.size(); ++s) {
         const std::vector<mv::Point>& sub = p.subpaths[s];
         if (sub.size() < 2)
@@ -351,7 +356,7 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
             points_[i] = ImVec2(origin.x + sub[i].x * scale, origin.y + sub[i].y * scale);
         const int n = int(points_.size());
         const int firstFill = dl->VtxBuffer.Size, firstFillIdx = dl->IdxBuffer.Size;
-        if (p.fill && n >= 3) {
+        if (p.fill && n >= 3 && !banded) {
             const bool rect = n == 4 && ((points_[0].x == points_[1].x && points_[1].y == points_[2].y && points_[2].x == points_[3].x) ||
                                          (points_[0].y == points_[1].y && points_[1].x == points_[2].x && points_[2].y == points_[3].y));
             if (rect) {
@@ -410,6 +415,38 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
                 lineEnd(dl, p.tail, points_[size_t(n - 1)], points_[size_t(n - 2)], size, p.stroke, width);
             }
         }
+    }
+}
+
+void PagePainter::drawBands(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin, float scale)
+{
+    const ImVec4 clip = dl->_ClipRectStack.back();
+    const ImVec2 uv = ImGui::GetDrawListSharedData()->TexUvWhitePixel;
+    const int first = dl->VtxBuffer.Size, firstIdx = dl->IdxBuffer.Size;
+    ImVec2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
+    constexpr int kChunk = 4096; // quads per reserve: within a 16-bit index range
+    int room = 0;
+    for (const mv::FillBand& b : p.bands) {
+        const float y0 = origin.y + b.y0 * scale, y1 = origin.y + b.y1 * scale;
+        const float l0 = origin.x + b.left0 * scale, r0 = origin.x + b.right0 * scale;
+        const float l1 = origin.x + b.left1 * scale, r1 = origin.x + b.right1 * scale;
+        lo = ImVec2(std::min({lo.x, l0, l1}), std::min(lo.y, y0));
+        hi = ImVec2(std::max({hi.x, r0, r1}), std::max(hi.y, y1));
+        if (y1 < clip.y || y0 > clip.w || std::max(r0, r1) < clip.x || std::min(l0, l1) > clip.z)
+            continue; // out of view (a magnified page)
+        if (room == 0) {
+            dl->PrimReserve(kChunk * 6, kChunk * 4);
+            room = kChunk;
+        }
+        dl->PrimQuadUV(ImVec2(l0, y0), ImVec2(r0, y0), ImVec2(r1, y1), ImVec2(l1, y1), uv, uv, uv, uv, p.fill);
+        --room;
+    }
+    if (room > 0)
+        dl->PrimUnreserve(room * 6, room * 4);
+    if (!p.gradient.stops.empty() && lo.x <= hi.x) {
+        if (needsFineMesh(p.gradient))
+            subdivide(dl, first, firstIdx, 16.0f, tris_);
+        shadeVertices(dl, first, p.gradient, lo, hi, origin, scale);
     }
 }
 

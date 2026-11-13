@@ -149,6 +149,22 @@ Done on `feature/word-rendering`:
 | B | Annotations and form fields (their appearance streams) are not drawn | draw `/AP` normal appearances as forms |
 | C | Mesh shadings (types 4-7), tiling patterns, blend modes, transparency groups and soft masks on content | per item |
 | C | Vertical writing (`Identity-V`), Type 3 fonts as their glyph procedures, encrypted files | per item |
+| C | Pictures are kept at 3 pixels per point of the size the page shows them (216 dpi at 100 %): sharp up to about twice the size on a high-density screen, soft beyond | read a page's pictures again at the zoom shown once it settles (levels of detail) |
+
+Done (2026-11-13, an image-heavy arXiv paper, 33 pages, 22.6 MB, against pdfium):
+
+- **Outlines with holes**: a filled path of several outlines (a picture's frame, a ring, letters
+  drawn as outlines) is cut into bands by its fill rule (non-zero or even-odd, `f*`) when the
+  page is read; frames were drawn as solid boxes over the pictures they framed.
+- **Soft masks of JPEGs**, and masks compressed or of another size: the picture and its mask
+  are put together off the UI thread (`model/viewer/ImagePack.h`, `services::fitImage`).
+- **Clips of pages read on demand** reached the view: the view-model copied the page's items
+  but not its clip rectangles (nor the scripts of its text), so pictures spilled out of theirs.
+- **Pictures at the size shown**, decoded on the reader's thread: a 1920 x 1536 camera frame
+  shown as a 90-point thumbnail is kept at 270 x 216, and every page picture reaches the UI
+  thread as QOI (unpacked several times faster than a JPEG is decoded). Paging through the
+  paper peaked at 90 MB over the empty app instead of 350 MB; the 96 MB picture budget was
+  running out and pictures past it showed as grey boxes.
 
 ### Checked against Office's render (2026-11-07)
 

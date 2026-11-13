@@ -5,6 +5,7 @@
 // Not yet: clipping, shadings and patterns, annotations, Type 3 glyph shapes (their text is
 // shown in our font), embedded font outlines (all text uses our font at the PDF's positions),
 // encrypted files.
+#include "enp/model/viewer/ImagePack.h"
 #include "enp/model/viewer/Viewer.h"
 
 #include "PdfObjects.h"
@@ -440,51 +441,6 @@ std::unique_ptr<Font> loadFont(File& file, const Object& dict)
 
 // ---- images -----------------------------------------------------------------------------------
 
-std::string encodeQoi(const std::vector<std::uint8_t>& rgba, int w, int h)
-{
-    std::string out;
-    out.reserve(14 + rgba.size() / 2 + 8);
-    out += "qoif";
-    auto be32 = [&](std::uint32_t v) {
-        for (int s = 24; s >= 0; s -= 8)
-            out += char((v >> s) & 0xFF);
-    };
-    be32(std::uint32_t(w));
-    be32(std::uint32_t(h));
-    out += char(4);
-    out += char(0);
-    std::uint8_t index[64][4] = {};
-    std::uint8_t prev[4] = {0, 0, 0, 255};
-    int run = 0;
-    const std::size_t n = std::size_t(w) * std::size_t(h);
-    for (std::size_t i = 0; i < n; ++i) {
-        const std::uint8_t* px = &rgba[i * 4];
-        if (std::memcmp(px, prev, 4) == 0) {
-            if (++run == 62 || i + 1 == n) {
-                out += char(0xC0 | (run - 1));
-                run = 0;
-            }
-            continue;
-        }
-        if (run > 0) {
-            out += char(0xC0 | (run - 1));
-            run = 0;
-        }
-        const int slot = (px[0] * 3 + px[1] * 5 + px[2] * 7 + px[3] * 11) % 64;
-        if (std::memcmp(index[slot], px, 4) == 0) {
-            out += char(slot);
-        } else {
-            std::memcpy(index[slot], px, 4);
-            out += char(0xFF);
-            out.append(reinterpret_cast<const char*>(px), 4);
-        }
-        std::memcpy(prev, px, 4);
-    }
-    out.append(7, '\0');
-    out += char(1);
-    return out;
-}
-
 struct ColorSpace {
     enum Kind { Gray, Rgb, Cmyk, Indexed, Tint, Pattern, Unknown } kind = Gray;
     int components = 1;
@@ -750,6 +706,7 @@ private:
         pendingClip_ = false;
         if ((fill || stroke) && !path_.empty() && budget()) {
             PathItem item;
+            item.evenOdd = evenOdd_;
             if (fill && !state_.patternFill)
                 item.fill = state_.fill;
             if (fill && state_.patternFill) // a shading pattern: the path filled with its gradient
@@ -1115,8 +1072,12 @@ private:
         std::optional<std::string> data = file_.streamData(image, &filter);
         if (!data)
             return {};
-        if (filter == "DCTDecode")
-            return std::move(*data); // JPEG, decoded by the views
+        if (filter == "DCTDecode") { // JPEG, decoded by the reader service (with its soft mask)
+            SoftMask sm;
+            if (softMask(image, sm))
+                return packMasked(*data, sm.bytes, sm.width, sm.height, sm.raw);
+            return std::move(*data);
+        }
         if (!filter.empty())
             return {}; // JPEG 2000, CCITT, JBIG2: not decoded yet
         const int w = int(file_.resolvedGet(image, "Width") ? file_.resolvedGet(image, "Width")->num() : 0);
@@ -1179,17 +1140,49 @@ private:
                 px[3] = 255;
             }
         }
-        // A soft mask of the same size gives the alpha.
-        if (const Object* smask = file_.resolvedGet(image, "SMask"); smask && smask->type == Object::Type::Stream) {
-            const int mw = int(file_.resolvedGet(*smask, "Width") ? file_.resolvedGet(*smask, "Width")->num() : 0);
-            const int mh = int(file_.resolvedGet(*smask, "Height") ? file_.resolvedGet(*smask, "Height")->num() : 0);
-            std::string mf;
-            std::optional<std::string> md = file_.streamData(*smask, &mf);
-            if (md && mf.empty() && mw == w && mh == h && md->size() >= std::size_t(w) * std::size_t(h))
-                for (std::size_t i = 0; i < std::size_t(w) * std::size_t(h); ++i)
-                    rgba[i * 4 + 3] = std::uint8_t((*md)[i]);
+        // A soft mask gives the alpha: here when it is raw samples of the same size, otherwise
+        // packed with the picture for the reader service.
+        SoftMask sm;
+        if (!softMask(image, sm))
+            return encodeQoi(rgba, w, h);
+        if (sm.raw && sm.width == w && sm.height == h) {
+            for (std::size_t i = 0; i < std::size_t(w) * std::size_t(h); ++i)
+                rgba[i * 4 + 3] = std::uint8_t(sm.bytes[i]);
+            return encodeQoi(rgba, w, h);
         }
-        return encodeQoi(rgba, w, h);
+        return packMasked(encodeQoi(rgba, w, h), sm.bytes, sm.width, sm.height, sm.raw);
+    }
+
+    struct SoftMask {
+        std::string bytes; // raw: width * height samples; otherwise a JPEG
+        int width = 0, height = 0;
+        bool raw = true;
+    };
+
+    // The image's soft mask (SMask): 8-bit samples, or a JPEG. False when it has none we can read.
+    bool softMask(const Object& image, SoftMask& out)
+    {
+        const Object* smask = file_.resolvedGet(image, "SMask");
+        if (!smask || smask->type != Object::Type::Stream)
+            return false;
+        out.width = int(file_.resolvedGet(*smask, "Width") ? file_.resolvedGet(*smask, "Width")->num() : 0);
+        out.height = int(file_.resolvedGet(*smask, "Height") ? file_.resolvedGet(*smask, "Height")->num() : 0);
+        if (out.width <= 0 || out.height <= 0 || out.width > (1 << 14) || out.height > (1 << 14))
+            return false;
+        std::string filter;
+        std::optional<std::string> data = file_.streamData(*smask, &filter);
+        if (!data)
+            return false;
+        out.raw = filter.empty();
+        if (out.raw) {
+            const Object* bits = file_.resolvedGet(*smask, "BitsPerComponent");
+            if ((bits && bits->num(8) != 8) || data->size() < std::size_t(out.width) * std::size_t(out.height))
+                return false;
+        } else if (filter != "DCTDecode") {
+            return false;
+        }
+        out.bytes = std::move(*data);
+        return true;
     }
 
     void doXObject(const std::string& name, const Object* resources, int depth)
@@ -1315,10 +1308,13 @@ private:
             } else if (op == "s") {
                 paint(false, true, true);
             } else if (op == "f" || op == "F" || op == "f*") {
+                evenOdd_ = op == "f*";
                 paint(true, false, true);
             } else if (op == "B" || op == "B*") {
+                evenOdd_ = op == "B*";
                 paint(true, true, false);
             } else if (op == "b" || op == "b*") {
+                evenOdd_ = op == "b*";
                 paint(true, true, true);
             } else if (op == "n") {
                 paint(false, false, false);
@@ -1441,6 +1437,7 @@ private:
     bool runOpen_ = false;
     std::int32_t runClip_ = -1; // the clip the open run was started under
     bool pendingClip_ = false;  // W / W*: the next path painting (or n) sets the clip
+    bool evenOdd_ = false;      // the path being painted is filled by the even-odd rule (f*, B*, b*)
     Matrix base_;               // the page's own transform (patterns are drawn in it)
     Font fallback_;
     std::size_t operations_ = 0;

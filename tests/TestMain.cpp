@@ -31,6 +31,7 @@
 #include "enp/model/package/Inflate.h"
 #include "enp/model/package/Xml.h"
 #include "enp/model/package/Zip.h"
+#include "enp/model/viewer/ImagePack.h"
 #include "enp/model/viewer/NumberFormat.h"
 #include "enp/model/viewer/Viewer.h"
 #include "enp/interfaces/IAgentCliService.h"
@@ -2131,6 +2132,31 @@ TEST(file_types_are_detected_before_loading_and_images_decode)
     CHECK(img.width == 1 && img.height == 1 && img.rgba[1] == 255 && img.rgba[0] == 0);
     CHECK(!services::decodeImage(std::string("RIFF\0\0\0\0WEBPVP8 ", 16), img, note) && note.find("WebP") != std::string::npos);
     CHECK(!services::decodeImage("hello", img, note) && !note.empty());
+
+    // A page's picture made ready off the main thread: packed with a soft mask of another size
+    // (the mask stretched over it), and shrunk to the size it is shown at.
+    {
+        std::vector<std::uint8_t> red(size_t(64) * 32 * 4);
+        for (size_t i = 0; i < red.size(); i += 4) {
+            red[i] = 255;
+            red[i + 3] = 255;
+        }
+        const std::string mask("\x00\xFF", 2); // 2 x 1: the left half hidden
+        std::string bytes = model::viewer::packMasked(model::viewer::encodeQoi(red, 64, 32), mask, 2, 1, true);
+        model::viewer::MaskedImage parts;
+        CHECK(model::viewer::unpackMasked(bytes, parts) && parts.maskWidth == 2 && parts.raw && parts.mask.size() == 2);
+        CHECK(!model::viewer::unpackMasked(bytes.substr(0, 20), parts)); // cut short: not read
+        services::fitImage(bytes, 16);
+        CHECK(services::decodeImage(bytes, img, note) && img.format == "QOI" && img.width == 16 && img.height == 8);
+        CHECK(img.rgba[0] == 255 && img.rgba[3] == 0);                                  // the left: red, hidden
+        CHECK(img.rgba[size_t(15) * 4 + 3] == 255 && img.rgba[size_t(15) * 4] == 255); // the right: red, shown
+        std::string small = ppm; // small enough: its size kept, as QOI (quick for the view to unpack)
+        services::fitImage(small, 16);
+        CHECK(services::decodeImage(small, img, note) && img.format == "QOI" && img.width == 2 && img.height == 1 && img.rgba[0] == 255);
+        std::string text = "hello"; // not a picture: left for the view to say so
+        services::fitImage(text, 16);
+        CHECK(text == "hello");
+    }
 
     // Opening: an image and a binary file get a document without text; saving it refuses
     // (it would write the empty buffer over the file); "open as text" loads the bytes.

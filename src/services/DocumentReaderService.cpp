@@ -1,8 +1,11 @@
 #include "enp/services/DocumentReaderService.h"
 
 #include "enp/os/Memory.h"
+#include "enp/services/ImageDecoder.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -49,6 +52,32 @@ struct DocumentReaderService::Shared {
         return inFlight.size() + cancelled.size();
     }
 };
+
+namespace {
+
+// A page's pictures at the size it shows them (here, off the main thread): a photo drawn as a
+// thumbnail is kept at a thumbnail's pixels, not its camera's, and a soft mask is put on.
+// kPixelsPerPoint covers a page seen at about twice its size on a high-density screen; no side
+// passes kMaxSide (the view's own limit).
+void fitPageImages(const model::viewer::Page& page, std::map<std::string, std::string>& media)
+{
+    constexpr float kPixelsPerPoint = 3.0f;
+    constexpr int kMaxSide = 2048;
+    std::map<std::string, float> side; // the largest a picture is shown, in points
+    for (const model::viewer::ImageItem& img : page.images) {
+        // A cropped picture shows a part of itself: the whole is that much larger.
+        const float whole = std::max(img.box.w / std::max(0.01f, img.crop.w), img.box.h / std::max(0.01f, img.crop.h));
+        float& s = side[img.media];
+        s = std::max(s, whole);
+    }
+    for (auto& [key, bytes] : media) {
+        const auto it = side.find(key);
+        if (it != side.end())
+            fitImage(bytes, std::clamp(int(std::ceil(it->second * kPixelsPerPoint)), 16, kMaxSide));
+    }
+}
+
+} // namespace
 
 DocumentReaderService::DocumentReaderService(interfaces::IFileService* files) : files_(files), shared_(std::make_shared<Shared>()) {}
 
@@ -100,6 +129,8 @@ DocumentReaderService::Ticket DocumentReaderService::readPage(std::shared_ptr<mo
         {
             os::mem::Scope scope("viewer");
             source->load(index, *page, *media);
+            page->scripts = model::viewer::scriptsIn(page->plainText()); // as PageDocument::load does
+            fitPageImages(*page, *media);
         }
         source.reset(); // the last holder of a closed document's file lets go here, not later
         os::dispatch::postToMain([shared, ticket, page, media, done = std::move(done)]() {

@@ -328,6 +328,7 @@ add_library(enp_model STATIC
     src/model/package/Inflate.cpp
     src/model/package/Zip.cpp
     src/model/package/Xml.cpp
+    src/model/viewer/ImagePack.cpp
     src/model/viewer/Viewer.cpp
     src/model/viewer/NumberFormat.cpp
     src/model/viewer/Ooxml.cpp

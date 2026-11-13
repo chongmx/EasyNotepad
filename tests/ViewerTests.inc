@@ -1402,3 +1402,46 @@ TEST(viewer_reads_word_letterhead_pages)
     CHECK(ps.bordersFromPage && ps.borders[0].width == 0.5f && ps.borderSpace[0] == 24.0f && ps.borders[1].width == 0.5f &&
           ps.borders[2].width == 0.0f);
 }
+
+// A filled shape of several outlines: a frame (a square with a square cut out), a ring drawn the
+// same way round both times, and a single outline, as the bands the painter fills.
+TEST(viewer_fills_outlines_with_holes)
+{
+    auto area = [](const mv::PathItem& p) {
+        float a = 0.0f;
+        for (const mv::FillBand& b : p.bands)
+            a += ((b.right0 - b.left0) + (b.right1 - b.left1)) * 0.5f * (b.y1 - b.y0);
+        return a;
+    };
+    const std::vector<mv::Point> outer{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    const std::vector<mv::Point> innerCw{{2, 2}, {8, 2}, {8, 8}, {2, 8}};
+    const std::vector<mv::Point> innerCcw{{2, 2}, {2, 8}, {8, 8}, {8, 2}};
+    mv::Page page;
+    mv::PathItem frame; // non-zero, the hole drawn the other way round: a frame
+    frame.fill = mv::kBlack;
+    frame.subpaths = {outer, innerCcw};
+    frame.closed = {true, true};
+    page.add(frame);
+    mv::PathItem same = frame; // non-zero, both the same way round: no hole
+    same.subpaths = {outer, innerCw};
+    page.add(same);
+    mv::PathItem evenOdd = same; // even-odd: a hole whichever way it goes
+    evenOdd.evenOdd = true;
+    page.add(evenOdd);
+    mv::PathItem one; // one outline: filled as it is, no bands
+    one.fill = mv::kBlack;
+    one.subpaths = {outer};
+    one.closed = {true};
+    page.add(one);
+    mv::PathItem cross; // a self-crossing pair (a bow tie over a square): bands split where edges cross
+    cross.fill = mv::kBlack;
+    cross.evenOdd = true;
+    cross.subpaths = {{{0, 0}, {10, 10}, {10, 0}, {0, 10}}, {{20, 0}, {30, 0}, {30, 10}, {20, 10}}};
+    cross.closed = {true, true};
+    page.add(cross);
+    CHECK(std::fabs(area(page.paths[0]) - 64.0f) < 0.01f);
+    CHECK(std::fabs(area(page.paths[1]) - 100.0f) < 0.01f);
+    CHECK(std::fabs(area(page.paths[2]) - 64.0f) < 0.01f);
+    CHECK(page.paths[3].bands.empty());
+    CHECK(std::fabs(area(page.paths[4]) - 150.0f) < 0.5f); // the bow tie's two triangles (50) and the square (100)
+}

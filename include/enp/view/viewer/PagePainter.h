@@ -36,6 +36,7 @@ public:
 
 private:
     void drawPath(ImDrawList* dl, const model::viewer::PathItem& p, ImVec2 origin, float scale);
+    void drawBands(ImDrawList* dl, const model::viewer::PathItem& p, ImVec2 origin, float scale);
     void drawGlyphs(ImDrawList* dl, const model::viewer::GlyphRun& g, ImVec2 origin, float scale, const Fonts& fonts);
     void drawBox(ImDrawList* dl, const model::viewer::TextBox& b, ImVec2 origin, float scale, const Fonts& fonts);
     std::vector<ImVec2> points_;

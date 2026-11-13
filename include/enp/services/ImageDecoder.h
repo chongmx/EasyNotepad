@@ -21,6 +21,12 @@ struct DecodedImage {
 // returns false with `note` ("not an image", "WebP is not supported yet", ...).
 bool decodeImage(const std::string& bytes, DecodedImage& out, std::string& note, int maxSide = 2048);
 
+// A picture a page shows at most `maxSide` pixels across, made ready for the view off the main
+// thread: decoded (a packed picture with its soft mask, model::viewer::packMasked, put together),
+// shrunk (area-averaged) when larger, and handed on as QOI. Bytes that are not a picture stay as
+// they are (the view says why it cannot show them).
+void fitImage(std::string& bytes, int maxSide);
+
 // Raw deflate data (a zip entry stored with method 8) inflated; nothing when it is not valid.
 std::optional<std::string> inflateRaw(std::string_view data, size_t expectedSize);
 

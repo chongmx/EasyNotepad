@@ -34,7 +34,10 @@
 #include <cmath>
 #include <cstring>
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <thread>
 #include <map>
 #include <set>
@@ -1058,6 +1061,22 @@ int main(int argc, char** argv)
                 paths.push_back("/enp-ui-viewer/" + name);
                 h.files().memory[paths.back()] = bytes;
             }
+            // More documents from disk to put through the same (a file a user reported):
+            // ENP_UI_VIEWER_FILES="a.pdf;b.docx".
+            if (const char* extra = std::getenv("ENP_UI_VIEWER_FILES")) {
+                std::string list = extra;
+                for (std::size_t at = 0; at <= list.size();) {
+                    const std::size_t end = std::min(list.find(';', at), list.size());
+                    const std::string file = list.substr(at, end - at);
+                    at = end + 1;
+                    std::ifstream in(file, std::ios::binary);
+                    if (file.empty() || !in)
+                        continue;
+                    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    paths.push_back("/enp-ui-viewer/" + file.substr(file.find_last_of("/\\") + 1));
+                    h.files().memory[paths.back()] = std::move(bytes);
+                }
+            }
             for (int round = 0; round < 2; ++round) {
                 for (const std::string& path : paths) {
                     h.vm().openFile(path);
@@ -1126,6 +1145,30 @@ int main(int argc, char** argv)
                                 std::printf("  FAILED document viewer: a pinch did not zoom %s in (content %.0f -> %.0f)\n", path.c_str(), before, after),
                                     ++checksFailed;
                         }
+                    }
+                    // Flung hard down the document and back (a phone's fast scroll): pages asked for,
+                    // dropped and asked for again while the reader is still busy with them.
+                    if (ImGuiWindow* w = [] {
+                            for (ImGuiWindow* win : GImGui->Windows)
+                                if (win->WasActive && (std::strstr(win->Name, "##viewerPages") || std::strstr(win->Name, "##viewerFlow")))
+                                    return win;
+                            return static_cast<ImGuiWindow*>(nullptr);
+                        }()) {
+                        const ImVec2 c = w->InnerRect.GetCenter();
+                        const float reach = std::min(160.0f, w->InnerRect.GetHeight() * 0.3f);
+                        h.setTouch(true);
+                        for (int fling = 0; fling < 8; ++fling) {
+                            const float dir = fling < 5 ? -1.0f : 1.0f; // finger up: down the document
+                            h.frame(ImVec2(c.x, c.y - dir * reach));
+                            h.frame(ImVec2(c.x, c.y - dir * reach), true);
+                            for (int step = 1; step <= 4; ++step)
+                                h.frame(ImVec2(c.x, c.y - dir * reach + dir * reach * 0.5f * float(step)), true);
+                            h.frame(ImVec2(c.x, c.y + dir * reach), false);
+                            for (int glide = 0; glide < 20; ++glide)
+                                h.frame(ImVec2(-100.0f, -100.0f));
+                        }
+                        h.setTouch(false);
+                        h.settleReading();
                     }
                     h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
                 }

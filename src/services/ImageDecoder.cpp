@@ -1,6 +1,7 @@
 #include "enp/services/ImageDecoder.h"
 
 #include "enp/model/FileKind.h"
+#include "enp/model/viewer/ImagePack.h"
 #include "enp/os/Memory.h"
 
 #include <algorithm>
@@ -205,7 +206,87 @@ void downscale(std::vector<unsigned char>& rgba, int& w, int& h, int maxSide)
     h = nh;
 }
 
+// The image resized to nw x nh: each new pixel the average of the source pixels it covers
+// (fractions at its edges counted by their share). Shrinking only.
+void resample(std::vector<unsigned char>& rgba, int& w, int& h, int nw, int nh)
+{
+    const float sx = float(w) / float(nw), sy = float(h) / float(nh);
+    std::vector<unsigned char> out(size_t(nw) * size_t(nh) * 4);
+    std::vector<float> row(size_t(nw) * 4);
+    for (int y = 0; y < nh; ++y) {
+        std::fill(row.begin(), row.end(), 0.0f);
+        const float y0 = float(y) * sy, y1 = std::min(float(h), y0 + sy);
+        for (int iy = int(y0); iy < h && float(iy) < y1; ++iy) {
+            const float wy = std::min(y1, float(iy + 1)) - std::max(y0, float(iy));
+            const unsigned char* src = rgba.data() + size_t(iy) * size_t(w) * 4;
+            for (int x = 0; x < nw; ++x) {
+                const float x0 = float(x) * sx, x1 = std::min(float(w), x0 + sx);
+                float* o = &row[size_t(x) * 4];
+                for (int ix = int(x0); ix < w && float(ix) < x1; ++ix) {
+                    const float wgt = wy * (std::min(x1, float(ix + 1)) - std::max(x0, float(ix)));
+                    const unsigned char* p = src + size_t(ix) * 4;
+                    for (int k = 0; k < 4; ++k)
+                        o[k] += wgt * float(p[k]);
+                }
+            }
+        }
+        const float area = sx * sy;
+        unsigned char* dst = out.data() + size_t(y) * size_t(nw) * 4;
+        for (size_t i = 0; i < row.size(); ++i)
+            dst[i] = static_cast<unsigned char>(std::clamp(row[i] / area + 0.5f, 0.0f, 255.0f));
+    }
+    rgba.swap(out);
+    w = nw;
+    h = nh;
+}
+
 } // namespace
+
+void fitImage(std::string& bytes, int maxSide)
+{
+    os::mem::Scope scope("images");
+    model::viewer::MaskedImage masked;
+    const bool packed = model::viewer::unpackMasked(bytes, masked);
+    DecodedImage image;
+    std::string note;
+    // At most 16k across (stb's limit): the shrink below brings it down, not decodeImage's.
+    if (!decodeImage(packed ? std::string(masked.image) : bytes, image, note, 1 << 14))
+        return;
+    if (packed) { // the mask's samples, stretched over the picture when its size differs
+        std::vector<unsigned char> alpha;
+        int mw = masked.maskWidth, mh = masked.maskHeight;
+        if (masked.raw) {
+            alpha.assign(masked.mask.begin(), masked.mask.begin() + std::ptrdiff_t(size_t(mw) * size_t(mh)));
+        } else {
+            DecodedImage m;
+            if (!decodeImage(std::string(masked.mask), m, note, 1 << 14))
+                return;
+            mw = m.width;
+            mh = m.height;
+            alpha.resize(size_t(mw) * size_t(mh));
+            for (size_t i = 0; i < alpha.size(); ++i)
+                alpha[i] = m.rgba[i * 4];
+        }
+        for (int y = 0; y < image.height; ++y) {
+            const size_t my = size_t(std::min(mh - 1, int(std::int64_t(y) * mh / image.height)));
+            for (int x = 0; x < image.width; ++x) {
+                const size_t mx = size_t(std::min(mw - 1, int(std::int64_t(x) * mw / image.width)));
+                image.rgba[(size_t(y) * size_t(image.width) + size_t(x)) * 4 + 3] = alpha[my * size_t(mw) + mx];
+            }
+        }
+    }
+    const int side = std::max(image.width, image.height);
+    if (side > maxSide) {
+        const float k = float(std::max(1, maxSide)) / float(side);
+        resample(image.rgba, image.width, image.height, std::max(1, int(float(image.width) * k + 0.5f)),
+                 std::max(1, int(float(image.height) * k + 0.5f)));
+    } else if (image.format == "QOI") {
+        return; // as it is: nothing to gain
+    }
+    // QOI even when the size stays: the main thread then only unpacks it (a JPEG's decode is
+    // several times slower, a frame's time for a photo).
+    bytes = model::viewer::encodeQoi(image.rgba, image.width, image.height);
+}
 
 std::optional<std::string> inflateRaw(std::string_view data, size_t expectedSize)
 {
