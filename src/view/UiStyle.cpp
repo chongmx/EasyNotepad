@@ -43,6 +43,8 @@ Light lights[kLights];
 double hintShownAt = 0.0;
 float hintFade = 1.0f;
 int hintFrame = -1;
+float hintWrapWidth = 0.0f; // the hint being drawn: its text width (begin())
+HintArea currentArea = HintArea::Dialogs; // the innermost HintScope's; outside every scope: a dialog or floating window
 
 // An open tooltip: where its content starts in its window's draw list, and whether the content
 // went to a channel of its own (the enhanced look draws the outline under it).
@@ -108,11 +110,43 @@ float updateLight(ImGuiID id, bool hovered)
     return amount;
 }
 
+// The area of a hint begun now: a menu's or a dialog's by the window it is in, else the scope's.
+HintArea areaHere()
+{
+    if (const ImGuiWindow* window = ImGui::GetCurrentWindowRead()) {
+        const ImGuiWindow* root = window->RootWindow ? window->RootWindow : window;
+        if (root->Flags & ImGuiWindowFlags_Modal)
+            return HintArea::Dialogs;
+        if (root->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_ChildMenu))
+            return HintArea::Menus;
+    }
+    return currentArea;
+}
+
 bool begin(ImGuiTooltipFlags flags)
 {
+    // Hints switched off where this one would show: none (checked before anything is set up for it).
+    if (depth == 0 && (look.fx.hiddenHints >> unsigned(areaHere())) & 1u)
+        return false;
     const float s = look.s;
+    const ImVec2 padding = look.enhanced ? ImVec2(12.0f * s, 9.0f * s) : ImVec2(9.0f * s, 6.0f * s);
+    // A hint stays inside the window it belongs to. With multi-viewports a tooltip may otherwise
+    // reach over the window's edge onto the monitor, and then it becomes an OS window of its own:
+    // its transparent background (the glowing hint has no box) shows black there. Pinned to the
+    // window's viewport, ImGui places it beside the cursor within that window, flipping or clamping.
+    const ImGuiViewport* viewport = ImGui::GetWindowViewport();
+    ImGui::SetNextWindowViewport(viewport->ID);
+    // Its width: about kHintWidth characters, or less when the window has less room beside the
+    // cursor, so a hint near the edge wraps onto more lines instead of running past it.
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 mouse = ImGui::IsMousePosValid(&io.MousePos) ? io.MousePos : ImVec2(viewport->Pos.x, viewport->Pos.y);
+    const float edge = 2.0f * padding.x + 2.0f * ImGui::GetStyle().DisplaySafeAreaPadding.x + 8.0f * s;
+    const float roomRight = viewport->Pos.x + viewport->Size.x - (mouse.x + 16.0f * s) - edge; // ImGui's tooltip offset: 16 px
+    const float roomLeft = mouse.x - viewport->Pos.x - edge;
+    hintWrapWidth = std::clamp(std::max(roomRight, roomLeft), 8.0f * ImGui::GetFontSize(), kHintWidth * ImGui::GetFontSize());
+    hintWrapWidth = std::min(hintWrapWidth, std::max(1.0f, viewport->Size.x - edge));
     // Without a box the padding is room for the glow (and keeps the text where the box had it).
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, look.enhanced ? ImVec2(12.0f * s, 9.0f * s) : ImVec2(9.0f * s, 6.0f * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * s); // a tooltip is not a popup: it takes the window's
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_PopupBg, look.enhanced ? IM_COL32(0, 0, 0, 0) : look.box);
@@ -140,8 +174,9 @@ bool begin(ImGuiTooltipFlags flags)
         ImGui::PushStyleColor(ImGuiCol_TextDisabled,
                               ImVec4((text.x + dim.x) * 0.5f, (text.y + dim.y) * 0.5f, (text.z + dim.z) * 0.5f, dim.w));
     }
-    // A long hint wraps: about 55 characters a line (a caller may set its own width inside).
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + kHintWidth * ImGui::GetFontSize());
+    // A long hint wraps: about kHintWidth characters a line, fewer near the window's edge (a caller
+    // may set its own width inside).
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + hintWrapWidth);
     if (depth < kMaxDepth)
         open[depth] = o;
     ++depth;
@@ -162,7 +197,7 @@ void copyUnder(ImDrawList* dl, int first, int count, unsigned vtxOffset, ImVec2 
                          (color & ~IM_COL32_A_MASK) | (ImU32(a + 0.5f) << IM_COL32_A_SHIFT));
     }
     for (const ImDrawIdx i : indices)
-        dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
+        dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + (vtxOffset + i - unsigned(first))));
 }
 
 // Whether the content [first, first + count) is quads of four vertices, each an upright rectangle:
@@ -198,7 +233,7 @@ void copyGrown(ImDrawList* dl, int first, int count, unsigned vtxOffset, float g
         }
     }
     for (const ImDrawIdx i : indices)
-        dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
+        dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + (vtxOffset + i - unsigned(first))));
 }
 
 // The enhanced hint: the content (channel 1) a little translucent; under it (channel 0) a glow in
@@ -316,6 +351,31 @@ void configure(bool enhanced, const Effects& effects, const Palette& palette, fl
 }
 
 bool enhanced() { return look.enhanced; }
+
+const char* hintAreaName(HintArea area)
+{
+    switch (area) {
+    case HintArea::TitleBar: return "Title bar";
+    case HintArea::Menus: return "Menus and lists";
+    case HintArea::Ribbon: return "Ribbon";
+    case HintArea::Panels: return "Side and bottom panels";
+    case HintArea::Editor: return "Editor and documents";
+    case HintArea::StatusBar: return "Status bar";
+    case HintArea::Dialogs: return "Dialogs";
+    case HintArea::Count: break;
+    }
+    return "";
+}
+
+HintScope::HintScope(HintArea area) : previous_(currentArea)
+{
+    currentArea = area;
+}
+
+HintScope::~HintScope()
+{
+    currentArea = previous_;
+}
 
 bool animating()
 {

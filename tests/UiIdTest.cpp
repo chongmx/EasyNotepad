@@ -13,12 +13,16 @@
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
 #include "enp/view/MathView.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/viewmodel/DummyData.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include "FakeTerminalService.h"
+#include "ViewerFixtures.h"
 #include "enp/interfaces/IFileService.h"
+#include "enp/os/Dispatch.h"
+#include "enp/services/DocumentReaderService.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -29,7 +33,14 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <thread>
+#include <tuple>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -69,17 +80,47 @@ struct Failure {
 // Reads real files (the library view's fixtures) and nothing else: no folder is listed or written.
 class ReadOnlyFiles final : public interfaces::IFileService {
 public:
-    std::optional<std::string> read(const std::string& path, std::string* error) override { return os::fs::readFile(path, error); }
+    // Files the test made up (the viewer's sample documents), served before the disk.
+    std::map<std::string, std::string> memory;
+    std::optional<std::string> read(const std::string& path, std::string* error) override
+    {
+        if (const auto it = memory.find(path); it != memory.end())
+            return it->second;
+        return os::fs::readFile(path, error);
+    }
     std::optional<std::string> readRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total) override
     {
+        if (const auto it = memory.find(path); it != memory.end()) {
+            if (total)
+                *total = it->second.size();
+            return offset < it->second.size() ? it->second.substr(size_t(offset), size) : std::string();
+        }
         return os::fs::readFileRange(path, offset, size, total);
     }
     bool write(const std::string&, std::string_view, std::string*) override { return false; }
-    std::vector<interfaces::DirectoryEntry> list(const std::string&) override { return {}; }
-    bool isDirectory(const std::string&) override { return false; }
+    // Folders the test made up (the file dialog's lists): path -> entries.
+    std::map<std::string, std::vector<interfaces::DirectoryEntry>> folders;
+    std::vector<interfaces::DirectoryEntry> list(const std::string& path) override
+    {
+        const auto it = folders.find(path);
+        return it == folders.end() ? std::vector<interfaces::DirectoryEntry>() : it->second;
+    }
+    bool isDirectory(const std::string& path) override { return folders.count(path) > 0; }
     std::string absolute(const std::string& path) override { return path; }
     bool createDirectories(const std::string&) override { return false; }
 };
+
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool kSanitized = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool kSanitized = true;
+#else
+constexpr bool kSanitized = false;
+#endif
+#else
+constexpr bool kSanitized = false;
+#endif
 
 class Harness {
 public:
@@ -106,11 +147,29 @@ public:
     }
 
     viewmodel::NotepadViewModel& vm() { return vm_; }
+    ReadOnlyFiles& files() { return files_; }
+    services::DocumentReaderService& documentReader() { return documentReader_; }
+    // Frames until the reader service has delivered everything asked of it (at most about 10 s).
+    void settleReading()
+    {
+        for (int i = 0; i < 2000 && (vm_.viewer().loadingCount() > 0 || documentReader_.pendingTickets() > 0); ++i) {
+            frame(ImVec2(-100.0f, -100.0f));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        settle();
+    }
     view::MainView& view() { return *view_; }
     const std::vector<Failure>& failures() const { return failures_; }
     int frames() const { return frames_; }
 
     void setContext(std::string where) { where_ = std::move(where); }
+    // The most vertices one draw list held since the last call (then counted afresh).
+    int takeMaxVertices()
+    {
+        const int n = maxVertices_;
+        maxVertices_ = 0;
+        return n;
+    }
     // Following frames come from a finger (ImGui's touch-screen source) instead of a mouse.
     void setTouch(bool touch) { touch_ = touch; }
 
@@ -123,6 +182,7 @@ public:
         io.AddMousePosEvent(pos.x, pos.y);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
         terminalService_.pump();
+        os::dispatch::pump(); // results of background work (the reader service) arrive here, as in the app
         ImGui::NewFrame();
         // Conflicts are evaluated in NewFrame() for the item hovered in the previous frame.
         ImGuiContext& g = *GImGui;
@@ -132,6 +192,11 @@ public:
         if (g.HoveredId != 0 && frame_.inDragRegion(pos) && reportedIds_.insert(g.HoveredId).second)
             failures_.push_back({"item 0x" + hex(g.HoveredId) + " (window \"" + std::string(g.HoveredWindow ? g.HoveredWindow->Name : "?") + "\") lies inside a title-bar drag region", where_, pos});
         ImGui::Render();
+        // The most vertices one draw list held (a window's): with 16-bit indices and a renderer
+        // that cannot offset them (OpenGL ES: Android, the web), past 65535 ImGui asserts.
+        if (const ImDrawData* data = ImGui::GetDrawData())
+            for (const ImDrawList* list : data->CmdLists)
+                maxVertices_ = std::max(maxVertices_, list->VtxBuffer.Size);
         if (g.ErrorCountCurrentFrame > 0) {
             const std::string message = lastError();
             if (reportedErrors_.insert(message + where_).second)
@@ -202,7 +267,8 @@ private:
 
     tests::FakeTerminalService terminalService_; // declared before vm_, which uses it
     ReadOnlyFiles files_;
-    viewmodel::NotepadViewModel vm_{&terminalService_, &files_};
+    services::DocumentReaderService documentReader_{&files_}; // Word, Excel, PowerPoint, PDF: read off the UI thread
+    viewmodel::NotepadViewModel vm_{&terminalService_, &files_, nullptr, nullptr, nullptr, &documentReader_};
     view::Fonts fonts_;
     FakeFrame frame_;
     std::unique_ptr<view::MainView> view_;
@@ -212,6 +278,7 @@ private:
     std::string where_;
     ImVec2 lastPos_{-1.0f, -1.0f};
     int frames_ = 0;
+    int maxVertices_ = 0;
     bool touch_ = false;
 };
 
@@ -286,6 +353,108 @@ int main(int argc, char** argv)
                     h.sweep(0.0f, 0.0f, phone.size.x, phone.size.y, kCoarseStep);
                 }
             }
+            // The on-screen keyboard up (a bottom inset of 300 px): the bottom bar steps aside, so the
+            // editor keeps more of the height.
+            ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
+            h.settle();
+            h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
+            h.settle();
+            auto editorHeight = [] {
+                for (ImGuiWindow* w : GImGui->Windows)
+                    if (w->WasActive && std::strstr(w->Name, "##editorText"))
+                        return w->Size.y;
+                return -1.0f;
+            };
+            const float plain = editorHeight();
+            h.view().setSafeArea(0.0f, 0.0f, 0.0f, 300.0f);
+            h.setContext("phone upright, keyboard up");
+            h.settle();
+            h.sweep(0.0f, 0.0f, 390.0f, 544.0f, kCoarseStep);
+            if (!(plain > 0.0f && editorHeight() > 0.0f && editorHeight() < plain - 100.0f && editorHeight() > plain - 300.0f + 40.0f))
+                std::printf("  FAILED keyboard: the editor is %.0f high, %.0f without the keyboard (the bottom bar should step aside)\n",
+                            editorHeight(), plain), ++checksFailed;
+            h.view().setSafeArea(0.0f, 0.0f, 0.0f, 0.0f);
+            ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.settle();
+        }
+
+        // The file dialog on a phone: a long list scrolls under a finger, a tap on a folder goes in, a
+        // tap on a file picks it without narrowing the list, and the name box keeps its room.
+        {
+            auto child = [&](const char* name) -> ImGuiWindow* {
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    if (w->WasActive && std::strncmp(slash ? slash + 1 : w->Name, name, std::strlen(name)) == 0)
+                        return w;
+                }
+                return nullptr;
+            };
+            auto check = [&](bool ok, const std::string& what) {
+                if (!ok)
+                    std::printf("  FAILED file dialog: %s\n", what.c_str()), ++checksFailed;
+            };
+            std::vector<interfaces::DirectoryEntry> listing;
+            for (int i = 0; i < 40; ++i)
+                listing.push_back({"folder" + std::to_string(i), true, false});
+            for (int i = 0; i < 200; ++i)
+                listing.push_back({"file" + std::to_string(i) + ".txt", false, false});
+            h.files().folders["/pics"] = listing;
+            h.files().folders["/pics/folder0"] = {{"inner.txt", false, false}};
+            for (const ImVec2 size : {ImVec2(390.0f, 844.0f), ImVec2(844.0f, 390.0f)}) {
+                ImGui::GetIO().DisplaySize = size;
+                const std::string shape = std::to_string(int(size.x)) + "x" + std::to_string(int(size.y));
+                h.setContext("file dialog on a phone " + shape);
+                h.setTouch(true);
+                h.vm().fileDialog().show(viewmodel::FileDialogMode::Open, "/pics");
+                h.settle();
+                h.settle();
+                ImGuiWindow* entries = child("##entries");
+                check(entries != nullptr, shape + ": the list of entries is shown");
+                if (!entries) {
+                    h.vm().fileDialog().cancel();
+                    h.settle();
+                    continue;
+                }
+                const ImVec2 middle(entries->Pos.x + entries->Size.x * 0.5f, entries->Pos.y + entries->Size.y * 0.5f);
+                check(entries->Size.y >= size.y * 0.3f,
+                      shape + ": the list has room (" + std::to_string(entries->Size.y) + " of " + std::to_string(size.y) + ")");
+                // A finger drags the list.
+                const float before = entries->Scroll.y;
+                h.frame(middle);
+                h.frame(middle, true);
+                for (int i = 1; i <= 12; ++i)
+                    h.frame(ImVec2(middle.x, middle.y - 150.0f * float(i) / 12.0f), true);
+                h.frame(ImVec2(middle.x, middle.y - 150.0f), false);
+                check(entries->Scroll.y - before > 100.0f && entries->Scroll.y - before < 200.0f,
+                      shape + ": a finger dragging 150 px should scroll the list about 150 px (" +
+                          std::to_string(entries->Scroll.y - before) + ")");
+                for (int i = 0; i < 60; ++i) // the glide after the finger lifted
+                    h.settle();
+                // A tap on a file picks it; the list stays whole.
+                const size_t all = h.vm().fileDialog().visibleEntries().size();
+                ImGui::SetScrollY(entries, entries->ScrollMax.y); // the files are at the end
+                h.settle();
+                h.setContext("tap on a file " + shape);
+                h.click(ImVec2(middle.x, entries->Pos.y + entries->Size.y - 12.0f));
+                h.settle();
+                check(!h.vm().fileDialog().fileName.empty(), shape + ": a tap on a file picks it");
+                check(h.vm().fileDialog().visibleEntries().size() == all,
+                      shape + ": picking a file must not narrow the list (" +
+                          std::to_string(h.vm().fileDialog().visibleEntries().size()) + " of " + std::to_string(all) + ")");
+                // A tap on a folder goes in.
+                entries = child("##entries");
+                ImGui::SetScrollY(entries, 0.0f);
+                h.settle();
+                h.setContext("tap on a folder " + shape);
+                h.click(ImVec2(middle.x, entries->Pos.y + 14.0f)); // the first row: folder0
+                h.settle();
+                check(h.vm().fileDialog().folder() == "/pics/folder0",
+                      shape + ": a tap on a folder goes into it (" + h.vm().fileDialog().folder() + ")");
+                h.vm().fileDialog().cancel();
+                h.settle();
+                h.settle();
+            }
+            h.setTouch(false);
             ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
             h.settle();
         }
@@ -960,6 +1129,307 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // Hints stay inside the app's window, near its edges too (with multi-viewports a hint over the
+        // edge would become an OS window of its own, its transparent background black): every title
+        // bar control hovered, in both looks, its hint inside the display and on the main viewport.
+        for (const bool enhanced : {false, true}) {
+            h.setContext(enhanced ? "title bar hints (enhanced UI)" : "title bar hints");
+            const bool before = h.vm().enhancedUi.get();
+            h.vm().enhancedUi.set(enhanced);
+            h.settle();
+            std::vector<ImVec2> spots;
+            for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                if (e.max.y <= 60.0f && e.max.x > e.min.x)
+                    spots.push_back(ImVec2((e.min.x + e.max.x) * 0.5f, (e.min.y + e.max.y) * 0.5f));
+            for (const ImVec2& at : spots) {
+                for (int i = 0; i < 40; ++i) // past the hover delay
+                    h.frame(at);
+                for (const ImGuiWindow* w : GImGui->Windows) {
+                    if (!w->Active || !(w->Flags & ImGuiWindowFlags_Tooltip))
+                        continue;
+                    const bool inside = w->Pos.x >= -0.5f && w->Pos.y >= -0.5f && w->Pos.x + w->Size.x <= kWidth + 0.5f &&
+                                        w->Pos.y + w->Size.y <= kHeight + 0.5f;
+                    if (!inside || w->Viewport != ImGui::GetMainViewport())
+                        std::printf("  FAILED hint at (%.0f, %.0f) over the window's edge: (%.0f, %.0f) %.0f x %.0f (%s)\n", at.x, at.y, w->Pos.x,
+                                    w->Pos.y, w->Size.x, w->Size.y, enhanced ? "enhanced" : "plain"),
+                            ++checksFailed;
+                }
+            }
+            h.vm().enhancedUi.set(before);
+            h.settle();
+        }
+
+        // Preferences: its title bar's x closes it when clicked with the mouse, in the plain look and
+        // the enhanced one.
+        for (const bool enhanced : {false, true}) {
+            h.setContext(enhanced ? "preferences close button (enhanced UI)" : "preferences close button");
+            const bool before = h.vm().enhancedUi.get();
+            h.vm().enhancedUi.set(enhanced);
+            h.vm().execute(viewmodel::CommandId::Preferences);
+            h.settle();
+            h.settle();
+            const view::UiElement* close = view::UiAutomation::instance().find("dialog:preferences:close");
+            if (!close || !ImGui::IsPopupOpen("Preferences", ImGuiPopupFlags_AnyPopupId)) {
+                std::printf("  FAILED preferences did not open (%s)\n", enhanced ? "enhanced" : "plain"), ++checksFailed;
+            } else {
+                const ImVec2 at((close->min.x + close->max.x) * 0.5f, (close->min.y + close->max.y) * 0.5f);
+                h.click(at);
+                h.settle();
+                if (view::UiAutomation::instance().find("dialog:preferences:close"))
+                    std::printf("  FAILED preferences: a click on its x at (%.0f, %.0f) did not close it (%s)\n", at.x, at.y,
+                                enhanced ? "enhanced" : "plain"),
+                        ++checksFailed;
+            }
+            h.vm().enhancedUi.set(before);
+            h.settle();
+        }
+
+        // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,
+        // sheets and zoom gone through; everything it read and every picture it decoded must go
+        // when it is opened as text, and when it closes.
+        {
+            h.setContext("document viewer");
+            const view::ViewerView& viewer = h.view().editor().viewerView();
+            std::vector<std::string> paths; // served from memory by the test's file service
+            for (const auto& [name, bytes] : viewertest::sampleDocuments()) {
+                paths.push_back("/enp-ui-viewer/" + name);
+                h.files().memory[paths.back()] = bytes;
+            }
+            // More documents from disk to put through the same (a file a user reported):
+            // ENP_UI_VIEWER_FILES="a.pdf;b.docx".
+            if (const char* extra = std::getenv("ENP_UI_VIEWER_FILES")) {
+                std::string list = extra;
+                for (std::size_t at = 0; at <= list.size();) {
+                    const std::size_t end = std::min(list.find(';', at), list.size());
+                    const std::string file = list.substr(at, end - at);
+                    at = end + 1;
+                    std::ifstream in(file, std::ios::binary);
+                    if (file.empty() || !in)
+                        continue;
+                    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    paths.push_back("/enp-ui-viewer/" + file.substr(file.find_last_of("/\\") + 1));
+                    h.files().memory[paths.back()] = std::move(bytes);
+                }
+            }
+            for (int round = 0; round < 2; ++round) {
+                for (const std::string& path : paths) {
+                    h.vm().openFile(path);
+                    model::Document* doc = h.vm().activeDocument();
+                    if (!doc || doc->kind != model::FileKind::Document) {
+                        std::printf("  FAILED document viewer: %s did not open as a document\n", path.c_str());
+                        ++checksFailed;
+                        continue;
+                    }
+                    h.settle(); // the first frames show "Reading": the service reads it off the UI thread
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    h.settleReading();
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                    h.settleReading(); // pages asked for while sweeping
+                    const viewmodel::ViewerViewModel::Entry* model = h.vm().viewer().find(doc->id);
+                    if (!model || model->state != viewmodel::ViewerViewModel::State::Ready)
+                        std::printf("  FAILED document viewer: %s was not read (%s)\n", path.c_str(), model ? model->doc.error.c_str() : "no entry"),
+                            ++checksFailed;
+                    if (!viewer.holds(doc->id))
+                        std::printf("  FAILED document viewer: %s was not read\n", path.c_str()), ++checksFailed;
+                    for (const char* button : {"viewer:zoom-in", "viewer:zoom-out", "viewer:zoom-fit"})
+                        if (const view::UiElement* e = view::UiAutomation::instance().find(button); e && e->activate) {
+                            const std::function<void()> action = e->activate;
+                            action();
+                            h.settle();
+                        }
+                    // Zoomed far out (many pages on the screen at once, as a phone's pinch does):
+                    // every page drawn, its pictures read; one draw list may hold more than 16-bit
+                    // indices reach, which OpenGL ES (Android, the web) cannot draw.
+                    // (Upright on a phone: the most pages on the screen.)
+                    if (const view::UiElement* out = view::UiAutomation::instance().find("viewer:zoom-out"); out && out->activate) {
+                        const std::function<void()> action = out->activate;
+                        ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
+                        h.settle();
+                        h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // the document's screen
+                        h.settle();
+                        for (int i = 0; i < 12; ++i) {
+                            action();
+                            h.settle();
+                        }
+                        h.settleReading();
+                        h.takeMaxVertices();
+                        h.settle();
+                        h.sweep(0.0f, 0.0f, 390.0f, 844.0f, kCoarseStep);
+                        const int most = h.takeMaxVertices();
+                        ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+                        h.settle();
+                        std::printf("  zoomed out on %s: at most %d vertices in one draw list (ImDrawIdx %zu bytes)\n", path.c_str(), most,
+                                    sizeof(ImDrawIdx));
+                        if (sizeof(ImDrawIdx) == 2 && most >= (1 << 16))
+                            std::printf("  FAILED document viewer: %s zoomed out draws %d vertices in one list: past 16-bit indices "
+                                        "(OpenGL ES asserts or draws garbage)\n",
+                                        path.c_str(), most),
+                                ++checksFailed;
+                        if (const view::UiElement* fit = view::UiAutomation::instance().find("viewer:zoom-fit"); fit && fit->activate) {
+                            const std::function<void()> back = fit->activate;
+                            back();
+                            h.settle();
+                        }
+                    }
+                    // Two fingers spread over the reader (a phone's pinch): its content grows.
+                    {
+                        auto reader = []() -> ImGuiWindow* {
+                            ImGuiWindow* found = nullptr;
+                            for (ImGuiWindow* w : GImGui->Windows)
+                                if (w->WasActive && (std::strstr(w->Name, "##viewerPages") || std::strstr(w->Name, "##viewerFlow") ||
+                                                     std::strstr(w->Name, "##viewerSheet_")))
+                                    found = w;
+                            return found;
+                        };
+                        ImGuiWindow* w = reader();
+                        if (!w) {
+                            std::printf("  FAILED document viewer: %s has no reader window to pinch\n", path.c_str());
+                            ++checksFailed;
+                        } else {
+                            const ImVec2 c = w->InnerRect.GetCenter();
+                            const float before = w->ContentSize.x * w->ContentSize.y;
+                            h.setTouch(true);
+                            for (int step = 0; step <= 6; ++step) {
+                                const float d = 40.0f + 20.0f * float(step);
+                                view::touch::pinch(2, c.x - d, c.y, c.x + d, c.y);
+                                const ImVec2 scrolled = w->Scroll;
+                                h.frame(ImVec2(-100.0f, -100.0f));
+                                // The zoomed frame is drawn from its new scroll, not the old one for a frame
+                                // (a jump that grows with the zoom).
+                                if (step > 0 && ((w->Scroll.x == scrolled.x && w->Scroll.y == scrolled.y) || w->ScrollTarget.x != FLT_MAX ||
+                                                 w->ScrollTarget.y != FLT_MAX)) {
+                                    std::printf("  FAILED document viewer: a pinch on %s drew a frame from the old scroll\n", path.c_str());
+                                    ++checksFailed;
+                                    break;
+                                }
+                            }
+                            view::touch::pinch(0, 0.0f, 0.0f, 0.0f, 0.0f);
+                            h.setTouch(false);
+                            h.settle();
+                            h.settle();
+                            w = reader();
+                            const float after = w ? w->ContentSize.x * w->ContentSize.y : 0.0f;
+                            if (!(after > before * 1.5f))
+                                std::printf("  FAILED document viewer: a pinch did not zoom %s in (content %.0f -> %.0f)\n", path.c_str(), before, after),
+                                    ++checksFailed;
+                        }
+                    }
+                    // Flung hard down the document and back (a phone's fast scroll): pages asked for,
+                    // dropped and asked for again while the reader is still busy with them.
+                    if (ImGuiWindow* w = [] {
+                            for (ImGuiWindow* win : GImGui->Windows)
+                                if (win->WasActive && (std::strstr(win->Name, "##viewerPages") || std::strstr(win->Name, "##viewerFlow")))
+                                    return win;
+                            return static_cast<ImGuiWindow*>(nullptr);
+                        }()) {
+                        const ImVec2 c = w->InnerRect.GetCenter();
+                        const float reach = std::min(160.0f, w->InnerRect.GetHeight() * 0.3f);
+                        // A document of many pages: how long the page landed on takes to show its
+                        // text, and its pictures (the reader at work on the pages flown past too).
+                        const viewmodel::ViewerViewModel::Entry* model = h.vm().viewer().find(doc->id);
+                        const bool timed = model && model->doc.shape == model::viewer::Shape::Pages && model->doc.pages.pages.size() > 4;
+                        std::vector<double> textMs, picturesMs;
+                        auto landed = [&]() {
+                            using Clock = std::chrono::steady_clock;
+                            const auto start = Clock::now();
+                            double text = -1.0;
+                            for (int i = 0; i < 1500; ++i) {
+                                h.frame(ImVec2(-100.0f, -100.0f));
+                                const int page = viewer.currentPage(doc->id);
+                                const auto* m = h.vm().viewer().find(doc->id);
+                                if (page < 0 || !m || size_t(page) >= m->doc.pages.pages.size())
+                                    break;
+                                const model::viewer::Page& p = m->doc.pages.pages[size_t(page)];
+                                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+                                if (p.loaded && text < 0.0)
+                                    text = ms;
+                                bool waiting = !p.loaded;
+                                for (const model::viewer::ImageItem& img : p.images)
+                                    waiting = waiting || h.vm().viewer().pictureWaiting(doc->id, img.media);
+                                if (!waiting) {
+                                    textMs.push_back(text);
+                                    picturesMs.push_back(ms);
+                                    h.settle(); // drawn: every picture a texture, none a grey box
+                                    for (int shown = std::max(0, page - 1); shown <= page + 1; ++shown)
+                                        for (const std::string& why : viewer.failedPictures(doc->id, size_t(shown)))
+                                            std::printf("  FAILED document viewer: page %d of %s shows a grey box: %s\n", shown + 1,
+                                                        path.c_str(), why.c_str()),
+                                                ++checksFailed;
+                                    return;
+                                }
+                                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                            }
+                            textMs.push_back(text < 0.0 ? 3000.0 : text);
+                            picturesMs.push_back(3000.0);
+                        };
+                        h.setTouch(true);
+                        for (int fling = 0; fling < (timed ? 16 : 8); ++fling) {
+                            const float dir = fling < 5 ? -1.0f : 1.0f; // finger up: down the document
+                            h.frame(ImVec2(c.x, c.y - dir * reach));
+                            h.frame(ImVec2(c.x, c.y - dir * reach), true);
+                            for (int step = 1; step <= 4; ++step)
+                                h.frame(ImVec2(c.x, c.y - dir * reach + dir * reach * 0.5f * float(step)), true);
+                            h.frame(ImVec2(c.x, c.y + dir * reach), false);
+                            for (int glide = 0; glide < 20; ++glide)
+                                h.frame(ImVec2(-100.0f, -100.0f));
+                            if (timed && fling % 2 == 1) // every other fling lands; the others fly on at once
+                                landed();
+                        }
+                        h.setTouch(false);
+                        h.settleReading();
+                        // Thrown far up and down the document (the scrollbar dragged fast, a long
+                        // fling): ten frames on the way, then the page landed on, timed.
+                        if (timed) {
+                            for (const float to : {0.06f, 0.6f, 0.3f, 0.95f, 0.38f, 0.02f, 0.55f, 0.8f, 0.1f, 0.7f}) {
+                                const float from = w->Scroll.y, target = w->ScrollMax.y * to;
+                                for (int step = 1; step <= 10; ++step) {
+                                    ImGui::SetScrollY(w, from + (target - from) * float(step) / 10.0f);
+                                    h.frame(ImVec2(-100.0f, -100.0f));
+                                }
+                                landed();
+                            }
+                        }
+                        if (timed && !textMs.empty()) {
+                            auto stats = [](std::vector<double> v) {
+                                std::sort(v.begin(), v.end());
+                                return std::make_tuple(v[v.size() / 2], v[std::min(v.size() - 1, v.size() * 95 / 100)], v.back());
+                            };
+                            const auto [t50, t95, tMax] = stats(textMs);
+                            const auto [p50, p95, pMax] = stats(picturesMs);
+                            std::printf("  reading %s after a fling (%zu landings): text %.0f / %.0f / %.0f ms, pictures %.0f / %.0f / %.0f ms (median / 95%% / most)\n",
+                                        path.c_str(), textMs.size(), t50, t95, tMax, p50, p95, pMax);
+                            // 200 ms is the aim for the text, 500 ms for the pictures; 1000 ms the most.
+                            // (Timed only in a plain build: a sanitizer makes the reading 2-3 times slower.)
+                            if (!kSanitized && (tMax > 200.0 || p95 > 500.0 || pMax > 1000.0))
+                                std::printf("  FAILED document viewer: the page landed on took too long to show in %s\n", path.c_str()), ++checksFailed;
+                        }
+                    }
+                    h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                }
+                if (viewer.entryCount() != paths.size())
+                    std::printf("  FAILED document viewer: %zu documents held, expected %zu\n", viewer.entryCount(), paths.size()), ++checksFailed;
+                if (round == 0) { // opened as text: what the viewer read goes at once
+                    const int id = h.vm().activeDocument() ? h.vm().activeDocument()->id : -1;
+                    h.vm().openAsText(h.vm().activeIndex.get());
+                    h.settle();
+                    if (viewer.holds(id))
+                        std::printf("  FAILED document viewer: a document opened as text still holds what was read\n"), ++checksFailed;
+                }
+                while (!h.vm().documents().empty())
+                    h.vm().closeDocument(0);
+                h.settleReading(); // results that were on their way are dropped
+                if (viewer.entryCount() != 0 || viewer.heldImageCount() != 0 || h.view().editor().imageTextureCount() != 0 ||
+                    h.vm().viewer().entryCount() != 0 || h.documentReader().pendingTickets() != 0)
+                    std::printf("  FAILED document viewer: %zu view entries, %zu pictures, %zu textures, %zu models, %zu reads held after closing them\n",
+                                viewer.entryCount(), viewer.heldImageCount(), h.view().editor().imageTextureCount(), h.vm().viewer().entryCount(),
+                                h.documentReader().pendingTickets()),
+                        ++checksFailed;
+            }
+            h.files().memory.clear();
+            h.vm().openStartupDocuments({});
+            h.settle();
+        }
+
         // Libraries and programs: every list of each fixture drawn and swept, names shown both ways;
         // what a file contained must go when it is opened as text, and when it closes.
         {
@@ -1277,6 +1747,14 @@ int main(int argc, char** argv)
             }
         }
 
+        // The automation registry's room is taken once (view::UiAutomation::kReservedElements): every
+        // layout state drawn above must fit in it, or the room is too small and has to be raised.
+        const std::size_t peak = view::UiAutomation::instance().peakElements();
+        std::printf("automation registry: at most %zu elements in a frame, room for %zu\n", peak, view::UiAutomation::kReservedElements);
+        if (peak > view::UiAutomation::kReservedElements)
+            std::printf("  FAILED a frame registered %zu automation elements, more than the %zu reserved: raise kReservedElements\n", peak,
+                        view::UiAutomation::kReservedElements),
+                ++checksFailed;
         for (const Failure& f : h.failures())
             std::printf("  FAILED %s at (%.0f, %.0f) in %s\n", f.what.c_str(), f.mouse.x, f.mouse.y, f.where.c_str());
         std::printf("%d frames, %d ID failure(s), %d failed check(s)\n", h.frames(), int(h.failures().size()), checksFailed);

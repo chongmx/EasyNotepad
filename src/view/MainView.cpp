@@ -33,6 +33,9 @@ namespace {
 
 constexpr float kTopBarHeight = 36.0f;
 constexpr float kStatusBarHeight = 24.0f;
+// A phone: the bottom inset (dp) above which it is the on-screen keyboard, not a system bar (those
+// are under 50); the editor then takes the room of the navigation bar too.
+constexpr float kKeyboardInset = 120.0f;
 constexpr float kGap = 6.0f;
 constexpr float kPanelHeader = 28.0f;
 constexpr float kRounding = 6.0f;
@@ -214,6 +217,7 @@ void MainView::render()
         fx.fadeIn = vm_.glowFadeIn.get();
         fx.fadeOut = vm_.glowFadeOut.get();
         fx.color = ImU32(vm_.glowColor.get());
+        fx.hiddenHints = unsigned(vm_.hiddenHints.get());
         ui::configure(vm_.enhancedUi.get(), fx, palette_, s_);
     }
     emoji_.frame(ImGui::GetTime());
@@ -240,14 +244,26 @@ void MainView::render()
 
     handleShortcuts();
     if (layout_ != Layout::Desktop) {
-        renderCompactTopBar();
-        if (compactRibbon_)
+        {
+            ui::HintScope hints(ui::HintArea::TitleBar);
+            renderCompactTopBar();
+        }
+        if (compactRibbon_) {
+            ui::HintScope hints(ui::HintArea::Ribbon);
             ribbon_.render();
+        }
         const ImVec2 avail = ImGui::GetContentRegionAvail();
+        ui::HintScope hints(ui::HintArea::Panels); // the editor inside sets its own
         renderCompactScreen(avail);
     } else {
-    renderTopBar();
-    ribbon_.render();
+    {
+        ui::HintScope hints(ui::HintArea::TitleBar);
+        renderTopBar();
+    }
+    {
+        ui::HintScope hints(ui::HintArea::Ribbon);
+        ribbon_.render();
+    }
 
     const float statusH = kStatusBarHeight * s_;
     const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -257,13 +273,19 @@ void MainView::render()
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    if (vm_.workspace.get() == WorkspaceMode::Agent)
-        renderAgentWorkspace();
-    else
-        renderCodeWorkspace();
+    {
+        ui::HintScope hints(ui::HintArea::Panels); // the editor inside sets its own
+        if (vm_.workspace.get() == WorkspaceMode::Agent)
+            renderAgentWorkspace();
+        else
+            renderCodeWorkspace();
+    }
     map_.releaseIfMapGone(); // whichever view is shown: the closed folder's map layout goes with it
     ImGui::EndChild();
-    renderStatusBar();
+    {
+        ui::HintScope hints(ui::HintArea::StatusBar);
+        renderStatusBar();
+    }
     }
 
     renderGoToLinePopup();
@@ -285,12 +307,55 @@ void MainView::render()
     renderAboutPopup();
     renderShortcutsDialog();
     engineLab_.render(layout_ != Layout::Desktop, pos, ImVec2(pos.x + size.x, pos.y + size.y));
+    publishDragRegions();
     handleCaptionMouse();
     ImGui::End();
     UiAutomation::instance().endFrame();
     agentCursor_.render(); // on top of everything, using this frame's element positions
     if (layout_ != Layout::Desktop)
         keepWindowsOnScreen();
+}
+
+// Menus, dialogs and floating windows over the title bar take its clicks: what they cover is cut
+// out of the drag regions before they go to the window frame. Without this a dialog tall enough to
+// reach the title bar could not be closed: a press on its x there started a window drag instead.
+void MainView::publishDragRegions()
+{
+    const ImGuiWindow* host = ImGui::GetCurrentWindow();
+    const ImGuiContext& g = *GImGui;
+    for (const ImGuiWindow* w : g.Windows) {
+        if (!w->Active || w->Hidden || w == host || w->Viewport != host->Viewport ||
+            (w->Flags & (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_Tooltip)))
+            continue;
+        const ImVec2 a = w->Pos, b(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y);
+        dragScratch_.clear();
+        for (const ScreenRect& r : dragRegions_) {
+            if (b.x <= r.min.x || a.x >= r.max.x || b.y <= r.min.y || a.y >= r.max.y) {
+                dragScratch_.push_back(r); // not covered
+                continue;
+            }
+            // The parts of r around the window: above, below, left and right of it.
+            const float top = std::max(r.min.y, a.y), bottom = std::min(r.max.y, b.y);
+            if (a.y > r.min.y)
+                dragScratch_.push_back({r.min, ImVec2(r.max.x, a.y)});
+            if (b.y < r.max.y)
+                dragScratch_.push_back({ImVec2(r.min.x, b.y), r.max});
+            if (a.x > r.min.x)
+                dragScratch_.push_back({ImVec2(r.min.x, top), ImVec2(a.x, bottom)});
+            if (b.x < r.max.x)
+                dragScratch_.push_back({ImVec2(b.x, top), ImVec2(r.max.x, bottom)});
+        }
+        dragRegions_.swap(dragScratch_);
+    }
+    if (!frame_)
+        return;
+    const ImVec2 o = ImGui::GetMainViewport()->Pos;
+    dragScratch_.assign(dragRegions_.begin(), dragRegions_.end());
+    for (ScreenRect& r : dragScratch_) {
+        r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
+        r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
+    }
+    frame_->setDragRegions(dragScratch_);
 }
 
 // ---- Input --------------------------------------------------------------------------------------
@@ -565,16 +630,7 @@ void MainView::renderTopBar()
     // right-hand controls.
     dragRegions_.push_back({ImVec2(tabsX0, origin.y), ImVec2(tabsX1, origin.y + 5.0f * s_)});
     dragRegions_.push_back({ImVec2(tabsX1 + 4.0f * s_, origin.y), ImVec2(rightX - 4.0f * s_, origin.y + h)});
-    if (frame_)
-    {
-        const ImVec2 o = ImGui::GetMainViewport()->Pos;
-        std::vector<ScreenRect> local = dragRegions_;
-        for (ScreenRect& r : local) {
-            r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
-            r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
-        }
-        frame_->setDragRegions(local);
-    }
+    // Handed to the window frame at the end of the frame, without what popups cover (publishDragRegions).
 
     ImGui::SetCursorScreenPos(ImVec2(rightX, y));
     renderLayoutToggles();
@@ -930,18 +986,21 @@ void MainView::renderCompactTopBar()
     const float titleX1 = rightX - 6.0f * s_;
     if (titleX1 - titleX0 > 40.0f * s_) {
         const model::Document* doc = vm_.activeDocument();
-        std::string title = doc ? doc->title : std::string("No document");
-        if (doc && doc->modified)
-            title += " " ICON_FA_CIRCLE;
-        title += "  " ICON_FA_CARET_DOWN;
+        const std::string title = doc ? doc->title : std::string("No document");
         ImGui::SetCursorScreenPos(ImVec2(titleX0, y));
-        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col(palette_.hover));
-        if (ImGui::Button((title + "##documents").c_str(), ImVec2(titleX1 - titleX0, button)))
+        if (ImGui::InvisibleButton("##documents", ImVec2(titleX1 - titleX0, button)))
             ImGui::OpenPopup("##allTabs");
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar();
+        // The name is cut short with "..." to leave the unsaved dot and the caret their room.
+        const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+        if (ImGui::IsItemHovered())
+            dl->AddRectFilled(min, max, palette_.hover, 4.0f * s_);
+        const float caretW = ImGui::CalcTextSize(ICON_FA_CARET_DOWN).x;
+        const float textY = min.y + (max.y - min.y - ImGui::GetTextLineHeight()) * 0.5f;
+        const float dotRoom = doc && doc->modified ? 14.0f * s_ : 0.0f;
+        const float end = fit::text(dl, ImVec2(min.x + 8.0f * s_, textY), max.x - caretW - 14.0f * s_ - dotRoom, palette_.text, title);
+        if (doc && doc->modified)
+            dl->AddCircleFilled(ImVec2(end + 9.0f * s_, min.y + (max.y - min.y) * 0.5f), 3.5f * s_, palette_.accent);
+        dl->AddText(ImVec2(end + dotRoom + 8.0f * s_, textY), palette_.textDim, ICON_FA_CARET_DOWN); // the caret follows the name
         registerLastItem("compact:documents", "button", "Open documents", [this]() { openAllTabs_ = true; });
         if (frame_) // the empty part of the bar moves the window
             dragRegions_.push_back({ImVec2(titleX1, origin.y), ImVec2(rightX, origin.y + h)});
@@ -951,15 +1010,7 @@ void MainView::renderCompactTopBar()
         openAllTabs_ = false;
     }
     renderAllTabsPopup(); // (in this ID scope, where it is opened)
-    if (frame_) {
-        const ImVec2 o = ImGui::GetMainViewport()->Pos;
-        std::vector<ScreenRect> local = dragRegions_;
-        for (ScreenRect& r : local) {
-            r.min = ImVec2(r.min.x - o.x, r.min.y - o.y);
-            r.max = ImVec2(r.max.x - o.x, r.max.y - o.y);
-        }
-        frame_->setDragRegions(local);
-    }
+    // Handed to the window frame at the end of the frame, without what popups cover (publishDragRegions).
     ImGui::SetCursorScreenPos(origin);
     ImGui::Dummy(ImVec2(width, h));
     ImGui::PopID();
@@ -975,8 +1026,9 @@ void MainView::renderCompactScreen(ImVec2 size)
     lastActiveDocument_ = activeId;
 
     const bool rail = layout_ == Layout::Landscape;
+    const bool keyboard = !rail && safeArea_.w > kKeyboardInset * s_; // typing: the text keeps the height
     const float navW = rail ? 64.0f * s_ : size.x;
-    const float navH = rail ? size.y : 58.0f * s_;
+    const float navH = rail ? size.y : keyboard ? 0.0f : 58.0f * s_;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 body(rail ? size.x - navW : size.x, rail ? size.y : size.y - navH);
 
@@ -998,14 +1050,16 @@ void MainView::renderCompactScreen(ImVec2 size)
         renderExplorer();
         endPanel();
         break;
-    case Screen::Editor:
+    case Screen::Editor: {
         beginPanel("##editorPanel", nullptr, inner);
+        ui::HintScope editorHints(ui::HintArea::Editor);
         if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
             map_.render(ImGui::GetContentRegionAvail());
         else
             editor_.render(ImGui::GetContentRegionAvail());
         endPanel();
         break;
+    }
     case Screen::Agent: {
         const char* busy = vm_.agent().busy.get() ? "working..." : nullptr;
         beginPanel("##agentSide", ICON_FA_ROBOT "  Agent", inner, busy);
@@ -1018,7 +1072,7 @@ void MainView::renderCompactScreen(ImVec2 size)
         break;
     }
     ImGui::EndChild();
-    if (!rail) {
+    if (!rail && !keyboard) {
         ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + body.y));
         renderNavigation(false, ImVec2(navW, navH));
     }
@@ -2001,10 +2055,12 @@ void MainView::renderCodeWorkspace()
     const float sideW = side ? agentSideWidth_ + gap : 0.0f;
     const float editorW = std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - sideW);
     beginPanel("##editorPanel", nullptr, ImVec2(editorW, topH));
-    if (vm_.editorMode.get() == viewmodel::EditorMode::Map) {
-        map_.render(ImGui::GetContentRegionAvail());
-    } else {
-        renderEditors(ImGui::GetContentRegionAvail());
+    {
+        ui::HintScope hints(ui::HintArea::Editor);
+        if (vm_.editorMode.get() == viewmodel::EditorMode::Map)
+            map_.render(ImGui::GetContentRegionAvail());
+        else
+            renderEditors(ImGui::GetContentRegionAvail());
     }
     endPanel();
     if (side) {
@@ -3470,6 +3526,17 @@ void MainView::renderEnhancedUiSettings()
         vm_.glowColor.set(int(defaults.color));
     }
     ImGui::EndDisabled();
+    // Floating hints, area by area (in both looks, so usable with the enhanced UI off too).
+    ImGui::Spacing();
+    ImGui::TextDisabled("Floating hints in:");
+    const unsigned hidden = unsigned(vm_.hiddenHints.get());
+    for (unsigned a = 0; a < unsigned(ui::HintArea::Count); ++a) {
+        bool shown = ((hidden >> a) & 1u) == 0;
+        if (a % 2 == 1)
+            ImGui::SameLine(230.0f * s_);
+        if (ImGui::Checkbox(ui::hintAreaName(ui::HintArea(a)), &shown))
+            vm_.hiddenHints.set(int(shown ? hidden & ~(1u << a) : hidden | (1u << a)));
+    }
 }
 
 void MainView::renderSyntaxColorsPopup()

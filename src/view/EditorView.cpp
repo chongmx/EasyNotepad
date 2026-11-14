@@ -164,7 +164,7 @@ void squiggle(ImDrawList* dl, float x0, float x1, float y, ImU32 color, float sc
 EditorView::EditorView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
     : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale), layers_(vm, fonts, palette, uiScale),
       data_(vm, fonts, palette, uiScale),
-      library_(vm, palette, uiScale)
+      library_(vm, palette, uiScale), viewer_(vm, fonts, palette, uiScale, images_, emoji_)
 {
     subscriptions_.push_back(vm_.caretRevealRequested.subscribe([this]() { revealCaret_ = true; }));
     subscriptions_.push_back(vm_.focusFindRequested.subscribe([this]() { focusFind_ = true; }));
@@ -287,6 +287,7 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
     };
 
     const MarkdownImage* image = nullptr;
+    RenderedMarkdown::HeldImage* heldImage = nullptr;
     if (doc.kind == model::FileKind::Image) {
         auto held = fileImages_.find(doc.id);
         if (held == fileImages_.end()) {
@@ -295,7 +296,8 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
             const MarkdownImage* acquired = images_.acquire(key, vm_.readWorkspaceFile(doc.path));
             held = fileImages_.emplace(doc.id, RenderedMarkdown::HeldImage{key, acquired}).first;
         }
-        image = held->second.image;
+        heldImage = &held->second;
+        image = heldImage->image;
     }
 
     if (image && image->texture) {
@@ -317,6 +319,8 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
         float scale = 1.0f;
         if (imageFit_)
             scale = std::min({1.0f, avail.x / std::max(1.0f, sourceW), avail.y / std::max(1.0f, sourceH)});
+        touch::zoomView(heldImage->zoom, 0.1f, 16.0f, heldImage->pendingScroll); // a pinch: larger or smaller
+        scale *= heldImage->zoom;
         const ImVec2 shown(sourceW * scale, sourceH * scale);
         const ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(pad + std::max(0.0f, (avail.x - shown.x) * 0.5f), cursor.y + pad * 0.5f));
@@ -367,6 +371,7 @@ void EditorView::pruneClosed()
 {
     data_.releaseClosed(); // a closed document's table or tree goes with it
     library_.releaseClosed();
+    viewer_.releaseClosed();
     // The line layout of the text view is sized by the longest document it has shown: rebuilt for
     // the active one next frame, it should not keep a closed document's size (docs/MEMORY.md 5).
     os::mem::release(rows_);
@@ -538,8 +543,12 @@ void EditorView::render(ImVec2 size, model::Document* shown)
     }
     if (doc->kind != model::FileKind::Text) {
         if (fileImages_.size() > vm_.documents().size() || markdown_.size() > vm_.documents().size() ||
-            library_.entryCount() > vm_.documents().size())
+            library_.entryCount() > vm_.documents().size() || viewer_.entryCount() > vm_.documents().size())
             pruneClosed();
+        if (doc->kind == model::FileKind::Document) { // Word, Excel, PowerPoint, PDF: read and shown
+            viewer_.render(*doc, size);
+            return;
+        }
         if (doc->kind == model::FileKind::Binary) { // a library or program: what it contains
             ImGui::PushFont(fonts_.ui, Fonts::kUiSize);
             const bool shown = library_.render(*doc, size);
@@ -552,6 +561,8 @@ void EditorView::render(ImVec2 size, model::Document* shown)
     }
     if (library_.holds(doc->id))
         library_.release(doc->id); // opened as text: what it contained is freed now
+    if (viewer_.holds(doc->id))
+        viewer_.release(doc->id); // the same for a document the viewer read
     if (auto held = fileImages_.find(doc->id); held != fileImages_.end()) { // opened as text since
         images_.release(held->second.key);
         fileImages_.erase(held);
@@ -840,6 +851,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
         shownMarkdownDoc_ = doc.id;
     }
     panel::beginChild("##markdownText", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    touch::zoomView(md.zoom, 0.4f, 4.0f, md.pendingScroll); // a pinch: the text larger or smaller (it reflows)
     if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
@@ -847,7 +859,7 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     focused_ = ImGui::IsWindowFocused() && !passive_;
     const ImVec2 winPos = ImGui::GetWindowPos();
     const float viewW = ImGui::GetContentRegionAvail().x;
-    const float zoom = vm_.zoom.get();
+    const float zoom = vm_.zoom.get() * md.zoom;
     // A readable column: centred, at most ~90 characters wide unless the ruler set another width.
     const float pad = 24.0f * s_;
     const float widest = std::max(1.0f, viewW - pad * 2.0f);

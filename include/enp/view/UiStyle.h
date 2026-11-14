@@ -26,6 +26,23 @@ struct Effects {
     float fadeIn = 0.12f;        // seconds a control takes to light up
     float fadeOut = 0.28f;       // and to go dark
     ImU32 color = 0;             // the glows' colour; 0: the theme's accent
+    unsigned hiddenHints = 0;    // a bit per HintArea: no hints there (both looks)
+};
+
+// Where a hint is shown, so each area's hints can be switched off on its own (Preferences >
+// Enhanced UI). A hint inside a menu or popup list is a Menus hint and one in a modal dialog a
+// Dialogs hint, whichever area opened it; elsewhere the innermost HintScope says.
+enum class HintArea : unsigned { TitleBar, Menus, Ribbon, Panels, Editor, StatusBar, Dialogs, Count };
+const char* hintAreaName(HintArea area); // "Title bar", "Menus and lists", ...
+class HintScope {
+public:
+    explicit HintScope(HintArea area);
+    ~HintScope();
+    HintScope(const HintScope&) = delete;
+    HintScope& operator=(const HintScope&) = delete;
+
+private:
+    HintArea previous_;
 };
 
 // Once a frame, before the UI: the look, its parameters and its colours.

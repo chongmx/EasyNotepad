@@ -4,6 +4,8 @@
 // cases, not every corner of it; text it cannot place stays plain.
 #pragma once
 
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,6 +23,10 @@ enum Style : unsigned {
     Math = 1u << 6,     // $...$ or \(...\): text is the LaTeX source
     Emoji = 1u << 7,    // one emoji sequence (model/Emoji.h): text is its characters, emoji its picture key
     Display = 1u << 8,  // with Math: $$...$$ within a paragraph, set apart on lines of its own
+    Underline = 1u << 9,
+    PageNumber = 1u << 10, // documents: the number of the page it is drawn on (a PAGE field); text: the saved one
+    PageCount = 1u << 11,  // documents: the number of pages (NUMPAGES)
+    Floating = 1u << 12,   // with Image: placed on the page by the document (FlowDocument::floats), not in the line
 };
 
 struct Span {
@@ -28,10 +34,94 @@ struct Span {
     unsigned style = Plain;
     std::string url;   // for Link and Image
     std::string emoji; // for Emoji: the key of its picture in the emoji pack
+    // Documents read for viewing (Word) give a run its own look; Markdown leaves these at 0.
+    std::uint32_t color = 0;     // text colour (packed like ImU32); 0: the block's
+    std::uint32_t highlight = 0; // background behind the text; 0: none
+    float size = 0.0f;           // points; 0: the block's size
+    std::uint8_t font = 0;       // 1-based into the document's font names (FlowDocument::fonts); 0: the view's
+    float width = 0.0f, height = 0.0f; // Image: its size in points as the document sets it (0: its pixels')
 };
 using Spans = std::vector<Span>;
 
-enum class BlockKind { Paragraph, Heading, Bullet, Numbered, Task, Code, Rule, Table, Math };
+// Drawing: a fixed drawing of a document read for viewing (a chart, a shape): `level` is its index in
+// the document's drawings. The Markdown parser never makes one.
+enum class BlockKind { Paragraph, Heading, Bullet, Numbered, Task, Code, Rule, Table, Math, Drawing };
+
+// A document paragraph's tab stop (Word): where a tab character moves the text to.
+struct TabStop {
+    float pos = 0.0f;        // points from the text column's left edge
+    std::uint8_t kind = 0;   // 0 left, 1 centre, 2 right, 3 decimal (the text's '.' at the stop)
+    char leader = 0;         // what fills the gap: '.', '-', '_', or 0 nothing
+};
+
+// A document table's cell (Word): its look, as the table's style, its parts (header row, banding)
+// and the cell's own properties give it.
+struct CellEdge {
+    float width = 0.0f;      // points; 0: no line
+    std::uint32_t color = 0; // 0: the text's colour
+};
+
+// A paragraph of a document's table cell: its spacing and its lines over and under it (points).
+struct CellParagraph {
+    float before = 0.0f, after = 0.0f;
+    CellEdge top, bottom;
+    float topSpace = 0.0f, bottomSpace = 0.0f; // the lines' distance from the text
+};
+
+struct CellLook {
+    std::uint32_t fill = 0;    // background; 0: none
+    std::uint32_t color = 0;   // text colour where a run sets none; 0: the block's
+    bool bold = false;         // its text bold (a header row's)
+    std::int8_t align = -1;    // its first paragraph's alignment: -1 left, 1 centre, 2 right
+    std::vector<std::int8_t> paragraphAligns; // each paragraph's (the '\n'-separated parts of its text)
+    std::vector<CellParagraph> paragraphs;    // each paragraph's spacing and lines (empty: none)
+    std::int8_t valign = 0;    // 0 top, 1 centre, 2 bottom
+    std::uint8_t span = 1;     // columns it covers (gridSpan)
+    bool covered = false;      // inside the span of a cell before it on its row: not drawn
+    bool merged = false;       // continues the cell above (vMerge): no text, no line between them
+    CellEdge edges[4];         // left, top, right, bottom
+};
+
+// What a document's block (Word) adds to its layout: tab stops, spacing as the author set it,
+// where pages break, a table's grid and cells. Kept beside the block and made only for documents,
+// so Markdown's blocks stay small: within the allocators' small sizes (macOS's nano malloc, 256
+// bytes), where a parsed file's many blocks come and go without growing the footprint.
+struct DocumentLayout {
+    std::vector<TabStop> tabs;    // its tab stops, by position (none: every half inch)
+    // Spacing as the author set it (points), used instead of the renderer's gaps when
+    // `documentSpacing` is set; and where pages break (the page view).
+    bool documentSpacing = false;
+    float spaceAfter = 0.0f;
+    float lineMultiple = 0.0f;    // lines this many times the font's single line; 0: single
+    float lineExact = 0.0f;       // > 0: lines exactly (with lineAtLeast: at least) this tall
+    bool lineAtLeast = false;
+    bool contextual = false;      // no spacing to a neighbour of the same paragraph style (lists)
+    std::uint16_t style = 0;      // its paragraph style, numbered (contextual spacing compares them)
+    bool pageBreakBefore = false; // starts a new page
+    bool keepNext = false;        // kept on the page of the block after it
+    std::vector<float> columns;   // Table: Word's grid, the columns' widths in points (empty: by their text)
+    std::vector<std::vector<CellLook>> looks; // Table: each cell's look, as `rows` (empty: the renderer's own)
+    std::vector<float> rowHeights;   // Table: each row's least height in points (< 0: exactly that; 0: by its text)
+    // A paragraph's borders (pBdr): top, left, bottom, right, each its space (points) from the text.
+    CellEdge borders[4];
+    float borderSpace[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+// An owning pointer that copies what it points to (a block copied is a block of its own).
+template <class T>
+struct DeepPointer {
+    std::unique_ptr<T> p;
+    DeepPointer() = default;
+    DeepPointer(const DeepPointer& o) : p(o.p ? std::make_unique<T>(*o.p) : nullptr) {}
+    DeepPointer& operator=(const DeepPointer& o)
+    {
+        if (this != &o)
+            p = o.p ? std::make_unique<T>(*o.p) : nullptr;
+        return *this;
+    }
+    DeepPointer(DeepPointer&&) noexcept = default;
+    DeepPointer& operator=(DeepPointer&&) noexcept = default;
+};
 
 struct Block {
     BlockKind kind = BlockKind::Paragraph;
@@ -45,6 +135,26 @@ struct Block {
     std::vector<std::vector<Spans>> rows; // Table: cells; the first row is the header
     std::vector<int> align; // Table: per column -1 left, 0 centre, 1 right
     int line = 0;           // first source line (0-based), to go back to the text
+    // Documents read for viewing (Word): the paragraph's own layout, in points; Markdown leaves 0.
+    int textAlign = 0;            // 0 left (or justified), 1 centre, 2 right
+    float size = 0.0f;            // the paragraph's text size; 0: the renderer's (11 points)
+    float indentLeft = 0.0f, indentRight = 0.0f, firstLine = 0.0f; // firstLine < 0: a hanging indent
+    float spaceBefore = 0.0f;     // above the paragraph, beyond the renderer's own gap
+    std::uint32_t shading = 0;    // the paragraph's background (0: none)
+    DeepPointer<DocumentLayout> layout; // a document's block: the rest of its layout (null: Markdown's)
+
+    // The document layout: made on the first write; read from a block without one, an empty one.
+    DocumentLayout& doc()
+    {
+        if (!layout.p)
+            layout.p = std::make_unique<DocumentLayout>();
+        return *layout.p;
+    }
+    const DocumentLayout& doc() const
+    {
+        static const DocumentLayout none;
+        return layout.p ? *layout.p : none;
+    }
 };
 
 std::vector<Block> parse(std::string_view text);

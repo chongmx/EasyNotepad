@@ -1,6 +1,7 @@
 #include "enp/model/FileKind.h"
 
 #include "enp/model/BinaryInfo.h"
+#include "enp/model/viewer/Viewer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -131,6 +132,12 @@ FileType detectFileType(std::string_view path, std::string_view bytes)
     if (bin::recognises(bytes)) {
         type.kind = FileKind::Binary;
         type.format = bin::describe(bytes);
+        return type;
+    }
+    // Documents the viewer reads: PDF by content, the ZIP-based Office formats by extension too.
+    if (std::string format = viewer::viewerFormat(path, bytes); !format.empty()) {
+        type.kind = FileKind::Document;
+        type.format = std::move(format);
         return type;
     }
     for (const Magic& m : kMagics) {

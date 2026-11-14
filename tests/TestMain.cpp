@@ -28,6 +28,12 @@
 #include "enp/model/FileKind.h"
 #include "enp/model/Markdown.h"
 #include "enp/model/Math.h"
+#include "enp/model/package/Inflate.h"
+#include "enp/model/package/Xml.h"
+#include "enp/model/package/Zip.h"
+#include "enp/model/viewer/ImagePack.h"
+#include "enp/model/viewer/NumberFormat.h"
+#include "enp/model/viewer/Viewer.h"
 #include "enp/interfaces/IAgentCliService.h"
 #include "enp/interfaces/ILocalEngineService.h"
 #include "enp/os/Dispatch.h"
@@ -39,11 +45,15 @@
 #include "enp/services/ImageDecoder.h"
 #include "enp/services/ImageEncoder.h"
 #include "enp/services/ProcessService.h"
+#include "enp/services/DocumentReaderService.h"
+#include "enp/viewmodel/ViewerViewModel.h"
 
 #include "AutomationController.h"
 #include "McpBridge.h"
 
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <set>
@@ -1338,6 +1348,10 @@ TEST(file_dialog_open_and_save_as)
     CHECK(entries.size() >= 3 && entries[0].isDirectory && entries[0].name == "src" && entries[1].name == "zeta");
     dialog.fileName = "note";
     CHECK(dialog.visibleEntries().size() == 1 && dialog.visibleEntries()[0].name == "notes.md");
+    dialog.choose({"notes.md", false}, false); // picked from the list: the list stays whole around it
+    CHECK(dialog.fileName == "notes.md" && dialog.visibleEntries().size() == entries.size());
+    dialog.fileName = "notes.m"; // typed again: it filters again
+    CHECK(dialog.visibleEntries().size() == 1);
     dialog.fileName.clear();
     dialog.choose({"src", true}, false);
     CHECK(dialog.folder().size() > 4 && dialog.folder().substr(dialog.folder().size() - 4) == "/src");
@@ -2122,6 +2136,68 @@ TEST(file_types_are_detected_before_loading_and_images_decode)
     CHECK(img.width == 1 && img.height == 1 && img.rgba[1] == 255 && img.rgba[0] == 0);
     CHECK(!services::decodeImage(std::string("RIFF\0\0\0\0WEBPVP8 ", 16), img, note) && note.find("WebP") != std::string::npos);
     CHECK(!services::decodeImage("hello", img, note) && !note.empty());
+
+    // A page's picture made ready off the main thread: packed with a soft mask of another size
+    // (the mask stretched over it), and shrunk to the size it is shown at.
+    {
+        std::vector<std::uint8_t> red(size_t(64) * 32 * 4);
+        for (size_t i = 0; i < red.size(); i += 4) {
+            red[i] = 255;
+            red[i + 3] = 255;
+        }
+        const std::string mask("\x00\xFF", 2); // 2 x 1: the left half hidden
+        std::string bytes = model::viewer::packMasked(model::viewer::encodeQoi(red, 64, 32), mask, 2, 1, true);
+        model::viewer::MaskedImage parts;
+        CHECK(model::viewer::unpackMasked(bytes, parts) && parts.maskWidth == 2 && parts.raw && parts.mask.size() == 2);
+        CHECK(!model::viewer::unpackMasked(bytes.substr(0, 20), parts)); // cut short: not read
+        services::fitImage(bytes, 16);
+        CHECK(services::decodeImage(bytes, img, note) && img.format == "RGBA" && img.width == 16 && img.height == 8);
+        CHECK(img.rgba[0] == 255 && img.rgba[3] == 0);                                  // the left: red, hidden
+        CHECK(img.rgba[size_t(15) * 4 + 3] == 255 && img.rgba[size_t(15) * 4] == 255); // the right: red, shown
+        std::string small = ppm; // small enough: its size kept, as raw pixels (the view only copies them)
+        services::fitImage(small, 16);
+        CHECK(services::decodeImage(small, img, note) && img.format == "RGBA" && img.width == 2 && img.height == 1 && img.rgba[0] == 255);
+        std::string raw = small; // raw pixels that fit: left as they are
+        services::fitImage(raw, 16);
+        CHECK(raw == small);
+        // The fast shrink (whole blocks, then the exact fraction) keeps a flat colour flat and
+        // lands on the size asked: 1000 x 600 grey to 128 across.
+        {
+            std::vector<std::uint8_t> grey(size_t(1000) * 600 * 4, 100);
+            std::string big = model::viewer::packRgba(grey, 1000, 600);
+            services::fitImage(big, 128);
+            CHECK(services::decodeImage(big, img, note) && img.width == 128 && img.height == 77);
+            bool flat = true;
+            for (std::uint8_t v : img.rgba)
+                flat = flat && v == 100;
+            CHECK(flat);
+        }
+        std::string text = "hello"; // not a picture: left for the view to say so
+        services::fitImage(text, 16);
+        CHECK(text == "hello");
+    }
+
+    // A JPEG's header read without decoding it: what decides whether the platform's decoder may
+    // have it (grey or colour, not turned by EXIF; CMYK and turned ones stay with stb_image).
+    {
+        auto segment = [](unsigned marker, const std::string& body) {
+            const std::size_t n = body.size() + 2;
+            return std::string("\xFF", 1) + char(marker) + char((n >> 8) & 0xFF) + char(n & 0xFF) + body;
+        };
+        const std::string soi("\xFF\xD8", 2);
+        const std::string sof3 = segment(0xC0, std::string("\x08\x01\x2C\x02\x58\x03", 6) + std::string(9, '\x01')); // 600 x 300, 3 components
+        const std::string sof4 = segment(0xC2, std::string("\x08\x00\x10\x00\x20\x04", 6) + std::string(12, '\x01')); // 32 x 16, CMYK
+        // EXIF, big-endian TIFF: IFD0 at 8 with one entry, orientation (0x0112) = 6.
+        const std::string exif = segment(0xE1, std::string("Exif\0\0MM\0\x2A\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0", 32));
+        services::JpegInfo info;
+        CHECK(services::readJpegInfo(soi + sof3, info) && info.width == 600 && info.height == 300 && info.components == 3 && info.orientation == 1 &&
+              !info.adobe);
+        CHECK(services::readJpegInfo(soi + exif + sof3, info) && info.orientation == 6);
+        CHECK(services::readJpegInfo(soi + segment(0xEE, std::string("Adobe\0\x64\0\0\0\0\x02", 12)) + sof4, info) && info.adobe &&
+              info.components == 4 && info.width == 32 && info.height == 16);
+        CHECK(!services::readJpegInfo("hello", info));
+        CHECK(!services::readJpegInfo(soi + sof3.substr(0, 6), info)); // cut short
+    }
 
     // Opening: an image and a binary file get a document without text; saving it refuses
     // (it would write the empty buffer over the file); "open as text" loads the bytes.
@@ -5832,6 +5908,8 @@ TEST(damaged_libraries_are_read_without_crashing)
         }
     }
 }
+
+#include "ViewerTests.inc"
 
 TEST(source_rules_no_raw_allocation_outside_the_os_layer)
 {

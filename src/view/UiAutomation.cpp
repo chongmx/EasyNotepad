@@ -22,13 +22,26 @@ void UiAutomation::beginFrame()
 void UiAutomation::endFrame()
 {
     current_.swap(building_);
-    // Both buffers keep the capacity of the busiest frame (a large explorer tree, a long git log):
-    // once the screen holds far fewer elements, the room goes back (docs/MEMORY.md rule 5).
+    // The registry is used every frame, so its room is taken once and kept: kReservedElements in
+    // each buffer from the first frame, more than a busy screen registers. A frame beyond that (a
+    // large explorer tree, a long git log) grows a buffer; once the screen holds far fewer elements
+    // it goes back to exactly the reserved room, so after a close the heap reads as at the start
+    // (docs/MEMORY.md rules 5 and 6).
     const size_t n = current_.size();
-    if (current_.capacity() > 4 * n + 64)
-        current_.shrink_to_fit();
-    if (building_.capacity() > 4 * n + 64)
+    peak_ = std::max(peak_, n);
+    if (current_.capacity() < kReservedElements) {
+        current_.reserve(kReservedElements);
+    } else if (current_.capacity() > kReservedElements && current_.capacity() > 4 * n + 64) {
+        std::vector<UiElement> room;
+        room.reserve(std::max(kReservedElements, n));
+        for (UiElement& e : current_)
+            room.push_back(std::move(e));
+        current_.swap(room);
+    }
+    if (building_.capacity() < kReservedElements || (building_.capacity() > kReservedElements && building_.capacity() > 4 * n + 64)) {
         os::mem::release(building_);
+        building_.reserve(kReservedElements);
+    }
 }
 
 void UiAutomation::add(UiElement element)

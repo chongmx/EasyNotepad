@@ -34,7 +34,8 @@ public:
     FileDialogMode mode() const { return mode_; }
     const std::string& folder() const { return folder_; } // absolute, '/' separated
 
-    // Folders first, then files; in Open mode a typed name (not a path) filters them.
+    // Folders first, then files; in Open mode a typed name (not a path) filters them. A name picked
+    // from the list (choose()) is not a typed one: the list keeps all its entries around it.
     std::vector<Entry> visibleEntries() const;
     // Workspace, Home and (Windows) drives: label and absolute path.
     // Computed when the dialog opens: checking drives can be slow (network, empty card readers).
@@ -73,6 +74,7 @@ private:
     FileDialogMode mode_ = FileDialogMode::Open;
     std::string folder_;
     std::vector<Entry> entries_;
+    std::string pickedName_; // fileName as set by choose(); the list is filtered only by other text
     std::vector<std::string> history_;
     std::vector<std::pair<std::string, std::string>> places_;
     bool storageAccess_ = true;

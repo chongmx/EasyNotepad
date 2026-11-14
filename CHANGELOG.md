@@ -16,6 +16,16 @@ its release notes on GitHub.
   the fade times and the breathing.
 - Agents can rest the pointer on a control (`hover`) to see its hover effect and hint, without
   moving the mouse.
+- **Document viewer**: Word, Excel, PowerPoint and PDF files open read-only, drawn as their
+  authors see them. Word: styles, numbering, run colours and sizes, alignment and indents,
+  tables (aligned, cells of several lines), headers and footers, footnotes and comments, pictures
+  and charts. Excel: number formats (dates, fractions, colour sections), fonts and sizes, rich
+  text, fills, borders, wrapped and rotated text, merges, frozen panes, text running over empty
+  cells, charts and pictures, and sheet tabs along the bottom. PowerPoint: masters and layouts,
+  text styles, shapes with gradients, dashes and arrowheads, rotation, cropped pictures, tables
+  with their table styles, charts and SmartArt. PDF: text with its fonts and spacing, ligatures,
+  rotated text, paths, dashes, clipping, shadings and images, pages read as they come into view.
+  Chinese, Japanese and Korean text uses a system font, loaded only while a document needs it.
 
 ### Changed
 - Hints are a rounded, semi-transparent box without a border; a long hint wraps (about 55
@@ -30,6 +40,40 @@ its release notes on GitHub.
   Home is the shared storage, and its folders and SD cards are places of the dialog.
 - Hints opened from the ribbon (and other places without padding) had their text touching the
   edges of a box too small for it.
+- PDF pictures several times faster: JPEGs are decoded by the platform's own decoder straight at
+  1/2, 1/4 or 1/8 of their size, about the size they are shown (Android 11 and later: the
+  system's AImageDecoder, libjpeg-turbo with NEON; Windows: WIC; macOS: ImageIO; Linux: the
+  system's libjpeg-turbo when installed, found at run time; elsewhere stb_image as before; all
+  behind one function of the OS layer). Only grey and colour JPEGs drawn as stored go that way:
+  CMYK JPEGs and ones an EXIF orientation would turn stay with stb_image, so a PDF's pictures look
+  the same on every platform (Android's decoder always applies EXIF and inverts every CMYK JPEG).
+  A JPEG soft mask is decoded the same way. Pictures of a page are decoded side by side on
+  up to three threads while the page's text has a thread of its own; pictures are handed on as
+  raw pixels (no encoding and decoding on the way) and shrunk with integer block sums; common
+  colour spaces are converted without a per-pixel colour computation; compressed streams are
+  inflated with libdeflate (pinned submodule). Shrunk pictures are kept per document (up to
+  32 MB), so a page scrolled back to shows them at once, and the next page the reader goes to is
+  read ahead.
+- PDF: a picture still being read shows an hourglass, and one that cannot be shown a crossed-out
+  picture, instead of the same empty box for both. A picture that two pages show, taken by one of
+  them and let go, could stay an empty box on the other (seen on a phone): it is read again.
+- PDF: scrolling fast up and down a long document left the page landed on at "Reading the
+  page..." for a second or more, waiting behind every page scrolled past. A page's text now
+  shows first (within a few milliseconds) and each picture follows on its own; the page being
+  read is served first and reads no longer near the view are cancelled at once; nothing new is
+  asked for while the pages fly past. On a 33-page paper with large photos, the page landed on
+  shows its text in under 25 ms and its pictures in under half a second (desktop).
+- Phones, the Open, Open Folder and Save As dialogs: the list had a sliver of the width beside a
+  150 px places pane and the file name a sliver of the line. The places are now buttons above the
+  list, which has the whole width and taller rows; the name has a line of its own, with the
+  buttons below it; the dialog takes the whole screen.
+- Phones: a tap on a folder in those dialogs goes into it (there is no double click on a finger).
+- Picking a file in the Open dialog narrowed the list to that file (its name was taken for a
+  typed filter), so a list of many files was left with one. The list keeps all its entries.
+- Phones: the name of the open document in the top bar and the names in the list of open
+  documents end in "..." when too long, instead of being cut off; a finger dragging the list of
+  open documents scrolls it and never reorders it; the bottom bar steps aside while the on-screen
+  keyboard is up, so the text keeps the height.
 
 ## [1.1.0] - 2026-11-06
 

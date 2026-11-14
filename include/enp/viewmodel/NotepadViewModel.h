@@ -26,6 +26,7 @@
 #include "enp/viewmodel/Settings.h"
 #include "enp/viewmodel/SyntaxColorSettings.h"
 #include "enp/viewmodel/TerminalViewModel.h"
+#include "enp/viewmodel/ViewerViewModel.h"
 
 #include <functional>
 #include <cstdint>
@@ -88,7 +89,8 @@ public:
                               interfaces::IFileService* fileService = nullptr,
                               interfaces::IAgentCliService* agentCli = nullptr,
                               interfaces::IProcessService* processService = nullptr,
-                              interfaces::ILocalEngineService* localEngine = nullptr);
+                              interfaces::ILocalEngineService* localEngine = nullptr,
+                              interfaces::IDocumentReaderService* documentReader = nullptr);
     ~NotepadViewModel();
     NotepadViewModel(const NotepadViewModel&) = delete;
     NotepadViewModel& operator=(const NotepadViewModel&) = delete;
@@ -103,6 +105,7 @@ public:
     // The enhanced UI's parameters (Preferences > Enhanced UI; view/UiStyle.h's Effects).
     Property<float> glowStrength{1.0f};   // every glow's intensity, 0..2
     Property<float> glowReach{12.0f};     // how far a hint's glow reaches, pixels at 100%
+    Property<int> hiddenHints{0};         // a bit per area (view/UiStyle.h HintArea): no floating hints there
     Property<float> iconLight{1.0f};      // the light in a lit icon, 0..2
     Property<bool> glowBreathes{true};    // glows swell and ebb slowly
     Property<float> breathDepth{0.25f};   // by this share of their intensity
@@ -484,6 +487,9 @@ public:
     FindInFilesViewModel& findInFiles() { return findInFiles_; }
     // Completion, Go to Definition and the workspace's symbol index.
     IntellisenseViewModel& intellisense() { return intellisense_; }
+    // Word, Excel, PowerPoint and PDF documents read for viewing (FileKind::Document).
+    ViewerViewModel& viewer() { return viewer_; }
+    const ViewerViewModel& viewer() const { return viewer_; }
     const IntellisenseViewModel& intellisense() const { return intellisense_; }
     // Code suggestions from a model (local or online), IntelliSense's provider.
     CodeAssistant& codeAssistant() { return codeAssistant_; }
@@ -603,6 +609,7 @@ private:
     int nextDocumentId_ = 1;
     int untitledCounter_ = 0;
     bool memoryTrimRequested_ = false;
+    ViewerViewModel viewer_; // after memoryTrimRequested_, which its trim requests set
     std::vector<Subscription> subscriptions_;
     int revealSerial_ = 0;
     void closeWhere(const std::function<bool(int index, const model::Document&)>& close);

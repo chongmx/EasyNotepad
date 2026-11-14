@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cctype>
+#include <cwctype>
 #include <iterator>
 
 namespace enp::os {
@@ -183,6 +184,92 @@ bool readFileInto(const std::string& path, std::string& out, size_t maxBytes, st
     CloseHandle(h);
     out.resize(total);
     return true;
+}
+
+std::string installedFontFile(std::string_view family, bool bold, bool italic)
+{
+    // The registry names each installed face "Family Style (TrueType)" (a collection: "A & B"),
+    // with its file: a name in the Windows fonts folder, or a full path (the user's own fonts).
+    std::wstring want = widen(family);
+    if (bold)
+        want += L" Bold";
+    if (italic)
+        want += L" Italic";
+    auto lower = [](std::wstring s) {
+        for (wchar_t& c : s)
+            c = wchar_t(::towlower(c));
+        return s;
+    };
+    want = lower(want);
+    wchar_t windows[MAX_PATH] = {};
+    const UINT n = ::GetWindowsDirectoryW(windows, MAX_PATH);
+    const std::wstring fontsDir = (n > 0 && n < MAX_PATH ? std::wstring(windows, n) : std::wstring(L"C:\\Windows")) + L"\\Fonts\\";
+    for (HKEY root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+        HKEY key = nullptr;
+        if (::RegOpenKeyExW(root, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 0, KEY_READ, &key) != ERROR_SUCCESS)
+            continue;
+        std::wstring found;
+        for (DWORD i = 0; i < 10000 && found.empty(); ++i) {
+            wchar_t name[512];
+            BYTE data[2048];
+            DWORD nameLen = 512, dataLen = sizeof(data) - sizeof(wchar_t), type = 0;
+            const LONG r = ::RegEnumValueW(key, i, name, &nameLen, nullptr, &type, data, &dataLen);
+            if (r == ERROR_NO_MORE_ITEMS)
+                break;
+            if (r != ERROR_SUCCESS || type != REG_SZ)
+                continue;
+            std::wstring faces(name, nameLen);
+            if (const std::size_t paren = faces.rfind(L" ("); paren != std::wstring::npos)
+                faces.erase(paren);
+            faces = lower(faces);
+            for (std::size_t at = 0; at <= faces.size();) { // each face of "A & B"
+                std::size_t end = faces.find(L" & ", at);
+                if (end == std::wstring::npos)
+                    end = faces.size();
+                if (faces.compare(at, end - at, want) == 0) {
+                    data[dataLen] = 0;
+                    data[dataLen + 1] = 0;
+                    const std::wstring file(reinterpret_cast<const wchar_t*>(data));
+                    found = file.find(L'\\') != std::wstring::npos ? file : fontsDir + file;
+                    break;
+                }
+                at = end + 3;
+            }
+        }
+        ::RegCloseKey(key);
+        if (!found.empty())
+            return narrow(found);
+    }
+    return {};
+}
+
+bool MappedFile::open(const std::string& path)
+{
+    close();
+    HANDLE h = CreateFileW(nativePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    LARGE_INTEGER length{};
+    if (GetFileSizeEx(h, &length) && length.QuadPart > 0 && std::uint64_t(length.QuadPart) <= SIZE_MAX) {
+        if (HANDLE mapping = CreateFileMappingW(h, nullptr, PAGE_READONLY, 0, 0, nullptr)) {
+            if (void* p = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0)) {
+                data_ = p;
+                size_ = size_t(length.QuadPart);
+            }
+            CloseHandle(mapping); // the view keeps the mapping
+        }
+    }
+    CloseHandle(h);
+    return data_ != nullptr;
+}
+
+void MappedFile::close()
+{
+    if (data_)
+        UnmapViewOfFile(data_);
+    data_ = nullptr;
+    size_ = 0;
 }
 
 std::optional<std::string> readFile(const std::string& path, std::string* error)

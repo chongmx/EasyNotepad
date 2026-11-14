@@ -3,6 +3,7 @@
 #include "enp/services/AgentCliService.h"
 #include "enp/services/ProcessService.h"
 #include "enp/services/FileService.h"
+#include "enp/services/DocumentReaderService.h"
 #include "enp/services/LocalEngineService.h"
 #include "enp/services/TerminalService.h"
 
@@ -16,6 +17,7 @@ ServiceContainer ServiceContainer::createDefault()
     c.agentCli = std::make_unique<AgentCliService>();
     c.processes = std::make_unique<ProcessService>();
     c.localEngine = std::make_unique<LocalEngineService>();
+    c.documentReader = std::make_unique<DocumentReaderService>(c.files.get());
     return c;
 }
 

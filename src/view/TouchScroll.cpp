@@ -3,7 +3,9 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include <cfloat>
 #include <cmath>
+#include <initializer_list>
 
 namespace enp::view::touch {
 
@@ -21,6 +23,17 @@ struct State {
 };
 
 State s;
+
+// The pinch: the fingers' distance last reported, and the zoom gathered since the last frame
+// (`gathered`) and this frame's for the view under the fingers (`factor`, at `centre`).
+struct Pinch {
+    bool active = false;
+    float distance = 0.0f, gathered = 1.0f, factor = 1.0f;
+    ImVec2 centre;
+    bool wheel = false; // this frame's factor is Ctrl+wheel's (taken by the window under the mouse)
+};
+
+Pinch p;
 
 // Whether the user may scroll `w` along `axis`: the same windows a mouse wheel or a scrollbar
 // scrolls. A window with scrolling turned off (the app's frame, a body sized to fit) may still
@@ -56,13 +69,92 @@ bool scrollBy(ImGuiWindow* w, int axis, float delta)
     return after != before;
 }
 
+// Scrolls `w` to `to` for this frame's content too, not from the next frame as SetScroll does: the
+// window's content has not been submitted yet, so its start and cursor move with the scroll. Without
+// it a zoomed frame is drawn at the new size from the old scroll, a jump of (scroll × change) that
+// grows with the zoom: thousands of pixels deep in a magnified page.
+void scrollNow(ImGuiWindow* w, ImVec2 to)
+{
+    const ImVec2 d(to.x - w->Scroll.x, to.y - w->Scroll.y);
+    if (d.x == 0.0f && d.y == 0.0f)
+        return;
+    w->Scroll = to;
+    w->ScrollTarget = ImVec2(FLT_MAX, FLT_MAX); // nothing left to apply next frame
+    for (ImVec2* v : {&w->WorkRect.Min, &w->WorkRect.Max, &w->ContentRegionRect.Min, &w->ContentRegionRect.Max, &w->DC.CursorStartPos,
+                      &w->DC.CursorPos, &w->DC.CursorPosPrevLine, &w->DC.CursorMaxPos, &w->DC.IdealMaxPos})
+        *v = ImVec2(v->x - d.x, v->y - d.y);
+    w->ParentWorkRect = w->WorkRect;
+    w->DC.Indent.x -= d.x;
+}
+
 } // namespace
+
+void pinch(int fingers, float x0, float y0, float x1, float y1)
+{
+    if (fingers < 2) {
+        p.active = false;
+        return;
+    }
+    const float d = std::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+    p.centre = ImVec2((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+    if (p.active && p.distance > 1.0f && d > 1.0f)
+        p.gathered *= d / p.distance;
+    p.active = true;
+    p.distance = d;
+}
+
+bool pinching() { return p.active; }
+
+bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
+{
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (pending.x >= 0.0f) { // last frame's zoom: its scroll, now that the content has its size
+        if (window->Scroll.x != pending.x || window->Scroll.y != pending.y) { // cut short by last frame's range
+            ImGui::SetScrollX(window, pending.x);
+            ImGui::SetScrollY(window, pending.y);
+        }
+        pending = ImVec2(-1.0f, -1.0f);
+    }
+    if (p.factor == 1.0f)
+        return false;
+    const ImVec2 c = p.wheel ? ImGui::GetIO().MousePos : p.centre;
+    const ImRect r = window->InnerRect;
+    if (!r.Contains(c) || (p.wheel && !ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)))
+        return false;
+    const float before = zoom;
+    zoom = ImClamp(zoom * p.factor, lowest, highest);
+    p.factor = 1.0f; // taken
+    if (zoom == before)
+        return false;
+    // The point under the fingers stays: its place in the content grows with the zoom.
+    const float k = zoom / before;
+    const ImVec2 at(c.x - window->Pos.x, c.y - window->Pos.y);
+    pending = ImVec2(ImMax(0.0f, IM_TRUNC((window->Scroll.x + at.x) * k - at.x)), ImMax(0.0f, IM_TRUNC((window->Scroll.y + at.y) * k - at.y)));
+    scrollNow(window, pending);
+    return true;
+}
 
 void update(float uiScale)
 {
     ImGuiContext& g = *GImGui;
     const ImGuiIO& io = g.IO;
     const float dt = io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f;
+
+    // This frame's zoom: what the fingers gathered, or Ctrl+wheel's (desktops); one the view
+    // under it did not take last frame is dropped.
+    p.factor = p.gathered;
+    p.gathered = 1.0f;
+    p.wheel = false;
+    if (p.factor == 1.0f && io.KeyCtrl && io.MouseWheel != 0.0f && !p.active) {
+        p.factor = std::pow(1.15f, io.MouseWheel);
+        p.wheel = true;
+    }
+    if (p.active) { // two fingers: no pan, no glide, and the release is not a tap
+        s.pressed = s.panning = false;
+        s.velocity = 0.0f;
+        s.moved = true;
+        return;
+    }
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         s = State{};

@@ -1,10 +1,12 @@
 // File-system access. All paths are UTF-8; '/' is accepted as separator on every platform.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace enp::os::fs {
@@ -72,6 +74,43 @@ std::optional<std::string> readAsset(const std::string& relativePath);
 std::optional<std::string> readFileRange(const std::string& path, std::uint64_t offset, size_t size, std::uint64_t* total = nullptr);
 std::optional<std::string> readAssetRange(const std::string& relativePath, std::uint64_t offset, size_t size,
                                           std::uint64_t* total = nullptr);
+
+// The file of an installed font family in a style ("Cooper Black", bold, italic): its path, or ""
+// when it is not installed. Windows: the fonts the system lists, for everyone and for the user;
+// elsewhere none (documents there use their bundled stand-ins).
+std::string installedFontFile(std::string_view family, bool bold, bool italic);
+
+// A file mapped read-only into memory: its bytes are the system's file cache, not the heap, and
+// go back the moment it is closed (a large file read in place, such as a font). Moves, never copies.
+class MappedFile {
+public:
+    MappedFile() = default;
+    ~MappedFile() { close(); }
+    MappedFile(MappedFile&& other) noexcept { *this = std::move(other); }
+    MappedFile& operator=(MappedFile&& other) noexcept;
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+
+    bool open(const std::string& path); // false (and closed) when it cannot be mapped or is empty
+    void close();
+    bool isOpen() const { return data_ != nullptr; }
+    const void* data() const { return data_; }
+    std::size_t size() const { return size_; }
+
+private:
+    void* data_ = nullptr;
+    std::size_t size_ = 0;
+};
+
+inline MappedFile& MappedFile::operator=(MappedFile&& other) noexcept
+{
+    if (this != &other) {
+        close();
+        data_ = std::exchange(other.data_, nullptr);
+        size_ = std::exchange(other.size_, 0);
+    }
+    return *this;
+}
 
 inline bool exists(const std::string& path) { return stat(path).exists; }
 inline bool isDirectory(const std::string& path) { return stat(path).isDirectory; }
