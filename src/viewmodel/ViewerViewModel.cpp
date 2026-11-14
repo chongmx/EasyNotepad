@@ -112,6 +112,15 @@ void ViewerViewModel::readPictures(Entry& e, std::size_t index)
     for (const mv::ImageItem& img : page.images) {
         if (e.pictures.count(img.media) || pd.media.count(img.media))
             continue;
+        if (const auto cached = e.pictureCache.find(img.media); cached != e.pictureCache.end()) { // read before: at once
+            os::mem::Scope scope("viewer");
+            cached->second.used = ++e.pictureClock;
+            pd.media.emplace(img.media, cached->second.bytes);
+            Entry::Picture& picture = e.pictures[img.media];
+            picture.page = index;
+            picture.done = true;
+            continue;
+        }
         // The largest the page shows it (a cropped picture shows a part: the whole is larger).
         float side = 0.0f;
         for (const mv::ImageItem& other : page.images)
@@ -136,10 +145,57 @@ void ViewerViewModel::readPictures(Entry& e, std::size_t index)
             os::mem::Scope scope("viewer");
             p->second.ticket = 0;
             p->second.done = true;
-            if (!bytes.empty())
+            p->second.failed = bytes.empty();
+            if (!bytes.empty()) {
+                cachePicture(it->second, key, bytes);
                 it->second.doc.pages.media.emplace(key, std::move(bytes));
+            }
         });
     }
+}
+
+void ViewerViewModel::cachePicture(Entry& e, const std::string& key, const std::string& bytes)
+{
+    if (bytes.size() > kPictureCacheBytes / 2 || e.pictureCache.count(key))
+        return;
+    os::mem::Scope scope("viewer");
+    Entry::Cached& c = e.pictureCache[key];
+    c.bytes = bytes;
+    c.used = ++e.pictureClock;
+    e.pictureCacheBytes += bytes.size();
+    while (e.pictureCacheBytes > kPictureCacheBytes) { // the least recently used go
+        auto oldest = e.pictureCache.begin();
+        for (auto it = e.pictureCache.begin(); it != e.pictureCache.end(); ++it)
+            if (it->second.used < oldest->second.used)
+                oldest = it;
+        e.pictureCacheBytes -= oldest->second.bytes.size();
+        e.pictureCache.erase(oldest);
+    }
+}
+
+bool ViewerViewModel::pictureFailed(int id, const std::string& key) const
+{
+    const auto it = entries_.find(id);
+    if (it == entries_.end())
+        return false;
+    const auto p = it->second.pictures.find(key);
+    return p != it->second.pictures.end() && p->second.failed;
+}
+
+bool ViewerViewModel::pictureBytesHere(int id, const std::string& key) const
+{
+    const auto it = entries_.find(id);
+    return it != entries_.end() && it->second.doc.pages.media.count(key) != 0;
+}
+
+void ViewerViewModel::pictureLost(int id, const std::string& key)
+{
+    const auto it = entries_.find(id);
+    if (it == entries_.end())
+        return;
+    const auto p = it->second.pictures.find(key);
+    if (p != it->second.pictures.end() && p->second.done && !p->second.failed)
+        it->second.pictures.erase(p);
 }
 
 bool ViewerViewModel::pictureWaiting(int id, const std::string& key) const
@@ -189,8 +245,14 @@ void ViewerViewModel::showPages(int id, std::size_t first, std::size_t last, std
     last = std::min(last, n - 1);
     first = std::min(first, last);
     current = std::clamp(current, first, last);
-    const std::size_t from = first >= kPagesAround ? first - kPagesAround : 0;
-    const std::size_t to = std::min(n - 1, last + kPagesAround);
+    if (current != e.lastCurrent) {
+        e.direction = current > e.lastCurrent ? 1 : -1;
+        e.lastCurrent = current;
+    }
+    // The pages in view, kPagesAround on each side, and one more the way the reader goes (read
+    // last: the service serves the nearest first).
+    const std::size_t from = first >= kPagesAround + (e.direction < 0 ? 1 : 0) ? first - kPagesAround - (e.direction < 0 ? 1 : 0) : 0;
+    const std::size_t to = std::min(n - 1, last + kPagesAround + (e.direction > 0 ? 1 : 0));
     reader_->focus(e.doc.pages.source.get(), current); // the service serves the nearest first
     // Reads no longer near the view: cancelled (a page far away is dropped below as well).
     for (auto it = e.pageTickets.begin(); it != e.pageTickets.end();) {

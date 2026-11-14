@@ -3,11 +3,13 @@
 #include "enp/os/Memory.h"
 #include "enp/services/ImageDecoder.h"
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <thread>
 #include <tuple>
 
 namespace enp::services {
@@ -45,14 +47,17 @@ struct DocumentReaderService::Shared {
         waiting.emplace(t, std::move(r));
         return t;
     }
-    // The waiting request to run now: the nearest the page in view (see IDocumentReaderService::focus).
-    std::optional<std::pair<Ticket, Request>> take()
+    // The waiting request to run now, of the kind asked for (pictures, or documents and pages'
+    // content): the nearest the page in view (see IDocumentReaderService::focus).
+    std::optional<std::pair<Ticket, Request>> take(bool pictures)
     {
         std::lock_guard<std::mutex> lock(mutex);
         auto best = waiting.end();
         std::tuple<int, int, int, std::size_t, Ticket> bestRank{};
         for (auto it = waiting.begin(); it != waiting.end(); ++it) {
             const Request& r = it->second;
+            if ((r.kind == Request::Kind::Image) != pictures)
+                continue;
             const bool here = r.source.get() == focusSource;
             const std::size_t distance = !here ? 0 : r.page > focusPage ? r.page - focusPage : focusPage - r.page;
             const auto rank = std::make_tuple(r.kind == Request::Kind::Document ? 0 : 1, here ? 0 : 1, r.kind == Request::Kind::Image ? 1 : 0,
@@ -101,7 +106,14 @@ struct DocumentReaderService::Shared {
     }
 };
 
-DocumentReaderService::DocumentReaderService(interfaces::IFileService* files) : files_(files), shared_(std::make_shared<Shared>()) {}
+DocumentReaderService::DocumentReaderService(interfaces::IFileService* files) : files_(files), shared_(std::make_shared<Shared>())
+{
+    const unsigned cores = std::thread::hardware_concurrency();
+    const std::size_t workers = std::clamp<std::size_t>(cores / 2, 1, 3);
+    pictures_.reserve(workers);
+    for (std::size_t i = 0; i < workers; ++i)
+        pictures_.push_back(std::make_unique<os::dispatch::Worker>());
+}
 
 DocumentReaderService::~DocumentReaderService() = default;
 
@@ -112,10 +124,10 @@ DocumentReaderService::~DocumentReaderService() = default;
 // it waits for the task running and drops the queued ones), and a pointer fits inside the task, so
 // a task costs no allocation. (A shared_ptr would be a heap block per request, left in the
 // worker's queue after its request was cancelled, until the worker reached it.)
-os::dispatch::Task DocumentReaderService::nextTask()
+os::dispatch::Task DocumentReaderService::nextTask(bool pictures)
 {
-    return [self = this]() {
-        std::optional<std::pair<Ticket, Request>> job = self->shared_->take();
+    return [self = this, pictures]() {
+        std::optional<std::pair<Ticket, Request>> job = self->shared_->take(pictures);
         if (job)
             run(self->shared_, job->first, std::move(job->second));
     };
@@ -200,7 +212,7 @@ DocumentReaderService::Ticket DocumentReaderService::read(const std::string& pat
     r.files = files_;
     r.documentDone = std::move(done);
     const Ticket ticket = shared_->add(std::move(r));
-    worker_.post(nextTask());
+    content_.post(nextTask(false));
     return ticket;
 }
 
@@ -213,7 +225,7 @@ DocumentReaderService::Ticket DocumentReaderService::readPage(std::shared_ptr<mo
     r.page = index;
     r.pageDone = std::move(done);
     const Ticket ticket = shared_->add(std::move(r));
-    worker_.post(nextTask());
+    content_.post(nextTask(false));
     return ticket;
 }
 
@@ -228,7 +240,10 @@ DocumentReaderService::Ticket DocumentReaderService::readImage(std::shared_ptr<m
     r.maxSide = maxSide;
     r.imageDone = std::move(done);
     const Ticket ticket = shared_->add(std::move(r));
-    worker_.post(nextTask());
+    // A task to every picture worker: whichever is free first takes it (the others find the list
+    // empty and do nothing; a task holds a pointer and a flag, no allocation).
+    for (const auto& worker : pictures_)
+        worker->post(nextTask(true));
     return ticket;
 }
 

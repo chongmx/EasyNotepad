@@ -2,6 +2,7 @@
 
 #include "enp/model/FileKind.h"
 #include "enp/model/viewer/ImagePack.h"
+#include "enp/os/Image.h"
 #include "enp/os/Memory.h"
 
 #include <algorithm>
@@ -46,6 +47,26 @@ inline void* stbRealloc(void* ptr, size_t oldSize, size_t newSize)
 namespace enp::services {
 
 namespace {
+
+bool decodeBytes(std::string_view bytes, DecodedImage& out, std::string& note, int maxSide);
+
+// A JPEG decoded by the platform at about `maxSide` across (os::image); false: decode it here.
+// Only one the platforms all show alike: grey or colour (CMYK is treated differently by each:
+// stb_image does Adobe's the way PDF readers do), and not turned by an EXIF orientation (a PDF's
+// pictures are drawn as stored; Android's decoder always applies it).
+bool decodeScaledJpeg(std::string_view bytes, int maxSide, DecodedImage& out)
+{
+    JpegInfo info;
+    if (!readJpegInfo(bytes, info) || (info.components != 1 && info.components != 3) || info.orientation != 1)
+        return false;
+    out = DecodedImage{};
+    if (!os::image::decodeJpeg(bytes, maxSide, out.rgba, out.width, out.height))
+        return false;
+    out.format = "JPEG";
+    out.sourceWidth = info.width;
+    out.sourceHeight = info.height;
+    return true;
+}
 
 std::uint32_t be32(const unsigned char* p) { return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) | (std::uint32_t(p[2]) << 8) | p[3]; }
 std::uint32_t le32(const unsigned char* p) { return (std::uint32_t(p[3]) << 24) | (std::uint32_t(p[2]) << 16) | (std::uint32_t(p[1]) << 8) | p[0]; }
@@ -206,10 +227,58 @@ void downscale(std::vector<unsigned char>& rgba, int& w, int& h, int maxSide)
     h = nh;
 }
 
+// Whole blocks of `f` x `f` pixels averaged into one (integer sums, one pass over the source:
+// the bulk of a large shrink); the blocks at the right and bottom edges count what they hold.
+void boxReduce(std::vector<unsigned char>& rgba, int& w, int& h, int f)
+{
+    const int nw = (w + f - 1) / f, nh = (h + f - 1) / f;
+    std::vector<unsigned char> out(size_t(nw) * size_t(nh) * 4);
+    std::vector<std::uint32_t> sum(size_t(nw) * 4);
+    for (int oy = 0; oy < nh; ++oy) {
+        std::fill(sum.begin(), sum.end(), 0u);
+        const int y0 = oy * f, y1 = std::min(h, y0 + f);
+        for (int y = y0; y < y1; ++y) {
+            const unsigned char* src = rgba.data() + size_t(y) * size_t(w) * 4;
+            std::uint32_t* s = sum.data();
+            int x = 0;
+            for (int ox = 0; ox < nw; ++ox, s += 4) {
+                const int x1 = std::min(w, x + f);
+                std::uint32_t r = 0, g = 0, b = 0, a = 0;
+                for (; x < x1; ++x, src += 4) {
+                    r += src[0];
+                    g += src[1];
+                    b += src[2];
+                    a += src[3];
+                }
+                s[0] += r;
+                s[1] += g;
+                s[2] += b;
+                s[3] += a;
+            }
+        }
+        unsigned char* dst = out.data() + size_t(oy) * size_t(nw) * 4;
+        const std::uint32_t rows = std::uint32_t(y1 - y0);
+        for (int ox = 0; ox < nw; ++ox) {
+            const std::uint32_t count = rows * std::uint32_t(std::min(w, (ox + 1) * f) - ox * f);
+            for (int k = 0; k < 4; ++k)
+                dst[ox * 4 + k] = static_cast<unsigned char>((sum[size_t(ox) * 4 + size_t(k)] + count / 2) / count);
+        }
+    }
+    rgba.swap(out);
+    w = nw;
+    h = nh;
+}
+
 // The image resized to nw x nh: each new pixel the average of the source pixels it covers
-// (fractions at its edges counted by their share). Shrinking only.
+// (fractions at its edges counted by their share). Shrinking only. A large shrink first averages
+// whole blocks (boxReduce), leaving less than twice the size to this exact pass.
 void resample(std::vector<unsigned char>& rgba, int& w, int& h, int nw, int nh)
 {
+    const int f = std::min(w / std::max(1, nw), h / std::max(1, nh)); // the whole part of the shrink
+    if (f >= 2)
+        boxReduce(rgba, w, h, f);
+    if (w == nw && h == nh)
+        return;
     const float sx = float(w) / float(nw), sy = float(h) / float(nh);
     std::vector<unsigned char> out(size_t(nw) * size_t(nh) * 4);
     std::vector<float> row(size_t(nw) * 4);
@@ -247,10 +316,20 @@ void fitImage(std::string& bytes, int maxSide)
     os::mem::Scope scope("images");
     model::viewer::MaskedImage masked;
     const bool packed = model::viewer::unpackMasked(bytes, masked);
+    const std::string_view source = packed ? masked.image : std::string_view(bytes);
+    maxSide = std::max(1, maxSide);
+    {   // Raw pixels that already fit: as they are.
+        int w = 0, h = 0;
+        std::string_view pixels;
+        if (!packed && model::viewer::unpackRgba(source, w, h, pixels) && std::max(w, h) <= maxSide)
+            return;
+    }
     DecodedImage image;
     std::string note;
-    // At most 16k across (stb's limit): the shrink below brings it down, not decodeImage's.
-    if (!decodeImage(packed ? std::string(masked.image) : bytes, image, note, 1 << 14))
+    // A JPEG through the platform's decoder, decoded at about the size shown (os::image); others,
+    // and a JPEG the platform cannot decode, here (at most 16k across: stb's limit; the shrink
+    // below brings it down, not decodeImage's).
+    if (!decodeScaledJpeg(source, maxSide, image) && !decodeBytes(source, image, note, 1 << 14))
         return;
     if (packed) { // the mask's samples, stretched over the picture when its size differs
         std::vector<unsigned char> alpha;
@@ -259,7 +338,8 @@ void fitImage(std::string& bytes, int maxSide)
             alpha.assign(masked.mask.begin(), masked.mask.begin() + std::ptrdiff_t(size_t(mw) * size_t(mh)));
         } else {
             DecodedImage m;
-            if (!decodeImage(std::string(masked.mask), m, note, 1 << 14))
+            // A JPEG mask at about the picture's size (decoded scaled, like the picture).
+            if (!decodeScaledJpeg(masked.mask, std::max(image.width, image.height), m) && !decodeBytes(masked.mask, m, note, 1 << 14))
                 return;
             mw = m.width;
             mh = m.height;
@@ -267,25 +347,85 @@ void fitImage(std::string& bytes, int maxSide)
             for (size_t i = 0; i < alpha.size(); ++i)
                 alpha[i] = m.rgba[i * 4];
         }
+        std::vector<size_t> column(size_t(image.width));
+        for (int x = 0; x < image.width; ++x)
+            column[size_t(x)] = size_t(std::min(mw - 1, int(std::int64_t(x) * mw / image.width)));
         for (int y = 0; y < image.height; ++y) {
-            const size_t my = size_t(std::min(mh - 1, int(std::int64_t(y) * mh / image.height)));
-            for (int x = 0; x < image.width; ++x) {
-                const size_t mx = size_t(std::min(mw - 1, int(std::int64_t(x) * mw / image.width)));
-                image.rgba[(size_t(y) * size_t(image.width) + size_t(x)) * 4 + 3] = alpha[my * size_t(mw) + mx];
-            }
+            const unsigned char* row = alpha.data() + size_t(std::min(mh - 1, int(std::int64_t(y) * mh / image.height))) * size_t(mw);
+            unsigned char* px = image.rgba.data() + size_t(y) * size_t(image.width) * 4 + 3;
+            for (int x = 0; x < image.width; ++x, px += 4)
+                *px = row[column[size_t(x)]];
         }
     }
     const int side = std::max(image.width, image.height);
     if (side > maxSide) {
-        const float k = float(std::max(1, maxSide)) / float(side);
+        const float k = float(maxSide) / float(side);
         resample(image.rgba, image.width, image.height, std::max(1, int(float(image.width) * k + 0.5f)),
                  std::max(1, int(float(image.height) * k + 0.5f)));
-    } else if (image.format == "QOI") {
-        return; // as it is: nothing to gain
     }
-    // QOI even when the size stays: the main thread then only unpacks it (a JPEG's decode is
-    // several times slower, a frame's time for a photo).
-    bytes = model::viewer::encodeQoi(image.rgba, image.width, image.height);
+    // Raw pixels: the view only copies them into a texture (no decode on the main thread).
+    bytes = model::viewer::packRgba(image.rgba, image.width, image.height);
+}
+
+bool readJpegInfo(std::string_view bytes, JpegInfo& out)
+{
+    out = JpegInfo{};
+    const auto* b = reinterpret_cast<const unsigned char*>(bytes.data());
+    const std::size_t n = bytes.size();
+    if (n < 4 || b[0] != 0xFF || b[1] != 0xD8)
+        return false;
+    std::size_t at = 2;
+    while (at + 4 <= n) {
+        if (b[at] != 0xFF)
+            return false;
+        const unsigned marker = b[at + 1];
+        if (marker == 0xFF) { // fill byte
+            ++at;
+            continue;
+        }
+        if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7) || marker == 0x01) { // no length
+            at += 2;
+            continue;
+        }
+        const std::size_t length = (std::size_t(b[at + 2]) << 8) | b[at + 3];
+        if (length < 2 || at + 2 + length > n)
+            return false;
+        const unsigned char* seg = b + at + 4;
+        const std::size_t size = length - 2;
+        const bool sof = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
+        if (sof && size >= 6) {
+            out.height = (int(seg[1]) << 8) | seg[2];
+            out.width = (int(seg[3]) << 8) | seg[4];
+            out.components = seg[5];
+            return out.width > 0 && out.height > 0 && out.components > 0; // the frame: all that matters is before it
+        }
+        if (marker == 0xEE && size >= 5 && std::memcmp(seg, "Adobe", 5) == 0)
+            out.adobe = true;
+        if (marker == 0xE1 && size >= 14 && std::memcmp(seg, "Exif\0\0", 6) == 0) { // TIFF: the orientation tag of IFD0
+            const unsigned char* t = seg + 6;
+            const std::size_t tn = size - 6;
+            const bool le = t[0] == 'I' && t[1] == 'I';
+            auto u16 = [&](std::size_t o) -> unsigned { return o + 2 > tn ? 0u : le ? unsigned(t[o] | (t[o + 1] << 8)) : unsigned((t[o] << 8) | t[o + 1]); };
+            auto u32 = [&](std::size_t o) -> std::size_t {
+                return o + 4 > tn ? std::size_t(-1) : le ? std::size_t(le32(t + o)) : std::size_t(be32(t + o));
+            };
+            const std::size_t ifd = u32(4);
+            if (ifd != std::size_t(-1) && ifd + 2 <= tn) {
+                const unsigned entries = u16(ifd);
+                for (unsigned i = 0; i < entries && ifd + 2 + (i + 1) * 12 <= tn; ++i) {
+                    const std::size_t e = ifd + 2 + i * 12;
+                    if (u16(e) == 0x0112) {
+                        out.orientation = int(u16(e + 8));
+                        break;
+                    }
+                }
+            }
+        }
+        if (marker == 0xDA) // the scan before any frame header: not a JPEG this reads
+            return false;
+        at += 2 + length;
+    }
+    return false;
 }
 
 std::optional<std::string> inflateRaw(std::string_view data, size_t expectedSize)
@@ -303,11 +443,30 @@ std::optional<std::string> inflateRaw(std::string_view data, size_t expectedSize
 
 bool decodeImage(const std::string& bytes, DecodedImage& out, std::string& note, int maxSide)
 {
+    return decodeBytes(bytes, out, note, maxSide);
+}
+
+namespace {
+
+bool decodeBytes(std::string_view bytes, DecodedImage& out, std::string& note, int maxSide)
+{
     os::mem::Scope scope("images");
     out = DecodedImage{};
     if (bytes.empty()) {
         note = "empty file";
         return false;
+    }
+    {   // Raw pixels (model::viewer::packRgba): copied.
+        std::string_view pixels;
+        if (model::viewer::unpackRgba(bytes, out.width, out.height, pixels)) {
+            out.format = "RGBA";
+            out.rgba.assign(pixels.begin(), pixels.end());
+            out.sourceWidth = out.width;
+            out.sourceHeight = out.height;
+            downscale(out.rgba, out.width, out.height, std::max(16, maxSide));
+            return true;
+        }
+        out.width = out.height = 0;
     }
     const model::FileType type = model::detectFileType({}, bytes);
     out.format = type.format;
@@ -342,5 +501,7 @@ bool decodeImage(const std::string& bytes, DecodedImage& out, std::string& note,
     downscale(out.rgba, out.width, out.height, std::max(16, maxSide));
     return true;
 }
+
+} // namespace
 
 } // namespace enp::services

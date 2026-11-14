@@ -1302,6 +1302,12 @@ int main(int argc, char** argv)
                                 if (!waiting) {
                                     textMs.push_back(text);
                                     picturesMs.push_back(ms);
+                                    h.settle(); // drawn: every picture a texture, none a grey box
+                                    for (int shown = std::max(0, page - 1); shown <= page + 1; ++shown)
+                                        for (const std::string& why : viewer.failedPictures(doc->id, size_t(shown)))
+                                            std::printf("  FAILED document viewer: page %d of %s shows a grey box: %s\n", shown + 1,
+                                                        path.c_str(), why.c_str()),
+                                                ++checksFailed;
                                     return;
                                 }
                                 std::this_thread::sleep_for(std::chrono::milliseconds(2));

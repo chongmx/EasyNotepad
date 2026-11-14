@@ -253,13 +253,22 @@ set(ENP_OS_SOURCES
     src/os/common/Path.cpp
 )
 if(ENP_PLATFORM STREQUAL "windows")
-    list(APPEND ENP_OS_SOURCES src/os/win32/OsWin32.cpp src/os/win32/PtyWin32.cpp)
+    list(APPEND ENP_OS_SOURCES src/os/win32/OsWin32.cpp src/os/win32/PtyWin32.cpp src/os/win32/ImageWin32.cpp)
 elseif(ENP_PLATFORM MATCHES "linux|macos")
     list(APPEND ENP_OS_SOURCES src/os/posix/FsPosix.cpp src/os/unix/OsUnix.cpp src/os/posix/PtyPosix.cpp)
 elseif(ENP_PLATFORM STREQUAL "android")
-    list(APPEND ENP_OS_SOURCES src/os/posix/FsPosix.cpp src/os/android/OsAndroid.cpp src/os/common/PtyNone.cpp)
+    list(APPEND ENP_OS_SOURCES src/os/posix/FsPosix.cpp src/os/android/OsAndroid.cpp src/os/common/PtyNone.cpp src/os/android/ImageAndroid.cpp)
 elseif(ENP_PLATFORM STREQUAL "web")
     list(APPEND ENP_OS_SOURCES src/os/posix/FsPosix.cpp src/os/web/OsWeb.cpp src/os/common/PtyNone.cpp)
+endif()
+# The platform's picture decoder (os/Image.h): WIC, AImageDecoder, ImageIO; on Linux the system's
+# libjpeg-turbo when it has one (found at run time); none on the web.
+if(ENP_PLATFORM STREQUAL "macos")
+    list(APPEND ENP_OS_SOURCES src/os/unix/ImageApple.cpp)
+elseif(ENP_PLATFORM STREQUAL "linux")
+    list(APPEND ENP_OS_SOURCES src/os/unix/ImageTurbo.cpp)
+elseif(ENP_PLATFORM STREQUAL "web")
+    list(APPEND ENP_OS_SOURCES src/os/common/ImageNone.cpp)
 endif()
 if(ENP_PLATFORM STREQUAL "android")
     list(APPEND ENP_OS_SOURCES src/os/android/DownloadAndroid.cpp)
@@ -278,14 +287,17 @@ if(ENP_PLATFORM STREQUAL "macos" AND ENP_MEMORY_ACCOUNTING AND ENP_APPLE_LARGE_A
     target_compile_definitions(enp_os PRIVATE ENP_APPLE_LARGE_ALLOCATION_MMAP=1)
 endif()
 target_include_directories(enp_os PUBLIC include)
+if(ENP_PLATFORM STREQUAL "macos")
+    target_link_libraries(enp_os PRIVATE "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
+endif()
 if(ENP_PLATFORM STREQUAL "windows")
-    target_link_libraries(enp_os PRIVATE comdlg32 shell32 user32 ws2_32)
+    target_link_libraries(enp_os PRIVATE comdlg32 shell32 user32 ws2_32 ole32 windowscodecs)
     target_compile_definitions(enp_os PRIVATE UNICODE _UNICODE)
 elseif(ENP_PLATFORM MATCHES "linux|macos")
     find_package(Threads REQUIRED)
     target_link_libraries(enp_os PUBLIC Threads::Threads)
     if(ENP_PLATFORM STREQUAL "linux")
-        target_link_libraries(enp_os PRIVATE util) # forkpty
+        target_link_libraries(enp_os PRIVATE util ${CMAKE_DL_LIBS}) # forkpty; dlopen (libturbojpeg)
     endif()
 elseif(ENP_PLATFORM STREQUAL "android")
     add_library(native_app_glue STATIC ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
@@ -296,6 +308,20 @@ endif()
 
 # ---- MVVM layers -----------------------------------------------------------------------------
 # model: pure domain data and logic (no OS, no UI)
+# libdeflate (pinned submodule): DEFLATE decompression for the document readers (PDF streams, zip
+# packages). Decompression only; the processor's vector code is chosen at run time.
+set(ENP_LIBDEFLATE_DIR ${ENP_THIRD_PARTY}/libdeflate)
+if(NOT EXISTS ${ENP_LIBDEFLATE_DIR}/libdeflate.h)
+    message(FATAL_ERROR "Submodule 3rdparty/libdeflate missing. Run: git submodule update --init --recursive")
+endif()
+add_library(libdeflate STATIC
+    ${ENP_LIBDEFLATE_DIR}/lib/deflate_decompress.c
+    ${ENP_LIBDEFLATE_DIR}/lib/utils.c
+    ${ENP_LIBDEFLATE_DIR}/lib/x86/cpu_features.c
+    ${ENP_LIBDEFLATE_DIR}/lib/arm/cpu_features.c)
+target_include_directories(libdeflate PUBLIC ${ENP_LIBDEFLATE_DIR})
+set_target_properties(libdeflate PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+
 add_library(enp_model STATIC
     src/model/TextBuffer.cpp
     src/model/Document.cpp
@@ -345,7 +371,7 @@ add_library(enp_model STATIC
 )
 target_include_directories(enp_model PUBLIC include)
 target_include_directories(enp_model PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stb)
-target_link_libraries(enp_model PRIVATE llvm_demangle)
+target_link_libraries(enp_model PRIVATE llvm_demangle libdeflate)
 
 # interfaces: service contracts (header only)
 add_library(enp_interfaces INTERFACE)

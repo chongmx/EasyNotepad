@@ -1,5 +1,6 @@
 #include "enp/model/viewer/ImagePack.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace enp::model::viewer {
@@ -64,6 +65,31 @@ std::uint32_t readBe32(std::string_view b, std::size_t at)
 }
 
 } // namespace
+
+std::string packRgba(const std::uint8_t* rgba, int w, int h)
+{
+    const std::size_t size = std::size_t(std::max(0, w)) * std::size_t(std::max(0, h)) * 4;
+    std::string out;
+    out.reserve(12 + size);
+    out += "enpr";
+    be32(out, std::uint32_t(w));
+    be32(out, std::uint32_t(h));
+    out.append(reinterpret_cast<const char*>(rgba), size);
+    return out;
+}
+
+bool unpackRgba(std::string_view bytes, int& w, int& h, std::string_view& pixels)
+{
+    if (bytes.size() < 12 || bytes.substr(0, 4) != "enpr")
+        return false;
+    const std::uint32_t pw = readBe32(bytes, 4), ph = readBe32(bytes, 8);
+    if (pw == 0 || ph == 0 || pw > (1u << 15) || ph > (1u << 15) || std::uint64_t(pw) * ph * 4 != bytes.size() - 12)
+        return false;
+    w = int(pw);
+    h = int(ph);
+    pixels = bytes.substr(12);
+    return true;
+}
 
 std::string packMasked(std::string_view image, std::string_view mask, int maskWidth, int maskHeight, bool raw)
 {

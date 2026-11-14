@@ -25,6 +25,13 @@ class PageImages {
 public:
     virtual ~PageImages() = default;
     virtual const MarkdownImage* image(const std::string& media) = 0;
+    // The picture is still being read: its box shows an hourglass (a picture that failed shows
+    // a crossed-out picture instead).
+    virtual bool waiting(const std::string& media)
+    {
+        (void)media;
+        return false;
+    }
 };
 
 class PagePainter {

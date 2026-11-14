@@ -160,7 +160,7 @@ struct Page {
 // Reads one page's content on request (PDF). Keeps what it needs of the file. Two steps, so a
 // page's text can be shown before its pictures are ready: load() fills the page with its
 // pictures as image items naming a key, and loadImage() reads one picture's bytes by that key.
-// Used by one thread at a time.
+// Safe to call from several threads (a source serialises its own work).
 class PageSource {
 public:
     virtual ~PageSource() = default;

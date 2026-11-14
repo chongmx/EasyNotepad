@@ -16,6 +16,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace enp::model::viewer {
 namespace pdf {
@@ -1117,6 +1118,50 @@ private:
             const int bit = index * bpc;
             return (row[bit / 8] >> (8 - bpc - bit % 8)) & maxValue;
         };
+        // Common kinds without a colour computed per pixel: 8-bit RGB, grey and CMYK straight from
+        // the bytes; one component of up to 8 bits (indexed, grey, a tint) through a table of every
+        // value made once. The rest per pixel, below.
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(data->data());
+        const std::size_t pixels = std::size_t(w) * std::size_t(h);
+        if (!mask && bpc == 8 && !invert && cs.kind == ColorSpace::Rgb && comps == 3) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                rgba[i * 4] = bytes[i * 3];
+                rgba[i * 4 + 1] = bytes[i * 3 + 1];
+                rgba[i * 4 + 2] = bytes[i * 3 + 2];
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (!mask && bpc == 8 && !invert && cs.kind == ColorSpace::Gray && comps == 1) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = bytes[i];
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (!mask && bpc == 8 && !invert && cs.kind == ColorSpace::Cmyk && comps == 4) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                const unsigned k = 255u - bytes[i * 4 + 3];
+                for (int ch = 0; ch < 3; ++ch)
+                    rgba[i * 4 + std::size_t(ch)] = std::uint8_t(((255u - bytes[i * 4 + std::size_t(ch)]) * k + 127u) / 255u);
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (!mask && comps == 1 && bpc <= 8) {
+            std::uint32_t table[256];
+            for (int s = 0; s <= maxValue; ++s) {
+                float v[4] = {cs.kind == ColorSpace::Indexed ? float(s) : float(s) / float(maxValue), 0, 0, 0};
+                if (invert && cs.kind != ColorSpace::Indexed)
+                    v[0] = 1.0f - v[0];
+                table[s] = toColor(cs, v, 1, 1.0f);
+            }
+            for (int y = 0; y < h; ++y) {
+                const std::uint8_t* row = bytes + std::size_t(y) * rowBytes;
+                std::uint8_t* px = &rgba[std::size_t(y) * std::size_t(w) * 4];
+                for (int x = 0; x < w; ++x, px += 4) {
+                    const std::uint32_t c = table[sample(row, x)];
+                    px[0] = std::uint8_t(c & 0xFF);
+                    px[1] = std::uint8_t((c >> 8) & 0xFF);
+                    px[2] = std::uint8_t((c >> 16) & 0xFF);
+                    px[3] = 255;
+                }
+            }
+        } else
         for (int y = 0; y < h; ++y) {
             const std::uint8_t* row = reinterpret_cast<const std::uint8_t*>(data->data()) + std::size_t(y) * rowBytes;
             for (int x = 0; x < w; ++x) {
@@ -1147,15 +1192,16 @@ private:
         }
         // A soft mask gives the alpha: here when it is raw samples of the same size, otherwise
         // packed with the picture for the reader service.
+        // (Raw pixels: the reader service shrinks them to the size shown, so nothing is encoded here.)
         SoftMask sm;
         if (!softMask(image, sm))
-            return encodeQoi(rgba, w, h);
+            return packRgba(rgba, w, h);
         if (sm.raw && sm.width == w && sm.height == h) {
             for (std::size_t i = 0; i < std::size_t(w) * std::size_t(h); ++i)
                 rgba[i * 4 + 3] = std::uint8_t(sm.bytes[i]);
-            return encodeQoi(rgba, w, h);
+            return packRgba(rgba, w, h);
         }
-        return packMasked(encodeQoi(rgba, w, h), sm.bytes, sm.width, sm.height, sm.raw);
+        return packMasked(packRgba(rgba, w, h), sm.bytes, sm.width, sm.height, sm.raw);
     }
 
     struct SoftMask {
@@ -1464,8 +1510,13 @@ public:
     // The pictures the pages read so far draw, by key: a few pointers each, for the document's life.
     std::map<std::string, PictureRef> pictures;
 
+    // The reader service reads a page's content on one thread and its pictures on others: the
+    // file's object cache, the fonts and the pictures' table are used by one at a time.
+    std::mutex mutex;
+
     bool load(std::size_t index, Page& page) override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (index >= pages.size())
             return false;
         PageReader reader(file, page, pictures, fonts);
@@ -1475,6 +1526,7 @@ public:
 
     std::string loadImage(const std::string& key) override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         const auto it = pictures.find(key);
         if (it == pictures.end())
             return {};

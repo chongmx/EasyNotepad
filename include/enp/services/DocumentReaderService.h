@@ -1,9 +1,10 @@
-// IDocumentReaderService on one background thread kept for the service's lifetime
-// (os::dispatch::Worker: the same thread and malloc arena every time, docs/MEMORY.md rule 10).
-// Requests wait in the service's own list, not the worker's queue: each time the worker is free
-// it takes the one nearest the page in view, so the page the reader stopped on never waits behind
-// the pages scrolled past. Files are read through the file service; what is read is counted in
-// the `viewer` scope.
+// IDocumentReaderService on background threads kept for the service's lifetime
+// (os::dispatch::Worker: the same threads and malloc arenas every time, docs/MEMORY.md rule 10):
+// one for documents and pages' content, and a few for pictures (decoded and shrunk side by side),
+// so a page's text never waits behind a picture. Requests wait in the service's own list, not the
+// workers' queues: each time a worker is free it takes the one of its kind nearest the page in
+// view, so the page the reader stopped on never waits behind the pages scrolled past. Files are
+// read through the file service; what is read is counted in the `viewer` scope.
 //
 // Memory: a waiting request holds its document's page source (shared_ptr) and its callback; a
 // cancel takes it out of the list at once, so a closed document's source goes with its last
@@ -16,6 +17,7 @@
 #include "enp/os/Dispatch.h"
 
 #include <memory>
+#include <vector>
 
 namespace enp::services {
 
@@ -39,11 +41,14 @@ public:
 private:
     struct Request; // one waiting request: what to read, and the callback for its result
     struct Shared;  // the waiting requests and the tickets, shared with the worker's tasks
-    os::dispatch::Task nextTask();
+    os::dispatch::Task nextTask(bool pictures);
     static void run(const std::shared_ptr<Shared>& shared, Ticket ticket, Request r);
     interfaces::IFileService* files_;
     std::shared_ptr<Shared> shared_;
-    os::dispatch::Worker worker_; // last: destroyed first, waiting for the task running then
+    // Last: destroyed first, each waiting for the task it runs then. Content (documents, pages),
+    // then the picture workers: half the processor's cores, 1 to 3.
+    os::dispatch::Worker content_;
+    std::vector<std::unique_ptr<os::dispatch::Worker>> pictures_;
 };
 
 } // namespace enp::services

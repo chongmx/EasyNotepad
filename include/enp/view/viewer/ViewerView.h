@@ -52,6 +52,8 @@ public:
     }
     std::size_t entryCount() const { return entries_.size(); }
     std::size_t heldImageCount() const; // for the tests: pictures decoded for open documents
+    // For the tests: the pictures of page `page` it holds that could not be shown, with why.
+    std::vector<std::string> failedPictures(int documentId, std::size_t page) const;
     // The scripts (model::viewer::Script bits) of what the open documents have shown: the fonts
     // they need merged in (ScriptFonts).
     std::uint8_t scripts() const;
@@ -115,12 +117,8 @@ private:
     public:
         PageImageSource(ViewerView& view, Entry& entry, std::size_t page) : view_(view), entry_(entry), page_(page) {}
         // A picture still being read is drawn as a placeholder (nothing taken from the view-model yet).
-        const MarkdownImage* image(const std::string& media) override
-        {
-            if (view_.vm_.viewer().pictureWaiting(entry_.id, media))
-                return nullptr;
-            return view_.image(entry_, entry_.pageImages[page_], media);
-        }
+        const MarkdownImage* image(const std::string& media) override;
+        bool waiting(const std::string& media) override { return view_.vm_.viewer().pictureWaiting(entry_.id, media); }
 
     private:
         ViewerView& view_;

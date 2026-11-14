@@ -11,3 +11,7 @@
 	path = 3rdparty/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp.git
 	shallow = true
+[submodule "3rdparty/libdeflate"]
+	path = 3rdparty/libdeflate
+	url = https://github.com/ebiggers/libdeflate.git
+	ignore = dirty

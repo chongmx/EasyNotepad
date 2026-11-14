@@ -40,6 +40,23 @@ its release notes on GitHub.
   Home is the shared storage, and its folders and SD cards are places of the dialog.
 - Hints opened from the ribbon (and other places without padding) had their text touching the
   edges of a box too small for it.
+- PDF pictures several times faster: JPEGs are decoded by the platform's own decoder straight at
+  1/2, 1/4 or 1/8 of their size, about the size they are shown (Android 11 and later: the
+  system's AImageDecoder, libjpeg-turbo with NEON; Windows: WIC; macOS: ImageIO; Linux: the
+  system's libjpeg-turbo when installed, found at run time; elsewhere stb_image as before; all
+  behind one function of the OS layer). Only grey and colour JPEGs drawn as stored go that way:
+  CMYK JPEGs and ones an EXIF orientation would turn stay with stb_image, so a PDF's pictures look
+  the same on every platform (Android's decoder always applies EXIF and inverts every CMYK JPEG).
+  A JPEG soft mask is decoded the same way. Pictures of a page are decoded side by side on
+  up to three threads while the page's text has a thread of its own; pictures are handed on as
+  raw pixels (no encoding and decoding on the way) and shrunk with integer block sums; common
+  colour spaces are converted without a per-pixel colour computation; compressed streams are
+  inflated with libdeflate (pinned submodule). Shrunk pictures are kept per document (up to
+  32 MB), so a page scrolled back to shows them at once, and the next page the reader goes to is
+  read ahead.
+- PDF: a picture still being read shows an hourglass, and one that cannot be shown a crossed-out
+  picture, instead of the same empty box for both. A picture that two pages show, taken by one of
+  them and let go, could stay an empty box on the other (seen on a phone): it is read again.
 - PDF: scrolling fast up and down a long document left the page landed on at "Reading the
   page..." for a second or more, waiting behind every page scrolled past. A page's text now
   shows first (within a few milliseconds) and each picture follows on its own; the page being

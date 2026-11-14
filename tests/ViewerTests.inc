@@ -630,10 +630,9 @@ TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             std::vector<interfaces::IDocumentReaderService::Ticket> tickets;
             int delivered = 0;
-            for (std::size_t i = 0; i < 10; ++i) {
+            // (Pages: the content worker is the one held up; pictures have workers of their own.)
+            for (std::size_t i = 0; i < 20; ++i)
                 tickets.push_back(reader.readPage(source, i, [&delivered](mv::Page) { ++delivered; }));
-                tickets.push_back(reader.readImage(source, i, "pdf-image-" + std::to_string(6 + 3 * i), 64, [&delivered](std::string) { ++delivered; }));
-            }
             CHECK(reader.waitingRequests() == 20 && source.use_count() > 2);
             for (const auto t : tickets)
                 reader.cancel(t);
@@ -643,6 +642,39 @@ TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
             CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
             CHECK(delivered == 0);
         }
+    }
+    CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+
+    // A page scrolled far away (dropped) and back: its picture comes from the cache, not read again.
+    {
+        viewmodel::ViewerViewModel viewer(&reader, nullptr);
+        viewer.open(1, "/docs/many.pdf");
+        CHECK(pumpUntil([&]() { return viewer.find(1)->state != State::Loading; }));
+        auto showUntilDone = [&](std::size_t page) {
+            return pumpUntil([&]() {
+                viewer.showPages(1, page, page, page);
+                return viewer.loadingCount() == 0;
+            });
+        };
+        CHECK(showUntilDone(0));
+        const std::string key = viewer.find(1)->doc.pages.pages[0].images.at(0).media;
+        CHECK(!viewer.takeMedia(1, key).empty()); // the view took it
+        CHECK(showUntilDone(20) && !viewer.find(1)->doc.pages.pages[0].loaded); // page 1 dropped
+        viewer.showPages(1, 0, 0, 0);
+        CHECK(pumpUntil([&]() { // its content read again...
+            viewer.showPages(1, 0, 0, 0);
+            return viewer.find(1)->doc.pages.pages[0].loaded;
+        }));
+        viewer.showPages(1, 0, 0, 0);
+        CHECK(viewer.pictureBytesHere(1, key) && !viewer.pictureWaiting(1, key)); // ...its picture at once
+        CHECK(viewer.find(1)->pictureCacheBytes > 0 && viewer.find(1)->pictureCacheBytes <= viewmodel::ViewerViewModel::kPictureCacheBytes);
+        // Taken, then lost (another page that shows it let go): forgotten, and given again.
+        CHECK(!viewer.takeMedia(1, key).empty() && !viewer.pictureBytesHere(1, key));
+        viewer.pictureLost(1, key);
+        CHECK(viewer.pictureWaiting(1, key));
+        viewer.showPages(1, 0, 0, 0);
+        CHECK(viewer.pictureBytesHere(1, key) && !viewer.pictureWaiting(1, key));
+        viewer.release(1);
     }
     CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
 

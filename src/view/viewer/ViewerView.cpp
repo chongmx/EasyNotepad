@@ -93,6 +93,37 @@ std::uint8_t ViewerView::scripts() const
     return scripts;
 }
 
+const MarkdownImage* ViewerView::PageImageSource::image(const std::string& media)
+{
+    viewmodel::ViewerViewModel& model = view_.vm_.viewer();
+    if (model.pictureWaiting(entry_.id, media))
+        return nullptr;
+    std::map<std::string, HeldImage>& held = entry_.pageImages[page_];
+    // Read, but its bytes are gone and no other page holds the picture: read it again rather
+    // than keep a crossed-out box (a picture two pages show, taken by one that let go of it).
+    if (!held.count(media) && !model.pictureBytesHere(entry_.id, media) && !model.pictureFailed(entry_.id, media) &&
+        !view_.images_.holds(entry_.keyPrefix + media)) {
+        model.pictureLost(entry_.id, media);
+        return nullptr;
+    }
+    return view_.image(entry_, held, media);
+}
+
+std::vector<std::string> ViewerView::failedPictures(int documentId, std::size_t page) const
+{
+    std::vector<std::string> out;
+    const auto e = entries_.find(documentId);
+    if (e == entries_.end())
+        return out;
+    const auto held = e->second.pageImages.find(page);
+    if (held == e->second.pageImages.end())
+        return out;
+    for (const auto& [media, h] : held->second)
+        if (!h.image || h.image->failed)
+            out.push_back(media + ": " + (h.image ? h.image->note : std::string("none")));
+    return out;
+}
+
 std::size_t ViewerView::heldImageCount() const
 {
     std::size_t n = 0;

@@ -45,9 +45,27 @@ public:
             interfaces::IDocumentReaderService::Ticket ticket = 0;
             std::size_t page = 0;
             bool done = false;
+            bool failed = false; // read, and it cannot be (its bytes are empty)
         };
         std::map<std::string, Picture> pictures;
+        // Pictures read and shrunk, kept (a copy) for when their page is read again: a page
+        // scrolled back to shows them at once. The least recently used go first past
+        // kPictureCacheBytes; all go with the document.
+        struct Cached {
+            std::string bytes;
+            std::uint64_t used = 0;
+        };
+        std::map<std::string, Cached> pictureCache;
+        std::size_t pictureCacheBytes = 0;
+        std::uint64_t pictureClock = 0;
+        // The page being read last time, and which way the reader goes (+1 down, -1 up): the next
+        // page that way is read ahead.
+        std::size_t lastCurrent = 0;
+        int direction = 1;
     };
+
+    // Shrunk pictures kept per document (Entry::pictureCache).
+    static constexpr std::size_t kPictureCacheBytes = std::size_t(32) << 20;
 
     // Pages kept read on each side of the ones shown; pages further away are dropped.
     static constexpr std::size_t kPagesAround = 1;
@@ -75,6 +93,13 @@ public:
     // The picture `key` of a PDF page is still being read (or not asked for yet): the view draws a
     // placeholder and does not take its bytes.
     bool pictureWaiting(int id, const std::string& key) const;
+    // The picture `key` was read and cannot be shown (the view draws it crossed out).
+    bool pictureFailed(int id, const std::string& key) const;
+    // Its bytes are here, not taken by the view yet.
+    bool pictureBytesHere(int id, const std::string& key) const;
+    // The view has no picture for `key`: it was read, but its bytes went before the view took them
+    // (another page that shows it took them and let go). It is forgotten, so it is read again.
+    void pictureLost(int id, const std::string& key);
     // An image's encoded bytes, moved out (the view decodes them once; a page read again puts them
     // back). Empty when there are none.
     std::string takeMedia(int id, const std::string& key);
@@ -88,6 +113,7 @@ public:
 private:
     void readPage(Entry& e, std::size_t index);
     void readPictures(Entry& e, std::size_t index);
+    static void cachePicture(Entry& e, const std::string& key, const std::string& bytes);
     void dropPage(Entry& e, std::size_t index);
 
     interfaces::IDocumentReaderService* reader_;

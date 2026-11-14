@@ -4,6 +4,7 @@
 #include "enp/view/DocumentFonts.h"
 #include "enp/view/MarkdownImages.h"
 
+#include "IconsFontAwesome6.h"
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -324,10 +325,22 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
             if (img.flipV)
                 std::swap(v0, v1);
             const int first = dl->VtxBuffer.Size;
-            if (image && image->texture)
+            if (image && image->texture) {
                 dl->AddImage(image->texture->GetTexRef(), a, b, ImVec2(u0, v0), ImVec2(u1, v1));
-            else
+            } else {
                 dl->AddRectFilled(a, b, IM_COL32(128, 128, 128, 40));
+                // Being read: an hourglass. Could not be shown: a picture crossed out.
+                const bool waiting = images && images->waiting(img.media), failed = !waiting && image && image->failed;
+                const char* mark = waiting ? ICON_FA_HOURGLASS_HALF : failed ? ICON_FA_IMAGE : nullptr;
+                const ImVec2 size = mark ? ImGui::CalcTextSize(mark) : ImVec2(0.0f, 0.0f);
+                if (mark && b.x - a.x > size.x * 2.0f && b.y - a.y > size.y * 2.0f) {
+                    const ImVec2 at((a.x + b.x - size.x) * 0.5f, (a.y + b.y - size.y) * 0.5f);
+                    dl->AddText(at, IM_COL32(110, 110, 110, 200), mark);
+                    if (failed)
+                        dl->AddLine(ImVec2(at.x - 2.0f, at.y + size.y + 1.0f), ImVec2(at.x + size.x + 2.0f, at.y - 1.0f), IM_COL32(200, 70, 70, 220),
+                                    2.0f);
+                }
+            }
             rotateVertices(dl, first, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), img.rotation);
             break;
         }
