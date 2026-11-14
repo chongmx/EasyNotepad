@@ -44,6 +44,9 @@ public:
     void release(int documentId); // opened as text: the view's caches go at once
     void releaseClosed();         // every entry whose document has closed
     bool holds(int documentId) const { return entries_.count(documentId) != 0; }
+    // For the tests: the page under screen position `at` in a paged document as drawn last frame,
+    // and the point on it in points (from its top left); -1 when none is shown.
+    int pagePointAt(int documentId, ImVec2 at, ImVec2& point) const;
     // The page being read in a paged document (tests); -1 when it is not shown.
     int currentPage(int documentId) const
     {
@@ -88,6 +91,16 @@ private:
         int currentPage = 0;
         int goToPage = -1;          // scroll to this page's top next frame (the toolbar's arrows, Home / End)
         float scrollSpeed = 0.0f;   // pages: how fast the content moves (pixels a second, smoothed)
+        // Pages: the point a pinch zooms about, kept while the fingers stay down (found once:
+        // found again each frame from a scroll of whole pixels, it would creep).
+        struct ZoomAnchor {
+            bool set = false;
+            int page = 0;
+            float x = 0.0f, y = 0.0f; // on the page, in points
+            float beyond = 0.0f;      // pixels past the page's top or bottom edge (in a gap: a fixed size)
+        } zoomAnchor;
+        ImVec2 pagesOrigin;         // pages: the window's top left, and the width pages are laid out in
+        float pagesWidth = 0.0f;    // (last frame's: what pagePointAt reads)
         std::uint8_t scripts = 0;   // of the document and the pages it has shown
         // Word: the page view (else reflowed); its pages as laid out at `wordScale` for `wordGeneration`.
         bool reflow = false;

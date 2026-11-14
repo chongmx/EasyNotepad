@@ -40,6 +40,10 @@ its release notes on GitHub.
   Home is the shared storage, and its folders and SD cards are places of the dialog.
 - Hints opened from the ribbon (and other places without padding) had their text touching the
   edges of a box too small for it.
+- PDF and slides: a pinch (or Ctrl+wheel) did not zoom about the point under the fingers: the
+  pages slid away while zooming, further the deeper into the document (a page and more, 90 pages
+  down a long PDF), as the gaps between pages keep their size while the pages grow. The point
+  under the fingers is now found on its page and kept there for the whole pinch.
 - PDF pictures several times faster: JPEGs are decoded by the platform's own decoder straight at
   1/2, 1/4 or 1/8 of their size, about the size they are shown (Android 11 and later: the
   system's AImageDecoder, libjpeg-turbo with NEON; Windows: WIC; macOS: ImageIO; Linux: the

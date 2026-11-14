@@ -109,6 +109,24 @@ const MarkdownImage* ViewerView::PageImageSource::image(const std::string& media
     return view_.image(entry_, held, media);
 }
 
+int ViewerView::pagePointAt(int documentId, ImVec2 at, ImVec2& point) const
+{
+    const auto it = entries_.find(documentId);
+    if (it == entries_.end() || it->second.pageTop.size() < 2 || it->second.pageScale <= 0.0f)
+        return -1;
+    const Entry& e = it->second;
+    const viewmodel::ViewerViewModel::Entry* model = vm_.viewer().find(documentId);
+    if (!model || model->doc.pages.pages.size() + 1 != e.pageTop.size())
+        return -1;
+    const int n = int(model->doc.pages.pages.size());
+    const float y = e.scroll.y + at.y - e.pagesOrigin.y;
+    const int i = std::clamp(int(std::upper_bound(e.pageTop.begin(), e.pageTop.begin() + n, y) - e.pageTop.begin()) - 1, 0, n - 1);
+    const mv::Page& p = model->doc.pages.pages[size_t(i)];
+    const float left = std::max(16.0f * s_, (e.pagesWidth - p.width * e.pageScale) * 0.5f);
+    point = ImVec2((e.scroll.x + at.x - e.pagesOrigin.x - left) / e.pageScale, (y - e.pageTop[size_t(i)]) / e.pageScale);
+    return i;
+}
+
 std::vector<std::string> ViewerView::failedPictures(int documentId, std::size_t page) const
 {
     std::vector<std::string> out;
@@ -1593,13 +1611,43 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     const bool slides = d.format != "PDF document";
     panel::beginChild("##viewerPages", size, IM_COL32(110, 110, 110, 60), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_HorizontalScrollbar);
-    {
-        float z = e.zoom > 0.0f ? e.zoom : 1.0f; // a pinch: from the fit (0) or the zoom set
-        if (touch::zoomView(z, 0.25f, 8.0f, e.pendingScroll))
-            e.zoom = z;
-    }
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float pad = 16.0f * s_, gap = 14.0f * s_;
+    // A pinch (or Ctrl+wheel) zooms about the point under the fingers. The pages do not grow in
+    // proportion to the zoom (the gaps between them keep their size; a page narrower than the view
+    // is centred), so scaling the scroll would drift by (zoom - 1) x the gaps above, more on every
+    // page further down. Instead the point is found on its page, in the page's own units, at the
+    // layout drawn last frame, and put back under the fingers once the pages are laid out at the
+    // new scale (below, before the content is submitted).
+    // The anchor is found when a pinch starts and kept while it lasts (Ctrl+wheel: each notch).
+    Entry::ZoomAnchor& anchor = e.zoomAnchor;
+    if (!touch::pinching())
+        anchor.set = false;
+    ImVec2 anchorAt; // where the point is to be in the window: under the fingers now
+    bool zoomed = false;
+    {
+        float z = e.zoom > 0.0f ? e.zoom : 1.0f; // from the fit (0) or the zoom set
+        ImVec2 centre;
+        if (touch::takeZoom(z, 0.25f, 8.0f, centre, e.pendingScroll)) {
+            const ImVec2 win = ImGui::GetWindowPos();
+            anchorAt = ImVec2(centre.x - win.x, centre.y - win.y);
+            if (!anchor.set && n > 0 && e.pageScale > 0.0f && e.pageTop.size() == size_t(n) + 1) {
+                const float y = ImGui::GetScrollY() + anchorAt.y; // in the content, at the old scale
+                int i = int(std::upper_bound(e.pageTop.begin(), e.pageTop.begin() + n, y) - e.pageTop.begin()) - 1;
+                i = std::clamp(i, 0, n - 1);
+                const mv::Page& p = pd.pages[size_t(i)];
+                const float local = y - e.pageTop[size_t(i)], h = p.height * e.pageScale;
+                anchor.page = i;
+                anchor.y = std::clamp(local, 0.0f, h) / e.pageScale;
+                anchor.beyond = local < 0.0f ? local : std::max(0.0f, local - h);
+                const float left = std::max(pad, (viewW - p.width * e.pageScale) * 0.5f);
+                anchor.x = (ImGui::GetScrollX() + anchorAt.x - left) / e.pageScale;
+                anchor.set = true;
+            }
+            e.zoom = z;
+            zoomed = anchor.set;
+        }
+    }
     float widest = 1.0f;
     for (const mv::Page& p : pd.pages)
         widest = std::max(widest, p.width);
@@ -1626,6 +1674,14 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         e.pageTop[size_t(n)] = y;
         e.pageScale = scale;
     }
+    if (zoomed && anchor.page < n) { // the point the pinch zooms about, back under the fingers at the new layout
+        const mv::Page& p = pd.pages[size_t(anchor.page)];
+        const float left = std::max(pad, (viewW - p.width * scale) * 0.5f);
+        const ImVec2 to(left + anchor.x * scale, e.pageTop[size_t(anchor.page)] + anchor.y * scale + anchor.beyond);
+        touch::scrollTo(ImVec2(to.x - anchorAt.x, to.y - anchorAt.y), e.pendingScroll);
+    }
+    if (!touch::pinching())
+        anchor.set = false; // (Ctrl+wheel: found again at the next notch)
     float contentW = 0.0f;
     for (const mv::Page& p : pd.pages)
         contentW = std::max(contentW, p.width * scale);
@@ -1644,6 +1700,8 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     e.scrollSpeed = moved > ImGui::GetWindowSize().y ? 0.0f : e.scrollSpeed * 0.5f + moved / dt * 0.5f;
     e.scroll = ImVec2(ImGui::GetScrollX(), scrollY);
     const ImVec2 win = ImGui::GetWindowPos();
+    e.pagesOrigin = win;
+    e.pagesWidth = viewW;
     const float viewH = ImGui::GetWindowSize().y;
     // The pages in view, read now; pages far away dropped with their images.
     int first = 0, last = -1;

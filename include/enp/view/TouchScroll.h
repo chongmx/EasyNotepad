@@ -28,4 +28,14 @@ bool pinching();
 // frame if the old content's range cut it short (`pending`). Call each frame inside the window, before the content; returns whether `zoom` changed.
 bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending);
 
+// For a view whose content does not grow in proportion to its zoom (pages with gaps of a fixed
+// size between them, centred when narrower than the view), which keeps the point under the
+// fingers in place itself: this frame's zoom for the current window, as zoomView takes it, but
+// without scrolling. `zoom` is changed within [lowest, highest] and `centre` is where (screen
+// pixels); true when it changed. Last frame's `pending` scroll is set again first, as zoomView does.
+bool takeZoom(float& zoom, float lowest, float highest, ImVec2& centre, ImVec2& pending);
+// Scrolls the current window to `to` now (this frame's content is drawn from it), and again next
+// frame if the old content's range cut it short (`pending`): after takeZoom, before the content.
+void scrollTo(ImVec2 to, ImVec2& pending);
+
 } // namespace enp::view::touch
