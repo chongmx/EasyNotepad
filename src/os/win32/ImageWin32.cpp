@@ -2,6 +2,10 @@
 // WIC serves by decoding the JPEG at a reduced scale, then a converter to RGBA8.
 #include "enp/os/Image.h"
 
+// Without NOMINMAX, MSVC's <windows.h> defines min and max as macros, which break std::max.
+#ifndef NOMINMAX
+#   define NOMINMAX
+#endif
 #include <windows.h>
 #include <wincodec.h>
 
