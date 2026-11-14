@@ -105,7 +105,7 @@ void pinch(int fingers, float x0, float y0, float x1, float y1)
 
 bool pinching() { return p.active; }
 
-bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
+bool takeZoom(float& zoom, float lowest, float highest, ImVec2& centre, ImVec2& pending)
 {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (pending.x >= 0.0f) { // last frame's zoom: its scroll, now that the content has its size
@@ -124,13 +124,27 @@ bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
     const float before = zoom;
     zoom = ImClamp(zoom * p.factor, lowest, highest);
     p.factor = 1.0f; // taken
-    if (zoom == before)
+    centre = c;
+    return zoom != before;
+}
+
+void scrollTo(ImVec2 to, ImVec2& pending)
+{
+    pending = ImVec2(ImMax(0.0f, IM_ROUND(to.x)), ImMax(0.0f, IM_ROUND(to.y))); // whole pixels, the nearest (no drift one way)
+    scrollNow(ImGui::GetCurrentWindow(), pending);
+}
+
+bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
+{
+    const float before = zoom;
+    ImVec2 c;
+    if (!takeZoom(zoom, lowest, highest, c, pending))
         return false;
     // The point under the fingers stays: its place in the content grows with the zoom.
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
     const float k = zoom / before;
     const ImVec2 at(c.x - window->Pos.x, c.y - window->Pos.y);
-    pending = ImVec2(ImMax(0.0f, IM_TRUNC((window->Scroll.x + at.x) * k - at.x)), ImMax(0.0f, IM_TRUNC((window->Scroll.y + at.y) * k - at.y)));
-    scrollNow(window, pending);
+    scrollTo(ImVec2((window->Scroll.x + at.x) * k - at.x, (window->Scroll.y + at.y) * k - at.y), pending);
     return true;
 }
 

@@ -1184,6 +1184,72 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // A pinch deep in a long PDF zooms about the point under the fingers: on every frame of it,
+        // in and out, the same point of the same page stays there (the gaps between pages keep
+        // their size, so scaling the scroll drifted by the zoom times the gaps above: a page's
+        // height and more, 90 pages down).
+        {
+            h.setContext("pinch on a 120-page PDF");
+            const view::ViewerView& viewer = h.view().editor().viewerView();
+            h.files().memory["/enp-ui-viewer/long.pdf"] = viewertest::manyPagesPdf(120, 16);
+            h.vm().openFile("/enp-ui-viewer/long.pdf");
+            model::Document* doc = h.vm().activeDocument();
+            h.settleReading();
+            h.settle();
+            ImGuiWindow* w = nullptr;
+            for (ImGuiWindow* win : GImGui->Windows)
+                if (win->WasActive && std::strstr(win->Name, "##viewerPages"))
+                    w = win;
+            if (!doc || !w) {
+                std::printf("  FAILED pinch: the long PDF is not shown\n"), ++checksFailed;
+            } else {
+                ImGui::SetScrollY(w, w->ScrollMax.y * 0.75f);
+                h.settle();
+                h.settleReading();
+                h.settle();
+                for (const ImVec2 off : {ImVec2(-0.2f, 0.1f), ImVec2(0.25f, -0.2f)}) { // left of the middle, and right
+                    const ImVec2 c(w->InnerRect.GetCenter().x + w->InnerRect.GetWidth() * off.x,
+                                   w->InnerRect.GetCenter().y + w->InnerRect.GetHeight() * off.y);
+                    ImVec2 p0;
+                    const int page0 = viewer.pagePointAt(doc->id, c, p0);
+                    if (page0 < 60)
+                        std::printf("  FAILED pinch: not deep in the document (page %d)\n", page0 + 1), ++checksFailed;
+                    h.setTouch(true);
+                    float worst = 0.0f;
+                    int wrongPage = -1;
+                    std::vector<float> spreads;
+                    for (float d = 40.0f; d <= 200.0f; d += 12.0f) // apart: in
+                        spreads.push_back(d);
+                    for (float d = 200.0f; d >= 12.0f; d -= 9.0f) // together: out, past where it started
+                        spreads.push_back(d);
+                    for (const float d : spreads) {
+                        view::touch::pinch(2, c.x - d, c.y, c.x + d, c.y);
+                        h.frame(ImVec2(-100.0f, -100.0f));
+                        ImVec2 p;
+                        const int page = viewer.pagePointAt(doc->id, c, p);
+                        // Across: only while the pages are wider than the view (narrower, they
+                        // are centred: there is nothing to scroll sideways).
+                        const bool wide = w->ContentSize.x > w->InnerRect.GetWidth() + 1.0f;
+                        if (page != page0)
+                            wrongPage = page;
+                        else
+                            worst = std::max(worst, std::max(wide ? std::fabs(p.x - p0.x) : 0.0f, std::fabs(p.y - p0.y)));
+                    }
+                    view::touch::pinch(0, 0.0f, 0.0f, 0.0f, 0.0f);
+                    h.setTouch(false);
+                    h.settle();
+                    // (The scroll is a whole number of pixels: up to a pixel at the smallest scale.)
+                    if (wrongPage >= 0 || worst > 3.0f)
+                        std::printf("  FAILED pinch: the point under the fingers moved (page %d -> %d, %.1f points)\n", page0 + 1, wrongPage + 1,
+                                    worst),
+                            ++checksFailed;
+                }
+            }
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settleReading();
+        }
+
         // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,
         // sheets and zoom gone through; everything it read and every picture it decoded must go
         // when it is opened as text, and when it closes.
