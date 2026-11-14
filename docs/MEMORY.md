@@ -223,6 +223,11 @@ Where to read it:
   first-cycle growth or anything the views hold: that is what the script is for.
 - `closing_a_folder_stops_the_agent_dissection_of_it` (`enp_tests`): a late agent answer about a
   closed folder is cancelled and ignored (rule 4).
+- `viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled` (`enp_tests`): a request
+  cancelled while it waits is forgotten at once with the PDF source it held; eight cycles of
+  reading pages and pictures, jumping about the document and closing it (some with reads
+  running) leave the `viewer` scope byte for byte where it was. A planted leak of one picture per
+  read fails it (600 KB after the first cycle).
 - `closing_a_folder_stops_the_symbol_index_build` (`enp_tests`): the IntelliSense index built on a
   background thread is cancelled by a close, its late result is dropped, and the `intellisense`
   scope is back to the byte afterwards, also when the view-model is destroyed mid-build. The cycle

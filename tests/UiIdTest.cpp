@@ -39,6 +39,7 @@
 #include <functional>
 #include <iterator>
 #include <thread>
+#include <tuple>
 #include <map>
 #include <set>
 #include <string>
@@ -108,6 +109,18 @@ public:
     std::string absolute(const std::string& path) override { return path; }
     bool createDirectories(const std::string&) override { return false; }
 };
+
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool kSanitized = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool kSanitized = true;
+#else
+constexpr bool kSanitized = false;
+#endif
+#else
+constexpr bool kSanitized = false;
+#endif
 
 class Harness {
 public:
@@ -1264,8 +1277,40 @@ int main(int argc, char** argv)
                         }()) {
                         const ImVec2 c = w->InnerRect.GetCenter();
                         const float reach = std::min(160.0f, w->InnerRect.GetHeight() * 0.3f);
+                        // A document of many pages: how long the page landed on takes to show its
+                        // text, and its pictures (the reader at work on the pages flown past too).
+                        const viewmodel::ViewerViewModel::Entry* model = h.vm().viewer().find(doc->id);
+                        const bool timed = model && model->doc.shape == model::viewer::Shape::Pages && model->doc.pages.pages.size() > 4;
+                        std::vector<double> textMs, picturesMs;
+                        auto landed = [&]() {
+                            using Clock = std::chrono::steady_clock;
+                            const auto start = Clock::now();
+                            double text = -1.0;
+                            for (int i = 0; i < 1500; ++i) {
+                                h.frame(ImVec2(-100.0f, -100.0f));
+                                const int page = viewer.currentPage(doc->id);
+                                const auto* m = h.vm().viewer().find(doc->id);
+                                if (page < 0 || !m || size_t(page) >= m->doc.pages.pages.size())
+                                    break;
+                                const model::viewer::Page& p = m->doc.pages.pages[size_t(page)];
+                                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+                                if (p.loaded && text < 0.0)
+                                    text = ms;
+                                bool waiting = !p.loaded;
+                                for (const model::viewer::ImageItem& img : p.images)
+                                    waiting = waiting || h.vm().viewer().pictureWaiting(doc->id, img.media);
+                                if (!waiting) {
+                                    textMs.push_back(text);
+                                    picturesMs.push_back(ms);
+                                    return;
+                                }
+                                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                            }
+                            textMs.push_back(text < 0.0 ? 3000.0 : text);
+                            picturesMs.push_back(3000.0);
+                        };
                         h.setTouch(true);
-                        for (int fling = 0; fling < 8; ++fling) {
+                        for (int fling = 0; fling < (timed ? 16 : 8); ++fling) {
                             const float dir = fling < 5 ? -1.0f : 1.0f; // finger up: down the document
                             h.frame(ImVec2(c.x, c.y - dir * reach));
                             h.frame(ImVec2(c.x, c.y - dir * reach), true);
@@ -1274,9 +1319,37 @@ int main(int argc, char** argv)
                             h.frame(ImVec2(c.x, c.y + dir * reach), false);
                             for (int glide = 0; glide < 20; ++glide)
                                 h.frame(ImVec2(-100.0f, -100.0f));
+                            if (timed && fling % 2 == 1) // every other fling lands; the others fly on at once
+                                landed();
                         }
                         h.setTouch(false);
                         h.settleReading();
+                        // Thrown far up and down the document (the scrollbar dragged fast, a long
+                        // fling): ten frames on the way, then the page landed on, timed.
+                        if (timed) {
+                            for (const float to : {0.06f, 0.6f, 0.3f, 0.95f, 0.38f, 0.02f, 0.55f, 0.8f, 0.1f, 0.7f}) {
+                                const float from = w->Scroll.y, target = w->ScrollMax.y * to;
+                                for (int step = 1; step <= 10; ++step) {
+                                    ImGui::SetScrollY(w, from + (target - from) * float(step) / 10.0f);
+                                    h.frame(ImVec2(-100.0f, -100.0f));
+                                }
+                                landed();
+                            }
+                        }
+                        if (timed && !textMs.empty()) {
+                            auto stats = [](std::vector<double> v) {
+                                std::sort(v.begin(), v.end());
+                                return std::make_tuple(v[v.size() / 2], v[std::min(v.size() - 1, v.size() * 95 / 100)], v.back());
+                            };
+                            const auto [t50, t95, tMax] = stats(textMs);
+                            const auto [p50, p95, pMax] = stats(picturesMs);
+                            std::printf("  reading %s after a fling (%zu landings): text %.0f / %.0f / %.0f ms, pictures %.0f / %.0f / %.0f ms (median / 95%% / most)\n",
+                                        path.c_str(), textMs.size(), t50, t95, tMax, p50, p95, pMax);
+                            // 200 ms is the aim for the text, 500 ms for the pictures; 1000 ms the most.
+                            // (Timed only in a plain build: a sanitizer makes the reading 2-3 times slower.)
+                            if (!kSanitized && (tMax > 200.0 || p95 > 500.0 || pMax > 1000.0))
+                                std::printf("  FAILED document viewer: the page landed on took too long to show in %s\n", path.c_str()), ++checksFailed;
+                        }
                     }
                     h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
                 }

@@ -553,11 +553,19 @@ TEST(viewer_reads_documents_off_the_ui_thread)
         CHECK(pumpUntil([&]() { return viewer.find(2)->state != State::Loading; }));
         const viewmodel::ViewerViewModel::Entry* pdf = viewer.find(2);
         CHECK(pdf->state == State::Ready && pdf->doc.pages.pages.size() == 2 && !pdf->doc.pages.pages[0].loaded);
-        viewer.showPages(2, 0, 0);
-        CHECK(pumpUntil([&]() { return viewer.loadingCount() == 0; }));
+        // (As the view does every frame: the content first, then its pictures once it is there.)
+        auto shown = [&]() {
+            viewer.showPages(2, 0, 0, 0);
+            return viewer.loadingCount() == 0;
+        };
+        CHECK(pumpUntil(shown));
         CHECK(pdf->doc.pages.pages[0].loaded && pdf->doc.pages.pages[1].loaded); // the one shown and its neighbour
         CHECK(runWith(pdf->doc.pages.pages[0], "Page one") != nullptr);
+        CHECK(!viewer.pictureWaiting(2, "pdf-image-7"));
         CHECK(!viewer.takeMedia(2, "pdf-image-7").empty()); // the page's picture, encoded (QOI)
+        CHECK(!viewer.pictureWaiting(2, "pdf-image-7")); // taken: read, not waited for again
+        viewer.showPages(2, 0, 0, 0);
+        CHECK(viewer.loadingCount() == 0); // not asked for again while its page stays
 
         // A file that is not there: Failed, with the reason.
         viewer.open(3, "/docs/missing.pdf");
@@ -585,6 +593,93 @@ TEST(viewer_reads_documents_off_the_ui_thread)
         viewer.open(5, "/docs/sample.xlsx");
     }
     CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+}
+
+// The page in view is read first, whatever was asked for before it; a cancel lets go of a waiting
+// request (and the document's source it holds) at once; and reading pages and pictures, jumping
+// about the document and closing it in the middle leaves the `viewer` scope byte for byte where it
+// was (docs/MEMORY.md).
+TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
+{
+    using namespace viewertest;
+    using State = viewmodel::ViewerViewModel::State;
+    MemoryFiles files;
+    files.files["/docs/many.pdf"] = manyPagesPdf(24);
+    services::DocumentReaderService reader(&files);
+    {
+        mv::ViewerDocument doc = mv::readViewerDocument("many.pdf", files.files["/docs/many.pdf"]);
+        CHECK(doc.shape == mv::Shape::Pages && doc.pages.pages.size() == 24);
+        const std::shared_ptr<mv::PageSource> source = doc.pages.source;
+        // The worker held up (reading a file whose service is locked), the pages asked for in
+        // order 0..19, the reader on page 15: page 15 comes first, then its neighbours.
+        std::vector<std::size_t> order;
+        {
+            std::unique_lock<std::mutex> hold(files.mutex);
+            reader.read("/docs/many.pdf", [](mv::ViewerDocument) {});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20)); // the worker takes it and waits
+            for (std::size_t i = 0; i < 20; ++i)
+                reader.readPage(source, i, [&order, i](mv::Page) { order.push_back(i); });
+            reader.focus(source.get(), 15);
+        }
+        CHECK(pumpUntil([&]() { return order.size() == 20; }));
+        CHECK(order.size() == 20 && order[0] == 15 && (order[1] == 14 || order[1] == 16) && (order[2] == 14 || order[2] == 16));
+        // Cancelled while waiting: forgotten at once, the source it held let go with it.
+        {
+            std::unique_lock<std::mutex> hold(files.mutex);
+            reader.read("/docs/many.pdf", [](mv::ViewerDocument) {});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::vector<interfaces::IDocumentReaderService::Ticket> tickets;
+            int delivered = 0;
+            for (std::size_t i = 0; i < 10; ++i) {
+                tickets.push_back(reader.readPage(source, i, [&delivered](mv::Page) { ++delivered; }));
+                tickets.push_back(reader.readImage(source, i, "pdf-image-" + std::to_string(6 + 3 * i), 64, [&delivered](std::string) { ++delivered; }));
+            }
+            CHECK(reader.waitingRequests() == 20 && source.use_count() > 2);
+            for (const auto t : tickets)
+                reader.cancel(t);
+            CHECK(reader.waitingRequests() == 0);
+            CHECK(source.use_count() == 2); // `source` and the document's own
+            hold.unlock();
+            CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+            CHECK(delivered == 0);
+        }
+    }
+    CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+
+    // Memory: eight cycles of open, read pages and pictures here and there, close (sometimes with
+    // reads still running); the `viewer` scope after cycle 2 and after cycle 8 is the same, to the
+    // byte, and so is it after each close.
+    std::uint64_t afterSecond = 0;
+    const std::uint64_t before = os::mem::liveBytes("viewer");
+    for (int cycle = 1; cycle <= 8; ++cycle) {
+        {
+            viewmodel::ViewerViewModel viewer(&reader, nullptr);
+            viewer.open(1, "/docs/many.pdf");
+            CHECK(pumpUntil([&]() { return viewer.find(1)->state != State::Loading; }));
+            for (const std::size_t page : {std::size_t(0), std::size_t(12), std::size_t(3), std::size_t(23), std::size_t(8)}) {
+                pumpUntil([&]() {
+                    viewer.showPages(1, page, page, page);
+                    return viewer.loadingCount() == 0;
+                });
+                const mv::Page& p = viewer.find(1)->doc.pages.pages[page];
+                CHECK(p.loaded && p.images.size() == 1 && !viewer.pictureWaiting(1, p.images[0].media));
+                CHECK(!viewer.takeMedia(1, p.images[0].media).empty() || cycle % 2 == 0); // taken by the view, or left to go with the page
+            }
+            if (cycle % 3 == 0) // closed with reads running
+                viewer.showPages(1, 17, 17, 17);
+            viewer.release(1);
+            CHECK(viewer.entryCount() == 0);
+        }
+        CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+        CHECK(reader.waitingRequests() == 0);
+        const std::uint64_t now = os::mem::liveBytes("viewer");
+        if (cycle == 2)
+            afterSecond = now;
+        if (now != before)
+            std::printf("  viewer scope after cycle %d: %llu bytes, %llu before\n", cycle, (unsigned long long)now, (unsigned long long)before);
+        CHECK(now == before);
+    }
+    CHECK(os::mem::liveBytes("viewer") == afterSecond);
 }
 
 // ---- Charts, text boxes, comments, shapes and SmartArt ---------------------------------------------

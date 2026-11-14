@@ -506,10 +506,17 @@ struct GState {
     std::int32_t clip = -1;                 // into the page's clips: the clip path's bounds (page points)
 };
 
+// A picture a page draws: read later, by its key (PageSource::loadImage), with the resources it
+// was drawn with (its colour space may be named there). Points into the file's objects.
+struct PictureRef {
+    const Object* image = nullptr;
+    const Object* resources = nullptr;
+};
+
 class PageReader {
 public:
-    PageReader(File& file, Page& page, std::map<std::string, std::string>& media, std::map<const Object*, std::unique_ptr<Font>>& fonts)
-        : file_(file), page_(page), media_(media), fonts_(fonts)
+    PageReader(File& file, Page& page, std::map<std::string, PictureRef>& pictures, std::map<const Object*, std::unique_ptr<Font>>& fonts)
+        : file_(file), page_(page), pictures_(pictures), fonts_(fonts)
     {
         for (std::uint32_t c = 32; c < 127; ++c)
             fallback_.encoding[c] = c;
@@ -1045,19 +1052,8 @@ private:
         }
         if (x1 - x0 < 0.05f || y1 - y0 < 0.05f || !budget())
             return;
-        if (!media_.count(key)) {
-            std::string encoded = imageBytes(image);
-            if (encoded.empty()) { // cannot decode: a light box where it was
-                PathItem box;
-                box.fill = rgba(128, 128, 128, 40);
-                box.subpaths.push_back({{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}});
-                box.closed.push_back(true);
-                flushRun();
-                page_.add(std::move(box));
-                return;
-            }
-            media_[key] = std::move(encoded);
-        }
+        // Read later (a picture that cannot be read is drawn as a light box by the views).
+        pictures_.emplace(key, PictureRef{&image, resources_});
         ImageItem item;
         item.box = Rect{x0, y0, x1 - x0, y1 - y0};
         item.media = key;
@@ -1066,6 +1062,15 @@ private:
         page_.add(std::move(item));
     }
 
+public:
+    // A picture this reader's file names, read now (PageSource::loadImage).
+    std::string pictureBytes(const PictureRef& ref)
+    {
+        resources_ = ref.resources;
+        return ref.image ? imageBytes(*ref.image) : std::string();
+    }
+
+private:
     std::string imageBytes(const Object& image)
     {
         std::string filter;
@@ -1424,7 +1429,7 @@ private:
 
     File& file_;
     Page& page_;
-    std::map<std::string, std::string>& media_;
+    std::map<std::string, PictureRef>& pictures_;
     std::map<const Object*, std::unique_ptr<Font>>& fonts_;
     const Object* resources_ = nullptr;
     GState state_;
@@ -1456,14 +1461,26 @@ public:
     File file;
     std::vector<PageInfo> pages;
     std::map<const Object*, std::unique_ptr<Font>> fonts;
+    // The pictures the pages read so far draw, by key: a few pointers each, for the document's life.
+    std::map<std::string, PictureRef> pictures;
 
-    bool load(std::size_t index, Page& page, std::map<std::string, std::string>& media) override
+    bool load(std::size_t index, Page& page) override
     {
         if (index >= pages.size())
             return false;
-        PageReader reader(file, page, media, fonts);
+        PageReader reader(file, page, pictures, fonts);
         reader.run(*pages[index].dict, pages[index].resources, pages[index].base);
         return true;
+    }
+
+    std::string loadImage(const std::string& key) override
+    {
+        const auto it = pictures.find(key);
+        if (it == pictures.end())
+            return {};
+        Page scratch;
+        PageReader reader(file, scratch, pictures, fonts);
+        return reader.pictureBytes(it->second);
     }
 
     // The page tree, depth first, with inherited attributes.

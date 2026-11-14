@@ -157,12 +157,18 @@ struct Page {
     std::string plainText() const;
 };
 
-// Reads one page's content on request (PDF). Keeps what it needs of the file.
+// Reads one page's content on request (PDF). Keeps what it needs of the file. Two steps, so a
+// page's text can be shown before its pictures are ready: load() fills the page with its
+// pictures as image items naming a key, and loadImage() reads one picture's bytes by that key.
+// Used by one thread at a time.
 class PageSource {
 public:
     virtual ~PageSource() = default;
-    // Fills `page` (its items) and adds the images it uses to `media`. False when it cannot.
-    virtual bool load(std::size_t index, Page& page, std::map<std::string, std::string>& media) = 0;
+    // Fills `page` (its items; pictures by key, not read). False when it cannot.
+    virtual bool load(std::size_t index, Page& page) = 0;
+    // A picture named by load(): its encoded bytes (or a picture packed with its soft mask,
+    // ImagePack.h). Empty when it cannot be read, or the key is unknown.
+    virtual std::string loadImage(const std::string& key) = 0;
 };
 
 struct PageDocument {

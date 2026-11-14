@@ -1605,6 +1605,12 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         e.goToPage = -1;
     }
     const float scrollY = ImGui::GetScrollY();
+    // How fast the pages move: while they fly past (a fling) faster than about two screens a
+    // second, no page is asked for: the ones passed would only be cancelled again. A jump (Home,
+    // the page arrows, another document shown) is not movement: the page landed on is read at once.
+    const float dt = std::max(1.0f / 240.0f, ImGui::GetIO().DeltaTime);
+    const float moved = std::fabs(scrollY - e.scroll.y);
+    e.scrollSpeed = moved > ImGui::GetWindowSize().y ? 0.0f : e.scrollSpeed * 0.5f + moved / dt * 0.5f;
     e.scroll = ImVec2(ImGui::GetScrollX(), scrollY);
     const ImVec2 win = ImGui::GetWindowPos();
     const float viewH = ImGui::GetWindowSize().y;
@@ -1628,8 +1634,10 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             e.currentPage = i;
     // The view-model reads the pages in view (and their neighbours) through the reader service,
     // and drops pages far away; the pictures of a page no longer read go here.
-    if (n > 0)
-        vm_.viewer().showPages(e.id, size_t(first), size_t(std::max(first, last)));
+    if (n > 0) {
+        const bool flying = e.scrollSpeed > ImGui::GetWindowSize().y * 2.0f;
+        vm_.viewer().showPages(e.id, size_t(first), size_t(std::max(first, last)), size_t(e.currentPage), !flying);
+    }
     for (auto it = e.pageImages.begin(); it != e.pageImages.end();) {
         if (it->first < pd.pages.size() && pd.pages[it->first].loaded) {
             ++it;

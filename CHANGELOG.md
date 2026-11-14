@@ -40,6 +40,12 @@ its release notes on GitHub.
   Home is the shared storage, and its folders and SD cards are places of the dialog.
 - Hints opened from the ribbon (and other places without padding) had their text touching the
   edges of a box too small for it.
+- PDF: scrolling fast up and down a long document left the page landed on at "Reading the
+  page..." for a second or more, waiting behind every page scrolled past. A page's text now
+  shows first (within a few milliseconds) and each picture follows on its own; the page being
+  read is served first and reads no longer near the view are cancelled at once; nothing new is
+  asked for while the pages fly past. On a 33-page paper with large photos, the page landed on
+  shows its text in under 25 ms and its pictures in under half a second (desktop).
 - Phones, the Open, Open Folder and Save As dialogs: the list had a sliver of the width beside a
   150 px places pane and the file name a sliver of the line. The places are now buttons above the
   list, which has the whole width and taller rows; the name has a line of its own, with the

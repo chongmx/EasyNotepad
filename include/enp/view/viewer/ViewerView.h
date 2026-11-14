@@ -44,6 +44,12 @@ public:
     void release(int documentId); // opened as text: the view's caches go at once
     void releaseClosed();         // every entry whose document has closed
     bool holds(int documentId) const { return entries_.count(documentId) != 0; }
+    // The page being read in a paged document (tests); -1 when it is not shown.
+    int currentPage(int documentId) const
+    {
+        const auto it = entries_.find(documentId);
+        return it == entries_.end() ? -1 : it->second.currentPage;
+    }
     std::size_t entryCount() const { return entries_.size(); }
     std::size_t heldImageCount() const; // for the tests: pictures decoded for open documents
     // The scripts (model::viewer::Script bits) of what the open documents have shown: the fonts
@@ -79,6 +85,7 @@ private:
         float pageScale = 0.0f;
         int currentPage = 0;
         int goToPage = -1;          // scroll to this page's top next frame (the toolbar's arrows, Home / End)
+        float scrollSpeed = 0.0f;   // pages: how fast the content moves (pixels a second, smoothed)
         std::uint8_t scripts = 0;   // of the document and the pages it has shown
         // Word: the page view (else reflowed); its pages as laid out at `wordScale` for `wordGeneration`.
         bool reflow = false;
@@ -107,7 +114,13 @@ private:
     class PageImageSource final : public PageImages {
     public:
         PageImageSource(ViewerView& view, Entry& entry, std::size_t page) : view_(view), entry_(entry), page_(page) {}
-        const MarkdownImage* image(const std::string& media) override { return view_.image(entry_, entry_.pageImages[page_], media); }
+        // A picture still being read is drawn as a placeholder (nothing taken from the view-model yet).
+        const MarkdownImage* image(const std::string& media) override
+        {
+            if (view_.vm_.viewer().pictureWaiting(entry_.id, media))
+                return nullptr;
+            return view_.image(entry_, entry_.pageImages[page_], media);
+        }
 
     private:
         ViewerView& view_;

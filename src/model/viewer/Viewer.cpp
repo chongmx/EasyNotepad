@@ -194,7 +194,11 @@ bool PageDocument::load(std::size_t index)
     if (!source)
         return false;
     page.loaded = true; // even when it fails: not tried again every frame
-    const bool ok = source->load(index, page, media);
+    const bool ok = source->load(index, page);
+    for (const ImageItem& img : page.images)
+        if (!media.count(img.media))
+            if (std::string bytes = source->loadImage(img.media); !bytes.empty())
+                media.emplace(img.media, std::move(bytes));
     page.scripts = scriptsIn(page.plainText());
     return ok;
 }
