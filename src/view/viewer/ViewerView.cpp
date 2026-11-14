@@ -2,6 +2,7 @@
 
 #include "enp/os/Memory.h"
 #include "enp/view/DocumentFonts.h"
+#include "enp/view/Fit.h"
 #include "enp/view/PanelFrame.h"
 #include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
@@ -14,6 +15,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace enp::view {
 namespace {
@@ -244,9 +246,11 @@ void ViewerView::render(model::Document& doc, ImVec2 size)
     }
     Entry& e = entryFor(doc, *model);
     e.scripts |= d.scripts;
+    // The area starts where the caller's cursor is: below a column's name in two columns, or a
+    // bar of the editor (find, file changed on disk). Everything is placed from there.
     const float pad = 8.0f * s_;
     const float before = ImGui::GetCursorPosY();
-    ImGui::SetCursorPos(ImVec2(pad, pad * 0.5f));
+    ImGui::SetCursorPos(ImVec2(pad, before + pad * 0.5f));
     toolbar(doc, e, d, size.x - pad * 2.0f);
     ImGui::SetCursorPosX(0.0f);
     const float used = ImGui::GetCursorPosY() - before;
@@ -289,57 +293,126 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
     } else {
         std::snprintf(label_, sizeof(label_), "%s  %s  ·  %zu blocks", iconFor(d.shape, d.format), d.format.c_str(), d.flow.blocks.size());
     }
-    ImGui::TextDisabled("%s", label_);
-    if (d.shape == mv::Shape::Flow && !d.flow.printed.empty()) { // Word: pages as printed, or reflowed to the window
-        ImGui::SameLine();
-        if (ImGui::SmallButton(e.reflow ? ICON_FA_FILE "  Pages##viewerLayout" : ICON_FA_ALIGN_LEFT "  Reflow##viewerLayout"))
+    // The controls after the label, measured first: the label gives way to them, cut short with an
+    // ellipsis, or on a line of its own when a narrow column (two columns, a phone) leaves too
+    // little room; the controls then wrap to the column's width instead of running past it.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float gap = style.ItemSpacing.x;
+    auto smallWidth = [&style](const char* label) { return ImGui::CalcTextSize(label, nullptr, true).x + style.FramePadding.x * 2.0f; };
+    const bool wordLayout = d.shape == mv::Shape::Flow && !d.flow.printed.empty();
+    const bool printedPages = wordLayout && !e.reflow;
+    const bool paging = d.shape == mv::Shape::Pages || printedPages;
+    const bool zooming = paging && !printedPages; // slides and PDF pages: their own zoom (Word follows the editor's)
+    const char* layoutLabel = e.reflow ? ICON_FA_FILE "  Pages##viewerLayout" : ICON_FA_ALIGN_LEFT "  Reflow##viewerLayout";
+    const char* const previousLabel = ICON_FA_CHEVRON_UP "##viewerPrevious";
+    const char* const nextLabel = ICON_FA_CHEVRON_DOWN "##viewerNext";
+    const char* const zoomOutLabel = ICON_FA_MAGNIFYING_GLASS_MINUS "##viewerZoomOut";
+    const char* const fitLabel = "Fit##viewerZoomFit";
+    const char* const zoomInLabel = ICON_FA_MAGNIFYING_GLASS_PLUS "##viewerZoomIn";
+    const char* const openLabel = ICON_FA_FILE_LINES "  Open as text";
+    const bool openButton = vm_.showOpenAsText.get(); // Preferences > Files
+    const float openW = openButton ? smallWidth(openLabel) : 0.0f;
+    float controls = openButton ? gap + openW : 0.0f;
+    if (wordLayout)
+        controls += gap + smallWidth(layoutLabel);
+    if (paging)
+        controls += gap * 2.0f + smallWidth(previousLabel) + smallWidth(nextLabel);
+    if (zooming)
+        controls += gap * 3.0f + smallWidth(zoomOutLabel) + smallWidth(fitLabel) + smallWidth(zoomInLabel);
+    if (!d.notShown.empty())
+        controls += gap + ImGui::CalcTextSize(ICON_FA_CIRCLE_INFO).x;
+
+    const float left = ImGui::GetCursorPosX(), right = left + width;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const float lineH = ImGui::GetFrameHeight();
+    const ImVec2 textAt(at.x, at.y + style.FramePadding.y);
+    const ImU32 dim = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const bool ownLine = width - controls < 96.0f * s_;
+    // Short of room: the format's name goes first ("PDF document  ·  "), the page number stays.
+    if (ImGui::CalcTextSize(label_).x > (ownLine ? width : width - controls))
+        if (char* dot = std::strstr(label_, "  \xc2\xb7  ")) {
+            char* name = std::strstr(label_, "  ");
+            if (name && name < dot)
+                std::memmove(name + 2, dot + 6, std::strlen(dot + 6) + 1);
+        }
+    const float labelEnd = fit::text(dl, textAt, at.x + (ownLine ? width : width - controls), dim, label_);
+    ImGui::Dummy(ImVec2(std::max(1.0f, labelEnd - at.x), lineH));
+    float x = left + (labelEnd - at.x); // where the line's last item ends (window coordinates)
+    bool lineStart = false;
+    if (ownLine) {
+        ImGui::SetCursorPosX(left);
+        x = left;
+        lineStart = true;
+    }
+    // Before each control: on this line when it fits, else at the start of the next.
+    auto place = [&](float w) {
+        if (lineStart)
+            lineStart = false;
+        else if (x + gap + w <= right) {
+            ImGui::SameLine(0.0f, gap);
+            x += gap;
+        } else {
+            ImGui::SetCursorPosX(left);
+            x = left;
+        }
+        x += w;
+    };
+
+    if (wordLayout) { // Word: pages as printed, or reflowed to the window
+        place(smallWidth(layoutLabel));
+        if (ImGui::SmallButton(layoutLabel))
             e.reflow = !e.reflow;
         registerLastItem("viewer:word-layout", "button", e.reflow ? "Show as pages" : "Reflow to the window", [&e]() { e.reflow = !e.reflow; });
     }
-    const bool printedPages = d.shape == mv::Shape::Flow && !e.reflow && !d.flow.printed.empty();
-    if (d.shape == mv::Shape::Pages || printedPages) {
+    if (paging) {
         const int pageCount = printedPages ? int(e.wordPages.size()) : int(d.pages.pages.size());
         auto go = [&e, pageCount](int delta) { e.goToPage = std::clamp(e.currentPage + delta, 0, std::max(0, pageCount - 1)); };
-        ImGui::SameLine();
+        place(smallWidth(previousLabel));
         ImGui::BeginDisabled(e.currentPage <= 0);
-        if (ImGui::SmallButton(ICON_FA_CHEVRON_UP "##viewerPrevious"))
+        if (ImGui::SmallButton(previousLabel))
             go(-1);
         ImGui::EndDisabled();
         registerLastItem("viewer:previous-page", "button", "Previous page", [go]() { go(-1); });
-        ImGui::SameLine();
+        place(smallWidth(nextLabel));
         ImGui::BeginDisabled(e.currentPage + 1 >= pageCount);
-        if (ImGui::SmallButton(ICON_FA_CHEVRON_DOWN "##viewerNext"))
+        if (ImGui::SmallButton(nextLabel))
             go(1);
         ImGui::EndDisabled();
         registerLastItem("viewer:next-page", "button", "Next page", [go]() { go(1); });
-        if (!printedPages) { // slides and PDF pages: their own zoom (Word follows the editor's)
-            ImGui::SameLine();
-            if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_MINUS "##viewerZoomOut"))
+        if (zooming) {
+            place(smallWidth(zoomOutLabel));
+            if (ImGui::SmallButton(zoomOutLabel))
                 e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f);
             registerLastItem("viewer:zoom-out", "button", "Zoom out", [&e]() { e.zoom = std::max(0.25f, (e.zoom > 0.0f ? e.zoom : 1.0f) / 1.25f); });
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Fit##viewerZoomFit"))
+            place(smallWidth(fitLabel));
+            if (ImGui::SmallButton(fitLabel))
                 e.zoom = 0.0f;
             registerLastItem("viewer:zoom-fit", "button", d.format == "PDF document" ? "Fit to width" : "Fit the slide", [&e]() { e.zoom = 0.0f; });
-            ImGui::SameLine();
-            if (ImGui::SmallButton(ICON_FA_MAGNIFYING_GLASS_PLUS "##viewerZoomIn"))
+            place(smallWidth(zoomInLabel));
+            if (ImGui::SmallButton(zoomInLabel))
                 e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f);
             registerLastItem("viewer:zoom-in", "button", "Zoom in", [&e]() { e.zoom = std::min(8.0f, (e.zoom > 0.0f ? e.zoom : 1.0f) * 1.25f); });
         }
     }
     if (!d.notShown.empty()) {
-        std::size_t at = 0;
-        at += std::size_t(std::snprintf(label_, sizeof(label_), "Not shown yet: "));
-        for (std::size_t i = 0; i < d.notShown.size() && at + 2 < sizeof(label_); ++i)
-            at += std::size_t(std::snprintf(label_ + at, sizeof(label_) - at, "%s%s", i ? ", " : "", d.notShown[i].c_str()));
-        ImGui::SameLine();
+        std::size_t used = 0;
+        used += std::size_t(std::snprintf(label_, sizeof(label_), "Not shown yet: "));
+        for (std::size_t i = 0; i < d.notShown.size() && used + 2 < sizeof(label_); ++i)
+            used += std::size_t(std::snprintf(label_ + used, sizeof(label_) - used, "%s%s", i ? ", " : "", d.notShown[i].c_str()));
+        place(ImGui::CalcTextSize(ICON_FA_CIRCLE_INFO).x);
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconOrange), ICON_FA_CIRCLE_INFO);
         ui::itemTooltip("%s", label_);
     }
-    const float button = ImGui::CalcTextSize(ICON_FA_FILE_LINES "  Open as text").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), width - button + ImGui::GetStyle().WindowPadding.x));
+    // "Open as text" at the right end of the line, or of the next one.
+    if (!openButton)
+        return;
+    if (lineStart || x + gap + openW > right)
+        ImGui::SetCursorPosX(std::max(left, right - openW)); // the cursor is on the next line already
+    else
+        ImGui::SameLine(right - openW);
     const int index = vm_.documentIndexById(doc.id);
-    if (ImGui::SmallButton(ICON_FA_FILE_LINES "  Open as text"))
+    if (ImGui::SmallButton(openLabel))
         vm_.openAsText(index);
     registerLastItem("open-as-text", "button", "Open as text anyway", [this, index]() { vm_.openAsText(index); });
 }
@@ -348,7 +421,7 @@ void ViewerView::loading(model::Document& doc, ImVec2 size)
 {
     // The reader service reads the document on its own thread; the dots move meanwhile.
     const float pad = 24.0f * s_;
-    ImGui::SetCursorPos(ImVec2(pad, std::max(pad, size.y * 0.3f)));
+    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetCursorPosY() + std::max(pad, size.y * 0.3f)));
     static const char* const kDots[] = {"", ".", "..", "..."};
     ImGui::TextDisabled("%s  Reading %s%s", ICON_FA_HOURGLASS_HALF, doc.title.c_str(), kDots[int(ImGui::GetTime() * 3.0) % 4]);
 }
@@ -357,7 +430,7 @@ void ViewerView::unreadable(model::Document& doc, const std::string& format, con
 {
     const float pad = 24.0f * s_;
     const float column = std::min(size.x - pad * 2.0f, 560.0f * s_);
-    ImGui::SetCursorPos(ImVec2(std::max(pad, (size.x - column) * 0.5f), std::max(pad, size.y * 0.25f)));
+    ImGui::SetCursorPos(ImVec2(std::max(pad, (size.x - column) * 0.5f), ImGui::GetCursorPosY() + std::max(pad, size.y * 0.25f)));
     ImGui::BeginGroup();
     ImGui::PushFont(nullptr, ImGui::GetFontSize() * 2.0f);
     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconOrange), "%s", ICON_FA_FILE_CIRCLE_EXCLAMATION);
@@ -794,7 +867,8 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     e.sheet = std::clamp(e.sheet, 0, int(book.sheets.size()) - 1);
     const float pad = 8.0f * s_;
     // The cell inspector, then the grid, then the sheet tabs along the bottom (as in Excel).
-    float top = ImGui::GetCursorPosY();
+    const float origin = ImGui::GetCursorPosY();
+    float top = origin;
     const float tabsH = std::floor(ImGui::GetFontSize() * 1.45f);
     const mv::Sheet& sh = book.sheets[size_t(e.sheet)];
     {
@@ -811,7 +885,7 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         top = ImGui::GetCursorPosY();
     }
     ImGui::SetCursorPos(ImVec2(0.0f, top));
-    const ImVec2 gridSize(size.x, std::max(1.0f, size.y - (top - ImGui::GetCursorStartPos().y) - tabsH));
+    const ImVec2 gridSize(size.x, std::max(1.0f, size.y - (top - origin) - tabsH));
 
     // Geometry: Excel's column width is in characters of the default font (7 pixels each at 96
     // dpi, plus 5 pixels of padding); row heights are in points.

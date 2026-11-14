@@ -222,6 +222,7 @@ private:
     bool openGoToLine_ = false;
     bool openComment_ = false;
     bool openPreferences_ = false;
+    int preferencesTabRequest_ = -1; // switch on the next frame (agents)
     bool openSyntaxColors_ = false;
     bool openIntellisenseSettings_ = false;
     // The IntelliSense dialog's text fields while it is open (released when it closes).

@@ -117,11 +117,46 @@ void fillBands(PathItem& p)
     p.bands = std::move(bands);
 }
 
+// The outline turns one way all round and goes round once: the painter's triangle fan fills it
+// exactly. Repeated points and straight runs do not count as turns.
+bool convex(const std::vector<Point>& sub)
+{
+    const std::size_t n = sub.size();
+    if (n < 3)
+        return true;
+    int sign = 0;
+    double turned = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const Point& a = sub[i];
+        const Point& b = sub[(i + 1) % n];
+        const Point& c = sub[(i + 2) % n];
+        const double ux = double(b.x) - a.x, uy = double(b.y) - a.y, vx = double(c.x) - b.x, vy = double(c.y) - b.y;
+        if ((ux == 0.0 && uy == 0.0) || (vx == 0.0 && vy == 0.0))
+            continue;
+        const double cross = ux * vy - uy * vx;
+        const double dot = ux * vx + uy * vy;
+        if (std::fabs(cross) > 1e-9 * (std::fabs(ux) + std::fabs(uy)) * (std::fabs(vx) + std::fabs(vy))) {
+            const int s = cross > 0.0 ? 1 : -1;
+            if (sign != 0 && s != sign)
+                return false;
+            sign = s;
+        } else if (dot < 0.0) {
+            return false; // doubles back on itself
+        }
+        turned += std::atan2(cross, dot);
+    }
+    return std::fabs(turned) < 2.0 * 3.14159265358979 + 0.01; // once round, not a star drawn in one stroke
+}
+
 } // namespace
 
 void Page::add(PathItem p)
 {
-    if (p.fill != kNone && p.subpaths.size() > 1)
+    // Several outlines (holes, a letter's counter), or one that is not convex: the sweep's bands,
+    // which keep to the fill rule. A concave outline would otherwise be cut into triangles by
+    // ear clipping, which overfills outlines with repeated points or long straight runs (a logo's
+    // letters drawn as paths).
+    if (p.fill != kNone && (p.subpaths.size() > 1 || (p.subpaths.size() == 1 && !convex(p.subpaths[0]))))
         fillBands(p);
     items.push_back({PageItem::Kind::Path, std::uint32_t(paths.size()), clip});
     paths.push_back(std::move(p));

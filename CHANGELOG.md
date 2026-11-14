@@ -6,6 +6,22 @@ its release notes on GitHub.
 
 ## [1.3.0] - unreleased
 
+### Changed
+- Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
+  settings fold away under Appearance. The dialog keeps its size from tab to tab and fits a phone.
+- Word, Excel, PowerPoint and PDF no longer show "Open as text" on their toolbar. Preferences >
+  Files brings it back. A document that cannot be shown still offers its text.
+
+### Fixed
+- Word, Excel, PowerPoint and PDF in two columns: the viewer's toolbar was drawn over the
+  column's name. It now starts below it, as it does below the find bar.
+- The viewer's toolbar in a narrow column or window: the label (format, page) is cut short, then
+  goes on a line of its own, and the buttons wrap within the column instead of covering the label
+  or running past the edge. A column's name ends before its close button.
+- PDF and slides: a filled shape of one concave outline (a logo's letters drawn as paths, such as
+  SIMPLE·AI on an arXiv paper) was filled past its edges, as solid bars. Such outlines are now
+  filled exactly, by the same sweep as shapes with holes.
+
 ## [1.2.0] - 2026-11-14
 
 ### Added
