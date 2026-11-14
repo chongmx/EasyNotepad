@@ -13,10 +13,14 @@ collaborator**. C++17 with Dear ImGui; one code base for Windows, Linux, macOS, 
   what the program does, down to each function's steps.
 - **Work with an agent**: an Agent workspace with side-by-side diffs to accept or reject, an agent
   cursor that points and clicks for you, and an MCP connector any agent can use.
-- **A complete editor**: tabs, explorer, find in files, multiple carets and VS Code's keys,
-  IntelliSense, Git, and an integrated terminal running your real shell.
+- **A complete editor**: tabs, two columns, explorer, find in files, multiple carets and VS Code's
+  keys, IntelliSense, Git, and an integrated terminal running your real shell.
+- **Office documents and PDF**: Word, Excel, PowerPoint and PDF files open read-only, laid out as
+  their authors see them, with images decoded by the platform's native decoder where available.
 - **Files shown as what they are**: rendered Markdown with math and emoji, CSV tables, JSON and
   YAML trees, images, and the contents of libraries and executables.
+- **Desktop and phone**: one interface adapts to windows, tablets and phones, with touch scrolling
+  and pinch zoom; on Android it opens files anywhere in shared storage.
 - **Light on the machine**: it draws only when something changes, and memory is handed back when
   a folder closes.
 
