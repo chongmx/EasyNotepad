@@ -2,17 +2,25 @@
 #include "enp/view/Fit.h"
 
 #include "enp/model/Language.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
 #include "misc/cpp/imgui_stdlib.h"
 
+#include <algorithm>
+
 namespace enp::view {
 
 using viewmodel::FileDialogMode;
 
 namespace {
+
+// Below this width the dialog uses the narrow arrangement (a phone, a thin window).
+constexpr float kNarrowWidth = 560.0f;
+// A row of the list is at least this tall for a finger.
+constexpr float kTouchRow = 40.0f;
 
 const char* entryIcon(const viewmodel::FileDialogViewModel::Entry& e)
 {
@@ -25,11 +33,26 @@ const char* entryIcon(const viewmodel::FileDialogViewModel::Entry& e)
     }
 }
 
+std::string placeLabel(const std::string& label)
+{
+    return std::string(label == "Workspace" ? ICON_FA_FOLDER_TREE "  "
+                       : label == "Home"    ? ICON_FA_HOUSE "  "
+                                            : ICON_FA_HARD_DRIVE "  ") +
+           label;
+}
+
 } // namespace
 
 FileDialogView::FileDialogView(viewmodel::FileDialogViewModel& vm, const Fonts& fonts, const Palette& palette, float uiScale)
     : vm_(vm), fonts_(fonts), palette_(palette), s_(uiScale)
 {
+}
+
+const char* FileDialogView::nameLabel() const
+{
+    return vm_.mode() == FileDialogMode::SaveAs       ? "File name"
+           : vm_.mode() == FileDialogMode::OpenFolder ? "Folder"
+                                                      : "File name, path or filter";
 }
 
 void FileDialogView::render()
@@ -45,7 +68,9 @@ void FileDialogView::render()
         focusName_ = true;
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(780.0f * s_, 500.0f * s_)), ImGuiCond_Appearing);
+    // A phone gives the dialog the whole screen (windowSize keeps a margin): the list needs the height.
+    const bool phone = ImGui::GetMainViewport()->WorkSize.x < kNarrowWidth * s_;
+    ImGui::SetNextWindowSize(fit::windowSize(ImVec2(780.0f * s_, (phone ? 2000.0f : 500.0f) * s_)), ImGuiCond_Appearing);
     bool open = true;
     fit::constrainNextWindow();
     const bool shown = ImGui::BeginPopupModal(title, &open);
@@ -64,7 +89,20 @@ void FileDialogView::render()
     }
     ImGui::PushID("fileDialog");
 
-    // Toolbar: back, up, the folder (editable).
+    const bool narrow = fit::narrow(ImGui::GetContentRegionAvail().x, kNarrowWidth * s_);
+    renderToolbar();
+    const float footer = footerHeight(narrow, ImGui::GetContentRegionAvail().x);
+    renderPlaces(narrow, footer);
+    renderEntries(narrow, footer);
+    renderFooter(narrow);
+
+    ImGui::PopID();
+    ImGui::EndPopup();
+}
+
+// Back, up, the folder (editable).
+void FileDialogView::renderToolbar()
+{
     if (shownFolder_ != vm_.folder()) {
         shownFolder_ = vm_.folder();
         pathEdit_ = shownFolder_;
@@ -85,22 +123,59 @@ void FileDialogView::render()
     if (ImGui::InputText("##folder", &pathEdit_, ImGuiInputTextFlags_EnterReturnsTrue))
         vm_.goTo(pathEdit_);
     registerLastItem("file-dialog:folder", "textbox", "Folder", nullptr);
+}
 
-    // Places and entries.
-    const float footerH = ImGui::GetFrameHeightWithSpacing() * 2.0f + 14.0f * s_;
-    ImGui::BeginChild("##places", ImVec2(150.0f * s_, -footerH), ImGuiChildFlags_Borders);
+// What lies below the list: the name (and the buttons), and a line for an error.
+float FileDialogView::footerHeight(bool narrow, float width) const
+{
+    const float row = ImGui::GetFrameHeightWithSpacing();
+    if (!narrow)
+        return row * 2.0f + 14.0f * s_;
+    // The name, the buttons; an error wraps to the width. (The folder is in the box above.)
+    const std::string& error = vm_.error.get();
+    const float message = error.empty() ? 0.0f : ImGui::CalcTextSize(error.c_str(), nullptr, false, width).y + ImGui::GetStyle().ItemSpacing.y;
+    return row * 2.0f + message + 6.0f * s_;
+}
+
+// Wide: a pane on the left. Narrow: buttons in a row above the list (which keeps the width).
+void FileDialogView::renderPlaces(bool narrow, float footerHeight)
+{
+    if (narrow) {
+        renderPlaceButtons();
+        return;
+    }
+    ImGui::BeginChild("##places", ImVec2(150.0f * s_, -footerHeight), ImGuiChildFlags_Borders);
     for (const auto& [label, path] : vm_.places()) {
-        const std::string text = std::string(label == "Workspace" ? ICON_FA_FOLDER_TREE "  "
-                                             : label == "Home"    ? ICON_FA_HOUSE "  "
-                                                                  : ICON_FA_HARD_DRIVE "  ") +
-                                 label;
-        if (ImGui::Selectable(text.c_str(), vm_.folder() == path))
+        if (ImGui::Selectable(placeLabel(label).c_str(), vm_.folder() == path))
             vm_.goTo(path);
         registerLastItem("file-dialog:place:" + label, "button", label, [this, p = path]() { vm_.goTo(p); });
     }
     ImGui::EndChild();
     ImGui::SameLine();
-    ImGui::BeginChild("##entries", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders);
+}
+
+void FileDialogView::renderPlaceButtons()
+{
+    bool first = true;
+    for (const auto& [label, path] : vm_.places()) {
+        const std::string text = placeLabel(label);
+        if (!first)
+            fit::sameLineIfFitsButton(text.c_str());
+        first = false;
+        const bool here = vm_.folder() == path;
+        if (here)
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(palette_.accentSoft));
+        if (ImGui::Button((text + "##place" + label).c_str()))
+            vm_.goTo(path);
+        if (here)
+            ImGui::PopStyleColor();
+        registerLastItem("file-dialog:place:" + label, "button", label, [this, p = path]() { vm_.goTo(p); });
+    }
+}
+
+void FileDialogView::renderEntries(bool narrow, float footerHeight)
+{
+    ImGui::BeginChild("##entries", ImVec2(0.0f, -footerHeight), ImGuiChildFlags_Borders);
     vm_.checkStorageAccess();
     if (vm_.storageAccessMissing()) { // Android: only the app's own folders until the user allows more
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(palette_.severityWarning));
@@ -117,48 +192,67 @@ void FileDialogView::render()
     const auto entries = vm_.visibleEntries();
     if (entries.empty())
         ImGui::TextDisabled(vm_.mode() == FileDialogMode::OpenFolder ? "No folders here" : "Nothing here");
-    for (int i = 0; i < int(entries.size()); ++i) {
-        const auto& e = entries[size_t(i)];
-        ImGui::PushID(i);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(e.isDirectory ? palette_.text : palette_.textDim));
-        const std::string label = std::string(entryIcon(e)) + "  " + e.name;
-        if (ImGui::Selectable(label.c_str(), selected_ == i, ImGuiSelectableFlags_AllowDoubleClick)) {
-            selected_ = i;
-            const bool twice = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
-            if (!e.isDirectory)
-                vm_.choose(e, twice); // a file: select it (double click: open / save)
-            else if (twice)
-                vm_.choose(e, false); // a folder: double click goes in
-        }
-        ImGui::PopStyleColor();
-        registerLastItem("file-dialog:entry:" + e.name, e.isDirectory ? "folder" : "file", e.name,
-                         [this, e]() { vm_.choose(e, !e.isDirectory); });
-        ImGui::PopID();
-    }
+    for (int i = 0; i < int(entries.size()); ++i)
+        renderEntry(i, entries[size_t(i)], narrow);
     ImGui::EndChild();
+}
 
-    // File name, error, buttons.
-    const char* nameLabel = vm_.mode() == FileDialogMode::SaveAs       ? "File name"
-                            : vm_.mode() == FileDialogMode::OpenFolder ? "Folder"
-                                                                       : "File name, path or filter";
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("%s", nameLabel);
-    ImGui::SameLine();
+// One row: a click selects (a file: its name goes to the name box). A folder opens on a double
+// click, or on a tap of a finger, which has no double click.
+void FileDialogView::renderEntry(int index, const viewmodel::FileDialogViewModel::Entry& e, bool narrow)
+{
+    ImGui::PushID(index);
+    const float rowH = narrow ? std::max(ImGui::GetFrameHeight(), kTouchRow * s_) : ImGui::GetTextLineHeightWithSpacing();
+    if (ImGui::Selectable("##entry", selected_ == index, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0.0f, rowH))) {
+        selected_ = index;
+        const bool twice = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+        if (!e.isDirectory)
+            vm_.choose(e, twice); // a file: select it (double click: open / save)
+        else if (twice || touch::fingerDown())
+            vm_.choose(e, false); // a folder: double click or a tap goes in
+    }
+    registerLastItem("file-dialog:entry:" + e.name, e.isDirectory ? "folder" : "file", e.name,
+                     [this, e]() { vm_.choose(e, !e.isDirectory); });
+    // Icon and name, the name cut short with "..." instead of running out of the row.
+    const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float y = min.y + (max.y - min.y - ImGui::GetTextLineHeight()) * 0.5f;
+    const ImU32 color = e.isDirectory ? palette_.text : palette_.textDim;
+    const float x = min.x + ImGui::GetStyle().FramePadding.x;
+    const float iconEnd = fit::text(dl, ImVec2(x, y), max.x, color, entryIcon(e));
+    fit::text(dl, ImVec2(std::max(iconEnd, x + ImGui::GetFontSize() * 1.3f), y), max.x - ImGui::GetStyle().FramePadding.x, color, e.name);
+    ImGui::PopID();
+}
+
+// The name, the buttons, an error or the folder.
+void FileDialogView::renderFooter(bool narrow)
+{
     const char* action = vm_.mode() == FileDialogMode::Open || vm_.mode() == FileDialogMode::OpenWorkspace ? ICON_FA_FOLDER_OPEN "  Open"
                          : vm_.mode() == FileDialogMode::SaveAs ? (vm_.confirmOverwrite ? ICON_FA_TRIANGLE_EXCLAMATION "  Replace" : ICON_FA_FLOPPY_DISK "  Save")
                                                                 : ICON_FA_FOLDER_TREE "  Open Folder";
+    if (!narrow) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", nameLabel());
+        ImGui::SameLine();
+    }
     const float buttonsW = 230.0f * s_;
-    ImGui::SetNextItemWidth(std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - buttonsW));
+    ImGui::SetNextItemWidth(narrow ? -1.0f : std::max(100.0f * s_, ImGui::GetContentRegionAvail().x - buttonsW));
     if (focusName_) {
         ImGui::SetKeyboardFocusHere();
         focusName_ = false;
     }
-    bool confirm = ImGui::InputText("##name", &vm_.fileName, ImGuiInputTextFlags_EnterReturnsTrue);
+    bool confirm = narrow ? ImGui::InputTextWithHint("##name", nameLabel(), &vm_.fileName, ImGuiInputTextFlags_EnterReturnsTrue)
+                          : ImGui::InputText("##name", &vm_.fileName, ImGuiInputTextFlags_EnterReturnsTrue);
     if (ImGui::IsItemEdited())
         vm_.confirmOverwrite = false;
-    registerLastItem("file-dialog:name", "textbox", nameLabel, nullptr);
-    ImGui::SameLine();
-    confirm = ImGui::Button(action, ImVec2(buttonsW * 0.55f, 0.0f)) || confirm;
+    registerLastItem("file-dialog:name", "textbox", nameLabel(), nullptr);
+    if (narrow) { // the buttons share the next line
+        const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        confirm = ImGui::Button(action, ImVec2(half, 0.0f)) || confirm;
+    } else {
+        ImGui::SameLine();
+        confirm = ImGui::Button(action, ImVec2(buttonsW * 0.55f, 0.0f)) || confirm;
+    }
     registerLastItem("file-dialog:confirm", "button", "Confirm", [this]() { vm_.confirm(); });
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(-1.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -168,14 +262,13 @@ void FileDialogView::render()
         vm_.confirm();
         focusName_ = vm_.visible.get();
     }
-    if (!vm_.error.get().empty())
-        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(vm_.confirmOverwrite ? palette_.severityWarning : palette_.severityError), "%s",
-                           vm_.error.get().c_str());
-    else
+    if (!vm_.error.get().empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(vm_.confirmOverwrite ? palette_.severityWarning : palette_.severityError));
+        ImGui::TextWrapped("%s", vm_.error.get().c_str());
+        ImGui::PopStyleColor();
+    } else if (!narrow) {
         ImGui::TextDisabled("%s", vm_.folder().c_str());
-
-    ImGui::PopID();
-    ImGui::EndPopup();
+    }
 }
 
 } // namespace enp::view

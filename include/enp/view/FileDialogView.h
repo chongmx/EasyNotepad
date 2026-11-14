@@ -1,5 +1,7 @@
-// The file dialog (Open, Save As, Open Folder) bound to FileDialogViewModel: places on the left,
-// the folder's entries, a path you can type, and the file name.
+// The file dialog (Open, Save As, Open Folder) bound to FileDialogViewModel: places, the folder's
+// entries, a path you can type, and the file name. Wide: places on the left, the name and buttons
+// on one line. Narrow (a phone): places as a row of buttons above the list, which then has the
+// whole width, the name on a line of its own and the buttons below it.
 #pragma once
 
 #include "enp/view/Fonts.h"
@@ -16,6 +18,15 @@ public:
     void render();
 
 private:
+    void renderToolbar();
+    void renderPlaces(bool narrow, float footerHeight);
+    void renderPlaceButtons();
+    void renderEntries(bool narrow, float footerHeight);
+    void renderEntry(int index, const viewmodel::FileDialogViewModel::Entry& entry, bool narrow);
+    void renderFooter(bool narrow);
+    float footerHeight(bool narrow, float width) const;
+    const char* nameLabel() const;
+
     viewmodel::FileDialogViewModel& vm_;
     const Fonts& fonts_;
     const Palette& palette_;

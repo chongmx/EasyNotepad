@@ -62,6 +62,7 @@ void FileDialogViewModel::show(FileDialogMode mode, const std::string& folder, c
 {
     mode_ = mode;
     fileName = name;
+    pickedName_.clear();
     confirmOverwrite = false;
     error.set({});
     history_.clear();
@@ -101,7 +102,7 @@ void FileDialogViewModel::load()
 std::vector<FileDialogViewModel::Entry> FileDialogViewModel::visibleEntries() const
 {
     // In Open mode a typed name narrows the list; a path (with a slash) does not.
-    const bool filter = mode_ == FileDialogMode::Open && !fileName.empty() &&
+    const bool filter = mode_ == FileDialogMode::Open && !fileName.empty() && fileName != pickedName_ &&
                         fileName.find_first_of("/\\") == std::string::npos;
     if (!filter)
         return entries_;
@@ -215,7 +216,7 @@ void FileDialogViewModel::choose(const Entry& entry, bool confirmNow)
             fileName.clear();
         return;
     }
-    fileName = entry.name;
+    fileName = pickedName_ = entry.name;
     confirmOverwrite = false;
     if (confirmNow)
         confirm();

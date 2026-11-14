@@ -40,6 +40,17 @@ its release notes on GitHub.
   Home is the shared storage, and its folders and SD cards are places of the dialog.
 - Hints opened from the ribbon (and other places without padding) had their text touching the
   edges of a box too small for it.
+- Phones, the Open, Open Folder and Save As dialogs: the list had a sliver of the width beside a
+  150 px places pane and the file name a sliver of the line. The places are now buttons above the
+  list, which has the whole width and taller rows; the name has a line of its own, with the
+  buttons below it; the dialog takes the whole screen.
+- Phones: a tap on a folder in those dialogs goes into it (there is no double click on a finger).
+- Picking a file in the Open dialog narrowed the list to that file (its name was taken for a
+  typed filter), so a list of many files was left with one. The list keeps all its entries.
+- Phones: the name of the open document in the top bar and the names in the list of open
+  documents end in "..." when too long, instead of being cut off; a finger dragging the list of
+  open documents scrolls it and never reorders it; the bottom bar steps aside while the on-screen
+  keyboard is up, so the text keeps the height.
 
 ## [1.1.0] - 2026-11-06
 

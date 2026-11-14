@@ -1348,6 +1348,10 @@ TEST(file_dialog_open_and_save_as)
     CHECK(entries.size() >= 3 && entries[0].isDirectory && entries[0].name == "src" && entries[1].name == "zeta");
     dialog.fileName = "note";
     CHECK(dialog.visibleEntries().size() == 1 && dialog.visibleEntries()[0].name == "notes.md");
+    dialog.choose({"notes.md", false}, false); // picked from the list: the list stays whole around it
+    CHECK(dialog.fileName == "notes.md" && dialog.visibleEntries().size() == entries.size());
+    dialog.fileName = "notes.m"; // typed again: it filters again
+    CHECK(dialog.visibleEntries().size() == 1);
     dialog.fileName.clear();
     dialog.choose({"src", true}, false);
     CHECK(dialog.folder().size() > 4 && dialog.folder().substr(dialog.folder().size() - 4) == "/src");

@@ -97,8 +97,14 @@ public:
         return os::fs::readFileRange(path, offset, size, total);
     }
     bool write(const std::string&, std::string_view, std::string*) override { return false; }
-    std::vector<interfaces::DirectoryEntry> list(const std::string&) override { return {}; }
-    bool isDirectory(const std::string&) override { return false; }
+    // Folders the test made up (the file dialog's lists): path -> entries.
+    std::map<std::string, std::vector<interfaces::DirectoryEntry>> folders;
+    std::vector<interfaces::DirectoryEntry> list(const std::string& path) override
+    {
+        const auto it = folders.find(path);
+        return it == folders.end() ? std::vector<interfaces::DirectoryEntry>() : it->second;
+    }
+    bool isDirectory(const std::string& path) override { return folders.count(path) > 0; }
     std::string absolute(const std::string& path) override { return path; }
     bool createDirectories(const std::string&) override { return false; }
 };
@@ -321,6 +327,108 @@ int main(int argc, char** argv)
                     h.sweep(0.0f, 0.0f, phone.size.x, phone.size.y, kCoarseStep);
                 }
             }
+            // The on-screen keyboard up (a bottom inset of 300 px): the bottom bar steps aside, so the
+            // editor keeps more of the height.
+            ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
+            h.settle();
+            h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // Code
+            h.settle();
+            auto editorHeight = [] {
+                for (ImGuiWindow* w : GImGui->Windows)
+                    if (w->WasActive && std::strstr(w->Name, "##editorText"))
+                        return w->Size.y;
+                return -1.0f;
+            };
+            const float plain = editorHeight();
+            h.view().setSafeArea(0.0f, 0.0f, 0.0f, 300.0f);
+            h.setContext("phone upright, keyboard up");
+            h.settle();
+            h.sweep(0.0f, 0.0f, 390.0f, 544.0f, kCoarseStep);
+            if (!(plain > 0.0f && editorHeight() > 0.0f && editorHeight() < plain - 100.0f && editorHeight() > plain - 300.0f + 40.0f))
+                std::printf("  FAILED keyboard: the editor is %.0f high, %.0f without the keyboard (the bottom bar should step aside)\n",
+                            editorHeight(), plain), ++checksFailed;
+            h.view().setSafeArea(0.0f, 0.0f, 0.0f, 0.0f);
+            ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.settle();
+        }
+
+        // The file dialog on a phone: a long list scrolls under a finger, a tap on a folder goes in, a
+        // tap on a file picks it without narrowing the list, and the name box keeps its room.
+        {
+            auto child = [&](const char* name) -> ImGuiWindow* {
+                for (ImGuiWindow* w : GImGui->Windows) {
+                    const char* slash = std::strrchr(w->Name, '/');
+                    if (w->WasActive && std::strncmp(slash ? slash + 1 : w->Name, name, std::strlen(name)) == 0)
+                        return w;
+                }
+                return nullptr;
+            };
+            auto check = [&](bool ok, const std::string& what) {
+                if (!ok)
+                    std::printf("  FAILED file dialog: %s\n", what.c_str()), ++checksFailed;
+            };
+            std::vector<interfaces::DirectoryEntry> listing;
+            for (int i = 0; i < 40; ++i)
+                listing.push_back({"folder" + std::to_string(i), true, false});
+            for (int i = 0; i < 200; ++i)
+                listing.push_back({"file" + std::to_string(i) + ".txt", false, false});
+            h.files().folders["/pics"] = listing;
+            h.files().folders["/pics/folder0"] = {{"inner.txt", false, false}};
+            for (const ImVec2 size : {ImVec2(390.0f, 844.0f), ImVec2(844.0f, 390.0f)}) {
+                ImGui::GetIO().DisplaySize = size;
+                const std::string shape = std::to_string(int(size.x)) + "x" + std::to_string(int(size.y));
+                h.setContext("file dialog on a phone " + shape);
+                h.setTouch(true);
+                h.vm().fileDialog().show(viewmodel::FileDialogMode::Open, "/pics");
+                h.settle();
+                h.settle();
+                ImGuiWindow* entries = child("##entries");
+                check(entries != nullptr, shape + ": the list of entries is shown");
+                if (!entries) {
+                    h.vm().fileDialog().cancel();
+                    h.settle();
+                    continue;
+                }
+                const ImVec2 middle(entries->Pos.x + entries->Size.x * 0.5f, entries->Pos.y + entries->Size.y * 0.5f);
+                check(entries->Size.y >= size.y * 0.3f,
+                      shape + ": the list has room (" + std::to_string(entries->Size.y) + " of " + std::to_string(size.y) + ")");
+                // A finger drags the list.
+                const float before = entries->Scroll.y;
+                h.frame(middle);
+                h.frame(middle, true);
+                for (int i = 1; i <= 12; ++i)
+                    h.frame(ImVec2(middle.x, middle.y - 150.0f * float(i) / 12.0f), true);
+                h.frame(ImVec2(middle.x, middle.y - 150.0f), false);
+                check(entries->Scroll.y - before > 100.0f && entries->Scroll.y - before < 200.0f,
+                      shape + ": a finger dragging 150 px should scroll the list about 150 px (" +
+                          std::to_string(entries->Scroll.y - before) + ")");
+                for (int i = 0; i < 60; ++i) // the glide after the finger lifted
+                    h.settle();
+                // A tap on a file picks it; the list stays whole.
+                const size_t all = h.vm().fileDialog().visibleEntries().size();
+                ImGui::SetScrollY(entries, entries->ScrollMax.y); // the files are at the end
+                h.settle();
+                h.setContext("tap on a file " + shape);
+                h.click(ImVec2(middle.x, entries->Pos.y + entries->Size.y - 12.0f));
+                h.settle();
+                check(!h.vm().fileDialog().fileName.empty(), shape + ": a tap on a file picks it");
+                check(h.vm().fileDialog().visibleEntries().size() == all,
+                      shape + ": picking a file must not narrow the list (" +
+                          std::to_string(h.vm().fileDialog().visibleEntries().size()) + " of " + std::to_string(all) + ")");
+                // A tap on a folder goes in.
+                entries = child("##entries");
+                ImGui::SetScrollY(entries, 0.0f);
+                h.settle();
+                h.setContext("tap on a folder " + shape);
+                h.click(ImVec2(middle.x, entries->Pos.y + 14.0f)); // the first row: folder0
+                h.settle();
+                check(h.vm().fileDialog().folder() == "/pics/folder0",
+                      shape + ": a tap on a folder goes into it (" + h.vm().fileDialog().folder() + ")");
+                h.vm().fileDialog().cancel();
+                h.settle();
+                h.settle();
+            }
+            h.setTouch(false);
             ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
             h.settle();
         }
