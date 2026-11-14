@@ -163,6 +163,13 @@ public:
     int frames() const { return frames_; }
 
     void setContext(std::string where) { where_ = std::move(where); }
+    // The most vertices one draw list held since the last call (then counted afresh).
+    int takeMaxVertices()
+    {
+        const int n = maxVertices_;
+        maxVertices_ = 0;
+        return n;
+    }
     // Following frames come from a finger (ImGui's touch-screen source) instead of a mouse.
     void setTouch(bool touch) { touch_ = touch; }
 
@@ -185,6 +192,11 @@ public:
         if (g.HoveredId != 0 && frame_.inDragRegion(pos) && reportedIds_.insert(g.HoveredId).second)
             failures_.push_back({"item 0x" + hex(g.HoveredId) + " (window \"" + std::string(g.HoveredWindow ? g.HoveredWindow->Name : "?") + "\") lies inside a title-bar drag region", where_, pos});
         ImGui::Render();
+        // The most vertices one draw list held (a window's): with 16-bit indices and a renderer
+        // that cannot offset them (OpenGL ES: Android, the web), past 65535 ImGui asserts.
+        if (const ImDrawData* data = ImGui::GetDrawData())
+            for (const ImDrawList* list : data->CmdLists)
+                maxVertices_ = std::max(maxVertices_, list->VtxBuffer.Size);
         if (g.ErrorCountCurrentFrame > 0) {
             const std::string message = lastError();
             if (reportedErrors_.insert(message + where_).second)
@@ -266,6 +278,7 @@ private:
     std::string where_;
     ImVec2 lastPos_{-1.0f, -1.0f};
     int frames_ = 0;
+    int maxVertices_ = 0;
     bool touch_ = false;
 };
 
@@ -1224,6 +1237,40 @@ int main(int argc, char** argv)
                             action();
                             h.settle();
                         }
+                    // Zoomed far out (many pages on the screen at once, as a phone's pinch does):
+                    // every page drawn, its pictures read; one draw list may hold more than 16-bit
+                    // indices reach, which OpenGL ES (Android, the web) cannot draw.
+                    // (Upright on a phone: the most pages on the screen.)
+                    if (const view::UiElement* out = view::UiAutomation::instance().find("viewer:zoom-out"); out && out->activate) {
+                        const std::function<void()> action = out->activate;
+                        ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
+                        h.settle();
+                        h.click(ImVec2(390.0f * 1.5f / 4.0f, 844.0f - 29.0f)); // the document's screen
+                        h.settle();
+                        for (int i = 0; i < 12; ++i) {
+                            action();
+                            h.settle();
+                        }
+                        h.settleReading();
+                        h.takeMaxVertices();
+                        h.settle();
+                        h.sweep(0.0f, 0.0f, 390.0f, 844.0f, kCoarseStep);
+                        const int most = h.takeMaxVertices();
+                        ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+                        h.settle();
+                        std::printf("  zoomed out on %s: at most %d vertices in one draw list (ImDrawIdx %zu bytes)\n", path.c_str(), most,
+                                    sizeof(ImDrawIdx));
+                        if (sizeof(ImDrawIdx) == 2 && most >= (1 << 16))
+                            std::printf("  FAILED document viewer: %s zoomed out draws %d vertices in one list: past 16-bit indices "
+                                        "(OpenGL ES asserts or draws garbage)\n",
+                                        path.c_str(), most),
+                                ++checksFailed;
+                        if (const view::UiElement* fit = view::UiAutomation::instance().find("viewer:zoom-fit"); fit && fit->activate) {
+                            const std::function<void()> back = fit->activate;
+                            back();
+                            h.settle();
+                        }
+                    }
                     // Two fingers spread over the reader (a phone's pinch): its content grows.
                     {
                         auto reader = []() -> ImGuiWindow* {

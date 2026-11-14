@@ -1173,14 +1173,14 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             const ImVec2 uv = dl->_Data->TexUvWhitePixel;
             const ImU32 inner = colorAt(0.0f), outer = colorAt(1.0f);
             dl->PrimReserve(12, 5);
-            const ImDrawIdx base = ImDrawIdx(dl->_VtxCurrentIdx);
+            const ImDrawIdx base = static_cast<ImDrawIdx>(dl->_VtxCurrentIdx);
             dl->PrimWriteVtx(c, uv, inner);
             for (const ImVec2& p : corners)
                 dl->PrimWriteVtx(p, uv, outer);
             for (int i = 0; i < 4; ++i) {
                 dl->PrimWriteIdx(base);
-                dl->PrimWriteIdx(ImDrawIdx(base + 1 + i));
-                dl->PrimWriteIdx(ImDrawIdx(base + 1 + (i + 1) % 4));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + i));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + (i + 1) % 4));
             }
             return;
         }

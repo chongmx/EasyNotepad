@@ -131,6 +131,11 @@ add_library(imgui STATIC
 )
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+# 32-bit draw indices: OpenGL ES and WebGL (Android, the web) cannot offset vertices, so with
+# 16-bit indices a window's draw list may hold at most 65535 of them: a PDF zoomed far out on a
+# phone (six pages of dense text) holds 86000, and ImGui asserts (a crash) or draws garbage.
+# ES 3 and WebGL 2 draw 32-bit indices natively; the same everywhere, so every build and test uses it.
+target_compile_definitions(imgui PUBLIC "ImDrawIdx=unsigned int")
 if(NOT MSVC)
     target_compile_options(imgui PRIVATE -w)
 endif()

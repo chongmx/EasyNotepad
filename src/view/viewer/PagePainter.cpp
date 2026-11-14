@@ -5,6 +5,9 @@
 #include "enp/view/MarkdownImages.h"
 
 #include "IconsFontAwesome6.h"
+// Pages zoomed far out put tens of thousands of glyphs into one draw list: 16-bit indices would
+// overflow on OpenGL ES (no vertex offset). CMakeLists.txt sets ImDrawIdx.
+static_assert(sizeof(ImDrawIdx) == 4, "ImDrawIdx must be 32-bit: a page view's draw list can pass 65535 vertices");
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -216,7 +219,7 @@ void subdivide(ImDrawList* dl, int firstVtx, int firstIdx, float step, std::vect
                 const ImDrawVert v = mix(a, b, c, float(i) / float(k), float(j) / float(k));
                 dl->PrimWriteVtx(v.pos, v.uv, v.col);
             }
-        auto at = [&](int i, int j) { return ImDrawIdx(base + unsigned(j * (k + 1) - j * (j - 1) / 2 + i)); };
+        auto at = [&](int i, int j) { return static_cast<ImDrawIdx>(base + unsigned(j * (k + 1) - j * (j - 1) / 2 + i)); };
         for (int j = 0; j < k; ++j)
             for (int i = 0; i + j < k; ++i) {
                 dl->PrimWriteIdx(at(i, j));
