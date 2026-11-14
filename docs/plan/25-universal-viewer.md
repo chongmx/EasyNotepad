@@ -60,38 +60,82 @@ is to be checked and ranked against it. Priority: **A** visible in most real fil
 
 ### Word
 
+Done on `feature/word-rendering`:
+
+- **The document's own fonts:** `rFonts` and the theme's fonts, from the system when installed,
+  else the bundled metric-compatible pack (`resources/fonts/document-fonts.zip`: Carlito for
+  Calibri, Caladea for Cambria, Liberation for Times New Roman / Arial / Courier New), bold and
+  italic faces, loaded when first drawn and given back when idle (`view::DocumentFonts`).
+- **Tab stops:** left, centre, right and decimal, with dot, dash and line leaders (tables of contents).
+- **Tables:** column widths from `tblGrid`, `gridSpan`, `vMerge`, cell shading, borders from the
+  table, the cell and the table style's conditional parts (`tblLook`: header row, banded rows, first
+  column...), cell alignment per paragraph, Word's automatic white text on dark shading.
+- **Spacing:** before / after, line spacing (multiple, exact, at least), contextual spacing, list
+  level indents with the marker at the hanging indent.
+- **Pages** (the default; the toolbar's Reflow button reflows to the window): page size and margins,
+  page breaks, section breaks, keep with next, headers and footers on every page with PAGE and
+  NUMPAGES fields, footnotes at the foot of their page, page navigation.
+- **Floating pictures:** placed from their anchor (page, margin or paragraph; offset or aligned), in
+  front of or behind the text; text beside them (square, tight, through) is narrowed to the wider
+  side, or goes under them (top and bottom, or no room beside).
+
 | Pri | Gap | What it takes |
 |---|---|---|
-| A | **No pages:** the document is one reflowed column; page size, margins, page breaks, section breaks and columns are ignored | a paginated layout (25 "Later": print layout) on the display list; reflowed stays the reading default |
-| A | **Floating pictures, shapes and text boxes** (anchored, with text wrapping) are put after their paragraph | position anchors relative to page / margin / paragraph and wrap text around them; needs pages |
-| A | **Tab stops** become four spaces: right, centre and decimal tabs and dot leaders (tables of contents) are lost | read `w:tabs` per paragraph and lay text out to them |
-| B | Table column widths come from the content, not `tblGrid` / `tcW`; text alignment inside cells is not applied; nested tables are flattened; pictures in cells move after the table; table style borders and shading partly | table layout from the grid; cells holding blocks (the shared renderer's table cell model, 25.1) |
-| B | Headers and footers: only the last section's default, shown once; first-page and even-page headers and page-number fields per page | with pages |
-| B | Footnotes at the end instead of at the page bottom; comments as a list instead of margin balloons; tracked changes: deletions hidden, insertions plain (Word shows markup) | a markup mode: insertions underlined and coloured, deletions struck |
+| B | Text beside a floating picture is narrowed for the whole paragraph: Word narrows only the lines beside the picture; floating shapes and text boxes are still put after their paragraph | line-by-line wrap in the paragraph layout (each line's room from the floats it meets); shapes through the slide painter |
+| B | Nested tables are flattened; pictures in cells move after the table | cells holding blocks (the shared renderer's table cell model, 25.1) |
+| B | Headers and footers: only the last section's default; first-page and even-page headers, columns | per section |
+| B | Comments as a list instead of margin balloons; tracked changes: deletions hidden, insertions plain (Word shows markup) | a markup mode: insertions underlined and coloured, deletions struck |
 | C | Paragraph borders, drop caps, `w:sym` symbol characters (drawn as a box), equations (OMML) laid out as math, line numbers, watermarks | per item |
 
 ### Excel
 
+Done on `feature/word-rendering`:
+
+- **The sheet as Excel draws it:** white paper, Excel's grey grid, black automatic text; cells and
+  rich-text runs in their own fonts (the document fonts, real bold and italic faces).
+- **Fills and lines:** hatch patterns, grey patterns as their mix, linear and centre gradients,
+  diagonal borders; the palette's indexed colours 8-63.
+- **Text:** `####` for numbers too wide for their column, right-aligned and centred text running
+  over the empty cells beside it, indent, shrink to fit.
+- **Conditional formatting** (`model/viewer/ConditionalFormat.cpp`), on the saved values: cell
+  rules (against numbers, text or cells), top / bottom, above / below the average, text, blanks,
+  errors, duplicates, colour scales, data bars, icon sets; priority order and stopIfTrue. Rules
+  with formulas (expressions) and time periods are reported as not shown.
+- **Table styles** (`model/viewer/SheetTable.cpp`): the built-in Light, Medium and Dark styles from
+  the theme's accents (checked against Excel's own render of Medium 2 and 9, Light 1 and 9), and
+  the workbook's own styles from its dxfs; header, total, banded rows and columns, first and last
+  column. A cell's own fill, colour and borders win over the style, and conditional formats win
+  over both.
+
 | Pri | Gap | What it takes |
 |---|---|---|
-| A | **Conditional formatting** is not applied: cell rules, colour scales, data bars, icon sets | evaluate `cfRule` against the cached values (no formula engine needed for cellIs, top/bottom, colour scales, data bars) |
-| A | **Table styles** ("Format as Table": header colour, banded rows) are not drawn | read `xl/tables/*.xml` and the built-in table styles, like PowerPoint's table styles |
-| B | Numbers too wide for their column are clipped; Excel shows `####` | measure, then `#` fill |
-| B | Italic not drawn; font families ignored | the font work under All formats |
-| B | Only solid fills: pattern fills (`gray125`, hatches) and gradient fills are not drawn | pattern bitmaps / the gradient code the page painter has |
-| C | Centred and right-aligned text does not run over empty cells to the left; indent and shrink-to-fit ignored; diagonal borders; thick borders partly covered by the next cell's fill | per item |
+| B | Conditional formats with formulas (`expression`), time periods; Excel 2010 data bars (`x14`: solid, negative bars, axis) | a small formula evaluator for the common forms (`MOD(ROW(),2)=0`, comparisons with `$A1`) |
+| B | Table styles' borders from a custom style's dxfs; Dark 8-11 and Medium 15-21 only approximated | read dxf borders; check against Excel's render |
+| C | The top border of row 1 sits under the column headers; thick borders partly covered by the next cell's fill | draw borders after all fills |
 | C | Chart sheets, sparklines, comment markers, data validation arrows, outline (grouping) bars, hidden-by-filter rows | per item |
 
 ### PowerPoint
 
+Done on `feature/word-rendering`:
+
+- **The deck's own fonts:** each run's latin typeface through the list styles and the theme (`+mj-lt`,
+  `+mn-lt`), drawn in the document fonts with real bold and italic faces; charts and sheet shapes
+  in the theme's minor font.
+- **SmartArt without a cached drawing** (`model/viewer/SmartArt.cpp`): laid out from the data model
+  by the layout's kind (block list, list, horizontal list, process, vertical process, chevrons,
+  cycle, hierarchy, pyramid; others as a block list) in the default look: the first accent, white
+  text, one text size for all. `lo-smartart1.pptx` now matches PowerPoint's render (five blocks, 2-2-1).
+- **Autofit:** `fontScale` and `lnSpcReduction` as PowerPoint last fitted the text.
+- **Table lines:** the cell's own (`lnL`...) over the table style's (`tcBdr`, by part outline and inside lines).
+- **Fills:** picture fills in rectangular shapes; pattern fills as their two colours mixed.
+- **Text:** superscript, subscript, letter spacing (`spc`).
+
 | Pri | Gap | What it takes |
 |---|---|---|
-| A | **SmartArt without a cached drawing** is an outline of its text (38 of LibreOffice's samples; `lo-smartart1.pptx`: PowerPoint draws five blue blocks, we draw a bulleted list) | lay out from the data model by the layout's `uniqueId`: the common layouts first (basic block list, process, cycle, hierarchy, pyramid), the quick style and colour parts for the look |
-| A | **Text autofit** (`normAutofit fontScale`, `lnSpcReduction`) and the substituted font make text overflow or break differently | apply the scale; with metric-compatible fonts, breaks match |
-| B | 40 of about 180 preset shapes; the others fall back to a simpler outline | port the preset geometry definitions (`presetShapeDefinitions.xml` formulas) instead of hand-written outlines |
-| B | Picture, texture and pattern fills inside shapes; picture bullets | image fill clipped to the shape path |
-| B | Text effects: gradient or outlined text, letter spacing (`spc`), columns in text boxes, superscript / subscript offsets | per item |
-| C | Table borders from the table style (`tcBdr`) are skipped; diagonal cell borders | read them with the fills |
+| B | SmartArt: the exact layout (sizes, spacing, connector shapes), quick styles and colour variations, layouts outside the families above | the layout part's own algorithm and constraints (`dgm:layoutNode`), a large piece of work |
+| B | 60 of about 180 preset shapes; the others fall back to a rectangle | port the preset geometry definitions (`presetShapeDefinitions.xml` formulas) |
+| B | Picture fills in non-rectangular shapes (clipped to the shape), tiled pictures, picture bullets | a clip to the shape's path in the painter |
+| B | Gradient or outlined text, columns in text boxes, shadows and glow | per item |
 | C | Video and audio show at most their poster frame; OLE objects their preview image | say so in "not shown" (done for media) |
 | C | Charts are drawn flat: 3D charts, chart styles, data labels positions, trendlines and error bars, `chartex` (waterfall, treemap, sunburst, histogram, box) | per chart kind |
 
@@ -105,6 +149,22 @@ is to be checked and ranked against it. Priority: **A** visible in most real fil
 | B | Annotations and form fields (their appearance streams) are not drawn | draw `/AP` normal appearances as forms |
 | C | Mesh shadings (types 4-7), tiling patterns, blend modes, transparency groups and soft masks on content | per item |
 | C | Vertical writing (`Identity-V`), Type 3 fonts as their glyph procedures, encrypted files | per item |
+| C | Pictures are kept at 3 pixels per point of the size the page shows them (216 dpi at 100 %): sharp up to about twice the size on a high-density screen, soft beyond | read a page's pictures again at the zoom shown once it settles (levels of detail) |
+
+Done (2026-11-13, an image-heavy arXiv paper, 33 pages, 22.6 MB, against pdfium):
+
+- **Outlines with holes**: a filled path of several outlines (a picture's frame, a ring, letters
+  drawn as outlines) is cut into bands by its fill rule (non-zero or even-odd, `f*`) when the
+  page is read; frames were drawn as solid boxes over the pictures they framed.
+- **Soft masks of JPEGs**, and masks compressed or of another size: the picture and its mask
+  are put together off the UI thread (`model/viewer/ImagePack.h`, `services::fitImage`).
+- **Clips of pages read on demand** reached the view: the view-model copied the page's items
+  but not its clip rectangles (nor the scripts of its text), so pictures spilled out of theirs.
+- **Pictures at the size shown**, decoded on the reader's thread: a 1920 x 1536 camera frame
+  shown as a 90-point thumbnail is kept at 270 x 216, and every page picture reaches the UI
+  thread as QOI (unpacked several times faster than a JPEG is decoded). Paging through the
+  paper peaked at 90 MB over the empty app instead of 350 MB; the 96 MB picture budget was
+  running out and pictures past it showed as grey boxes.
 
 ### Checked against Office's render (2026-11-07)
 
@@ -120,7 +180,7 @@ wrong; the rest confirm gaps listed above. **Fixed** rows were fixed the same da
 | A | Fixed | Text in a shape takes its colour from the shape's style (`p:style/a:fontRef` with a scheme colour): white text on a green box; ours black | poi-themes 4 ("Text in a autoshape is white") (fixed: fontRef colours the shape's text over the master's text styles (Pptx textBody)) |
 | A | Fixed | Italic text in slides is upright (title placeholders of the Austin theme, "This bit is in italic green") | poi-SampleShow 1, poi-themes 4-5 (fixed: italic runs slanted by the painter (styledText)) |
 | A | Gap (fonts) | Calibri / Century Gothic are lighter and narrower than our Roboto Medium: every slide's text looks bolder and breaks lines elsewhere ("Nunc at risus vel erat tempus / posuere." breaks after "tempus" in Office) | all decks, poi-sample 1 |
-| A | Gap | Word table styles: the tables' orange header rows and lines (a built-in "Grid Table" style) are not drawn | poi-table-alignment |
+| A | Fixed | Word table styles: the tables' orange header rows and lines (a built-in "Grid Table" style) are not drawn | poi-table-alignment (fixed: table styles with their conditional parts (Docx tableStyle)) |
 | A | Fixed | A layout's radial gradient background is drawn as one flat colour | poi-themes 3 ("Radial Gradient Fill On Slide Layout") (fixed: bgRef / fillRef resolve the theme's fill style lists with phClr (themeFill); radial centre from fillToRect; gradient fills drawn on a subdivided mesh (PagePainter subdivide)) |
 | B | Fixed | Comparison layout: the right column's bullet sits apart from its text, which is pushed right, and its heading is centred; Office left-aligns both columns | poi-layouts 5 (fixed: a placeholder matches the master by type only, the layout by idx) |
 | B | Fixed | Elbow connectors (`bentConnector3`) are drawn as one straight line | poi-shapes 1 (cloud to picture) (fixed: bent and curved connectors routed (dml::connectorPath)) |

@@ -224,6 +224,9 @@ void Worker::post(Task task)
 {
 #if defined(ENP_HAS_THREADS)
     {
+        // The queue's own room (its blocks, kept while the worker lives) is the worker's, not the
+        // scope of whoever posts: a document's scope would otherwise keep it after the document.
+        mem::Scope scope("dispatch");
         std::lock_guard<std::mutex> lock(state_->mutex);
         state_->tasks.push_back(std::move(task));
         if (!state_->thread.joinable())

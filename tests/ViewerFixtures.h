@@ -266,4 +266,27 @@ inline std::vector<std::pair<std::string, std::string>> sampleDocuments()
     return out;
 }
 
+// A PDF of `pages` pages, each with a line of text and a picture of its own (`side` pixels square,
+// drawn half an inch wide: read, then shrunk).
+inline std::string manyPagesPdf(int pages, int side = 96)
+{
+    std::vector<std::string> objects = {"<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"};
+    std::string kids;
+    for (int i = 0; i < pages; ++i) {
+        const int page = int(objects.size()) + 1, content = page + 1, image = page + 2;
+        kids += std::to_string(page) + " 0 R ";
+        objects.push_back("<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 " + std::to_string(image) +
+                          " 0 R >> >> /Contents " + std::to_string(content) + " 0 R >>");
+        objects.push_back(stream("", "BT /F1 12 Tf 20 150 Td (Page " + std::to_string(i + 1) + ") Tj ET q 36 0 0 36 20 20 cm /Im1 Do Q", true));
+        std::string pixels(std::size_t(side) * std::size_t(side) * 3, '\0');
+        for (std::size_t p = 0; p < pixels.size(); ++p)
+            pixels[p] = char((p * 7 + std::size_t(i) * 31) & 0xFF);
+        objects.push_back("<< /Type /XObject /Subtype /Image /Width " + std::to_string(side) + " /Height " + std::to_string(side) +
+                          " /BitsPerComponent 8 /ColorSpace /DeviceRGB /Length " + std::to_string(pixels.size()) + " >>\nstream\n" + pixels +
+                          "\nendstream");
+    }
+    objects[1] = "<< /Type /Pages /Kids [" + kids + "] /Count " + std::to_string(pages) + " /MediaBox [0 0 300 200] >>";
+    return pdf(objects);
+}
+
 } // namespace viewertest

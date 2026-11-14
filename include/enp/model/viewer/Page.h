@@ -49,10 +49,22 @@ struct Gradient {
 // The end of a line: none, or a filled triangle, an open arrow, a stealth arrow, a diamond or a dot.
 enum class LineEnd : std::uint8_t { None, Triangle, Arrow, Stealth, Diamond, Oval };
 
+// A strip of a filled area between two heights: its left and right edges at the top (y0) and at
+// the bottom (y1). Page points.
+struct FillBand {
+    float y0 = 0.0f, y1 = 0.0f;
+    float left0 = 0.0f, right0 = 0.0f, left1 = 0.0f, right1 = 0.0f;
+};
+
 // Filled and / or stroked outlines, already flattened to polygons.
 struct PathItem {
     std::vector<std::vector<Point>> subpaths;
     std::vector<bool> closed; // per subpath
+    // The fill of outlines taken together (a frame, a ring, a letter's counter: holes cut by the
+    // fill rule, non-zero or even-odd), as bands; made by Page::add when there is more than one
+    // outline. Empty: each outline is filled on its own.
+    bool evenOdd = false;
+    std::vector<FillBand> bands;
     std::uint32_t fill = kNone; // with a gradient: its first colour (a painter without gradients uses it)
     std::uint32_t stroke = kNone;
     float lineWidth = 1.0f;
@@ -81,6 +93,9 @@ struct TextRun {
     float size = 18.0f;
     std::uint32_t color = kBlack;
     std::uint8_t flags = 0;
+    std::string font; // its typeface ("Calibri"); empty: the view's font
+    float baseline = 0.0f; // superscript (> 0) or subscript (< 0): how far it is raised, in its size
+    float spacing = 0.0f;  // points added after each letter (spc)
 };
 
 struct TextParagraph {
@@ -142,12 +157,18 @@ struct Page {
     std::string plainText() const;
 };
 
-// Reads one page's content on request (PDF). Keeps what it needs of the file.
+// Reads one page's content on request (PDF). Keeps what it needs of the file. Two steps, so a
+// page's text can be shown before its pictures are ready: load() fills the page with its
+// pictures as image items naming a key, and loadImage() reads one picture's bytes by that key.
+// Safe to call from several threads (a source serialises its own work).
 class PageSource {
 public:
     virtual ~PageSource() = default;
-    // Fills `page` (its items) and adds the images it uses to `media`. False when it cannot.
-    virtual bool load(std::size_t index, Page& page, std::map<std::string, std::string>& media) = 0;
+    // Fills `page` (its items; pictures by key, not read). False when it cannot.
+    virtual bool load(std::size_t index, Page& page) = 0;
+    // A picture named by load(): its encoded bytes (or a picture packed with its soft mask,
+    // ImagePack.h). Empty when it cannot be read, or the key is unknown.
+    virtual std::string loadImage(const std::string& key) = 0;
 };
 
 struct PageDocument {

@@ -153,8 +153,12 @@ private:
         struct HeldImage {
             std::string key; // the cache's key (a resolved path, or the URL)
             const MarkdownImage* image = nullptr;
+            float zoom = 1.0f; // an image document's pinch zoom, over its fit or its pixel size
+            ImVec2 pendingScroll{-1.0f, -1.0f};
         };
         std::map<std::string, HeldImage> images; // by source as written
+        float zoom = 1.0f; // its pinch zoom, over the editor's (touch::zoomView)
+        ImVec2 pendingScroll{-1.0f, -1.0f};
     };
     std::map<int, RenderedMarkdown> markdown_; // by document id (open documents only)
     MarkdownImages images_;                     // shared by the documents, destroyed when unused

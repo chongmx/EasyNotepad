@@ -295,9 +295,91 @@ void presetOutline(std::string_view g, Rect r, std::vector<Point>& pts)
     }
 }
 
-bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
+// At the Start of custGeom: its paths, normalised to 0..1 of the shape's box, and whether each is closed.
+void customGeometry(XmlReader& x, std::vector<std::vector<Point>>& paths, std::vector<bool>& closed)
+{
+    double pw = 1, ph = 1;
+    std::vector<Point>* current = nullptr;
+    std::string op;
+    std::vector<Point> pts;
+    auto flush = [&]() {
+        if (op.empty() || !current)
+            return;
+        auto norm = [&](Point q) { return Point{float(q.x / pw), float(q.y / ph)}; };
+        if ((op == "moveTo" || op == "lnTo") && !pts.empty()) {
+            if (op == "moveTo") {
+                if (!current->empty()) {
+                    paths.emplace_back();
+                    closed.push_back(false);
+                    current = &paths.back();
+                }
+            }
+            current->push_back(norm(pts[0]));
+        } else if (op == "cubicBezTo" && pts.size() == 3 && !current->empty()) {
+            const Point a = current->back();
+            const Point b = norm(pts[0]), cc = norm(pts[1]), d = norm(pts[2]);
+            for (int i = 1; i <= 12; ++i) {
+                const float t = float(i) / 12.0f, u = 1.0f - t;
+                current->push_back({u * u * u * a.x + 3 * u * u * t * b.x + 3 * u * t * t * cc.x + t * t * t * d.x,
+                                    u * u * u * a.y + 3 * u * u * t * b.y + 3 * u * t * t * cc.y + t * t * t * d.y});
+            }
+        } else if (op == "quadBezTo" && pts.size() == 2 && !current->empty()) {
+            const Point a = current->back();
+            const Point b = norm(pts[0]), d = norm(pts[1]);
+            for (int i = 1; i <= 10; ++i) {
+                const float t = float(i) / 10.0f, u = 1.0f - t;
+                current->push_back({u * u * a.x + 2 * u * t * b.x + t * t * d.x, u * u * a.y + 2 * u * t * b.y + t * t * d.y});
+            }
+        }
+        op.clear();
+        pts.clear();
+    };
+    const int depth = x.depth();
+    for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+        if (e == Event::End) {
+            if (x.depth() < depth)
+                break;
+            const std::string_view n = x.localName();
+            if (n == "moveTo" || n == "lnTo" || n == "cubicBezTo" || n == "quadBezTo")
+                flush();
+            continue;
+        }
+        if (e != Event::Start)
+            continue;
+        const std::string_view n = x.localName();
+        if (n == "path") {
+            pw = std::max(1.0, std::atof(x.attribute("w").c_str()));
+            ph = std::max(1.0, std::atof(x.attribute("h").c_str()));
+            paths.emplace_back();
+            closed.push_back(false);
+            current = &paths.back();
+        } else if (n == "moveTo" || n == "lnTo" || n == "cubicBezTo" || n == "quadBezTo") {
+            op = std::string(n);
+            pts.clear();
+        } else if (n == "pt") {
+            pts.push_back({float(std::atof(x.attribute("x").c_str())), float(std::atof(x.attribute("y").c_str()))});
+        } else if (n == "close" && !closed.empty()) {
+            closed.back() = true;
+        } else if (n == "arcTo" && current && !current->empty()) {
+            // An arc: approximated by its end left out (the next segment joins); rare in practice.
+        } else if (n == "gdLst" || n == "avLst" || n == "ahLst" || n == "cxnLst" || n == "rect") {
+            x.skip();
+        }
+    }
+    // Paths written with guide names instead of numbers read as 0: drop degenerate ones.
+    for (std::size_t i = paths.size(); i-- > 0;)
+        if (paths[i].size() < 2) {
+            paths.erase(paths.begin() + long(i));
+            closed.erase(closed.begin() + long(i));
+        }
+}
+
+bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page, const Placement* place)
 {
     std::string geometry = "rect";
+    std::vector<std::vector<Point>> custom; // custGeom: paths in 0..1 of the box
+    std::vector<bool> customClosed;
+    bool inXfrm = false;
     std::uint32_t fill = 0, line = 0, styleFill = 0, styleLine = 0, fontColor = 0;
     bool hasFill = false, hasLine = false, hasStyleFill = false, hasStyleLine = false, flipH = false, flipV = false;
     float rotation = 0.0f;
@@ -320,6 +402,21 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
             flipH = on(x, "flipH");
             flipV = on(x, "flipV");
             rotation = float(std::atof(x.attribute("rot").c_str()) / 60000.0);
+            inXfrm = place != nullptr;
+        } else if (inXfrm && (n == "off" || n == "ext")) { // in a group: its own box, in the group's coordinates
+            const double a = std::atof(x.attribute(n == "off" ? "x" : "cx").c_str()), b = std::atof(x.attribute(n == "off" ? "y" : "cy").c_str());
+            if (n == "off") {
+                box.x = place->x0 + float((a - place->chX) * place->sx);
+                box.y = place->y0 + float((b - place->chY) * place->sy);
+            } else {
+                box.w = float(a * place->sx);
+                box.h = float(b * place->sy);
+                inXfrm = false;
+            }
+            text.box = box;
+        } else if (n == "custGeom") {
+            geometry = "custom";
+            customGeometry(x, custom, customClosed);
         } else if (n == "prstGeom") {
             geometry = x.attribute("prst");
         } else if (n == "noFill" && x.depth() == depth + 2) { // spPr's own (not a line's)
@@ -387,6 +484,7 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
                     run = &para.runs.back();
                     run->size = 11.0f;
                     run->color = fontColor ? fontColor : theme.color("dk1", kBlack);
+                    run->font = theme.minorFont;
                 } else if (m == "rPr" && run) {
                     if (x.hasAttribute("sz"))
                         run->size = std::max(1.0f, float(std::atof(x.attribute("sz").c_str()) / 100.0));
@@ -396,6 +494,11 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
                         run->flags |= Italic;
                     if (!x.attribute("u").empty() && x.attribute("u") != "none")
                         run->flags |= Underline;
+                } else if (m == "latin" && run) {
+                    const std::string face = x.attribute("typeface");
+                    run->font = face.empty() || face.compare(0, 3, "+mn") == 0 ? theme.minorFont
+                              : face.compare(0, 3, "+mj") == 0                 ? theme.majorFont
+                                                                               : face;
                 } else if (m == "solidFill" && run) {
                     bool found = false;
                     const std::uint32_t c = ooxml::readFillIn(x, theme, nullptr, &found);
@@ -440,18 +543,33 @@ bool shape(XmlReader& x, const ooxml::Theme& theme, Rect box, Page& page)
         drawn = true;
     } else if (fillColor || lineColor) {
         PathItem p;
-        std::vector<Point> pts;
-        presetOutline(geometry, box, pts);
-        if (flipH || flipV)
-            for (Point& q : pts) {
-                if (flipH)
-                    q.x = box.x + box.x + box.w - q.x;
-                if (flipV)
-                    q.y = box.y + box.y + box.h - q.y;
+        auto place = [&](std::vector<Point>& pts) {
+            if (flipH || flipV)
+                for (Point& q : pts) {
+                    if (flipH)
+                        q.x = box.x + box.x + box.w - q.x;
+                    if (flipV)
+                        q.y = box.y + box.y + box.h - q.y;
+                }
+            rotate(pts, box, rotation);
+        };
+        if (geometry == "custom") {
+            for (std::size_t i = 0; i < custom.size(); ++i) {
+                std::vector<Point> pts;
+                pts.reserve(custom[i].size());
+                for (const Point& q : custom[i])
+                    pts.push_back({box.x + q.x * box.w, box.y + q.y * box.h});
+                place(pts);
+                p.subpaths.push_back(std::move(pts));
+                p.closed.push_back(customClosed[i]);
             }
-        rotate(pts, box, rotation);
-        p.subpaths.push_back(std::move(pts));
-        p.closed.push_back(true);
+        } else {
+            std::vector<Point> pts;
+            presetOutline(geometry, box, pts);
+            place(pts);
+            p.subpaths.push_back(std::move(pts));
+            p.closed.push_back(true);
+        }
         p.fill = fillColor;
         p.gradient = hasFill ? gradient : Gradient();
         p.stroke = lineColor;

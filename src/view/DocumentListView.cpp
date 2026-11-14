@@ -1,6 +1,8 @@
 #include "enp/view/DocumentListView.h"
 
 #include "enp/model/Language.h"
+#include "enp/view/Fit.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/view/UiStyle.h"
 
@@ -68,7 +70,8 @@ int DocumentListView::render(const char* id, const std::string& filter, Options 
             closeIndex = i;
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
             requestMenu(i);
-        if (options.reorder && filter.empty() && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f * s_)) {
+        // (Not by a finger: its drag scrolls the list.)
+        if (options.reorder && filter.empty() && !touch::fingerDown() && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f * s_)) {
             const float my = ImGui::GetIO().MousePos.y;
             if (my < min.y - rowH * 0.5f && i > 0) {
                 moveFrom = i;
@@ -110,12 +113,11 @@ int DocumentListView::render(const char* id, const std::string& filter, Options 
         float x = min.x + 8.0f * s_;
         dl->AddText(ImVec2(x, textY), active ? palette_.accent : palette_.textFaint, icon);
         x += ImGui::CalcTextSize(icon).x + 7.0f * s_;
-        dl->PushClipRect(ImVec2(x, min.y), ImVec2(closeMin.x - 6.0f * s_, max.y), true);
-        dl->AddText(ImVec2(x, textY), active ? palette_.text : palette_.textDim, doc.title.c_str());
+        const float textEnd = closeMin.x - 6.0f * s_;
+        const float titleEnd = fit::text(dl, ImVec2(x, textY), textEnd, active ? palette_.text : palette_.textDim, doc.title);
         const std::string folder = doc.path.find('/') != std::string::npos ? doc.path.substr(0, doc.path.rfind('/')) : std::string();
         if (!folder.empty())
-            dl->AddText(ImVec2(x + ImGui::CalcTextSize(doc.title.c_str()).x + 8.0f * s_, textY), palette_.textFaint, folder.c_str());
-        dl->PopClipRect();
+            fit::text(dl, ImVec2(titleEnd + 8.0f * s_, textY), textEnd, palette_.textFaint, folder);
         if (hovered && !closeHovered)
             ui::itemTooltip("%s%s", doc.path.empty() ? doc.title.c_str() : doc.path.c_str(), doc.modified ? "\n(unsaved changes)" : "");
         ImGui::SetCursorScreenPos(ImVec2(min.x, max.y));

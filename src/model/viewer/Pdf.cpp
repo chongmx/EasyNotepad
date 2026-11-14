@@ -5,6 +5,7 @@
 // Not yet: clipping, shadings and patterns, annotations, Type 3 glyph shapes (their text is
 // shown in our font), embedded font outlines (all text uses our font at the PDF's positions),
 // encrypted files.
+#include "enp/model/viewer/ImagePack.h"
 #include "enp/model/viewer/Viewer.h"
 
 #include "PdfObjects.h"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 
 namespace enp::model::viewer {
 namespace pdf {
@@ -440,51 +442,6 @@ std::unique_ptr<Font> loadFont(File& file, const Object& dict)
 
 // ---- images -----------------------------------------------------------------------------------
 
-std::string encodeQoi(const std::vector<std::uint8_t>& rgba, int w, int h)
-{
-    std::string out;
-    out.reserve(14 + rgba.size() / 2 + 8);
-    out += "qoif";
-    auto be32 = [&](std::uint32_t v) {
-        for (int s = 24; s >= 0; s -= 8)
-            out += char((v >> s) & 0xFF);
-    };
-    be32(std::uint32_t(w));
-    be32(std::uint32_t(h));
-    out += char(4);
-    out += char(0);
-    std::uint8_t index[64][4] = {};
-    std::uint8_t prev[4] = {0, 0, 0, 255};
-    int run = 0;
-    const std::size_t n = std::size_t(w) * std::size_t(h);
-    for (std::size_t i = 0; i < n; ++i) {
-        const std::uint8_t* px = &rgba[i * 4];
-        if (std::memcmp(px, prev, 4) == 0) {
-            if (++run == 62 || i + 1 == n) {
-                out += char(0xC0 | (run - 1));
-                run = 0;
-            }
-            continue;
-        }
-        if (run > 0) {
-            out += char(0xC0 | (run - 1));
-            run = 0;
-        }
-        const int slot = (px[0] * 3 + px[1] * 5 + px[2] * 7 + px[3] * 11) % 64;
-        if (std::memcmp(index[slot], px, 4) == 0) {
-            out += char(slot);
-        } else {
-            std::memcpy(index[slot], px, 4);
-            out += char(0xFF);
-            out.append(reinterpret_cast<const char*>(px), 4);
-        }
-        std::memcpy(prev, px, 4);
-    }
-    out.append(7, '\0');
-    out += char(1);
-    return out;
-}
-
 struct ColorSpace {
     enum Kind { Gray, Rgb, Cmyk, Indexed, Tint, Pattern, Unknown } kind = Gray;
     int components = 1;
@@ -550,10 +507,17 @@ struct GState {
     std::int32_t clip = -1;                 // into the page's clips: the clip path's bounds (page points)
 };
 
+// A picture a page draws: read later, by its key (PageSource::loadImage), with the resources it
+// was drawn with (its colour space may be named there). Points into the file's objects.
+struct PictureRef {
+    const Object* image = nullptr;
+    const Object* resources = nullptr;
+};
+
 class PageReader {
 public:
-    PageReader(File& file, Page& page, std::map<std::string, std::string>& media, std::map<const Object*, std::unique_ptr<Font>>& fonts)
-        : file_(file), page_(page), media_(media), fonts_(fonts)
+    PageReader(File& file, Page& page, std::map<std::string, PictureRef>& pictures, std::map<const Object*, std::unique_ptr<Font>>& fonts)
+        : file_(file), page_(page), pictures_(pictures), fonts_(fonts)
     {
         for (std::uint32_t c = 32; c < 127; ++c)
             fallback_.encoding[c] = c;
@@ -750,6 +714,7 @@ private:
         pendingClip_ = false;
         if ((fill || stroke) && !path_.empty() && budget()) {
             PathItem item;
+            item.evenOdd = evenOdd_;
             if (fill && !state_.patternFill)
                 item.fill = state_.fill;
             if (fill && state_.patternFill) // a shading pattern: the path filled with its gradient
@@ -1088,19 +1053,8 @@ private:
         }
         if (x1 - x0 < 0.05f || y1 - y0 < 0.05f || !budget())
             return;
-        if (!media_.count(key)) {
-            std::string encoded = imageBytes(image);
-            if (encoded.empty()) { // cannot decode: a light box where it was
-                PathItem box;
-                box.fill = rgba(128, 128, 128, 40);
-                box.subpaths.push_back({{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}});
-                box.closed.push_back(true);
-                flushRun();
-                page_.add(std::move(box));
-                return;
-            }
-            media_[key] = std::move(encoded);
-        }
+        // Read later (a picture that cannot be read is drawn as a light box by the views).
+        pictures_.emplace(key, PictureRef{&image, resources_});
         ImageItem item;
         item.box = Rect{x0, y0, x1 - x0, y1 - y0};
         item.media = key;
@@ -1109,14 +1063,27 @@ private:
         page_.add(std::move(item));
     }
 
+public:
+    // A picture this reader's file names, read now (PageSource::loadImage).
+    std::string pictureBytes(const PictureRef& ref)
+    {
+        resources_ = ref.resources;
+        return ref.image ? imageBytes(*ref.image) : std::string();
+    }
+
+private:
     std::string imageBytes(const Object& image)
     {
         std::string filter;
         std::optional<std::string> data = file_.streamData(image, &filter);
         if (!data)
             return {};
-        if (filter == "DCTDecode")
-            return std::move(*data); // JPEG, decoded by the views
+        if (filter == "DCTDecode") { // JPEG, decoded by the reader service (with its soft mask)
+            SoftMask sm;
+            if (softMask(image, sm))
+                return packMasked(*data, sm.bytes, sm.width, sm.height, sm.raw);
+            return std::move(*data);
+        }
         if (!filter.empty())
             return {}; // JPEG 2000, CCITT, JBIG2: not decoded yet
         const int w = int(file_.resolvedGet(image, "Width") ? file_.resolvedGet(image, "Width")->num() : 0);
@@ -1151,6 +1118,50 @@ private:
             const int bit = index * bpc;
             return (row[bit / 8] >> (8 - bpc - bit % 8)) & maxValue;
         };
+        // Common kinds without a colour computed per pixel: 8-bit RGB, grey and CMYK straight from
+        // the bytes; one component of up to 8 bits (indexed, grey, a tint) through a table of every
+        // value made once. The rest per pixel, below.
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(data->data());
+        const std::size_t pixels = std::size_t(w) * std::size_t(h);
+        if (!mask && bpc == 8 && !invert && cs.kind == ColorSpace::Rgb && comps == 3) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                rgba[i * 4] = bytes[i * 3];
+                rgba[i * 4 + 1] = bytes[i * 3 + 1];
+                rgba[i * 4 + 2] = bytes[i * 3 + 2];
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (!mask && bpc == 8 && !invert && cs.kind == ColorSpace::Gray && comps == 1) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = bytes[i];
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (!mask && bpc == 8 && !invert && cs.kind == ColorSpace::Cmyk && comps == 4) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                const unsigned k = 255u - bytes[i * 4 + 3];
+                for (int ch = 0; ch < 3; ++ch)
+                    rgba[i * 4 + std::size_t(ch)] = std::uint8_t(((255u - bytes[i * 4 + std::size_t(ch)]) * k + 127u) / 255u);
+                rgba[i * 4 + 3] = 255;
+            }
+        } else if (!mask && comps == 1 && bpc <= 8) {
+            std::uint32_t table[256];
+            for (int s = 0; s <= maxValue; ++s) {
+                float v[4] = {cs.kind == ColorSpace::Indexed ? float(s) : float(s) / float(maxValue), 0, 0, 0};
+                if (invert && cs.kind != ColorSpace::Indexed)
+                    v[0] = 1.0f - v[0];
+                table[s] = toColor(cs, v, 1, 1.0f);
+            }
+            for (int y = 0; y < h; ++y) {
+                const std::uint8_t* row = bytes + std::size_t(y) * rowBytes;
+                std::uint8_t* px = &rgba[std::size_t(y) * std::size_t(w) * 4];
+                for (int x = 0; x < w; ++x, px += 4) {
+                    const std::uint32_t c = table[sample(row, x)];
+                    px[0] = std::uint8_t(c & 0xFF);
+                    px[1] = std::uint8_t((c >> 8) & 0xFF);
+                    px[2] = std::uint8_t((c >> 16) & 0xFF);
+                    px[3] = 255;
+                }
+            }
+        } else
         for (int y = 0; y < h; ++y) {
             const std::uint8_t* row = reinterpret_cast<const std::uint8_t*>(data->data()) + std::size_t(y) * rowBytes;
             for (int x = 0; x < w; ++x) {
@@ -1179,17 +1190,50 @@ private:
                 px[3] = 255;
             }
         }
-        // A soft mask of the same size gives the alpha.
-        if (const Object* smask = file_.resolvedGet(image, "SMask"); smask && smask->type == Object::Type::Stream) {
-            const int mw = int(file_.resolvedGet(*smask, "Width") ? file_.resolvedGet(*smask, "Width")->num() : 0);
-            const int mh = int(file_.resolvedGet(*smask, "Height") ? file_.resolvedGet(*smask, "Height")->num() : 0);
-            std::string mf;
-            std::optional<std::string> md = file_.streamData(*smask, &mf);
-            if (md && mf.empty() && mw == w && mh == h && md->size() >= std::size_t(w) * std::size_t(h))
-                for (std::size_t i = 0; i < std::size_t(w) * std::size_t(h); ++i)
-                    rgba[i * 4 + 3] = std::uint8_t((*md)[i]);
+        // A soft mask gives the alpha: here when it is raw samples of the same size, otherwise
+        // packed with the picture for the reader service.
+        // (Raw pixels: the reader service shrinks them to the size shown, so nothing is encoded here.)
+        SoftMask sm;
+        if (!softMask(image, sm))
+            return packRgba(rgba, w, h);
+        if (sm.raw && sm.width == w && sm.height == h) {
+            for (std::size_t i = 0; i < std::size_t(w) * std::size_t(h); ++i)
+                rgba[i * 4 + 3] = std::uint8_t(sm.bytes[i]);
+            return packRgba(rgba, w, h);
         }
-        return encodeQoi(rgba, w, h);
+        return packMasked(packRgba(rgba, w, h), sm.bytes, sm.width, sm.height, sm.raw);
+    }
+
+    struct SoftMask {
+        std::string bytes; // raw: width * height samples; otherwise a JPEG
+        int width = 0, height = 0;
+        bool raw = true;
+    };
+
+    // The image's soft mask (SMask): 8-bit samples, or a JPEG. False when it has none we can read.
+    bool softMask(const Object& image, SoftMask& out)
+    {
+        const Object* smask = file_.resolvedGet(image, "SMask");
+        if (!smask || smask->type != Object::Type::Stream)
+            return false;
+        out.width = int(file_.resolvedGet(*smask, "Width") ? file_.resolvedGet(*smask, "Width")->num() : 0);
+        out.height = int(file_.resolvedGet(*smask, "Height") ? file_.resolvedGet(*smask, "Height")->num() : 0);
+        if (out.width <= 0 || out.height <= 0 || out.width > (1 << 14) || out.height > (1 << 14))
+            return false;
+        std::string filter;
+        std::optional<std::string> data = file_.streamData(*smask, &filter);
+        if (!data)
+            return false;
+        out.raw = filter.empty();
+        if (out.raw) {
+            const Object* bits = file_.resolvedGet(*smask, "BitsPerComponent");
+            if ((bits && bits->num(8) != 8) || data->size() < std::size_t(out.width) * std::size_t(out.height))
+                return false;
+        } else if (filter != "DCTDecode") {
+            return false;
+        }
+        out.bytes = std::move(*data);
+        return true;
     }
 
     void doXObject(const std::string& name, const Object* resources, int depth)
@@ -1315,10 +1359,13 @@ private:
             } else if (op == "s") {
                 paint(false, true, true);
             } else if (op == "f" || op == "F" || op == "f*") {
+                evenOdd_ = op == "f*";
                 paint(true, false, true);
             } else if (op == "B" || op == "B*") {
+                evenOdd_ = op == "B*";
                 paint(true, true, false);
             } else if (op == "b" || op == "b*") {
+                evenOdd_ = op == "b*";
                 paint(true, true, true);
             } else if (op == "n") {
                 paint(false, false, false);
@@ -1428,7 +1475,7 @@ private:
 
     File& file_;
     Page& page_;
-    std::map<std::string, std::string>& media_;
+    std::map<std::string, PictureRef>& pictures_;
     std::map<const Object*, std::unique_ptr<Font>>& fonts_;
     const Object* resources_ = nullptr;
     GState state_;
@@ -1441,6 +1488,7 @@ private:
     bool runOpen_ = false;
     std::int32_t runClip_ = -1; // the clip the open run was started under
     bool pendingClip_ = false;  // W / W*: the next path painting (or n) sets the clip
+    bool evenOdd_ = false;      // the path being painted is filled by the even-odd rule (f*, B*, b*)
     Matrix base_;               // the page's own transform (patterns are drawn in it)
     Font fallback_;
     std::size_t operations_ = 0;
@@ -1459,14 +1507,32 @@ public:
     File file;
     std::vector<PageInfo> pages;
     std::map<const Object*, std::unique_ptr<Font>> fonts;
+    // The pictures the pages read so far draw, by key: a few pointers each, for the document's life.
+    std::map<std::string, PictureRef> pictures;
 
-    bool load(std::size_t index, Page& page, std::map<std::string, std::string>& media) override
+    // The reader service reads a page's content on one thread and its pictures on others: the
+    // file's object cache, the fonts and the pictures' table are used by one at a time.
+    std::mutex mutex;
+
+    bool load(std::size_t index, Page& page) override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (index >= pages.size())
             return false;
-        PageReader reader(file, page, media, fonts);
+        PageReader reader(file, page, pictures, fonts);
         reader.run(*pages[index].dict, pages[index].resources, pages[index].base);
         return true;
+    }
+
+    std::string loadImage(const std::string& key) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto it = pictures.find(key);
+        if (it == pictures.end())
+            return {};
+        Page scratch;
+        PageReader reader(file, scratch, pictures, fonts);
+        return reader.pictureBytes(it->second);
     }
 
     // The page tree, depth first, with inherited attributes.

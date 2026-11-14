@@ -425,7 +425,21 @@ bool read(const ooxml::ZipArchive& zip, std::string_view part, const ooxml::Them
     return true;
 }
 
+static void drawChart(const Chart& chart, const ooxml::Theme& theme, Rect box, Page& page);
+
 void draw(const Chart& chart, const ooxml::Theme& theme, Rect box, Page& page)
+{
+    const std::size_t firstBox = page.boxes.size();
+    drawChart(chart, theme, box, page);
+    // Its text in the theme's body font, as Office sets charts.
+    for (std::size_t i = firstBox; i < page.boxes.size(); ++i)
+        for (TextParagraph& para : page.boxes[i].paragraphs)
+            for (TextRun& run : para.runs)
+                if (run.font.empty())
+                    run.font = theme.minorFont;
+}
+
+static void drawChart(const Chart& chart, const ooxml::Theme& theme, Rect box, Page& page)
 {
     if (box.w < 8.0f || box.h < 8.0f)
         return;

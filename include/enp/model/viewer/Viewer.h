@@ -27,6 +27,49 @@ struct FlowDocument {
     std::map<std::string, std::string> media;
     // Fixed drawings (charts, shapes) between the blocks, sized in points: a Drawing block names one.
     std::vector<Page> drawings;
+    // The font families the runs are in ("Calibri", "Times New Roman"), as Span::font numbers them.
+    std::vector<std::string> fonts;
+
+    // As printed (the page view): the page's size and margins in points, the header and footer
+    // every page repeats, the blocks the pages flow through in order (the body, then endnotes and
+    // comments: not the header, footer and footnotes `blocks` holds for reading), and each
+    // footnote with the block that refers to it (it goes at the foot of that block's page).
+    struct PageSetup {
+        float width = 612.0f, height = 792.0f;
+        float top = 72.0f, right = 72.0f, bottom = 72.0f, left = 72.0f;
+        float header = 36.0f, footer = 36.0f; // from the page's edge to the header's top / the footer's bottom
+        // A border round the page (pgBorders): top, left, bottom, right, each its space (points)
+        // from the page's edge (`fromPage`) or from the text.
+        markdown::CellEdge borders[4];
+        float borderSpace[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        bool bordersFromPage = false;
+    };
+    PageSetup page;
+    std::vector<markdown::Block> header, footer;
+    std::vector<std::size_t> printed;
+    std::vector<std::pair<std::size_t, std::size_t>> footnotes; // (footnote block, referring block), into `blocks`
+    // A floating picture (wp:anchor): where it sits on the page of the paragraph that anchors it.
+    // Offsets in points from its reference: horizontally 0 the page, 1 the margin, 2 the column /
+    // character (the text's left edge); vertically 0 the page, 1 the margin, 2 the paragraph / line.
+    // An alignment (0 start, 1 centre, 2 end) replaces the offset; -1 none.
+    struct Float {
+        std::size_t block = 0; // into `blocks`
+        std::string media;
+        float x = 0.0f, y = 0.0f, width = 0.0f, height = 0.0f;
+        std::uint8_t fromH = 2, fromV = 2;
+        std::int8_t alignH = -1, alignV = -1;
+        bool behind = false; // behind the text (else over it)
+        // How the text goes round it: 0 not at all (in front of it or behind it), 1 beside it
+        // (square, tight, through), 2 above and below it; keeping `dist` (points: left, top,
+        // right, bottom) from it.
+        std::uint8_t wrap = 0;
+        float dist[4] = {9.0f, 0.0f, 9.0f, 0.0f};
+        Page drawing; // a group of drawn shapes (wpg), in points from its box's top left: drawn instead of a picture
+    };
+    std::vector<Float> floats;
+    // The header's floating pictures and drawings: on every page, behind the text, placed from
+    // the header's first paragraph.
+    std::vector<Float> headerFloats;
 };
 
 // Scripts whose letters the bundled fonts lack: the views merge a system font in while a document

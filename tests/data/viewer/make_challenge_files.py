@@ -160,6 +160,13 @@ def make_docx(path):
                       '<wp:docPr id="10" name="Gradient" descr="A blue gradient"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
                       '<pic:pic><pic:nvPicPr><pic:cNvPr id="10" name="g.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
                       '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    # A floating picture: right-aligned to the margin, level with its paragraph, text wrapping around it.
+    floating_picture = ('<w:r><w:drawing><wp:anchor behindDoc="0" distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="2" locked="0" layoutInCell="1" allowOverlap="1">'
+                        '<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH>'
+                        '<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="914400"/><wp:wrapSquare wrapText="bothSides"/>'
+                        '<wp:docPr id="13" name="Floating" descr="A floating gradient"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+                        '<pic:pic><pic:nvPicPr><pic:cNvPr id="13" name="f.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+                        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>')
     chart_run = ('<w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="3200400"/><wp:docPr id="11" name="Chart 1"/><a:graphic>'
                  '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
     # A text box (wps), with a VML fallback that must not be read twice.
@@ -209,8 +216,14 @@ def make_docx(path):
         '<w:sdt><w:sdtPr><w:alias w:val="Client"/></w:sdtPr><w:sdtContent>' + para(run("Inside a content control.")) + '</w:sdtContent></w:sdt>',
         para(run("Tab") + '<w:r><w:tab/></w:r>' + run("stop, line") + '<w:r><w:br/></w:r>' + run("break, symbol ") +
              '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>' + run(", no-break") + '<w:r><w:noBreakHyphen/></w:r>' + run("hyphen.")),
+        # Tab stops as a table of contents sets them: a right stop with a dot leader at the margin,
+        # a centre stop, and a decimal stop lining up the amounts.
+        para(run("Chapter One") + '<w:r><w:tab/></w:r>' + run("7"), '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs>'),
+        para(run("Left") + '<w:r><w:tab/></w:r>' + run("centred") + '<w:r><w:tab/></w:r>' + run("12.50"),
+             '<w:tabs><w:tab w:val="center" w:pos="4500"/><w:tab w:val="decimal" w:pos="8000"/></w:tabs>'),
         para(run("Unicode: 中文, العربية, é vs é, \U0001F600, ∑ x².")),
         para(inline_picture + run(" inline after a picture.")),
+        para(floating_picture + run("A paragraph with a floating picture at the right margin, set level with its first line; Word wraps the text around it, the reflowed view shows it after the text.")),
         table,
         para(text_box + run("Text beside the text box.")),
         para(chart_run),
@@ -252,14 +265,21 @@ def make_xlsx(path):
 <numFmt numFmtId="166" formatCode="#,##0.00;[Red]\\(#,##0.00\\);\\-"/><numFmt numFmtId="167" formatCode="0.0%"/>
 <numFmt numFmtId="168" formatCode="[$€-407] #,##0.00"/><numFmt numFmtId="169" formatCode="&quot;Qty: &quot;0"/></numFmts>
 <fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="14"/><color theme="4"/><name val="Calibri"/></font>
-<font><i/><u/><sz val="11"/><color rgb="FF7030A0"/><name val="Calibri"/></font><font><sz val="9"/><color theme="1" tint="0.5"/><name val="Calibri"/></font></fonts>
+<font><i/><u/><sz val="11"/><color rgb="FF7030A0"/><name val="Calibri"/></font><font><sz val="9"/><color theme="1" tint="0.5"/><name val="Calibri"/></font>
+<font><sz val="12"/><name val="Cambria"/></font><font><i/><sz val="10"/><name val="Arial"/></font></fonts>
 <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/><bgColor indexed="64"/></patternFill></fill>
-<fill><patternFill patternType="solid"><fgColor theme="4" tint="0.7999816888943144"/></patternFill></fill></fills>
+<fill><patternFill patternType="solid"><fgColor theme="4" tint="0.7999816888943144"/></patternFill></fill>
+<fill><patternFill patternType="darkGrid"><fgColor rgb="FFFF0000"/><bgColor rgb="FFFFFFFF"/></patternFill></fill>
+<fill><patternFill patternType="lightDown"><fgColor rgb="FF0070C0"/></patternFill></fill>
+<fill><gradientFill degree="90"><stop position="0"><color rgb="FFFFFFFF"/></stop><stop position="1"><color theme="4"/></stop></gradientFill></fill>
+<fill><gradientFill type="path" left="0.5" right="0.5" top="0.5" bottom="0.5"><stop position="0"><color rgb="FFFFFFFF"/></stop><stop position="1"><color rgb="FF70AD47"/></stop></gradientFill></fill>
+<fill><patternFill patternType="mediumGray"><fgColor rgb="FF000000"/><bgColor rgb="FFFFFFFF"/></patternFill></fill></fills>
 <borders count="3"><border/><border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right><top style="thin"><color auto="1"/></top><bottom style="medium"><color rgb="FF2E75B6"/></bottom></border>
-<border><bottom style="double"><color auto="1"/></bottom></border></borders>
+<border><bottom style="double"><color auto="1"/></bottom></border>
+<border diagonalUp="1" diagonalDown="1"><diagonal style="thin"><color rgb="FFC00000"/></diagonal></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="14">
+<cellXfs count="27">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
@@ -274,7 +294,27 @@ def make_xlsx(path):
 <xf numFmtId="0" fontId="3" fillId="0" borderId="2" xfId="0" applyFont="1" applyBorder="1"><alignment textRotation="90"/></xf>
 <xf numFmtId="18" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="4" fontId="1" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>
-</cellXfs></styleSheet>'''
+<xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="6" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="7" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="3" xfId="0" applyBorder="1"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment indent="2"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment shrinkToFit="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="0" fontId="0" fillId="8" borderId="0" xfId="0" applyFill="1"/>
+</cellXfs>
+<dxfs count="5"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+<dxf><font><b/><color rgb="FF006100"/></font><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf>
+<dxf><font><i/></font><fill><patternFill><bgColor rgb="FFFFEB9C"/></patternFill></fill></dxf>
+<dxf><font><b/><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF7030A0"/></patternFill></fill></dxf>
+<dxf><fill><patternFill><bgColor rgb="FFE4DFEC"/></patternFill></fill></dxf></dxfs>
+<tableStyles count="1" defaultTableStyle="TableStyleMedium2"><tableStyle name="Challenge Purple" pivot="0" count="2">
+<tableStyleElement type="headerRow" dxfId="3"/><tableStyleElement type="firstRowStripe" dxfId="4"/></tableStyle></tableStyles></styleSheet>'''
 
     def c(ref, value, t=None, s=None, f=None):
         attrs = f' r="{ref}"' + (f' t="{t}"' if t else "") + (f' s="{s}"' if s is not None else "")
@@ -313,12 +353,57 @@ def make_xlsx(path):
 <sheetData>{sheet_rows}</sheetData><mergeCells count="1"><mergeCell ref="A17:C18"/></mergeCells>
 <conditionalFormatting sqref="B2:B10"><cfRule type="cellIs" dxfId="0" priority="1" operator="lessThan"><formula>0</formula></cfRule></conditionalFormatting>
 <drawing r:id="rId1"/></worksheet>'''
-    data_rows = "".join(f'<row r="{i + 2}"><c r="A{i + 2}" t="inlineStr"><is><t>{m}</t></is></c><c r="B{i + 2}"><v>{v}</v></c><c r="C{i + 2}"><v>{w}</v></c></row>'
-                        for i, (m, v, w) in enumerate([("Jan", 10, 4), ("Feb", 14, 9), ("Mar", 9, 12), ("Apr", 18, 7)]))
-    sheet2 = CT_HEAD + f'<worksheet {X}><sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c></row>{data_rows}</sheetData></worksheet>'
+    # Two tables: Excel's default style (TableStyleMedium2) and one of the workbook's own.
+    teams = {2: ("North", 31), 3: ("South", 27), 4: ("East", 19)}
+    data_rows = "".join(f'<row r="{i + 2}"><c r="A{i + 2}" t="inlineStr"><is><t>{m}</t></is></c><c r="B{i + 2}"><v>{v}</v></c><c r="C{i + 2}"><v>{w}</v></c>' +
+                        (f'<c r="E{i + 2}" t="inlineStr"><is><t>{teams[i + 2][0]}</t></is></c><c r="F{i + 2}"><v>{teams[i + 2][1]}</v></c>' if i + 2 in teams else "") +
+                        '</row>' for i, (m, v, w) in enumerate([("Jan", 10, 4), ("Feb", 14, 9), ("Mar", 9, 12), ("Apr", 18, 7)]))
+    header_row = "".join(f'<c r="{col}1" t="inlineStr"><is><t>{t}</t></is></c>' for col, t in (("A", "Month"), ("B", "Sales"), ("C", "Costs"), ("E", "Team"), ("F", "Score")))
+    sheet2 = CT_HEAD + f'<worksheet {X}><sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews><sheetData><row r="1">{header_row}</row>{data_rows}</sheetData>' \
+        '<tableParts count="2"><tablePart r:id="rId1"/><tablePart r:id="rId2"/></tableParts></worksheet>'
+    table1 = CT_HEAD + '''<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sales" displayName="Sales" ref="A1:C5">
+<autoFilter ref="A1:C5"/><tableColumns count="3"><tableColumn id="1" name="Month"/><tableColumn id="2" name="Sales"/><tableColumn id="3" name="Costs"/></tableColumns>
+<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>'''
+    table2 = CT_HEAD + '''<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="2" name="Teams" displayName="Teams" ref="E1:F4">
+<tableColumns count="2"><tableColumn id="1" name="Team"/><tableColumn id="2" name="Score"/></tableColumns>
+<tableStyleInfo name="Challenge Purple" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>'''
     sheet3 = CT_HEAD + f'<worksheet {X}><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>'
+    # Cell looks: fonts, pattern and gradient fills, diagonals, indent, shrink to fit, a number too
+    # wide for its column, text running on to the left and both ways.
+    looks = [
+        (1, [c("A1", "Cambria 12", "inlineStr", 14), c("B1", "Arial italic 10", "inlineStr", 15)]),
+        (2, [c("A2", "dark grid", "inlineStr", 16), c("B2", "light down", "inlineStr", 17), c("C2", None, s=26)]),
+        (3, [c("A3", "gradient down", "inlineStr", 18), c("B3", "from the centre", "inlineStr", 19)]),
+        (4, [c("A4", "diagonals", "inlineStr", 20), c("B4", "indented twice", "inlineStr", 21)]),
+        (5, [c("A5", "shrunk to fit into this one cell", "inlineStr", 22), c("C5", 1234567.891, s=25)]),
+        (7, [c("B7", "right-aligned text runs on to the left", "inlineStr", 23)]),
+        (9, [c("B9", "centred text runs on both ways", "inlineStr", 24)]),
+    ]
+    # Conditional formats on the saved values: a colour scale, data bars, icon sets, cell rules, top 3, text.
+    fruit = ["apple", "banana", "cherry", "mango", "kiwi", "orange", "grape", "lime", "melon", "pear"]
+    stars = [1, 5, 9, 2, 8, 4, 6, 3, 7, 10]
+    rule_rows = "".join(f'<row r="{r}">' + "".join(f'<c r="{col}{r}"><v>{v}</v></c>' for col, v in
+                                                     (("A", r), ("B", r * r), ("C", 11 - r), ("D", r), ("E", stars[r - 1]))) +
+                        f'<c r="F{r}" t="inlineStr"><is><t>{fruit[r - 1]}</t></is></c>' +
+                        "".join(f'<c r="{col}{r}"><v>{v}</v></c>' for col, v in (("G", stars[r - 1]), ("H", r))) + '</row>' for r in range(1, 11))
+    sheet5 = CT_HEAD + f'''<worksheet {X}><sheetFormatPr defaultRowHeight="15"/><sheetData>{rule_rows}</sheetData>
+<conditionalFormatting sqref="A1:A10"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>
+<color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="B1:B10"><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="C1:C10"><cfRule type="iconSet" priority="3"><iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="D1:D10"><cfRule type="cellIs" dxfId="0" priority="4" operator="greaterThan"><formula>5</formula></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="E1:E10"><cfRule type="top10" dxfId="1" priority="5" rank="3"/></conditionalFormatting>
+<conditionalFormatting sqref="F1:F10"><cfRule type="containsText" dxfId="2" priority="6" operator="containsText" text="an"><formula>NOT(ISERROR(SEARCH("an",F1)))</formula></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="G1:G10"><cfRule type="iconSet" priority="7"><iconSet iconSet="3Stars"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="H1:H10"><cfRule type="iconSet" priority="8"><iconSet iconSet="5Quarters"><cfvo type="percent" val="0"/><cfvo type="percent" val="20"/><cfvo type="percent" val="40"/><cfvo type="percent" val="60"/><cfvo type="percent" val="80"/></iconSet></cfRule></conditionalFormatting>
+<conditionalFormatting sqref="A12"><cfRule type="expression" dxfId="0" priority="9"><formula>MOD(ROW(),2)=0</formula></cfRule></conditionalFormatting>
+</worksheet>'''
+    sheet4 = CT_HEAD + f'''<worksheet {X}><sheetFormatPr defaultRowHeight="15"/>
+<cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="3" width="6" customWidth="1"/></cols>
+<sheetData>''' + "".join(f'<row r="{r}" ht="24" customHeight="1">' + "".join(cells) + "</row>" for r, cells in looks) + '''</sheetData></worksheet>'''
     workbook = CT_HEAD + f'''<workbook {X}><workbookPr date1904="0"/><bookViews><workbookView activeTab="0"/></bookViews><sheets>
 <sheet name="Formats &amp; cells" sheetId="1" r:id="rId1"/><sheet name="Data" sheetId="2" r:id="rId2"/><sheet name="Hidden" sheetId="3" state="veryHidden" r:id="rId3"/>
+<sheet name="Looks" sheetId="4" r:id="rId7"/><sheet name="Rules" sheetId="5" r:id="rId8"/>
 </sheets><definedNames><definedName name="Total">'Formats &amp; cells'!$B$15</definedName></definedNames></workbook>'''
     drawing = CT_HEAD + '''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
@@ -343,9 +428,13 @@ def make_xlsx(path):
         ("_rels/.rels", rels([("rId1", "officeDocument", "xl/workbook.xml")])),
         ("xl/_rels/workbook.xml.rels", rels([("rId1", "worksheet", "worksheets/sheet1.xml"), ("rId2", "worksheet", "worksheets/sheet2.xml"),
                                              ("rId3", "worksheet", "worksheets/sheet3.xml"), ("rId4", "sharedStrings", "sharedStrings.xml"),
-                                             ("rId5", "styles", "styles.xml"), ("rId6", "theme", "theme/theme1.xml")])),
+                                             ("rId5", "styles", "styles.xml"), ("rId6", "theme", "theme/theme1.xml"),
+                                             ("rId7", "worksheet", "worksheets/sheet4.xml"), ("rId8", "worksheet", "worksheets/sheet5.xml")])),
         ("xl/workbook.xml", workbook), ("xl/sharedStrings.xml", sst), ("xl/styles.xml", styles), ("xl/theme/theme1.xml", THEME),
         ("xl/worksheets/sheet1.xml", sheet1), ("xl/worksheets/sheet2.xml", sheet2), ("xl/worksheets/sheet3.xml", sheet3),
+        ("xl/worksheets/sheet4.xml", sheet4), ("xl/worksheets/sheet5.xml", sheet5),
+        ("xl/worksheets/_rels/sheet2.xml.rels", rels([("rId1", "table", "../tables/table1.xml"), ("rId2", "table", "../tables/table2.xml")])),
+        ("xl/tables/table1.xml", table1), ("xl/tables/table2.xml", table2),
         ("xl/worksheets/_rels/sheet1.xml.rels", rels([("rId1", "drawing", "../drawings/drawing1.xml")])),
         ("xl/drawings/drawing1.xml", drawing),
         ("xl/drawings/_rels/drawing1.xml.rels", rels([("rId1", "chart", "../charts/chart1.xml"), ("rId2", "image", "../media/checker.png")])),

@@ -3,6 +3,7 @@
 #include "enp/os/Memory.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace enp::viewmodel {
 
@@ -59,8 +60,11 @@ const ViewerViewModel::Entry* ViewerViewModel::find(int id) const
 std::size_t ViewerViewModel::loadingCount() const
 {
     std::size_t n = 0;
-    for (const auto& [id, e] : entries_)
+    for (const auto& [id, e] : entries_) {
         n += (e.ticket ? 1 : 0) + e.pageTickets.size();
+        for (const auto& [key, p] : e.pictures)
+            n += p.ticket ? 1 : 0;
+    }
     return n;
 }
 
@@ -73,8 +77,7 @@ void ViewerViewModel::readPage(Entry& e, std::size_t index)
     const int id = e.id;
     const std::uint64_t generation = e.generation;
     os::mem::Scope scope("viewer");
-    e.pageTickets[index] = reader_->readPage(pd.source, index, [this, alive, id, generation, index](mv::Page page,
-                                                                                                   std::map<std::string, std::string> media) {
+    e.pageTickets[index] = reader_->readPage(pd.source, index, [this, alive, id, generation, index](mv::Page page) {
         if (alive.expired())
             return;
         const auto it = entries_.find(id);
@@ -93,10 +96,118 @@ void ViewerViewModel::readPage(Entry& e, std::size_t index)
         target.glyphs = std::move(page.glyphs);
         target.boxes = std::move(page.boxes);
         target.images = std::move(page.images);
+        target.clips = std::move(page.clips);
+        target.scripts = page.scripts;
         target.loaded = true;
-        for (auto& [key, bytes] : media)
-            doc.media.emplace(key, std::move(bytes)); // an image already waiting keeps its bytes
+        // Its pictures are asked for by showPages (while the page is still near the view).
     });
+}
+
+void ViewerViewModel::readPictures(Entry& e, std::size_t index)
+{
+    mv::PageDocument& pd = e.doc.pages;
+    if (!reader_ || !pd.source || index >= pd.pages.size() || !pd.pages[index].loaded)
+        return;
+    const mv::Page& page = pd.pages[index];
+    for (const mv::ImageItem& img : page.images) {
+        if (e.pictures.count(img.media) || pd.media.count(img.media))
+            continue;
+        if (const auto cached = e.pictureCache.find(img.media); cached != e.pictureCache.end()) { // read before: at once
+            os::mem::Scope scope("viewer");
+            cached->second.used = ++e.pictureClock;
+            pd.media.emplace(img.media, cached->second.bytes);
+            Entry::Picture& picture = e.pictures[img.media];
+            picture.page = index;
+            picture.done = true;
+            continue;
+        }
+        // The largest the page shows it (a cropped picture shows a part: the whole is larger).
+        float side = 0.0f;
+        for (const mv::ImageItem& other : page.images)
+            if (other.media == img.media)
+                side = std::max(side, std::max(other.box.w / std::max(0.01f, other.crop.w), other.box.h / std::max(0.01f, other.crop.h)));
+        const int maxSide = std::clamp(int(std::ceil(side * kPicturePixelsPerPoint)), 16, kMaxPictureSide);
+        const std::weak_ptr<bool> alive = alive_;
+        const int id = e.id;
+        const std::uint64_t generation = e.generation;
+        os::mem::Scope scope("viewer");
+        Entry::Picture& picture = e.pictures[img.media];
+        picture.page = index;
+        picture.ticket = reader_->readImage(pd.source, index, img.media, maxSide, [this, alive, id, generation, key = img.media](std::string bytes) {
+            if (alive.expired())
+                return;
+            const auto it = entries_.find(id);
+            if (it == entries_.end() || it->second.generation != generation)
+                return;
+            const auto p = it->second.pictures.find(key);
+            if (p == it->second.pictures.end())
+                return; // forgotten (its page dropped): the service drops such results, but be sure
+            os::mem::Scope scope("viewer");
+            p->second.ticket = 0;
+            p->second.done = true;
+            p->second.failed = bytes.empty();
+            if (!bytes.empty()) {
+                cachePicture(it->second, key, bytes);
+                it->second.doc.pages.media.emplace(key, std::move(bytes));
+            }
+        });
+    }
+}
+
+void ViewerViewModel::cachePicture(Entry& e, const std::string& key, const std::string& bytes)
+{
+    if (bytes.size() > kPictureCacheBytes / 2 || e.pictureCache.count(key))
+        return;
+    os::mem::Scope scope("viewer");
+    Entry::Cached& c = e.pictureCache[key];
+    c.bytes = bytes;
+    c.used = ++e.pictureClock;
+    e.pictureCacheBytes += bytes.size();
+    while (e.pictureCacheBytes > kPictureCacheBytes) { // the least recently used go
+        auto oldest = e.pictureCache.begin();
+        for (auto it = e.pictureCache.begin(); it != e.pictureCache.end(); ++it)
+            if (it->second.used < oldest->second.used)
+                oldest = it;
+        e.pictureCacheBytes -= oldest->second.bytes.size();
+        e.pictureCache.erase(oldest);
+    }
+}
+
+bool ViewerViewModel::pictureFailed(int id, const std::string& key) const
+{
+    const auto it = entries_.find(id);
+    if (it == entries_.end())
+        return false;
+    const auto p = it->second.pictures.find(key);
+    return p != it->second.pictures.end() && p->second.failed;
+}
+
+bool ViewerViewModel::pictureBytesHere(int id, const std::string& key) const
+{
+    const auto it = entries_.find(id);
+    return it != entries_.end() && it->second.doc.pages.media.count(key) != 0;
+}
+
+void ViewerViewModel::pictureLost(int id, const std::string& key)
+{
+    const auto it = entries_.find(id);
+    if (it == entries_.end())
+        return;
+    const auto p = it->second.pictures.find(key);
+    if (p != it->second.pictures.end() && p->second.done && !p->second.failed)
+        it->second.pictures.erase(p);
+}
+
+bool ViewerViewModel::pictureWaiting(int id, const std::string& key) const
+{
+    const auto it = entries_.find(id);
+    if (it == entries_.end())
+        return false;
+    const Entry& e = it->second;
+    if (e.doc.pages.media.count(key))
+        return false;
+    const auto p = e.pictures.find(key);
+    return p == e.pictures.end() || !p->second.done;
 }
 
 void ViewerViewModel::dropPage(Entry& e, std::size_t index)
@@ -108,14 +219,21 @@ void ViewerViewModel::dropPage(Entry& e, std::size_t index)
     }
     if (index >= pd.pages.size() || !pd.pages[index].loaded)
         return;
-    // Its images' bytes not decoded yet go with it (shared ones too: a page read again brings them back).
-    for (const mv::ImageItem& img : pd.pages[index].images)
+    // Its pictures go with it: being read (cancelled), or read and not taken by the view yet
+    // (shared ones too: a page read again asks for them again).
+    for (const mv::ImageItem& img : pd.pages[index].images) {
         if (const auto m = pd.media.find(img.media); m != pd.media.end())
             pd.media.erase(m);
+        if (const auto p = e.pictures.find(img.media); p != e.pictures.end()) {
+            if (p->second.ticket)
+                reader_->cancel(p->second.ticket);
+            e.pictures.erase(p);
+        }
+    }
     pd.unload(index);
 }
 
-void ViewerViewModel::showPages(int id, std::size_t first, std::size_t last)
+void ViewerViewModel::showPages(int id, std::size_t first, std::size_t last, std::size_t current, bool request)
 {
     const auto it = entries_.find(id);
     if (it == entries_.end() || it->second.state != State::Ready || !it->second.doc.pages.source)
@@ -126,14 +244,38 @@ void ViewerViewModel::showPages(int id, std::size_t first, std::size_t last)
         return;
     last = std::min(last, n - 1);
     first = std::min(first, last);
-    // The pages in view first, then their neighbours (requests are served in order).
-    for (std::size_t i = first; i <= last; ++i)
-        readPage(e, i);
-    if (first >= kPagesAround)
-        for (std::size_t i = first - kPagesAround; i < first; ++i)
+    current = std::clamp(current, first, last);
+    if (current != e.lastCurrent) {
+        e.direction = current > e.lastCurrent ? 1 : -1;
+        e.lastCurrent = current;
+    }
+    // The pages in view, kPagesAround on each side, and one more the way the reader goes (read
+    // last: the service serves the nearest first).
+    const std::size_t from = first >= kPagesAround + (e.direction < 0 ? 1 : 0) ? first - kPagesAround - (e.direction < 0 ? 1 : 0) : 0;
+    const std::size_t to = std::min(n - 1, last + kPagesAround + (e.direction > 0 ? 1 : 0));
+    reader_->focus(e.doc.pages.source.get(), current); // the service serves the nearest first
+    // Reads no longer near the view: cancelled (a page far away is dropped below as well).
+    for (auto it = e.pageTickets.begin(); it != e.pageTickets.end();) {
+        if (it->first >= from && it->first <= to) {
+            ++it;
+            continue;
+        }
+        reader_->cancel(it->second);
+        it = e.pageTickets.erase(it);
+    }
+    for (auto it = e.pictures.begin(); it != e.pictures.end();) {
+        if (!it->second.ticket || (it->second.page >= from && it->second.page <= to)) {
+            ++it;
+            continue;
+        }
+        reader_->cancel(it->second.ticket);
+        it = e.pictures.erase(it);
+    }
+    if (request)
+        for (std::size_t i = from; i <= to; ++i) {
             readPage(e, i);
-    for (std::size_t i = last + 1; i <= std::min(n - 1, last + kPagesAround); ++i)
-        readPage(e, i);
+            readPictures(e, i);
+        }
     for (std::size_t i = 0; i < n; ++i) {
         const bool far = i + kPagesKept < first || i > last + kPagesKept;
         if (far && (e.doc.pages.pages[i].loaded || e.pageTickets.count(i)))
@@ -167,6 +309,9 @@ void ViewerViewModel::release(int id)
             reader_->cancel(e.ticket);
         for (const auto& [page, ticket] : e.pageTickets)
             reader_->cancel(ticket);
+        for (const auto& [key, picture] : e.pictures)
+            if (picture.ticket)
+                reader_->cancel(picture.ticket);
     }
     entries_.erase(it);
     if (requestTrim_)

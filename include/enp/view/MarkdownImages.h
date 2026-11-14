@@ -44,6 +44,8 @@ public:
     // An image that cannot be shown (file not found, a remote URL): a failed entry with `note`,
     // so the renderer draws a placeholder and nothing is tried again until the document changes.
     const MarkdownImage* acquireUnavailable(const std::string& key, const std::string& note);
+    // An image is held under `key` (by any holder).
+    bool holds(const std::string& key) const { return images_.count(key) != 0; }
     void release(const std::string& key);
     // Frees textures the backend has destroyed and re-creates ones a lost context dropped. Once
     // a frame, with an ImGui context current.

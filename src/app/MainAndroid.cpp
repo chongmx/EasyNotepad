@@ -4,6 +4,7 @@
 #include "enp/os/Os.h"
 #include "enp/os/Memory.h"
 #include "enp/services/debug/MemoryTrace.h"
+#include "enp/view/TouchScroll.h"
 
 #include "imgui.h"
 #include "imgui_impl_android.h"
@@ -17,6 +18,7 @@
 #include <android_native_app_glue.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,6 +32,7 @@ struct AndroidState {
     EGLContext context = EGL_NO_CONTEXT;
     std::unique_ptr<enp::app::Application> application;
     bool uiReady = false;
+    bool pinching = false; // two fingers went down: the gesture is a pinch until every finger is up
     bool keyboardShown = false;
 };
 
@@ -263,7 +266,37 @@ int32_t onInputEvent(android_app*, AInputEvent* event)
             return g.application->navigateBack() ? 1 : 0;
         return 1;
     }
-    return g.uiReady ? ImGui_ImplAndroid_HandleInputEvent(event) : 0;
+    if (!g.uiReady)
+        return 0;
+    // Two fingers pinch (the readers zoom): ImGui's backend follows the first finger only, so the
+    // gesture is kept from it. When it starts, the press ImGui saw is let go away from the content
+    // (nothing under the fingers clicks); then nothing reaches ImGui until every finger is up.
+    if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) {
+        const int32_t action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
+        const std::size_t fingers = AMotionEvent_getPointerCount(event);
+        if (action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL) {
+            if (g.pinching) {
+                g.pinching = false;
+                enp::view::touch::pinch(0, 0.0f, 0.0f, 0.0f, 0.0f);
+                return 1;
+            }
+        } else if (fingers >= 2 && action != AMOTION_EVENT_ACTION_POINTER_UP) {
+            if (!g.pinching) {
+                g.pinching = true;
+                ImGuiIO& io = ImGui::GetIO();
+                io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+            }
+            enp::view::touch::pinch(int(fingers), AMotionEvent_getX(event, 0), AMotionEvent_getY(event, 0), AMotionEvent_getX(event, 1),
+                                    AMotionEvent_getY(event, 1));
+            return 1;
+        } else if (g.pinching) { // a finger lifted: the pinch ends, the rest of the gesture is not a press
+            if (action == AMOTION_EVENT_ACTION_POINTER_UP && fingers <= 2)
+                enp::view::touch::pinch(1, 0.0f, 0.0f, 0.0f, 0.0f);
+            return 1;
+        }
+    }
+    return ImGui_ImplAndroid_HandleInputEvent(event);
 }
 
 } // namespace

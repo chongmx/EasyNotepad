@@ -197,7 +197,7 @@ void copyUnder(ImDrawList* dl, int first, int count, unsigned vtxOffset, ImVec2 
                          (color & ~IM_COL32_A_MASK) | (ImU32(a + 0.5f) << IM_COL32_A_SHIFT));
     }
     for (const ImDrawIdx i : indices)
-        dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
+        dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + (vtxOffset + i - unsigned(first))));
 }
 
 // Whether the content [first, first + count) is quads of four vertices, each an upright rectangle:
@@ -233,7 +233,7 @@ void copyGrown(ImDrawList* dl, int first, int count, unsigned vtxOffset, float g
         }
     }
     for (const ImDrawIdx i : indices)
-        dl->PrimWriteIdx(ImDrawIdx(base + (vtxOffset + i - unsigned(first))));
+        dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + (vtxOffset + i - unsigned(first))));
 }
 
 // The enhanced hint: the content (channel 1) a little translucent; under it (channel 0) a glow in

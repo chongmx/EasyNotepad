@@ -33,6 +33,9 @@ namespace {
 
 constexpr float kTopBarHeight = 36.0f;
 constexpr float kStatusBarHeight = 24.0f;
+// A phone: the bottom inset (dp) above which it is the on-screen keyboard, not a system bar (those
+// are under 50); the editor then takes the room of the navigation bar too.
+constexpr float kKeyboardInset = 120.0f;
 constexpr float kGap = 6.0f;
 constexpr float kPanelHeader = 28.0f;
 constexpr float kRounding = 6.0f;
@@ -983,18 +986,21 @@ void MainView::renderCompactTopBar()
     const float titleX1 = rightX - 6.0f * s_;
     if (titleX1 - titleX0 > 40.0f * s_) {
         const model::Document* doc = vm_.activeDocument();
-        std::string title = doc ? doc->title : std::string("No document");
-        if (doc && doc->modified)
-            title += " " ICON_FA_CIRCLE;
-        title += "  " ICON_FA_CARET_DOWN;
+        const std::string title = doc ? doc->title : std::string("No document");
         ImGui::SetCursorScreenPos(ImVec2(titleX0, y));
-        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col(palette_.hover));
-        if (ImGui::Button((title + "##documents").c_str(), ImVec2(titleX1 - titleX0, button)))
+        if (ImGui::InvisibleButton("##documents", ImVec2(titleX1 - titleX0, button)))
             ImGui::OpenPopup("##allTabs");
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar();
+        // The name is cut short with "..." to leave the unsaved dot and the caret their room.
+        const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+        if (ImGui::IsItemHovered())
+            dl->AddRectFilled(min, max, palette_.hover, 4.0f * s_);
+        const float caretW = ImGui::CalcTextSize(ICON_FA_CARET_DOWN).x;
+        const float textY = min.y + (max.y - min.y - ImGui::GetTextLineHeight()) * 0.5f;
+        const float dotRoom = doc && doc->modified ? 14.0f * s_ : 0.0f;
+        const float end = fit::text(dl, ImVec2(min.x + 8.0f * s_, textY), max.x - caretW - 14.0f * s_ - dotRoom, palette_.text, title);
+        if (doc && doc->modified)
+            dl->AddCircleFilled(ImVec2(end + 9.0f * s_, min.y + (max.y - min.y) * 0.5f), 3.5f * s_, palette_.accent);
+        dl->AddText(ImVec2(end + dotRoom + 8.0f * s_, textY), palette_.textDim, ICON_FA_CARET_DOWN); // the caret follows the name
         registerLastItem("compact:documents", "button", "Open documents", [this]() { openAllTabs_ = true; });
         if (frame_) // the empty part of the bar moves the window
             dragRegions_.push_back({ImVec2(titleX1, origin.y), ImVec2(rightX, origin.y + h)});
@@ -1020,8 +1026,9 @@ void MainView::renderCompactScreen(ImVec2 size)
     lastActiveDocument_ = activeId;
 
     const bool rail = layout_ == Layout::Landscape;
+    const bool keyboard = !rail && safeArea_.w > kKeyboardInset * s_; // typing: the text keeps the height
     const float navW = rail ? 64.0f * s_ : size.x;
-    const float navH = rail ? size.y : 58.0f * s_;
+    const float navH = rail ? size.y : keyboard ? 0.0f : 58.0f * s_;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 body(rail ? size.x - navW : size.x, rail ? size.y : size.y - navH);
 
@@ -1065,7 +1072,7 @@ void MainView::renderCompactScreen(ImVec2 size)
         break;
     }
     ImGui::EndChild();
-    if (!rail) {
+    if (!rail && !keyboard) {
         ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + body.y));
         renderNavigation(false, ImVec2(navW, navH));
     }

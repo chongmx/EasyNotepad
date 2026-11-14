@@ -1,87 +1,87 @@
 #include "enp/model/package/Inflate.h"
 
+#include "libdeflate.h"
+
 #include <algorithm>
-#include <cstring>
+#include <cstdint>
 #include <new>
 
-// stb_image's zlib decoder, compiled here with internal linkage (STB_IMAGE_STATIC) so it does not
-// clash with the image decoder's copy in the services. It allocates through the global operator
-// new (the accounting sees it), and its growth goes through limitedRealloc, which refuses to grow
-// past the caller's limit: a zip bomb fails at the limit instead of filling memory.
+// libdeflate (3rdparty/libdeflate, pinned): several times faster than a byte-at-a-time inflater,
+// with the processor's vector instructions where it has them (chosen at run time). It inflates
+// into a buffer of a known size, so an unknown size is guessed and the guess grown until it fits,
+// never past the caller's limit: a zip bomb fails at the limit instead of filling memory. Its
+// memory comes from the global operator new (the accounting sees it).
 namespace enp::model::package {
+
 namespace {
-thread_local std::size_t g_limit = 0;
 
-// realloc's contract: on failure the old block stays (stb frees it itself).
-void* limitedRealloc(void* ptr, std::size_t oldSize, std::size_t newSize)
+void* allocate(std::size_t size)
 {
-    if (newSize > g_limit)
-        return nullptr;
-    void* fresh = ::operator new(newSize, std::nothrow);
-    if (!fresh)
-        return nullptr;
-    if (ptr)
-        std::memcpy(fresh, ptr, std::min(oldSize, newSize));
-    ::operator delete(ptr);
-    return fresh;
+    return ::operator new(size, std::nothrow);
 }
+
+void release(void* p)
+{
+    ::operator delete(p);
+}
+
+// The decompressor (its tables, about 10 KB): made for each call and freed after it, so nothing is
+// kept between calls, whatever thread inflates.
+struct Decompressor {
+    libdeflate_decompressor* d = nullptr;
+    Decompressor()
+    {
+        libdeflate_options options{};
+        options.sizeof_options = sizeof(options);
+        options.malloc_func = allocate;
+        options.free_func = release;
+        d = libdeflate_alloc_decompressor_ex(&options);
+    }
+    ~Decompressor()
+    {
+        if (d)
+            libdeflate_free_decompressor(d);
+    }
+    Decompressor(const Decompressor&) = delete;
+    Decompressor& operator=(const Decompressor&) = delete;
+};
+
 } // namespace
-} // namespace enp::model::package
-
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_STATIC
-#define STBI_ONLY_PNG
-#define STBI_NO_STDIO
-#define STBI_NO_LINEAR
-#define STBI_NO_HDR
-#define STBI_MALLOC(size) ::operator new(size, std::nothrow)
-#define STBI_REALLOC_SIZED(ptr, oldSize, newSize) enp::model::package::limitedRealloc(ptr, oldSize, newSize)
-#define STBI_FREE(ptr) ::operator delete(ptr)
-#if defined(__GNUC__)
-#   pragma GCC diagnostic push
-#   pragma GCC diagnostic ignored "-Wunused-function"
-#   pragma GCC diagnostic ignored "-Wsign-compare"
-#   pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
-#   pragma GCC diagnostic ignored "-Wunused-parameter"
-#   if !defined(__clang__)
-#       pragma GCC diagnostic ignored "-Wstringop-overflow" // MinGW GCC, in stb's PNG code (not used here)
-#   endif
-#   if !defined(__clang__) && __GNUC__ >= 12
-#       pragma GCC diagnostic ignored "-Wuse-after-free"
-#   endif
-#elif defined(_MSC_VER)
-#   pragma warning(push)
-#   pragma warning(disable : 4100 4244 4245 4456 4457 4505 4701 4703)
-#endif
-#include "stb_image.h"
-#if defined(__GNUC__)
-#   pragma GCC diagnostic pop
-#elif defined(_MSC_VER)
-#   pragma warning(pop)
-#endif
-
-namespace enp::model::package {
 
 std::optional<std::string> inflate(std::string_view data, bool zlibHeader, std::size_t limit, std::size_t expected)
 {
     if (data.empty() || data.size() > std::size_t(0x7FFFFFFF) || limit == 0)
         return std::nullopt;
-    g_limit = std::min<std::size_t>(limit, 0x7FFFFFFF);
-    const std::size_t guess = std::clamp<std::size_t>(expected ? expected : data.size() * 4, 64, g_limit);
-    // stb reads its bit buffer ahead and fails ("unexpected end") on a valid stream whose last
-    // code ends near the end of the input: a few zero bytes after it give it the look-ahead.
-    std::string padded;
-    padded.reserve(data.size() + 8);
-    padded.append(data);
-    padded.append(8, '\0');
-    int outLength = 0;
-    char* out = stbi_zlib_decode_malloc_guesssize_headerflag(padded.data(), int(padded.size()), int(guess), &outLength, zlibHeader ? 1 : 0);
-    g_limit = 0;
-    if (!out)
+    limit = std::min<std::size_t>(limit, 0x7FFFFFFF);
+    if (zlibHeader) {
+        // The 2-byte zlib header (deflate, no preset dictionary), then raw deflate data. Its
+        // checksum at the end is not checked: some PDF writers get it wrong, and the data is good.
+        if (data.size() < 2)
+            return std::nullopt;
+        const unsigned cmf = std::uint8_t(data[0]), flg = std::uint8_t(data[1]);
+        if ((cmf & 0x0F) != 8 || (cmf * 256 + flg) % 31 != 0 || (flg & 0x20))
+            return std::nullopt;
+        data.remove_prefix(2);
+    }
+    Decompressor decompressor;
+    if (!decompressor.d)
         return std::nullopt;
-    std::optional<std::string> result(std::in_place, out, std::size_t(outLength));
-    STBI_FREE(out);
-    return result;
+    std::size_t size = std::clamp<std::size_t>(expected ? expected : data.size() * 4, 64, limit);
+    std::string out;
+    for (;;) {
+        out.resize(size);
+        std::size_t used = 0, produced = 0;
+        const libdeflate_result r = libdeflate_deflate_decompress_ex(decompressor.d, data.data(), data.size(), &out[0], out.size(), &used, &produced);
+        if (r == LIBDEFLATE_SUCCESS) {
+            out.resize(produced);
+            if (out.capacity() > produced + produced / 4 + 4096) // a guess well over: the room given back
+                out.shrink_to_fit();
+            return out;
+        }
+        if (r != LIBDEFLATE_INSUFFICIENT_SPACE || size >= limit)
+            return std::nullopt;
+        size = std::min(limit, size * 4); // larger: inflated again from the start
+    }
 }
 
 } // namespace enp::model::package

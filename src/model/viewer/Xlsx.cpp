@@ -5,8 +5,10 @@
 #include "enp/model/viewer/Viewer.h"
 
 #include "Chart.h"
+#include "ConditionalFormat.h"
 #include "Ooxml.h"
 #include "Shapes.h"
+#include "SheetTable.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +32,14 @@ const Cell* Sheet::cell(std::uint32_t r, std::uint32_t c) const
     return it != rw->cells.end() && it->column == c ? &*it : nullptr;
 }
 
+const CellMark* Sheet::mark(std::uint32_t r, std::uint32_t c) const
+{
+    const auto it = std::lower_bound(marks.begin(), marks.end(), std::make_pair(r, c), [](const CellMark& m, std::pair<std::uint32_t, std::uint32_t> at) {
+        return m.row != at.first ? m.row < at.first : m.column < at.second;
+    });
+    return it != marks.end() && it->row == r && it->column == c ? &*it : nullptr;
+}
+
 float Sheet::columnWidth(std::uint32_t column) const
 {
     const auto it = columnWidths.find(column);
@@ -47,49 +57,41 @@ struct CellFormat {
     std::uint8_t flags = 0; // Cell::Bold / Italic / Underline / Strike / Wrap
     std::uint32_t color = 0, fill = 0;
     std::int8_t align = -1, valign = -1;
-    std::uint8_t halfPoints = 0;
+    std::uint8_t halfPoints = 0, indent = 0, font = 0;
     std::int16_t rotation = 0;
-    std::uint16_t border = 0;
+    std::uint16_t border = 0, fillStyle = 0;
 };
 
 struct Font {
     std::uint8_t flags = 0;
     std::uint32_t color = 0;
     float size = 0.0f;
+    std::string name;
 };
 
-// "B12" -> row 11, column 1. False when it is not a cell reference.
-bool parseReference(std::string_view ref, std::uint32_t& row, std::uint32_t& column)
+// A fill once read: its colour, and the pattern or gradient over it.
+struct Fill {
+    std::uint32_t color = 0;
+    std::uint16_t style = 0; // into Workbook::fills
+};
+
+// The share of the pattern's colour in the grey patterns (dots too fine to draw as dots).
+float greyShare(std::string_view pattern)
 {
-    std::size_t i = 0;
-    std::uint64_t col = 0;
-    while (i < ref.size() && ref[i] == '$')
-        ++i;
-    const std::size_t letters = i;
-    while (i < ref.size() && std::isalpha(static_cast<unsigned char>(ref[i]))) {
-        col = col * 26 + std::uint64_t(std::toupper(static_cast<unsigned char>(ref[i])) - 'A' + 1);
-        ++i;
-        if (col > 16384)
-            return false;
-    }
-    if (i == letters)
-        return false;
-    while (i < ref.size() && ref[i] == '$')
-        ++i;
-    std::uint64_t r = 0;
-    const std::size_t digits = i;
-    while (i < ref.size() && std::isdigit(static_cast<unsigned char>(ref[i]))) {
-        r = r * 10 + std::uint64_t(ref[i] - '0');
-        ++i;
-        if (r > 1048576)
-            return false;
-    }
-    if (i == digits || i != ref.size() || r == 0)
-        return false;
-    row = std::uint32_t(r - 1);
-    column = std::uint32_t(col - 1);
-    return true;
+    return pattern == "darkGray" ? 0.75f : pattern == "mediumGray" ? 0.5f : pattern == "lightGray" ? 0.25f
+         : pattern == "gray125" ? 0.125f : pattern == "gray0625" ? 0.0625f : -1.0f;
 }
+
+std::uint32_t mix(std::uint32_t a, std::uint32_t b, float t) // a toward b by t, packed like Page colours
+{
+    auto ch = [&](int shift) {
+        const float x = float((a >> shift) & 0xFF), y = float((b >> shift) & 0xFF);
+        return std::uint32_t(std::lround(x + (y - x) * t)) << shift;
+    };
+    return ch(0) | ch(8) | ch(16) | 0xFF000000u;
+}
+
+using cf::parseReference;
 
 class XlsxReader {
 public:
@@ -108,8 +110,8 @@ public:
         }
         const ooxml::Relationships rels = ooxml::readRelationships(zip_, main);
         theme_ = ooxml::readTheme(zip_, ooxml::targetOfType(rels, "theme"));
+        readStyles(ooxml::targetOfType(rels, "styles")); // first: runs name fonts against the default one
         readSharedStrings(ooxml::targetOfType(rels, "sharedStrings"));
-        readStyles(ooxml::targetOfType(rels, "styles"));
 
         struct SheetRef {
             std::string name, part;
@@ -153,6 +155,9 @@ public:
             doc.notShown.push_back(std::to_string(charts_) + (charts_ == 1 ? " chart or drawing" : " charts or drawings"));
         if (truncated_)
             doc.notShown.push_back("cells beyond the first 2,000,000");
+        if (unsupportedRules_)
+            doc.notShown.push_back(std::to_string(unsupportedRules_) +
+                                   (unsupportedRules_ == 1 ? " conditional format (a formula)" : " conditional formats (formulas)"));
         doc.shape = Shape::Sheet;
         return doc;
     }
@@ -222,6 +227,8 @@ private:
                     run->halfPoints = std::uint8_t(std::clamp(std::lround(std::atof(v.c_str()) * 2.0), 1L, 255L));
                 else if (n == "color")
                     run->color = textColor(colorOf(x));
+                else if (n == "rFont")
+                    run->font = fontNumber(v);
             }
         }
         if (rich && anyOwn && runs.size() <= 4096) {
@@ -239,6 +246,20 @@ private:
         return c == theme_.color("dk1") || c == ooxml::hexColor("000000") ? 0 : c;
     }
 
+    // A font's number in Workbook::fontNames (from 1; 0: the default font, or too many).
+    std::uint8_t fontNumber(const std::string& name)
+    {
+        if (name.empty() || name == book_->defaultFont)
+            return 0;
+        for (std::size_t i = 0; i < book_->fontNames.size(); ++i)
+            if (book_->fontNames[i] == name)
+                return std::uint8_t(i + 1);
+        if (book_->fontNames.size() >= 255)
+            return 0;
+        book_->fontNames.push_back(name);
+        return std::uint8_t(book_->fontNames.size());
+    }
+
     std::uint32_t colorOf(const XmlReader& x) const
     {
         std::uint32_t c = 0;
@@ -252,11 +273,17 @@ private:
             if (i >= 0 && i < 12)
                 c = theme_.color(kNames[i]);
         } else if (x.hasAttribute("indexed")) {
-            static const char* const kIndexed[] = {"000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF"};
+            // Excel's default palette (8-63; 0-7 repeat 8-15); 64 and up: the system's colours (automatic).
+            static const char* const kIndexed[] = {
+                "000000", "FFFFFF", "FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF", "00FFFF", "800000", "008000", "000080", "808000",
+                "800080", "008080", "C0C0C0", "808080", "9999FF", "993366", "FFFFCC", "CCFFFF", "660066", "FF8080", "0066CC", "CCCCFF",
+                "000080", "FF00FF", "FFFF00", "00FFFF", "800080", "800000", "008080", "0000FF", "00CCFF", "CCFFFF", "CCFFCC", "FFFF99",
+                "99CCFF", "FF99CC", "CC99FF", "FFCC99", "3366FF", "33CCCC", "99CC00", "FFCC00", "FF9900", "FF6600", "666699", "969696",
+                "003366", "339966", "003300", "333300", "993300", "993366", "333399", "333333"};
             const int i = std::atoi(x.attribute("indexed").c_str());
             if (i >= 0 && i < 8)
                 c = ooxml::hexColor(kIndexed[i]);
-            else if (i >= 8 && i < 16)
+            else if (i >= 8 && i < 64)
                 c = ooxml::hexColor(kIndexed[i - 8]);
         }
         if (c && x.hasAttribute("tint"))
@@ -273,13 +300,60 @@ private:
             return;
         std::map<int, std::string> codes;
         std::vector<Font> fonts;
-        std::vector<std::uint32_t> fills;
+        std::vector<Fill> fills;
         std::vector<Border> borders;
         std::map<int, std::uint16_t> borderIndex; // borderId -> Workbook::borders
         int edge = -1;                            // the border edge being read
         XmlReader x(*xml);
-        enum class In { None, Fonts, Fills, Borders, CellXfs, Other } in = In::None;
-        bool solid = false;
+        enum class In { None, Fonts, Fills, Borders, CellXfs, Dxfs, Other } in = In::None;
+        enum class DxfPart { None, Font, Fill } dxfPart = DxfPart::None; // in a dxf: its font or its fill
+        std::string tableStyle; // the custom table style being read
+        // The fill being read: its pattern's colours, or its gradient.
+        std::string pattern;
+        std::uint32_t fg = 0, bg = 0;
+        bool hasFg = false, hasBg = false;
+        FillStyle gradient;
+        bool inGradient = false;
+        float stopAt = 0.0f;
+        auto endFill = [&]() {
+            if (fills.empty())
+                return;
+            Fill& f = fills.back();
+            const FillStyle* style = nullptr;
+            FillStyle hatch;
+            if (inGradient) {
+                if (gradient.stopCount == 0)
+                    return;
+                f.color = gradient.stop[0];
+                style = &gradient;
+            } else if (pattern == "solid") {
+                f.color = hasFg ? fg : hasBg ? bg : 0;
+            } else if (pattern.empty() || pattern == "none") {
+                f.color = 0;
+            } else {
+                // The pattern's colour (black when not given) over the background (white).
+                const std::uint32_t ink = hasFg ? fg : ooxml::hexColor("000000"), paper = hasBg ? bg : ooxml::hexColor("FFFFFF");
+                const float share = greyShare(pattern);
+                if (share >= 0.0f) {
+                    f.color = mix(paper, ink, share);
+                } else {
+                    f.color = paper;
+                    const std::string_view p = pattern;
+                    hatch.dark = p.substr(0, 4) == "dark";
+                    const std::string_view kind = p.substr(hatch.dark ? 4 : std::min<std::size_t>(5, p.size()));
+                    hatch.lines = kind == "Vertical" ? FillStyle::Vertical : kind == "Down" ? FillStyle::Down : kind == "Up" ? FillStyle::Up
+                                : kind == "Grid" ? FillStyle::Grid : kind == "Trellis" ? FillStyle::Trellis : FillStyle::Horizontal;
+                    hatch.color = ink;
+                    style = &hatch;
+                }
+            }
+            if (style && book_->fills.size() < 65535) {
+                if (book_->fills.empty())
+                    book_->fills.emplace_back(); // [0]: none
+                f.style = std::uint16_t(book_->fills.size());
+                book_->fills.push_back(*style);
+            }
+        };
         for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
             if (e == Event::End) {
                 const std::string_view n = x.localName();
@@ -287,6 +361,10 @@ private:
                     in = In::None;
                 else if (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end" || n == "diagonal")
                     edge = -1;
+                else if (in == In::Fills && n == "fill")
+                    endFill();
+                else if (in == In::Dxfs && (n == "font" || n == "fill"))
+                    dxfPart = DxfPart::None;
                 continue;
             }
             if (e != Event::Start)
@@ -303,9 +381,11 @@ private:
             } else if (in == In::Borders && n == "border") {
                 borders.emplace_back();
                 edge = -1;
+                borders.back().diagonalUp = x.attribute("diagonalUp") == "1" || x.attribute("diagonalUp") == "true";
+                borders.back().diagonalDown = x.attribute("diagonalDown") == "1" || x.attribute("diagonalDown") == "true";
             } else if (in == In::Borders && !borders.empty() &&
-                       (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end")) {
-                edge = n == "left" || n == "start" ? 0 : n == "right" || n == "end" ? 1 : n == "top" ? 2 : 3;
+                       (n == "left" || n == "right" || n == "top" || n == "bottom" || n == "start" || n == "end" || n == "diagonal")) {
+                edge = n == "left" || n == "start" ? 0 : n == "right" || n == "end" ? 1 : n == "top" ? 2 : n == "bottom" ? 3 : 4;
                 const std::string st = x.attribute("style");
                 borders.back().style[edge] = st.empty() || st == "none" ? Border::None
                                              : st == "medium" || st == "mediumDashed" || st == "mediumDashDot" || st == "mediumDashDotDot" || st == "slantDashDot" ? Border::Medium
@@ -318,7 +398,55 @@ private:
                 borders.back().color[edge] = textColor(colorOf(x));
             } else if (n == "cellXfs") {
                 in = In::CellXfs;
-            } else if (n == "cellStyleXfs" || n == "dxfs") {
+            } else if (n == "dxfs") {
+                in = In::Dxfs;
+            } else if (in == In::Dxfs && n == "dxf") {
+                dxfs_.emplace_back();
+                dxfPart = DxfPart::None;
+            } else if (in == In::Dxfs && !dxfs_.empty()) {
+                cf::Dxf& d = dxfs_.back();
+                const std::string v = x.attribute("val");
+                const bool set = v.empty() || (v != "0" && v != "false" && v != "none");
+                const std::uint8_t flag = n == "b" ? Cell::Bold : n == "i" ? Cell::Italic : n == "u" ? Cell::Underline : n == "strike" ? Cell::Strike : 0;
+                if (n == "font") {
+                    dxfPart = DxfPart::Font;
+                } else if (n == "fill") {
+                    dxfPart = DxfPart::Fill;
+                } else if (n == "numFmt") {
+                    d.format = x.attribute("formatCode");
+                    if (d.format.empty())
+                        d.format = std::string(builtinNumberFormat(std::atoi(x.attribute("numFmtId").c_str())));
+                } else if (dxfPart == DxfPart::Font && flag) {
+                    (set ? d.setFlags : d.clearFlags) |= flag;
+                } else if (dxfPart == DxfPart::Font && n == "color") {
+                    d.hasColor = true;
+                    d.color = textColor(colorOf(x));
+                } else if (dxfPart == DxfPart::Fill && (n == "bgColor" || n == "fgColor")) {
+                    // A differential fill's colour is its background (the pattern colour when that is all it has).
+                    if (n == "bgColor" || !d.hasFill) {
+                        d.hasFill = true;
+                        d.fill = colorOf(x);
+                    }
+                }
+            } else if (n == "tableStyle") { // the workbook's own table styles, from its dxfs
+                tableStyle = x.attribute("name");
+                if (!tableStyle.empty() && customTables_.size() < 256)
+                    customTables_[tableStyle] = table::Style();
+                else
+                    tableStyle.clear();
+            } else if (n == "tableStyleElement" && !tableStyle.empty()) {
+                const table::Element el = table::elementOf(x.attribute("type"));
+                const int id = std::atoi(x.attribute("dxfId").c_str());
+                if (el != table::ElementCount && x.hasAttribute("dxfId") && id >= 0 && std::size_t(id) < dxfs_.size()) {
+                    const cf::Dxf& d = dxfs_[std::size_t(id)];
+                    table::Part& part = customTables_[tableStyle].parts[el];
+                    part.hasFill = d.hasFill;
+                    part.fill = d.fill;
+                    part.hasColor = d.hasColor;
+                    part.color = d.color;
+                    part.bold = (d.setFlags & Cell::Bold) != 0;
+                }
+            } else if (n == "cellStyleXfs") {
                 in = In::Other;
             } else if (in == In::Fonts && n == "font") {
                 fonts.emplace_back();
@@ -337,12 +465,29 @@ private:
                     fonts.back().size = float(std::atof(v.c_str()));
                 else if (n == "color")
                     fonts.back().color = colorOf(x);
+                else if (n == "name")
+                    fonts.back().name = v;
             } else if (in == In::Fills && n == "fill") {
-                fills.push_back(0);
+                fills.emplace_back();
+                pattern.clear();
+                hasFg = hasBg = inGradient = false;
+                gradient = FillStyle();
             } else if (in == In::Fills && n == "patternFill" && !fills.empty()) {
-                solid = x.attribute("patternType") == "solid";
-            } else if (in == In::Fills && n == "fgColor" && !fills.empty() && solid) {
-                fills.back() = colorOf(x);
+                pattern = x.attribute("patternType");
+            } else if (in == In::Fills && (n == "fgColor" || n == "bgColor") && !fills.empty() && !inGradient) {
+                const bool automatic = x.attribute("auto") == "1" || (x.hasAttribute("indexed") && std::atoi(x.attribute("indexed").c_str()) >= 64);
+                if (!automatic)
+                    (n == "fgColor" ? fg : bg) = colorOf(x);
+                (n == "fgColor" ? hasFg : hasBg) = !automatic;
+            } else if (in == In::Fills && n == "gradientFill" && !fills.empty()) {
+                inGradient = true;
+                gradient.kind = x.attribute("type") == "path" ? FillStyle::Path : FillStyle::Linear;
+                gradient.degree = float(std::atof(x.attribute("degree").c_str()));
+            } else if (in == In::Fills && n == "stop" && inGradient) {
+                stopAt = std::clamp(float(std::atof(x.attribute("position").c_str())), 0.0f, 1.0f);
+            } else if (in == In::Fills && n == "color" && inGradient && gradient.stopCount < 4) {
+                gradient.position[gradient.stopCount] = stopAt;
+                gradient.stop[gradient.stopCount++] = colorOf(x);
             } else if (in == In::CellXfs && n == "xf") {
                 CellFormat f;
                 const int numFmt = std::atoi(x.attribute("numFmtId").c_str());
@@ -352,8 +497,11 @@ private:
                 const int font = std::atoi(x.attribute("fontId").c_str());
                 if (!fonts.empty() && fonts[0].size > 0.0f)
                     book_->defaultFontSize = fonts[0].size;
+                if (!fonts.empty() && !fonts[0].name.empty())
+                    book_->defaultFont = fonts[0].name;
                 if (font >= 0 && font < int(fonts.size())) {
                     f.flags = fonts[size_t(font)].flags;
+                    f.font = fontNumber(fonts[size_t(font)].name);
                     f.color = textColor(fonts[size_t(font)].color); // black: the view picks a readable colour
                     const float size = fonts[size_t(font)].size;
                     if (size > 0.0f && std::fabs(size - book_->defaultFontSize) > 0.01f)
@@ -362,7 +510,7 @@ private:
                 const int border = std::atoi(x.attribute("borderId").c_str());
                 if (border > 0 && border < int(borders.size())) {
                     const Border& b = borders[size_t(border)];
-                    if (b.style[0] || b.style[1] || b.style[2] || b.style[3]) {
+                    if (b.style[0] || b.style[1] || b.style[2] || b.style[3] || (b.style[4] && (b.diagonalUp || b.diagonalDown))) {
                         auto [it, added] = borderIndex.emplace(border, std::uint16_t(0));
                         if (added && book_->borders.size() < 65535) {
                             if (book_->borders.empty())
@@ -374,8 +522,10 @@ private:
                     }
                 }
                 const int fill = std::atoi(x.attribute("fillId").c_str());
-                if (fill >= 2 && fill < int(fills.size())) // 0 and 1 are reserved (none, gray125)
-                    f.fill = fills[size_t(fill)];
+                if (fill >= 2 && fill < int(fills.size())) { // 0 and 1 are reserved (none, gray125)
+                    f.fill = fills[size_t(fill)].color;
+                    f.fillStyle = fills[size_t(fill)].style;
+                }
                 formats_.push_back(std::move(f));
             } else if (in == In::CellXfs && n == "alignment" && !formats_.empty()) {
                 CellFormat& f = formats_.back();
@@ -383,9 +533,12 @@ private:
                 f.align = h == "center" || h == "centerContinuous" ? 1 : h == "right" ? 2 : h == "left" ? 0 : -1;
                 const std::string v = x.attribute("vertical");
                 f.valign = v == "top" ? 0 : v == "center" || v == "justify" || v == "distributed" ? 1 : -1;
-                const std::string wrap = x.attribute("wrapText");
+                const std::string wrap = x.attribute("wrapText"), shrink = x.attribute("shrinkToFit");
                 if (wrap == "1" || wrap == "true")
                     f.flags |= Cell::Wrap;
+                else if (shrink == "1" || shrink == "true")
+                    f.flags |= Cell::Shrink;
+                f.indent = std::uint8_t(std::clamp(std::atoi(x.attribute("indent").c_str()), 0, 250));
                 // 0-90 anticlockwise, 91-180 clockwise (as 90 - n), 255 stacked.
                 const int rot = std::atoi(x.attribute("textRotation").c_str());
                 f.rotation = std::int16_t(rot == 255 ? 255 : rot > 90 && rot <= 180 ? 90 - rot : std::clamp(rot, 0, 90));
@@ -399,6 +552,9 @@ private:
         if (!xml)
             return;
         const ooxml::Relationships rels = ooxml::readRelationships(zip_, part);
+        // Conditional formats are evaluated on the saved numbers: kept while the sheet is read when it has any.
+        collectValues_ = xml->find("conditionalFormatting") != std::string::npos;
+        std::vector<cf::Rule> rules;
         XmlReader x(*xml);
         Row* row = nullptr;
         std::uint32_t nextRow = 0, nextColumn = 0;
@@ -472,8 +628,20 @@ private:
                 if (colon != std::string::npos && parseReference(std::string_view(ref).substr(0, colon), m.row0, m.col0) &&
                     parseReference(std::string_view(ref).substr(colon + 1), m.row1, m.col1) && m.row1 >= m.row0 && m.col1 >= m.col0)
                     sheet.merges.push_back(m);
+            } else if (n == "conditionalFormatting") {
+                conditionalFormatting(x, rules);
+            } else if (n == "extLst") { // Excel 2010's own rules (x14) repeat or extend these
+                x.skip();
             }
         }
+        // Tables' styles, then the conditional formats over them (they win, as in Excel).
+        for (const auto& [id, r] : rels)
+            if (r.type == "table" && !r.external)
+                readTable(r.target, sheet);
+        if (!rules.empty())
+            unsupportedRules_ += cf::apply(rules, dxfs_, values_, sheet, date1904_);
+        std::vector<cf::Value>().swap(values_); // given back
+        collectValues_ = false;
         // Rows that hold nothing and keep the default height add nothing.
         sheet.rows.erase(std::remove_if(sheet.rows.begin(), sheet.rows.end(), [](const Row& r) { return r.cells.empty() && r.height == 0.0f; }),
                          sheet.rows.end());
@@ -485,6 +653,114 @@ private:
         for (const auto& [id, r] : rels)
             if (r.type == "drawing" && !r.external)
                 readDrawing(r.target, sheet);
+    }
+
+    // A table part (xl/tables/tableN.xml): its range and style, laid onto the sheet's cells.
+    void readTable(const std::string& part, Sheet& sheet)
+    {
+        const std::optional<std::string> xml = zip_.read(part, std::size_t(4) << 20);
+        if (!xml)
+            return;
+        table::Table t;
+        std::string name;
+        bool ranged = false;
+        XmlReader x(*xml);
+        auto flag = [&](const char* attr, bool otherwise) {
+            const std::string v = x.attribute(attr);
+            return v.empty() ? otherwise : v == "1" || v == "true";
+        };
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "table") {
+                std::vector<Merge> refs;
+                cf::parseRanges(x.attribute("ref"), refs);
+                if (refs.empty())
+                    return;
+                t.ref = refs.front();
+                ranged = true;
+                if (x.hasAttribute("headerRowCount"))
+                    t.headerRows = std::uint32_t(std::max(0, std::atoi(x.attribute("headerRowCount").c_str())));
+                t.totalRows = std::uint32_t(std::max(0, std::atoi(x.attribute("totalsRowCount").c_str())));
+            } else if (n == "tableStyleInfo") {
+                name = x.attribute("name");
+                t.firstColumn = flag("showFirstColumn", false);
+                t.lastColumn = flag("showLastColumn", false);
+                t.rowStripes = flag("showRowStripes", true);
+                t.columnStripes = flag("showColumnStripes", false);
+            } else if (n == "autoFilter" || n == "tableColumns" || n == "extLst") {
+                x.skip();
+            }
+        }
+        if (!ranged || name.empty())
+            return;
+        table::Style style;
+        const auto custom = customTables_.find(name);
+        if (custom != customTables_.end())
+            style = custom->second;
+        else if (!table::builtin(name, theme_, style))
+            return;
+        table::apply(t, style, *book_, sheet);
+    }
+
+    // At the Start of conditionalFormatting: its rules over its ranges.
+    void conditionalFormatting(XmlReader& x, std::vector<cf::Rule>& rules)
+    {
+        std::vector<Merge> ranges;
+        cf::parseRanges(x.attribute("sqref"), ranges);
+        cf::Rule* rule = nullptr;
+        const int depth = x.depth();
+        for (Event e; (e = x.next()) != Event::Eof && e != Event::Error;) {
+            if (e == Event::End && x.depth() < depth)
+                break;
+            if (e != Event::Start)
+                continue;
+            const std::string_view n = x.localName();
+            if (n == "cfRule") {
+                if (rules.size() >= 4096) {
+                    x.skip();
+                    rule = nullptr;
+                    continue;
+                }
+                rules.emplace_back();
+                rule = &rules.back();
+                rule->ranges = ranges;
+                auto flag = [&](const char* name, bool otherwise) {
+                    const std::string v = x.attribute(name);
+                    return v.empty() ? otherwise : v == "1" || v == "true";
+                };
+                rule->type = x.attribute("type");
+                rule->op = x.attribute("operator");
+                rule->text = x.attribute("text");
+                rule->dxf = x.hasAttribute("dxfId") ? std::atoi(x.attribute("dxfId").c_str()) : -1;
+                rule->priority = std::atoi(x.attribute("priority").c_str());
+                if (x.hasAttribute("rank"))
+                    rule->rank = std::atoi(x.attribute("rank").c_str());
+                rule->stdDev = std::atoi(x.attribute("stdDev").c_str());
+                rule->stop = flag("stopIfTrue", false);
+                rule->percent = flag("percent", false);
+                rule->bottom = flag("bottom", false);
+                rule->above = flag("aboveAverage", true);
+                rule->equal = flag("equalAverage", false);
+            } else if (!rule) {
+                continue;
+            } else if (n == "formula") {
+                rule->formulas.push_back(x.elementText());
+            } else if (n == "iconSet") {
+                rule->iconSet = x.attribute("iconSet");
+                rule->reverse = x.attribute("reverse") == "1" || x.attribute("reverse") == "true";
+                rule->showValue = x.attribute("showValue") != "0" && x.attribute("showValue") != "false";
+            } else if (n == "dataBar") {
+                rule->showValue = x.attribute("showValue") != "0" && x.attribute("showValue") != "false";
+            } else if (n == "cfvo") {
+                rule->cfvos.push_back(cf::Cfvo{x.attribute("type"), x.attribute("val"), x.attribute("gte") != "0" && x.attribute("gte") != "false"});
+            } else if (n == "color") {
+                rule->colors.push_back(colorOf(x));
+            } else if (n == "extLst") {
+                x.skip();
+            }
+        }
     }
 
     // A sheet's size in points from its start to column `c` / row `r` (Excel's widths: characters
@@ -687,6 +963,9 @@ private:
             c.halfPoints = f->halfPoints;
             c.rotation = f->rotation;
             c.border = f->border;
+            c.indent = f->indent;
+            c.font = f->font;
+            c.fillStyle = f->fillStyle;
         }
         if (type == "s") {
             const long i = std::atol(value.c_str());
@@ -718,13 +997,15 @@ private:
                 std::uint32_t tag = 0; // [Red] and the like
                 c.text = formatNumber(v, f ? f->code : std::string_view(), date1904_, &tag);
                 c.flags |= Cell::Number;
+                if (collectValues_ && values_.size() < 2000000)
+                    values_.push_back(cf::Value{row.index, column, v});
                 if (tag)
                     c.color = textColor(tag);
             } else {
                 c.text = std::move(value);
             }
         }
-        if (c.text.empty() && c.formula.empty() && c.fill == 0 && c.border == 0)
+        if (c.text.empty() && c.formula.empty() && c.fill == 0 && c.fillStyle == 0 && c.border == 0)
             return;
         if (!row.cells.empty() && row.cells.back().column >= column) // out of order: ignored
             return;
@@ -738,6 +1019,11 @@ private:
     std::vector<std::string> strings_;
     std::vector<std::uint32_t> stringRich_; // per shared string: its Workbook::richTexts index (0: none)
     std::vector<CellFormat> formats_;
+    std::vector<cf::Dxf> dxfs_;      // the conditional formats' formats
+    std::map<std::string, table::Style> customTables_; // the workbook's own table styles
+    std::vector<cf::Value> values_;  // the sheet being read's numbers, while it has conditional formats
+    bool collectValues_ = false;
+    int unsupportedRules_ = 0;
     bool date1904_ = false;
     int otherSheets_ = 0, charts_ = 0;
     std::size_t cellCount_ = 0;

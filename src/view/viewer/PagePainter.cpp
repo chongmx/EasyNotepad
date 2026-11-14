@@ -1,7 +1,14 @@
 #include "enp/view/viewer/PagePainter.h"
 
 #include "enp/os/Memory.h"
+#include "enp/view/DocumentFonts.h"
 #include "enp/view/MarkdownImages.h"
+
+#include "IconsFontAwesome6.h"
+// Pages zoomed far out put tens of thousands of glyphs into one draw list: 16-bit indices would
+// overflow on OpenGL ES (no vertex offset). CMakeLists.txt sets ImDrawIdx.
+static_assert(sizeof(ImDrawIdx) == 4, "ImDrawIdx must be 32-bit: a page view's draw list can pass 65535 vertices");
+#include "imgui_internal.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -20,6 +27,42 @@ std::size_t utf8Length(unsigned char c)
 ImFont* fontFor(const Fonts& fonts, std::uint8_t flags)
 {
     return (flags & mv::Mono) && fonts.mono ? fonts.mono : fonts.ui;
+}
+
+// The face a slide's run is drawn in: its typeface with the face's own weight and slant (the
+// flags left are the ones to fake), or the view's font when the typeface is not there or lacks
+// one of the run's letters.
+struct Ink {
+    ImFont* font;
+    std::uint8_t flags;
+    float emScale; // a document face: ImGui's size for an em
+};
+float measure(ImFont* font, float px, const char* b, const char* e);
+
+// A run's text size in pixels: superscript and subscript at two thirds of it.
+float pxOf(const mv::TextRun& r, float scale)
+{
+    return r.size * scale * (r.baseline != 0.0f ? 0.66f : 1.0f);
+}
+
+// A run's width from b to e: its letters, and its letter spacing after each of them.
+float runWidth(ImFont* font, const mv::TextRun& r, float px, float scale, const char* b, const char* e)
+{
+    float w = measure(font, px, b, e);
+    if (r.spacing != 0.0f)
+        for (const char* p = b; p < e; p += utf8Length(static_cast<unsigned char>(*p)))
+            w += r.spacing * scale;
+    return w;
+}
+
+Ink inkFor(const Fonts& fonts, const mv::TextRun& r)
+{
+    if (!r.font.empty() && fonts.documents && !(r.flags & mv::Mono)) {
+        const DocumentFonts::Face face = fonts.documents->face(r.font, (r.flags & mv::Bold) != 0, (r.flags & mv::Italic) != 0);
+        if (face.font && DocumentFonts::covers(face.font, r.text.data(), r.text.data() + r.text.size()))
+            return Ink{face.font, std::uint8_t(r.flags & ~((face.bold ? mv::Bold : 0) | (face.italic ? mv::Italic : 0))), face.emScale};
+    }
+    return Ink{fontFor(fonts, r.flags), r.flags, 1.0f};
 }
 
 float measure(ImFont* font, float px, const char* b, const char* e)
@@ -159,10 +202,15 @@ void subdivide(ImDrawList* dl, int firstVtx, int firstIdx, float step, std::vect
         return out;
     };
     auto length = [](ImVec2 p, ImVec2 q) { return std::sqrt((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)); };
+    // At most about 16k pieces for the whole fill: an outline of hundreds of points (a custom
+    // shape's) is already hundreds of triangles, and 24 x 24 pieces each made a mesh of megabytes
+    // (vertex buffers the GPU driver keeps at their largest).
+    const int count = int(tris.size() / 3);
+    const int most = std::clamp(int(std::sqrt(16384.0 / double(std::max(1, count)))), 1, 24);
     for (std::size_t t = 0; t + 2 < tris.size(); t += 3) {
         const ImDrawVert a = tris[t], b = tris[t + 1], c = tris[t + 2];
         const float edge = std::max({length(a.pos, b.pos), length(b.pos, c.pos), length(c.pos, a.pos)});
-        const int k = std::clamp(int(std::ceil(edge / std::max(1.0f, step))), 1, 24);
+        const int k = std::clamp(int(std::ceil(edge / std::max(1.0f, step))), 1, most);
         const int vertices = (k + 1) * (k + 2) / 2;
         dl->PrimReserve(k * k * 3, vertices);
         const unsigned base = dl->_VtxCurrentIdx; // after the reserve: it may have started a new command
@@ -171,7 +219,7 @@ void subdivide(ImDrawList* dl, int firstVtx, int firstIdx, float step, std::vect
                 const ImDrawVert v = mix(a, b, c, float(i) / float(k), float(j) / float(k));
                 dl->PrimWriteVtx(v.pos, v.uv, v.col);
             }
-        auto at = [&](int i, int j) { return ImDrawIdx(base + unsigned(j * (k + 1) - j * (j - 1) / 2 + i)); };
+        auto at = [&](int i, int j) { return static_cast<ImDrawIdx>(base + unsigned(j * (k + 1) - j * (j - 1) / 2 + i)); };
         for (int j = 0; j < k; ++j)
             for (int i = 0; i + j < k; ++i) {
                 dl->PrimWriteIdx(at(i, j));
@@ -280,10 +328,22 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
             if (img.flipV)
                 std::swap(v0, v1);
             const int first = dl->VtxBuffer.Size;
-            if (image && image->texture)
+            if (image && image->texture) {
                 dl->AddImage(image->texture->GetTexRef(), a, b, ImVec2(u0, v0), ImVec2(u1, v1));
-            else
+            } else {
                 dl->AddRectFilled(a, b, IM_COL32(128, 128, 128, 40));
+                // Being read: an hourglass. Could not be shown: a picture crossed out.
+                const bool waiting = images && images->waiting(img.media), failed = !waiting && image && image->failed;
+                const char* mark = waiting ? ICON_FA_HOURGLASS_HALF : failed ? ICON_FA_IMAGE : nullptr;
+                const ImVec2 size = mark ? ImGui::CalcTextSize(mark) : ImVec2(0.0f, 0.0f);
+                if (mark && b.x - a.x > size.x * 2.0f && b.y - a.y > size.y * 2.0f) {
+                    const ImVec2 at((a.x + b.x - size.x) * 0.5f, (a.y + b.y - size.y) * 0.5f);
+                    dl->AddText(at, IM_COL32(110, 110, 110, 200), mark);
+                    if (failed)
+                        dl->AddLine(ImVec2(at.x - 2.0f, at.y + size.y + 1.0f), ImVec2(at.x + size.x + 2.0f, at.y - 1.0f), IM_COL32(200, 70, 70, 220),
+                                    2.0f);
+                }
+            }
             rotateVertices(dl, first, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), img.rotation);
             break;
         }
@@ -299,6 +359,9 @@ void PagePainter::draw(const mv::Page& page, ImVec2 origin, float scale, const F
 
 void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin, float scale)
 {
+    const bool banded = p.fill && !p.bands.empty();
+    if (banded) // outlines filled together, holes cut out: the bands the reader made, those in view
+        drawBands(dl, p, origin, scale);
     for (std::size_t s = 0; s < p.subpaths.size(); ++s) {
         const std::vector<mv::Point>& sub = p.subpaths[s];
         if (sub.size() < 2)
@@ -309,7 +372,7 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
             points_[i] = ImVec2(origin.x + sub[i].x * scale, origin.y + sub[i].y * scale);
         const int n = int(points_.size());
         const int firstFill = dl->VtxBuffer.Size, firstFillIdx = dl->IdxBuffer.Size;
-        if (p.fill && n >= 3) {
+        if (p.fill && n >= 3 && !banded) {
             const bool rect = n == 4 && ((points_[0].x == points_[1].x && points_[1].y == points_[2].y && points_[2].x == points_[3].x) ||
                                          (points_[0].y == points_[1].y && points_[1].x == points_[2].x && points_[2].y == points_[3].y));
             if (rect) {
@@ -368,6 +431,38 @@ void PagePainter::drawPath(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin,
                 lineEnd(dl, p.tail, points_[size_t(n - 1)], points_[size_t(n - 2)], size, p.stroke, width);
             }
         }
+    }
+}
+
+void PagePainter::drawBands(ImDrawList* dl, const mv::PathItem& p, ImVec2 origin, float scale)
+{
+    const ImVec4 clip = dl->_ClipRectStack.back();
+    const ImVec2 uv = ImGui::GetDrawListSharedData()->TexUvWhitePixel;
+    const int first = dl->VtxBuffer.Size, firstIdx = dl->IdxBuffer.Size;
+    ImVec2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
+    constexpr int kChunk = 4096; // quads per reserve: within a 16-bit index range
+    int room = 0;
+    for (const mv::FillBand& b : p.bands) {
+        const float y0 = origin.y + b.y0 * scale, y1 = origin.y + b.y1 * scale;
+        const float l0 = origin.x + b.left0 * scale, r0 = origin.x + b.right0 * scale;
+        const float l1 = origin.x + b.left1 * scale, r1 = origin.x + b.right1 * scale;
+        lo = ImVec2(std::min({lo.x, l0, l1}), std::min(lo.y, y0));
+        hi = ImVec2(std::max({hi.x, r0, r1}), std::max(hi.y, y1));
+        if (y1 < clip.y || y0 > clip.w || std::max(r0, r1) < clip.x || std::min(l0, l1) > clip.z)
+            continue; // out of view (a magnified page)
+        if (room == 0) {
+            dl->PrimReserve(kChunk * 6, kChunk * 4);
+            room = kChunk;
+        }
+        dl->PrimQuadUV(ImVec2(l0, y0), ImVec2(r0, y0), ImVec2(r1, y1), ImVec2(l1, y1), uv, uv, uv, uv, p.fill);
+        --room;
+    }
+    if (room > 0)
+        dl->PrimUnreserve(room * 6, room * 4);
+    if (!p.gradient.stops.empty() && lo.x <= hi.x) {
+        if (needsFineMesh(p.gradient))
+            subdivide(dl, first, firstIdx, 16.0f, tris_);
+        shadeVertices(dl, first, p.gradient, lo, hi, origin, scale);
     }
 }
 
@@ -450,8 +545,9 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         breakAt = p;
                         continue;
                     }
-                    ImFont* font = fontFor(fonts, r.flags);
-                    const float px = r.size * scale;
+                    const Ink ink = inkFor(fonts, r);
+                    ImFont* font = ink.font;
+                    const float px = pxOf(r, scale) * ink.emScale;
                     maxSize = std::max(maxSize, r.size);
                     const char* s = r.text.data();
                     if (s[p.at] == '\n') {
@@ -465,7 +561,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         ++e;
                     while (e < r.text.size() && s[e] == ' ')
                         ++e;
-                    const float w = measure(font, px, s + p.at, s + e);
+                    const float w = runWidth(font, r, px, scale, s + p.at, s + e);
                     if (any && box.wrap && width + w > avail + 0.5f && width > 0.0f) {
                         // The trailing spaces of the word may stay on this line.
                         break;
@@ -486,7 +582,7 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                         x += std::max(0.0f, avail - width);
                     if (firstLine && !para.bullet.empty() && !runs.empty()) {
                         const mv::TextRun& r0 = runs[0];
-                        ImFont* font = fontFor(fonts, r0.flags);
+                        ImFont* font = inkFor(fonts, r0).font;
                         const float px = r0.size * scale;
                         const float bw = measure(font, px, para.bullet.data(), para.bullet.data() + para.bullet.size());
                         dl->AddText(font, px, ImVec2(lineLeft - bw - 6.0f * scale, y + (lineH - px) * 0.5f), r0.color, para.bullet.data(),
@@ -501,13 +597,28 @@ void PagePainter::drawBox(ImDrawList* dl, const mv::TextBox& box, ImVec2 origin,
                             std::size_t e = stop;
                             if (e > q.at && r.text[e - 1] == '\n')
                                 --e;
-                            ImFont* font = fontFor(fonts, r.flags);
-                            const float px = r.size * scale;
+                            const Ink ink = inkFor(fonts, r);
+                            const float px = pxOf(r, scale) * ink.emScale;
                             const char* b = r.text.data() + q.at;
                             const char* en = r.text.data() + e;
-                            const float w = measure(font, px, b, en);
-                            if (px >= 1.0f && en > b)
-                                styledText(dl, font, px, ImVec2(x, y + (lineH - px * 1.2f) * 0.5f + px * 0.1f), r.color, r.flags, b, en, w);
+                            const float w = runWidth(ink.font, r, px, scale, b, en);
+                            // On the line's baseline as full-size text, raised or lowered when it is a superscript or subscript.
+                            const float full = r.size * scale;
+                            const ImVec2 at(x, y + (lineH - full * 1.2f) * 0.5f + full * 0.1f + (full - px) * 0.8f - r.baseline * full);
+                            if (px >= 1.0f && en > b) {
+                                if (r.spacing == 0.0f) {
+                                    styledText(dl, ink.font, px, at, r.color, ink.flags, b, en, w);
+                                } else { // letter by letter, each followed by the spacing
+                                    float lx = at.x;
+                                    for (const char* c = b; c < en;) {
+                                        const char* next = std::min(en, c + utf8Length(static_cast<unsigned char>(*c)));
+                                        const float cw = measure(ink.font, px, c, next) + r.spacing * scale;
+                                        styledText(dl, ink.font, px, ImVec2(lx, at.y), r.color, ink.flags, c, next, cw);
+                                        lx += cw;
+                                        c = next;
+                                    }
+                                }
+                            }
                             x += w;
                         }
                         q = Pos{q.run + 1, 0};

@@ -553,11 +553,19 @@ TEST(viewer_reads_documents_off_the_ui_thread)
         CHECK(pumpUntil([&]() { return viewer.find(2)->state != State::Loading; }));
         const viewmodel::ViewerViewModel::Entry* pdf = viewer.find(2);
         CHECK(pdf->state == State::Ready && pdf->doc.pages.pages.size() == 2 && !pdf->doc.pages.pages[0].loaded);
-        viewer.showPages(2, 0, 0);
-        CHECK(pumpUntil([&]() { return viewer.loadingCount() == 0; }));
+        // (As the view does every frame: the content first, then its pictures once it is there.)
+        auto shown = [&]() {
+            viewer.showPages(2, 0, 0, 0);
+            return viewer.loadingCount() == 0;
+        };
+        CHECK(pumpUntil(shown));
         CHECK(pdf->doc.pages.pages[0].loaded && pdf->doc.pages.pages[1].loaded); // the one shown and its neighbour
         CHECK(runWith(pdf->doc.pages.pages[0], "Page one") != nullptr);
+        CHECK(!viewer.pictureWaiting(2, "pdf-image-7"));
         CHECK(!viewer.takeMedia(2, "pdf-image-7").empty()); // the page's picture, encoded (QOI)
+        CHECK(!viewer.pictureWaiting(2, "pdf-image-7")); // taken: read, not waited for again
+        viewer.showPages(2, 0, 0, 0);
+        CHECK(viewer.loadingCount() == 0); // not asked for again while its page stays
 
         // A file that is not there: Failed, with the reason.
         viewer.open(3, "/docs/missing.pdf");
@@ -585,6 +593,125 @@ TEST(viewer_reads_documents_off_the_ui_thread)
         viewer.open(5, "/docs/sample.xlsx");
     }
     CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+}
+
+// The page in view is read first, whatever was asked for before it; a cancel lets go of a waiting
+// request (and the document's source it holds) at once; and reading pages and pictures, jumping
+// about the document and closing it in the middle leaves the `viewer` scope byte for byte where it
+// was (docs/MEMORY.md).
+TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
+{
+    using namespace viewertest;
+    using State = viewmodel::ViewerViewModel::State;
+    MemoryFiles files;
+    files.files["/docs/many.pdf"] = manyPagesPdf(24);
+    services::DocumentReaderService reader(&files);
+    {
+        mv::ViewerDocument doc = mv::readViewerDocument("many.pdf", files.files["/docs/many.pdf"]);
+        CHECK(doc.shape == mv::Shape::Pages && doc.pages.pages.size() == 24);
+        const std::shared_ptr<mv::PageSource> source = doc.pages.source;
+        // The worker held up (reading a file whose service is locked), the pages asked for in
+        // order 0..19, the reader on page 15: page 15 comes first, then its neighbours.
+        std::vector<std::size_t> order;
+        {
+            std::unique_lock<std::mutex> hold(files.mutex);
+            reader.read("/docs/many.pdf", [](mv::ViewerDocument) {});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20)); // the worker takes it and waits
+            for (std::size_t i = 0; i < 20; ++i)
+                reader.readPage(source, i, [&order, i](mv::Page) { order.push_back(i); });
+            reader.focus(source.get(), 15);
+        }
+        CHECK(pumpUntil([&]() { return order.size() == 20; }));
+        CHECK(order.size() == 20 && order[0] == 15 && (order[1] == 14 || order[1] == 16) && (order[2] == 14 || order[2] == 16));
+        // Cancelled while waiting: forgotten at once, the source it held let go with it.
+        {
+            std::unique_lock<std::mutex> hold(files.mutex);
+            reader.read("/docs/many.pdf", [](mv::ViewerDocument) {});
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::vector<interfaces::IDocumentReaderService::Ticket> tickets;
+            int delivered = 0;
+            // (Pages: the content worker is the one held up; pictures have workers of their own.)
+            for (std::size_t i = 0; i < 20; ++i)
+                tickets.push_back(reader.readPage(source, i, [&delivered](mv::Page) { ++delivered; }));
+            CHECK(reader.waitingRequests() == 20 && source.use_count() > 2);
+            for (const auto t : tickets)
+                reader.cancel(t);
+            CHECK(reader.waitingRequests() == 0);
+            CHECK(source.use_count() == 2); // `source` and the document's own
+            hold.unlock();
+            CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+            CHECK(delivered == 0);
+        }
+    }
+    CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+
+    // A page scrolled far away (dropped) and back: its picture comes from the cache, not read again.
+    {
+        viewmodel::ViewerViewModel viewer(&reader, nullptr);
+        viewer.open(1, "/docs/many.pdf");
+        CHECK(pumpUntil([&]() { return viewer.find(1)->state != State::Loading; }));
+        auto showUntilDone = [&](std::size_t page) {
+            return pumpUntil([&]() {
+                viewer.showPages(1, page, page, page);
+                return viewer.loadingCount() == 0;
+            });
+        };
+        CHECK(showUntilDone(0));
+        const std::string key = viewer.find(1)->doc.pages.pages[0].images.at(0).media;
+        CHECK(!viewer.takeMedia(1, key).empty()); // the view took it
+        CHECK(showUntilDone(20) && !viewer.find(1)->doc.pages.pages[0].loaded); // page 1 dropped
+        viewer.showPages(1, 0, 0, 0);
+        CHECK(pumpUntil([&]() { // its content read again...
+            viewer.showPages(1, 0, 0, 0);
+            return viewer.find(1)->doc.pages.pages[0].loaded;
+        }));
+        viewer.showPages(1, 0, 0, 0);
+        CHECK(viewer.pictureBytesHere(1, key) && !viewer.pictureWaiting(1, key)); // ...its picture at once
+        CHECK(viewer.find(1)->pictureCacheBytes > 0 && viewer.find(1)->pictureCacheBytes <= viewmodel::ViewerViewModel::kPictureCacheBytes);
+        // Taken, then lost (another page that shows it let go): forgotten, and given again.
+        CHECK(!viewer.takeMedia(1, key).empty() && !viewer.pictureBytesHere(1, key));
+        viewer.pictureLost(1, key);
+        CHECK(viewer.pictureWaiting(1, key));
+        viewer.showPages(1, 0, 0, 0);
+        CHECK(viewer.pictureBytesHere(1, key) && !viewer.pictureWaiting(1, key));
+        viewer.release(1);
+    }
+    CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+
+    // Memory: eight cycles of open, read pages and pictures here and there, close (sometimes with
+    // reads still running); the `viewer` scope after cycle 2 and after cycle 8 is the same, to the
+    // byte, and so is it after each close.
+    std::uint64_t afterSecond = 0;
+    const std::uint64_t before = os::mem::liveBytes("viewer");
+    for (int cycle = 1; cycle <= 8; ++cycle) {
+        {
+            viewmodel::ViewerViewModel viewer(&reader, nullptr);
+            viewer.open(1, "/docs/many.pdf");
+            CHECK(pumpUntil([&]() { return viewer.find(1)->state != State::Loading; }));
+            for (const std::size_t page : {std::size_t(0), std::size_t(12), std::size_t(3), std::size_t(23), std::size_t(8)}) {
+                pumpUntil([&]() {
+                    viewer.showPages(1, page, page, page);
+                    return viewer.loadingCount() == 0;
+                });
+                const mv::Page& p = viewer.find(1)->doc.pages.pages[page];
+                CHECK(p.loaded && p.images.size() == 1 && !viewer.pictureWaiting(1, p.images[0].media));
+                CHECK(!viewer.takeMedia(1, p.images[0].media).empty() || cycle % 2 == 0); // taken by the view, or left to go with the page
+            }
+            if (cycle % 3 == 0) // closed with reads running
+                viewer.showPages(1, 17, 17, 17);
+            viewer.release(1);
+            CHECK(viewer.entryCount() == 0);
+        }
+        CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+        CHECK(reader.waitingRequests() == 0);
+        const std::uint64_t now = os::mem::liveBytes("viewer");
+        if (cycle == 2)
+            afterSecond = now;
+        if (now != before)
+            std::printf("  viewer scope after cycle %d: %llu bytes, %llu before\n", cycle, (unsigned long long)now, (unsigned long long)before);
+        CHECK(now == before);
+    }
+    CHECK(os::mem::liveBytes("viewer") == afterSecond);
 }
 
 // ---- Charts, text boxes, comments, shapes and SmartArt ---------------------------------------------
@@ -754,6 +881,16 @@ TEST(viewer_reads_the_challenge_files)
             CHECK(footer);
             CHECK(mv::plainText(doc).find("stop, line\nbreak") != std::string::npos);
         }
+        // The floating picture: one inch, at the right margin, level with its paragraph, the text
+        // beside it 0.125 inch away.
+        CHECK(doc.flow.floats.size() == 1);
+        if (doc.flow.floats.size() == 1) {
+            const mv::FlowDocument::Float& f = doc.flow.floats[0];
+            CHECK(std::fabs(f.width - 72.0f) < 0.01f && std::fabs(f.height - 72.0f) < 0.01f);
+            CHECK(f.fromH == 1 && f.alignH == 2 && f.fromV == 2 && f.alignV == -1 && f.wrap == 1 && !f.behind);
+            CHECK(std::fabs(f.dist[0] - 9.0f) < 0.01f && f.dist[1] == 0.0f);
+            CHECK(f.block < doc.flow.blocks.size() && md::plainText(doc.flow.blocks[f.block].spans).find("floating picture") != std::string::npos);
+        }
     }
 
     // Excel: number format colours and fractions, rich text, sizes, borders, wrapping, rotation,
@@ -766,7 +903,9 @@ TEST(viewer_reads_the_challenge_files)
         const mv::Workbook& book = doc.book;
         const mv::Sheet& s = book.sheets[0];
         const mv::Cell* negative = s.cell(4, 1);
-        CHECK(negative && negative->text == "(1,234.50)" && negative->color == mv::rgba(255, 0, 0));
+        // [Red] from the format; the conditional format (below 0: dark red on pink) takes the colour over.
+        CHECK(negative && negative->text == "(1,234.50)" && negative->color == mv::rgba(0x9C, 0, 6) && negative->fill == mv::rgba(0xFF, 0xC7, 0xCE));
+        CHECK(s.cell(6, 1) && s.cell(6, 1)->fill == 0); // 12.3%: not below 0
         CHECK(s.cell(9, 1) && s.cell(9, 1)->text == "3  1/4 "); // built-in 13, "# ?\?/?\?": padded
         const mv::Cell* rich = s.cell(11, 0);
         CHECK(rich && rich->text == "Rich text" && rich->rich > 0 && rich->rich < book.richTexts.size());
@@ -788,6 +927,74 @@ TEST(viewer_reads_the_challenge_files)
               book.borders[total->border].style[3] == mv::Border::Double);
         CHECK(s.cell(11, 2) && (s.cell(11, 2)->flags & mv::Cell::Wrap) && s.cell(19, 1) && (s.cell(19, 1)->flags & mv::Cell::Wrap));
         CHECK(s.cell(19, 0) && s.cell(19, 0)->rotation == 90);
+        // The Looks sheet: fonts by name, pattern and gradient fills, diagonals, indent, shrink to fit.
+        CHECK(book.defaultFont == "Calibri" && book.sheets.size() == 5);
+        if (book.sheets.size() == 5) {
+            // The Data sheet's tables: Excel's default style (the accent's header, banded rows, light
+            // lines) and the workbook's own (its dxfs).
+            const mv::Sheet& data = book.sheets[1];
+            const mv::Cell* head = data.cell(0, 0);
+            CHECK(head && head->fill == mv::rgba(0x2E, 0x75, 0xB6) && head->color == mv::rgba(255, 255, 255) && (head->flags & mv::Cell::Bold));
+            const mv::Cell* band = data.cell(1, 1);
+            CHECK(band && band->fill != 0 && data.cell(2, 1) && data.cell(2, 1)->fill == 0);
+            CHECK(band && band->border > 0 && band->border < book.borders.size() && book.borders[band->border].style[3] == mv::Border::Thin);
+            const mv::Cell* purple = data.cell(0, 4);
+            CHECK(purple && purple->fill == mv::rgba(0x70, 0x30, 0xA0) && (purple->flags & mv::Cell::Bold));
+            CHECK(data.cell(1, 4) && data.cell(1, 4)->fill == mv::rgba(0xE4, 0xDF, 0xEC) && data.cell(2, 4) && data.cell(2, 4)->fill == 0);
+            CHECK(data.cell(3, 5) && data.cell(3, 5)->fill == mv::rgba(0xE4, 0xDF, 0xEC)); // the third row: banded again
+            // The Rules sheet's conditional formats, on the saved values.
+            const mv::Sheet& rules = book.sheets[4];
+            CHECK(rules.cell(0, 0) && rules.cell(0, 0)->fill == mv::rgba(0xF8, 0x69, 0x6B));  // colour scale: the lowest red
+            CHECK(rules.cell(9, 0) && rules.cell(9, 0)->fill == mv::rgba(0x63, 0xBE, 0x7B));  // the highest green
+            CHECK(rules.cell(4, 0) && rules.cell(4, 0)->fill != 0 && rules.cell(4, 0)->fill != rules.cell(0, 0)->fill);
+            const mv::CellMark* low = rules.mark(0, 1);
+            const mv::CellMark* high = rules.mark(9, 1);
+            CHECK(low && high && std::fabs(low->bar - 0.1f) < 0.001f && std::fabs(high->bar - 0.9f) < 0.001f && high->barColor == mv::rgba(0x63, 0x8E, 0xC6));
+            const mv::CellMark* rising = rules.mark(0, 2);   // 10 of 1..10: the top third
+            const mv::CellMark* falling = rules.mark(9, 2); // 1
+            CHECK(rising && rising->icon == mv::CellMark::ArrowUp && falling && falling->icon == mv::CellMark::ArrowDown);
+            CHECK(rules.cell(5, 3) && rules.cell(5, 3)->fill == mv::rgba(0xFF, 0xC7, 0xCE) && rules.cell(4, 3) && rules.cell(4, 3)->fill == 0); // > 5
+            int top = 0;
+            for (std::uint32_t r = 0; r < 10; ++r)
+                if (const mv::Cell* c = rules.cell(r, 4); c && (c->flags & mv::Cell::Bold) && c->fill == mv::rgba(0xC6, 0xEF, 0xCE))
+                    ++top;
+            CHECK(top == 3);
+            CHECK(rules.cell(1, 5) && (rules.cell(1, 5)->flags & mv::Cell::Italic) && rules.cell(0, 5) && !(rules.cell(0, 5)->flags & mv::Cell::Italic)); // banana, apple
+            CHECK(rules.mark(9, 6) && rules.mark(9, 6)->icon == mv::CellMark::Star && rules.mark(9, 6)->level == 2);
+            CHECK(rules.mark(0, 7) && rules.mark(0, 7)->icon == mv::CellMark::Quarters && rules.mark(0, 7)->level == 0);
+            bool reported = false; // the expression rule
+            for (const std::string& n : doc.notShown)
+                reported = reported || n.find("conditional format") != std::string::npos;
+            CHECK(reported);
+            const mv::Sheet& looks = book.sheets[3];
+            auto named = [&](std::uint32_t r, std::uint32_t c) {
+                const mv::Cell* cell = looks.cell(r, c);
+                return cell && cell->font > 0 && cell->font <= book.fontNames.size() ? book.fontNames[cell->font - 1u] : std::string();
+            };
+            CHECK(named(0, 0) == "Cambria" && named(0, 1) == "Arial" && looks.cell(0, 1) && (looks.cell(0, 1)->flags & mv::Cell::Italic));
+            auto style = [&](std::uint32_t r, std::uint32_t c) -> const mv::FillStyle* {
+                const mv::Cell* cell = looks.cell(r, c);
+                return cell && cell->fillStyle > 0 && cell->fillStyle < book.fills.size() ? &book.fills[cell->fillStyle] : nullptr;
+            };
+            const mv::FillStyle* grid = style(1, 0);
+            CHECK(grid && grid->kind == mv::FillStyle::Hatch && grid->lines == mv::FillStyle::Grid && grid->dark &&
+                  grid->color == mv::rgba(255, 0, 0) && looks.cell(1, 0)->fill == mv::rgba(255, 255, 255));
+            const mv::FillStyle* down = style(1, 1);
+            CHECK(down && down->lines == mv::FillStyle::Down && !down->dark);
+            CHECK(looks.cell(1, 2) && looks.cell(1, 2)->fillStyle == 0 && looks.cell(1, 2)->fill == mv::rgba(128, 128, 128)); // medium grey: half
+            const mv::FillStyle* linear = style(2, 0);
+            CHECK(linear && linear->kind == mv::FillStyle::Linear && linear->degree == 90.0f && linear->stopCount == 2 &&
+                  linear->stop[0] == mv::rgba(255, 255, 255) && linear->position[1] == 1.0f);
+            CHECK(style(2, 1) && style(2, 1)->kind == mv::FillStyle::Path);
+            const mv::Cell* diagonal = looks.cell(3, 0);
+            CHECK(diagonal && diagonal->border > 0 && diagonal->border < book.borders.size());
+            if (diagonal && diagonal->border > 0 && diagonal->border < book.borders.size()) {
+                const mv::Border& b = book.borders[diagonal->border];
+                CHECK(b.style[4] == mv::Border::Thin && b.diagonalUp && b.diagonalDown && b.color[4] == mv::rgba(0xC0, 0, 0));
+            }
+            CHECK(looks.cell(3, 1) && looks.cell(3, 1)->indent == 2);
+            CHECK(looks.cell(4, 0) && (looks.cell(4, 0)->flags & mv::Cell::Shrink));
+        }
     }
 
     // PDF: a page's scripts are found when it is read.
@@ -833,6 +1040,7 @@ TEST(viewer_draws_slides_as_office_does)
     // The theme's third background fill style: a radial gradient in the referenced colour (phClr).
     const std::string theme = R"(<a:theme xmlns:a="a"><a:themeElements><a:clrScheme name="t"><a:dk1><a:srgbClr val="000000"/></a:dk1>
 <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1></a:clrScheme>
+<a:fontScheme name="s"><a:majorFont><a:latin typeface="Georgia"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme>
 <a:fmtScheme name="f"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>
 <a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
 <a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="80000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="30000"/></a:schemeClr></a:gs></a:gsLst>
@@ -847,25 +1055,44 @@ TEST(viewer_draws_slides_as_office_does)
 <p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>)";
     const std::string layout = R"(<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgRef idx="1003"><a:schemeClr val="bg2"/></p:bgRef></p:bg><p:spTree>
 <p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="600000"/></a:xfrm></p:spPr>
-<p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr cap="all"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
+<p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr cap="all"><a:latin typeface="+mj-lt"/></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="700000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm></p:spPr>
 <p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="tx1"><a:tint val="75000"/></a:schemeClr></a:solidFill></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sldLayout>)";
     const std::string slide = R"(<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
 <p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="3"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Section title</a:t></a:r></a:p></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr><p:ph idx="4"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Grey subtitle</a:t></a:r></a:p>
-<a:p><a:r><a:rPr i="1"/><a:t>Slanted</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="rId9"/></a:rPr><a:t>link</a:t></a:r></a:p></p:txBody></p:sp>
+<a:p><a:r><a:rPr i="1"/><a:t>Slanted</a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="rId9"/></a:rPr><a:t>link</a:t></a:r>
+<a:r><a:rPr><a:latin typeface="Arial"/></a:rPr><a:t>In Arial</a:t></a:r><a:r><a:rPr baseline="30000"/><a:t>up</a:t></a:r>
+<a:r><a:rPr baseline="-25000" spc="300"/><a:t>down</a:t></a:r></a:p></p:txBody></p:sp>
 <p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="5000000" y="0"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr>
 <p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>
 <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody><a:bodyPr/><a:p><a:r><a:t>White text</a:t></a:r></a:p></p:txBody></p:sp>
 <p:cxnSp><p:nvCxnSpPr/><p:spPr><a:xfrm><a:off x="0" y="5000000"/><a:ext cx="2540000" cy="1270000"/></a:xfrm><a:prstGeom prst="bentConnector3"/>
 <a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr></p:cxnSp>
+<p:graphicFrame><p:nvGraphicFramePr/><p:xfrm><a:off x="0" y="3000000"/><a:ext cx="2540000" cy="762000"/></p:xfrm><a:graphic><a:graphicData><a:tbl>
+<a:tblPr firstRow="1"><a:tableStyleId>{LINES}</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w="1270000"/><a:gridCol w="1270000"/></a:tblGrid>
+<a:tr h="381000"><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>a</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>b</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr>
+<a:tr h="381000"><a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>c</a:t></a:r></a:p></a:txBody>
+<a:tcPr><a:lnB w="38100"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnB></a:tcPr></a:tc>
+<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>d</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+<p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6000000" y="3000000"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"/>
+<a:pattFill prst="pct50"><a:fgClr><a:srgbClr val="000000"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></p:spPr></p:sp>
+<p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6000000" y="5000000"/><a:ext cx="1270000" cy="635000"/></a:xfrm><a:prstGeom prst="rect"/>
+<a:blipFill><a:blip r:embed="rId5"/><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:ln><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:sp>
 </p:spTree></p:cSld></p:sld>)";
+    // A table style with a 2-point green line under its first row and none elsewhere.
+    const std::string tableStyles = R"(<a:tblStyleLst xmlns:a="a"><a:tblStyle styleId="{LINES}" styleName="Lines">
+<a:firstRow><a:tcStyle><a:tcBdr><a:bottom><a:ln w="25400"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln></a:bottom></a:tcBdr></a:tcStyle></a:firstRow>
+</a:tblStyle></a:tblStyleLst>)";
     const std::string bytes = zip({{"_rels/.rels", packageRels("ppt/presentation.xml")},
-                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}})},
+                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}, {"rId3", "tableStyles", "tableStyles.xml"}})},
+                                   {"ppt/tableStyles.xml", tableStyles},
                                    {"ppt/presentation.xml", presentation},
                                    {"ppt/slides/_rels/slide1.xml.rels",
-                                    rels({{"rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"}, {"rId9", "hyperlink", "https://example.com/"}})},
+                                    rels({{"rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"}, {"rId9", "hyperlink", "https://example.com/"},
+                                          {"rId5", "image", "../media/fill.png"}})},
+                                   {"ppt/media/fill.png", "not decoded here"},
                                    {"ppt/slides/slide1.xml", slide},
                                    {"ppt/slideLayouts/_rels/slideLayout1.xml.rels", rels({{"rId1", "slideMaster", "../slideMasters/slideMaster1.xml"}})},
                                    {"ppt/slideLayouts/slideLayout1.xml", layout},
@@ -903,6 +1130,14 @@ TEST(viewer_draws_slides_as_office_does)
     CHECK(grey && std::abs(int(grey->color & 0xFF) - 0x89) <= 2 && std::abs(int((grey->color >> 8) & 0xFF) - 0x89) <= 2);
     const mv::TextRun* slanted = find("Slanted");
     CHECK(slanted && (slanted->flags & mv::Italic));
+    // Typefaces: the layout's +mj-lt (the theme's major font), the theme's minor font when none is
+    // named, a run's own.
+    CHECK(find("SECTION TITLE") && find("SECTION TITLE")->font == "Georgia");
+    CHECK(grey && grey->font == "Calibri");
+    CHECK(find("In Arial") && find("In Arial")->font == "Arial");
+    // Superscript, subscript and letter spacing (hundredths of a point).
+    CHECK(find("up") && std::fabs(find("up")->baseline - 0.3f) < 0.001f && find("up")->spacing == 0.0f);
+    CHECK(find("down") && std::fabs(find("down")->baseline + 0.25f) < 0.001f && std::fabs(find("down")->spacing - 3.0f) < 0.001f);
     const mv::TextRun* link = find("link");
     CHECK(link && link->color == mv::rgba(0x05, 0x63, 0xC1) && (link->flags & mv::Underline)); // the theme's hlink
     const mv::TextRun* white = find("White text");
@@ -912,6 +1147,25 @@ TEST(viewer_draws_slides_as_office_does)
         if (path.stroke && path.subpaths.size() == 1 && path.subpaths[0].size() == 4)
             elbow = std::fabs(path.subpaths[0][1].x - path.subpaths[0][2].x) < 0.01f; // across, down, across
     CHECK(elbow);
+    // Table lines: the style's under its first row (both cells), the cell's own under "c"; no others.
+    int green = 0, red = 0, other = 0;
+    for (const mv::PathItem& path : p.paths) {
+        if (!path.stroke || path.fill || path.subpaths.size() != 1 || path.subpaths[0].size() != 2 || path.subpaths[0][0].y < 230.0f)
+            continue;
+        if (path.stroke == mv::rgba(0, 0xB0, 0x50) && std::fabs(path.lineWidth - 2.0f) < 0.01f)
+            ++green;
+        else if (path.stroke == mv::rgba(255, 0, 0) && std::fabs(path.lineWidth - 3.0f) < 0.01f)
+            ++red;
+        else
+            ++other;
+    }
+    CHECK(green == 2 && red == 1 && other == 0);
+    // Fills: a 50% pattern as its two colours mixed; a picture fill as the picture in the box, under its outline.
+    bool grey50 = false;
+    for (const mv::PathItem& path : p.paths)
+        grey50 = grey50 || path.fill == mv::rgba(128, 128, 128);
+    CHECK(grey50);
+    CHECK(p.images.size() == 1 && p.images[0].media == "ppt/media/fill.png" && std::fabs(p.images[0].box.w - 100.0f) < 0.01f);
 }
 
 TEST(viewer_numbers_word_headings_through_their_styles)
@@ -945,4 +1199,376 @@ TEST(viewer_numbers_word_headings_through_their_styles)
     CHECK_EQ(md::plainText(b[1].spans), std::string("A.1 Introduction"));
     CHECK(b[2].kind == md::BlockKind::Paragraph && md::plainText(b[2].spans) == " "); // an empty paragraph keeps its line
     CHECK_EQ(md::plainText(b[3].spans), std::string("A.2 Directives"));
+}
+
+TEST(viewer_reads_word_run_fonts)
+{
+    using namespace viewertest;
+    namespace md = model::markdown;
+    // docDefaults name the theme's body font; a run names its own; a document naming none is in
+    // Times New Roman, as Word sets it.
+    const std::string theme = R"(<a:theme xmlns:a="a"><a:themeElements><a:fontScheme name="f"><a:majorFont><a:latin typeface="Cambria"/></a:majorFont>
+<a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>)";
+    const std::string styles = R"(<w:styles xmlns:w="w"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:rFonts w:asciiTheme="majorHAnsi"/></w:rPr></w:style></w:styles>)";
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Body </w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr><w:t>code</w:t></w:r></w:p></w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rId1", "styles", "styles.xml"}, {"rId2", "theme", "theme/theme1.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/theme/theme1.xml", theme}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    const std::vector<std::string>& fonts = doc.flow.fonts;
+    CHECK(b.size() == 2);
+    if (b.size() != 2 || b[1].spans.size() != 2)
+        return;
+    auto family = [&](const md::Span& s) { return s.font > 0 && s.font <= fonts.size() ? fonts[s.font - 1] : std::string(); };
+    CHECK_EQ(family(b[0].spans[0]), std::string("Cambria"));     // the heading style: the theme's major font
+    CHECK_EQ(family(b[1].spans[0]), std::string("Calibri"));     // docDefaults: the theme's minor font
+    CHECK_EQ(family(b[1].spans[1]), std::string("Courier New")); // the run's own
+    CHECK(!(b[1].spans[1].style & md::Code));                    // a fixed-pitch font is not code
+    // No fonts named anywhere: Word's own default.
+    const mv::ViewerDocument plain = mv::readDocx(zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                                       {"word/document.xml", R"(<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>)"}}));
+    CHECK(plain.flow.fonts.size() == 1 && plain.flow.fonts[0] == "Times New Roman");
+}
+
+TEST(markdown_blocks_stay_small)
+{
+    // A parsed Markdown file is many blocks, made and freed as it is edited and shown. Over 256
+    // bytes they leave macOS's nano allocator, and its footprint creeps on every open and close
+    // (the CI memory benchmark failed so): a document's own layout lives beside the block.
+    namespace md = model::markdown;
+    CHECK(sizeof(md::Block) <= 256);
+    const std::vector<md::Block> blocks = md::parse("# Title\n\nText with a\ttab.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+    bool any = false;
+    for (const md::Block& b : blocks)
+        any = any || b.layout.p != nullptr;
+    CHECK(!blocks.empty() && !any); // Markdown's blocks have none
+}
+
+TEST(viewer_reads_word_layout)
+{
+    // Tab stops, Word's spacing, list indents, page breaks and tables with a table style.
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string styles = R"(<w:styles xmlns:w="w">
+<w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:styleId="List"><w:name w:val="List Paragraph"/><w:pPr><w:contextualSpacing/></w:pPr></w:style>
+<w:style w:type="table" w:styleId="Grid"><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="8" w:color="FF0000"/><w:insideH w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>
+<w:tblStylePr w:type="firstRow"><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="4472C4"/></w:tcPr></w:tblStylePr>
+<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr></w:style></w:styles>)";
+    const std::string numbering = R"(<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>)";
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs><w:spacing w:before="240" w:line="360" w:lineRule="exact"/></w:pPr>
+<w:r><w:t>Chapter</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>7</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="List"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item</w:t></w:r></w:p>
+<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>New page</w:t></w:r></w:p>
+<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblLook w:val="04A0"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/></w:tblGrid>
+<w:tr><w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>wide</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/><w:shd w:val="clear" w:fill="FFFF00"/></w:tcPr><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels", rels({{"rId1", "styles", "styles.xml"}, {"rId2", "numbering", "numbering.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/numbering.xml", numbering}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    CHECK(b.size() == 4);
+    if (b.size() != 4)
+        return;
+    // The tab stop, the paragraph's spacing (its own before and exact line, the defaults' after).
+    CHECK(b[0].doc().tabs.size() == 1 && b[0].doc().tabs[0].kind == 2 && b[0].doc().tabs[0].leader == '.' && std::fabs(b[0].doc().tabs[0].pos - 450.0f) < 0.01f);
+    CHECK(md::plainText(b[0].spans) == "Chapter\t7");
+    CHECK(b[0].doc().documentSpacing && std::fabs(b[0].spaceBefore - 12.0f) < 0.01f && std::fabs(b[0].doc().spaceAfter - 8.0f) < 0.01f);
+    CHECK(std::fabs(b[0].doc().lineExact - 18.0f) < 0.01f && !b[0].doc().lineAtLeast);
+    // The list item: its level's indents, contextual spacing from its style.
+    CHECK(b[1].kind == md::BlockKind::Numbered && std::fabs(b[1].indentLeft - 36.0f) < 0.01f && std::fabs(b[1].firstLine + 18.0f) < 0.01f);
+    CHECK(b[1].doc().contextual && std::fabs(b[1].doc().lineMultiple - 259.0f / 240.0f) < 0.001f);
+    // A page break at the start of a paragraph.
+    CHECK(b[2].doc().pageBreakBefore && !b[1].doc().pageBreakBefore);
+    // The table: its grid, the style's header row and bands, spans, merges, the cell's own shading.
+    const md::Block& t = b[3];
+    CHECK(t.kind == md::BlockKind::Table && t.doc().columns.size() == 2 && std::fabs(t.doc().columns[1] - 200.0f) < 0.01f);
+    CHECK(t.doc().looks.size() == 4 && t.doc().looks[0].size() == 2);
+    if (t.doc().looks.size() != 4)
+        return;
+    const md::CellLook& head = t.doc().looks[0][0];
+    CHECK(head.fill == mv::rgba(0x44, 0x72, 0xC4) && head.bold && head.color == mv::rgba(255, 255, 255));
+    CHECK(std::fabs(head.edges[1].width - 1.0f) < 0.01f && head.edges[1].color == mv::rgba(255, 0, 0)); // the table's top line
+    CHECK(t.doc().looks[1][0].span == 2 && t.doc().looks[1][1].covered && t.doc().looks[1][0].align == 1);
+    CHECK(t.doc().looks[1][0].fill == mv::rgba(0xD9, 0xE2, 0xF3));                                   // band 1
+    CHECK(t.doc().looks[2][0].fill == mv::rgba(255, 255, 0) && !t.doc().looks[2][0].merged && t.doc().looks[3][0].merged); // own shading; vMerge
+    CHECK(t.doc().looks[2][0].edges[3].width > 0.0f);                                                // insideH between rows
+}
+
+TEST(viewer_lays_out_smartart_from_its_data)
+{
+    // SmartArt saved without its drawing: laid out from the data model by the layout's kind.
+    using namespace viewertest;
+    const std::string presentation = R"(<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000"/></p:presentation>)";
+    const std::string slide = R"(<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
+<p:graphicFrame><p:nvGraphicFramePr/><p:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="2540000"/></p:xfrm><a:graphic><a:graphicData>
+<dgm:relIds xmlns:dgm="d" r:dm="rId3" r:lo="rId4" r:qs="rId5" r:cs="rId6"/></a:graphicData></a:graphic></p:graphicFrame>
+</p:spTree></p:cSld></p:sld>)";
+    // Three steps; the second has a child (a bullet in its box); a transition and a presentation point are not nodes.
+    const std::string data = R"(<dgm:dataModel xmlns:dgm="d" xmlns:a="a"><dgm:ptLst>
+<dgm:pt modelId="0" type="doc"/>
+<dgm:pt modelId="1"><dgm:t><a:p><a:r><a:t>Plan</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="2"><dgm:t><a:p><a:r><a:t>Build</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="3"><dgm:t><a:p><a:r><a:t>Ship</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="4"><dgm:t><a:p><a:r><a:t>tests first</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="5" type="sibTrans"><dgm:t><a:p><a:r><a:t>NOT A NODE</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="6" type="pres"/></dgm:ptLst><dgm:cxnLst>
+<dgm:cxn modelId="10" srcId="0" destId="3" srcOrd="2"/><dgm:cxn modelId="11" srcId="0" destId="1" srcOrd="0"/>
+<dgm:cxn modelId="12" srcId="0" destId="2" srcOrd="1"/><dgm:cxn modelId="13" srcId="2" destId="4" srcOrd="0"/>
+<dgm:cxn modelId="14" srcId="1" destId="5" srcOrd="0"/><dgm:cxn modelId="15" type="presOf" srcId="1" destId="6"/></dgm:cxnLst></dgm:dataModel>)";
+    const std::string layout = R"(<dgm:layoutDef xmlns:dgm="d" uniqueId="urn:microsoft.com/office/officeart/2005/8/layout/process1"/>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("ppt/presentation.xml")},
+                                   {"ppt/_rels/presentation.xml.rels", rels({{"rId2", "slide", "slides/slide1.xml"}})},
+                                   {"ppt/presentation.xml", presentation},
+                                   {"ppt/slides/_rels/slide1.xml.rels",
+                                    rels({{"rId3", "diagramData", "../diagrams/data1.xml"}, {"rId4", "diagramLayout", "../diagrams/layout1.xml"}})},
+                                   {"ppt/slides/slide1.xml", slide},
+                                   {"ppt/diagrams/data1.xml", data},
+                                   {"ppt/diagrams/layout1.xml", layout}});
+    const mv::ViewerDocument doc = mv::readViewerDocument("smart.pptx", bytes);
+    CHECK(doc.pages.pages.size() == 1);
+    if (doc.pages.pages.size() != 1)
+        return;
+    const mv::Page& p = doc.pages.pages[0];
+    // The steps left to right, in their order, each in a box; the child as a bullet under its parent.
+    std::vector<std::pair<float, std::string>> texts;
+    bool bullet = false, transition = false;
+    for (const mv::TextBox& b : p.boxes)
+        for (const mv::TextParagraph& para : b.paragraphs)
+            for (const mv::TextRun& r : para.runs) {
+                if (para.bullet.empty())
+                    texts.emplace_back(b.box.x, r.text);
+                bullet = bullet || (r.text == "tests first" && !para.bullet.empty());
+                transition = transition || r.text == "NOT A NODE";
+            }
+    std::sort(texts.begin(), texts.end());
+    CHECK(texts.size() == 3 && texts[0].second == "Plan" && texts[1].second == "Build" && texts[2].second == "Ship");
+    CHECK(bullet && !transition);
+    // Three boxes and two arrows between them.
+    int boxes = 0;
+    for (const mv::PathItem& path : p.paths)
+        boxes += path.fill != 0;
+    CHECK(boxes == 5);
+    bool said = false;
+    for (const std::string& n : doc.notShown)
+        said = said || n.find("SmartArt") != std::string::npos;
+    CHECK(said);
+}
+
+TEST(viewer_reads_word_cells_spanning_three_columns)
+{
+    // A cell over three grid columns covers the next two: the cell after it starts in the fourth
+    // (Word's letter templates lay out with such tables; a cell short of a column shifted the rest).
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="720"/><w:gridCol w:w="631"/>
+<w:gridCol w:w="2313"/><w:gridCol w:w="424"/><w:gridCol w:w="3305"/></w:tblGrid>
+<w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>wide</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc>
+<w:tc><w:p><w:r><w:t>last</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")}, {"word/document.xml", document}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    CHECK(!doc.flow.blocks.empty() && doc.flow.blocks[0].kind == md::BlockKind::Table);
+    if (doc.flow.blocks.empty() || doc.flow.blocks[0].rows.empty())
+        return;
+    const md::Block& t = doc.flow.blocks[0];
+    CHECK(t.rows[0].size() == 5 && t.doc().columns.size() == 5);
+    if (t.rows[0].size() != 5 || t.doc().looks.empty())
+        return;
+    CHECK(t.doc().looks[0][0].span == 3 && t.doc().looks[0][1].covered && t.doc().looks[0][2].covered && !t.doc().looks[0][3].covered);
+    CHECK(md::plainText(t.rows[0][4]) == "last");
+}
+
+TEST(viewer_reads_word_letter_templates)
+{
+    // What Word's own templates lean on (Welcome to Word, a letter with a picture): paragraph
+    // rules, a layout table out in the margin with row heights, a styled title and a picture in a
+    // cell, and a header drawing of grouped shapes on every page.
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string styles = R"(<w:styles xmlns:w="w">
+<w:style w:type="paragraph" w:styleId="Title"><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="24" w:space="8" w:color="2C567A"/></w:pBdr>
+<w:spacing w:after="480"/></w:pPr><w:rPr><w:sz w:val="48"/></w:rPr></w:style></w:styles>)";
+    const std::string document = R"(<w:document xmlns:w="w" xmlns:r="r" xmlns:wp="wp" xmlns:a="a" xmlns:pic="pic"><w:body>
+<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="24" w:space="4" w:color="FF0000"/></w:pBdr></w:pPr><w:r><w:t>ruled</w:t></w:r></w:p>
+<w:tbl><w:tblPr><w:tblInd w:w="-720" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/></w:tblGrid>
+<w:tr><w:trPr><w:trHeight w:val="2112"/></w:trPr>
+<w:tc><w:p><w:r><w:drawing><wp:inline><wp:extent cx="635000" cy="635000"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:tc>
+<w:tc><w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>First</w:t></w:r><w:r><w:br/><w:t>Last</w:t></w:r></w:p><w:p><w:r><w:t>after</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr></w:body></w:document>)";
+    const std::string header = R"(<w:hdr xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wpg="wpg" xmlns:wps="wps"><w:p><w:r><w:drawing>
+<wp:anchor behindDoc="0"><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+<wp:extent cx="1270000" cy="635000"/><wp:wrapNone/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/>
+<a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm></wpg:grpSpPr>
+<wps:wsp><wps:spPr><a:xfrm><a:off x="1270000" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="2C567A"/></a:solidFill></wps:spPr></wps:wsp>
+</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:hdr>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels",
+                                    rels({{"rId1", "styles", "styles.xml"}, {"rIdH", "header", "header1.xml"}, {"rId5", "image", "media/p.png"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/header1.xml", header},
+                                   {"word/media/p.png", "not decoded here"}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    const md::Block* ruled = nullptr;
+    const md::Block* table = nullptr;
+    for (std::size_t i : doc.flow.printed) {
+        const md::Block& b = doc.flow.blocks[i];
+        if (b.kind == md::BlockKind::Table)
+            table = &b;
+        else if (md::plainText(b.spans) == "ruled")
+            ruled = &b;
+    }
+    CHECK(ruled && ruled->doc().borders[0].width == 3.0f && ruled->doc().borders[0].color == mv::rgba(255, 0, 0) && ruled->doc().borderSpace[0] == 4.0f);
+    CHECK(table != nullptr);
+    if (!table || table->rows.size() != 1 || table->rows[0].size() != 2)
+        return;
+    CHECK(table->indentLeft == -36.0f && table->doc().rowHeights.size() == 1 && std::fabs(table->doc().rowHeights[0] - 105.6f) < 0.01f);
+    // The picture stays in its cell; the title's size goes with its runs, its line break a '\v'.
+    const md::Spans& left = table->rows[0][0];
+    CHECK(left.size() == 1 && (left[0].style & md::Image) && left[0].width == 50.0f);
+    const md::Spans& right = table->rows[0][1];
+    bool sized = false, lineBreak = false;
+    for (const md::Span& s : right) {
+        sized = sized || (s.text.rfind("First", 0) == 0 && s.size == 24.0f); // the runs joined: "First\vLast"
+        lineBreak = lineBreak || s.text.find('\v') != std::string::npos;
+    }
+    CHECK(sized);
+    CHECK(lineBreak);
+    CHECK(md::plainText(right).find("First\nLast") != std::string::npos);
+    // Each of the cell's paragraphs: the title's spacing after and its rule under it.
+    const std::vector<md::CellParagraph>& paras = table->doc().looks[0][1].paragraphs;
+    CHECK(paras.size() == 2 && paras[0].after == 24.0f && paras[0].bottom.width == 3.0f && paras[0].bottomSpace == 8.0f && paras[1].bottom.width == 0.0f);
+    // The header's group: its shape placed through the group's coordinates (half scale).
+    CHECK(doc.flow.headerFloats.size() == 1);
+    if (doc.flow.headerFloats.size() == 1) {
+        const mv::FlowDocument::Float& f = doc.flow.headerFloats[0];
+        CHECK(f.width == 100.0f && f.height == 50.0f && f.drawing.paths.size() == 1);
+        if (f.drawing.paths.size() == 1 && !f.drawing.paths[0].subpaths.empty()) {
+            float minX = 1e9f, maxX = -1e9f;
+            for (const mv::Point& p : f.drawing.paths[0].subpaths[0])
+                minX = std::min(minX, p.x), maxX = std::max(maxX, p.x);
+            CHECK(std::fabs(minX - 50.0f) < 0.01f && std::fabs(maxX - 100.0f) < 0.01f && f.drawing.paths[0].fill == mv::rgba(0x2C, 0x56, 0x7A));
+        }
+    }
+}
+
+
+TEST(viewer_breaks_word_pages_after_a_section)
+{
+    // A paragraph ending a section (its sectPr) stays on its page: the page breaks after it, before
+    // the next block (a calendar: a month's table, the section's last paragraph, the next month).
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w"><w:body>
+<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>January</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p/><w:p><w:pPr><w:sectPr><w:pgSz w:w="15840" w:h="12240"/></w:sectPr></w:pPr></w:p>
+<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>February</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>after</w:t></w:r></w:p><w:p><w:r><w:t>next</w:t></w:r></w:p>
+</w:body></w:document>)";
+    const mv::ViewerDocument doc = mv::readDocx(zip({{"_rels/.rels", packageRels("word/document.xml")}, {"word/document.xml", document}}));
+    const std::vector<md::Block>& b = doc.flow.blocks;
+    CHECK(b.size() == 6);
+    if (b.size() != 6)
+        return;
+    CHECK(!b[1].doc().pageBreakBefore && !b[2].doc().pageBreakBefore); // the section's last paragraphs
+    CHECK(b[3].kind == md::BlockKind::Table && b[3].doc().pageBreakBefore); // the next section's table
+    CHECK(!b[4].doc().pageBreakBefore && b[5].doc().pageBreakBefore);       // a break inside a paragraph: after it
+}
+
+TEST(viewer_reads_word_letterhead_pages)
+{
+    // A job description from a letterhead template, against Word: lines sized by the text on them
+    // (10-point runs in an 11-point style), an empty paragraph by its mark, a header of a logo
+    // between empty paragraphs (they keep their lines), a border round the page.
+    using namespace viewertest;
+    namespace md = model::markdown;
+    const std::string document = R"(<w:document xmlns:w="w" xmlns:r="r"><w:body>
+<w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>ten</w:t></w:r><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t> points</w:t></w:r></w:p>
+<w:p><w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr></w:p>
+<w:p><w:r><w:t>default</w:t></w:r><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t> mixed</w:t></w:r></w:p>
+<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:headerReference w:type="first" r:id="rIdE"/>
+<w:pgBorders w:offsetFrom="page"><w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="24"/></w:pgBorders></w:sectPr></w:body></w:document>)";
+    const std::string styles = R"(<w:styles xmlns:w="w"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>)";
+    const std::string header = R"(<w:hdr xmlns:w="w"><w:p/><w:p><w:r><w:t>LOGO</w:t></w:r></w:p><w:p/></w:hdr>)";
+    const std::string bytes = zip({{"_rels/.rels", packageRels("word/document.xml")},
+                                   {"word/_rels/document.xml.rels",
+                                    rels({{"rId1", "styles", "styles.xml"}, {"rIdH", "header", "header2.xml"}, {"rIdE", "header", "header3.xml"}})},
+                                   {"word/document.xml", document},
+                                   {"word/styles.xml", styles},
+                                   {"word/header2.xml", header},
+                                   {"word/header3.xml", R"(<w:hdr xmlns:w="w"><w:p/></w:hdr>)"}});
+    const mv::ViewerDocument doc = mv::readDocx(bytes);
+    std::vector<const md::Block*> body;
+    for (std::size_t i : doc.flow.printed)
+        body.push_back(&doc.flow.blocks[i]);
+    CHECK(body.size() == 3);
+    if (body.size() == 3) {
+        CHECK(body[0]->size == 10.0f);                                  // every run 10 points: the paragraph is 10
+        CHECK(body[1]->size == 10.0f);                                  // empty: its mark's size
+        CHECK(body[2]->size == 11.0f && body[2]->spans.size() == 2);    // mixed: the style's, the run its own
+    }
+    // The default header, its empty paragraphs kept around the logo.
+    CHECK(doc.flow.header.size() == 3 && md::plainText(doc.flow.header[1].spans) == "LOGO" && md::plainText(doc.flow.header[0].spans) == " ");
+    // The page border: from the page's edge.
+    const mv::FlowDocument::PageSetup& ps = doc.flow.page;
+    CHECK(ps.bordersFromPage && ps.borders[0].width == 0.5f && ps.borderSpace[0] == 24.0f && ps.borders[1].width == 0.5f &&
+          ps.borders[2].width == 0.0f);
+}
+
+// A filled shape of several outlines: a frame (a square with a square cut out), a ring drawn the
+// same way round both times, and a single outline, as the bands the painter fills.
+TEST(viewer_fills_outlines_with_holes)
+{
+    auto area = [](const mv::PathItem& p) {
+        float a = 0.0f;
+        for (const mv::FillBand& b : p.bands)
+            a += ((b.right0 - b.left0) + (b.right1 - b.left1)) * 0.5f * (b.y1 - b.y0);
+        return a;
+    };
+    const std::vector<mv::Point> outer{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    const std::vector<mv::Point> innerCw{{2, 2}, {8, 2}, {8, 8}, {2, 8}};
+    const std::vector<mv::Point> innerCcw{{2, 2}, {2, 8}, {8, 8}, {8, 2}};
+    mv::Page page;
+    mv::PathItem frame; // non-zero, the hole drawn the other way round: a frame
+    frame.fill = mv::kBlack;
+    frame.subpaths = {outer, innerCcw};
+    frame.closed = {true, true};
+    page.add(frame);
+    mv::PathItem same = frame; // non-zero, both the same way round: no hole
+    same.subpaths = {outer, innerCw};
+    page.add(same);
+    mv::PathItem evenOdd = same; // even-odd: a hole whichever way it goes
+    evenOdd.evenOdd = true;
+    page.add(evenOdd);
+    mv::PathItem one; // one outline: filled as it is, no bands
+    one.fill = mv::kBlack;
+    one.subpaths = {outer};
+    one.closed = {true};
+    page.add(one);
+    mv::PathItem cross; // a self-crossing pair (a bow tie over a square): bands split where edges cross
+    cross.fill = mv::kBlack;
+    cross.evenOdd = true;
+    cross.subpaths = {{{0, 0}, {10, 10}, {10, 0}, {0, 10}}, {{20, 0}, {30, 0}, {30, 10}, {20, 10}}};
+    cross.closed = {true, true};
+    page.add(cross);
+    CHECK(std::fabs(area(page.paths[0]) - 64.0f) < 0.01f);
+    CHECK(std::fabs(area(page.paths[1]) - 100.0f) < 0.01f);
+    CHECK(std::fabs(area(page.paths[2]) - 64.0f) < 0.01f);
+    CHECK(page.paths[3].bands.empty());
+    CHECK(std::fabs(area(page.paths[4]) - 150.0f) < 0.5f); // the bow tie's two triangles (50) and the square (100)
 }

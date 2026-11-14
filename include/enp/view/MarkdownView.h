@@ -26,9 +26,30 @@ public:
     // when the text changes; blocks outside the visible area are skipped once measured.
     void render(const std::string& text, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale);
     // The same for blocks read elsewhere (a Word document's: model::viewer). They are not copied:
-    // `blocks` must stay alive and unchanged while `generation` is the same.
+    // `blocks` must stay alive and unchanged while `generation` is the same. `fontNames`: the
+    // document's font families its spans' `font` numbers name (drawn in those fonts when the
+    // fonts have DocumentFonts), and the same while `generation` is.
     void renderBlocks(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
-                      const Palette& palette, float fontSize, float uiScale);
+                      const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
+
+    // For a caller that places the blocks itself (a document's pages): measures `blocks` at
+    // `width` (once per width, size and generation, as renderBlocks does), after which each
+    // block's height and the gap before it (after the block before it in `blocks`) are known; then
+    // draws one block where the caller puts it, on page `pageNumber` of `pageCount` (its page-number
+    // fields; 0: as saved).
+    void measureBlocks(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
+                       const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
+    float blockHeight(std::size_t index) const { return index < heights_.size() ? heights_[index] : 0.0f; }
+    float blockGap(std::size_t index) const;
+    // The height of one of the measured blocks at another width (beside a floating picture).
+    // A document table among them: each row's bottom, from the table's top, at `width` (where the
+    // page view may break it: Word breaks a table between rows). None for another block.
+    void tableRows(std::size_t index, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
+                   const std::vector<std::string>* fontNames, std::vector<float>& bottoms);
+    float measureBlockAt(std::size_t index, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
+                         const std::vector<std::string>* fontNames = nullptr);
+    void drawBlockAt(std::size_t index, ImVec2 at, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale,
+                     const std::vector<std::string>* fontNames = nullptr, int pageNumber = 0, int pageCount = 0);
 
     // A link was clicked (its target).
     std::function<void(const std::string& url)> onLink;
@@ -62,12 +83,16 @@ private:
     std::vector<float> heights_;
     float width_ = -1.0f;
     float fontSize_ = 0.0f;
+    std::vector<float>* rowSink_ = nullptr; // tableRows(): where the table being measured puts its rows' bottoms
+    bool measuredPages_ = false; // tops_ and heights_ are the page view's (floating pictures left out)
     int hoveredLine_ = -1;
     std::map<std::string, model::math::Node> math_; // parsed formulas by source (cleared with the text)
 
     float drawBlock(const model::markdown::Block& block, ImVec2 at, float width, const Style& style, bool draw);
     void styleFor(Style& st, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale);
     void layoutAndDraw(const Style& st, float width); // shown_, measured when needed
+    void measure(const Style& st, float width);       // tops_ and heights_ of shown(), when the layout changed
+    void use(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation); // shows the caller's blocks
 };
 
 } // namespace enp::view
