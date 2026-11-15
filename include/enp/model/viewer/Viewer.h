@@ -12,9 +12,11 @@
 #include "enp/model/viewer/Page.h"
 #include "enp/model/viewer/Workbook.h"
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace enp::model::viewer {
@@ -110,5 +112,41 @@ ViewerDocument readPdf(std::string bytes, std::string_view password = {});
 
 // The document's text in reading order (copying, agents, tests).
 std::string plainText(const ViewerDocument& doc);
+
+// ---- Search in fixed-layout pages (PDF, slides) ------------------------------------------------
+
+// Where a code point of pageText() comes from: letter `letter` of glyph run `run` (Page::glyphs),
+// or text box `box` (Page::boxes: the painter lays its text out, so a match there is shown on the
+// whole box). Neither (all -1): a space or line break put between runs.
+struct TextAt {
+    std::int32_t run = -1;
+    std::int32_t letter = -1;
+    std::int32_t box = -1;
+};
+
+// The page's text in reading order (Page::plainText): glyph runs by line, then left to right, a
+// space where runs stand apart and a line break between lines; then the text boxes' paragraphs.
+// `where`, when given, gets one entry per code point of the result.
+std::string pageText(const Page& page, std::vector<TextAt>* where = nullptr);
+
+// The matches of `query` in `text`, as [first, last) code point indexes into `text`, in order and
+// not overlapping. Letters match whatever their case unless `matchCase` (Latin, Greek, Cyrillic);
+// a ligature (U+FB00-FB06) matches its letters; any run of spaces and line breaks matches any
+// other. A query of only spaces matches nothing.
+std::vector<std::pair<std::size_t, std::size_t>> findText(std::string_view text, std::string_view query, bool matchCase);
+
+// A match on a page, where it is drawn: one four-cornered box per glyph run it is in (along the
+// run's direction, from below its baseline to above its letters), or a text box's outline; in
+// page points, clockwise from the top left.
+struct TextHit {
+    struct Quad {
+        Point corners[4];
+    };
+    std::vector<Quad> quads;
+    Rect bounds() const; // its extent, for scrolling it into view
+};
+
+// The matches of `query` on `page`: as many, in the same order, as findText on pageText(page).
+std::vector<TextHit> findOnPage(const Page& page, std::string_view query, bool matchCase);
 
 } // namespace enp::model::viewer

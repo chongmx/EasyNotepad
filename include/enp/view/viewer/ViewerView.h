@@ -38,15 +38,22 @@ public:
     ViewerView(const ViewerView&) = delete;
     ViewerView& operator=(const ViewerView&) = delete;
 
-    // Draws the document at the cursor, filling `size`.
-    void render(model::Document& doc, ImVec2 size);
+    // Draws the document at the cursor, filling `size`. `active`: the view with the keyboard (in
+    // two columns, the other one only shows): it brings a search's current match into view.
+    void render(model::Document& doc, ImVec2 size, bool active = true);
 
     void release(int documentId); // opened as text: the view's caches go at once
+    // It shows no document now (a text file is shown in its place): the pages read for the one it
+    // showed are no longer kept for it.
+    void leave();
     void releaseClosed();         // every entry whose document has closed
     bool holds(int documentId) const { return entries_.count(documentId) != 0; }
     // For the tests: the page under screen position `at` in a paged document as drawn last frame,
     // and the point on it in points (from its top left); -1 when none is shown.
     int pagePointAt(int documentId, ImVec2 at, ImVec2& point) const;
+    // For the tests: the search's matches drawn on page `page` last frame (its highlights), and
+    // which of them is the current one (-1 none).
+    std::size_t searchHits(int documentId, std::size_t page, int* current = nullptr) const;
     // The page being read in a paged document (tests); -1 when it is not shown.
     int currentPage(int documentId) const
     {
@@ -102,6 +109,15 @@ private:
         ImVec2 pagesOrigin;         // pages: the window's top left, and the width pages are laid out in
         float pagesWidth = 0.0f;    // (last frame's: what pagePointAt reads)
         std::uint8_t scripts = 0;   // of the document and the pages it has shown
+        // Pages: a search's matches on the pages shown, where they are drawn (by page), for the
+        // query `hitsQuery` in the document as read for `hitsGeneration`; and the last time the
+        // current match was brought into view (the view-model's Search::reveal).
+        std::map<std::size_t, std::vector<model::viewer::TextHit>> hits;
+        std::string hitsQuery;
+        bool hitsCase = false;
+        std::uint64_t hitsGeneration = 0;
+        std::uint64_t revealed = 0;
+        int revealPage = -1; // gone to that page's top, its content not read yet: the match follows
         // Word: the page view (else reflowed); its pages as laid out at `wordScale` for `wordGeneration`.
         bool reflow = false;
         struct WordPage {
@@ -162,6 +178,12 @@ private:
     void sheet(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void sheetTabs(Entry& e, const model::viewer::Workbook& book, ImVec2 size);
     void pages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
+    // The search's matches on page `index` (computed once while the query and page stay), or null.
+    const std::vector<model::viewer::TextHit>* pageHits(Entry& e, const viewmodel::ViewerViewModel::Entry::Search& s,
+                                                       const model::viewer::Page& page, std::size_t index);
+    // The current match brought into view, by the view with the keyboard (pages()).
+    void revealMatch(Entry& e, const viewmodel::ViewerViewModel::Entry::Search& s, const model::viewer::PageDocument& pd, float viewW,
+                     float viewH, float pad);
     void loading(model::Document& doc, ImVec2 size);
     void unreadable(model::Document& doc, const std::string& format, const std::string& error, ImVec2 size);
     // A PDF protected by a password: a field to type it, read again with it on Enter or Open.
@@ -177,6 +199,7 @@ private:
     PagePainter painter_;
     std::map<int, Entry> entries_; // by document id: documents shown here only
     int shownDoc_ = -1;            // the document the shared windows showed last
+    bool active_ = true;           // render()'s: this view has the keyboard
     char label_[512] = {};         // scratch for labels drawn this frame (no allocation per frame)
     // The password being typed for document `passwordDoc_` (one prompt at a time): wiped once
     // handed to the view-model, and when another document's prompt shows.

@@ -23,6 +23,8 @@ public:
     using PageDone = std::function<void(model::viewer::Page page)>;
     // A picture's bytes, ready for the view (QOI, at most the size asked); empty: it cannot be read.
     using ImageDone = std::function<void(std::string bytes)>;
+    // A page's text, for a search (model::viewer::pageText).
+    using TextDone = std::function<void(std::string text)>;
 
     virtual ~IDocumentReaderService() = default;
 
@@ -35,6 +37,9 @@ public:
     // Reads the picture `key` that page `page` draws, shrunk to at most `maxSide` pixels a side.
     virtual Ticket readImage(std::shared_ptr<model::viewer::PageSource> source, std::size_t page, std::string key, int maxSide,
                              ImageDone done) = 0;
+    // Reads page `index`'s text (a search reads every page): the page is read and let go on the
+    // reader's thread, only its text comes back. Served after every page's content asked for.
+    virtual Ticket readText(std::shared_ptr<model::viewer::PageSource> source, std::size_t index, TextDone done) = 0;
     // The page the reader is looking at in the document read through `source`. Requests are
     // served one at a time (a source is never used by two threads), the nearest first: a whole
     // document, then pages' content, then pictures, each nearest that page; another document's

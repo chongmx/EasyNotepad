@@ -1,5 +1,6 @@
 #include "AutomationController.h"
 
+#include "enp/model/FileKind.h"
 #include "enp/model/Git.h"
 #include "enp/os/Memory.h"
 #include "enp/services/debug/MemoryTrace.h"
@@ -682,7 +683,14 @@ Json handleAutomation(viewmodel::NotepadViewModel& vm, const std::string& method
                 return documentInfo(*doc).set("text", doc->buffer.text());
         if (path.empty())
             return error("no document is open");
-        return Json::object().set("path", path).set("open", false).set("text", viewmodel::dummy::fileContent(path));
+        // Not open: read from disk (the sample workspace's own files: their sample text). A file
+        // that is not text is described, not poured out as text.
+        std::string bytes = vm.readWorkspaceFile(path);
+        const model::FileType type = model::detectFileType(path, bytes);
+        Json result = Json::object().set("path", path).set("open", false);
+        if (type.kind != model::FileKind::Text)
+            return result.set("format", type.format).set("text", "");
+        return result.set("text", std::move(bytes));
     }
     if (method == "read_outline")
         return readOutline(vm);

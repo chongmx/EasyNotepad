@@ -541,12 +541,14 @@ void EditorView::render(ImVec2 size, model::Document* shown)
         renderFindBar();
         size.y = std::max(1.0f, size.y - (ImGui::GetCursorPosY() - before));
     }
+    if (doc->kind != model::FileKind::Document)
+        viewer_.leave(); // another kind of file shown in this column: the viewer's place goes
     if (doc->kind != model::FileKind::Text) {
         if (fileImages_.size() > vm_.documents().size() || markdown_.size() > vm_.documents().size() ||
             library_.entryCount() > vm_.documents().size() || viewer_.entryCount() > vm_.documents().size())
             pruneClosed();
         if (doc->kind == model::FileKind::Document) { // Word, Excel, PowerPoint, PDF: read and shown
-            viewer_.render(*doc, size);
+            viewer_.render(*doc, size, !passive_);
             return;
         }
         if (doc->kind == model::FileKind::Binary) { // a library or program: what it contains
@@ -975,18 +977,37 @@ void EditorView::renderFindBar()
         vm_.findQuery.set(findBuffer_);
     findActive = ImGui::IsItemActive();
 
+    // Word, Excel, PowerPoint, PDF: the viewer searches (read-only: nothing to replace).
+    const model::Document* active = vm_.activeDocument();
+    const bool viewerDoc = active && active->kind == model::FileKind::Document;
     const auto& matches = vm_.findMatches();
     if (!vm_.findQuery.get().empty()) {
         char count[64];
-        if (matches.empty())
-            std::snprintf(count, sizeof(count), "No results");
-        else if (vm_.currentMatch.get() >= 0)
+        bool none = matches.empty();
+        if (viewerDoc) {
+            const viewmodel::ViewerViewModel::SearchStatus status = vm_.viewer().searchStatus(active->id);
+            const char* more = status.searching ? "+" : ""; // pages still being searched
+            none = false;
+            if (!status.supported)
+                std::snprintf(count, sizeof(count), "Not searched");
+            else if (status.total == 0 && status.searching)
+                std::snprintf(count, sizeof(count), "Searching...");
+            else if (status.total == 0)
+                none = true;
+            else if (status.current >= 0)
+                std::snprintf(count, sizeof(count), "%d of %d%s", status.current + 1, status.total, more);
+            else
+                std::snprintf(count, sizeof(count), "%d results%s", status.total, more);
+        } else if (vm_.currentMatch.get() >= 0 && !none) {
             std::snprintf(count, sizeof(count), "%d of %d", vm_.currentMatch.get() + 1, int(matches.size()));
-        else
+        } else {
             std::snprintf(count, sizeof(count), "%d results", int(matches.size()));
+        }
+        if (none)
+            std::snprintf(count, sizeof(count), "No results");
         fit::sameLineIfFits(ImGui::CalcTextSize(count).x);
         ImGui::AlignTextToFramePadding();
-        if (matches.empty())
+        if (none)
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.severityError), "%s", count);
         else
             ImGui::TextDisabled("%s", count);
@@ -1008,16 +1029,18 @@ void EditorView::renderFindBar()
     if (matchCase)
         ImGui::PopStyleColor();
     ui::itemTooltip("Match case");
-    fit::sameLineIfFits(fit::buttonWidth(ICON_FA_RIGHT_LEFT), 2.0f * s_);
-    if (ImGui::Button(ICON_FA_RIGHT_LEFT))
-        vm_.replaceVisible.set(!vm_.replaceVisible.get());
-    ui::itemTooltip("Toggle replace");
+    if (!viewerDoc) {
+        fit::sameLineIfFits(fit::buttonWidth(ICON_FA_RIGHT_LEFT), 2.0f * s_);
+        if (ImGui::Button(ICON_FA_RIGHT_LEFT))
+            vm_.replaceVisible.set(!vm_.replaceVisible.get());
+        ui::itemTooltip("Toggle replace");
+    }
     fit::sameLineIfFits(fit::buttonWidth(ICON_FA_XMARK), 2.0f * s_);
     if (ImGui::Button(ICON_FA_XMARK) || (findActive && ImGui::IsKeyPressed(ImGuiKey_Escape)))
         vm_.findVisible.set(false);
     ui::itemTooltip("Close (Esc)");
 
-    if (vm_.replaceVisible.get()) {
+    if (vm_.replaceVisible.get() && !viewerDoc) {
         ImGui::SetNextItemWidth(inputW);
         if (replaceBuffer_ != vm_.replaceText.get() && !ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
             replaceBuffer_ = vm_.replaceText.get();
@@ -1443,7 +1466,10 @@ void EditorView::drawRows(const model::Document& doc, const Metrics& m, int firs
     inBlock = doc.highlightCache.stateAt(doc.buffer, spec, firstLine); // cached: no re-scan from line 1
 
     const std::vector<const model::ReviewFinding*> findings = vm_.review().findingsForFile(doc.path);
-    const auto& matches = vm_.findMatches();
+    // The matches are the active document's: in two columns, another document beside it has none.
+    static const std::vector<viewmodel::FindMatch> kNoMatches;
+    const model::Document* activeDoc = vm_.activeDocument();
+    const auto& matches = activeDoc && activeDoc->id == doc.id ? vm_.findMatches() : kNoMatches;
     const int currentMatch = vm_.currentMatch.get();
     // Every caret with its selection, in document order (several with multiple carets).
     // Kept in a member (drawn every frame); its room goes back once far fewer carets are left.

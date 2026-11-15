@@ -792,6 +792,148 @@ TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
     CHECK(os::mem::liveBytes("viewer") == afterSecond);
 }
 
+// ---- Search in pages ---------------------------------------------------------------------------------
+
+TEST(viewer_finds_text_on_pdf_pages)
+{
+    using namespace viewertest;
+    using Ranges = std::vector<std::pair<std::size_t, std::size_t>>;
+    // Case folded unless asked (Latin, Greek, Cyrillic), ligatures as their letters, spacing as
+    // one space, matches not overlapping; code point indexes.
+    CHECK(mv::findText("Hello hello HELLO", "hello", false).size() == 3);
+    CHECK((mv::findText("Hello hello HELLO", "hello", true) == Ranges{{6, 11}}));
+    CHECK(mv::findText("\xC3\x84RGER \xC3\xA4rger", "\xC3\xA4rger", false).size() == 2); // ÄRGER ärger
+    CHECK(mv::findText("\xCE\xA3\xCE\x9F\xCE\xA6\xCE\x99\xCE\x91", "\xCF\x83\xCE\xBF\xCF\x86\xCE\xB9\xCE\xB1", false).size() == 1); // ΣΟΦΙΑ
+    CHECK(mv::findText("\xD0\x91\xD0\x90\xD0\x9D\xD0\x9A", "\xD0\xB1\xD0\xB0\xD0\xBD\xD0\xBA", false).size() == 1); // БАНК
+    CHECK((mv::findText("the \xEF\xAC\x81le", "FILE", false) == Ranges{{4, 7}})); // "ﬁ" is one code point
+    CHECK((mv::findText("a \n\t b", "a  b", false) == Ranges{{0, 6}}));
+    CHECK((mv::findText("aaaa", "aa", false) == Ranges{{0, 2}, {2, 4}}));
+    CHECK(mv::findText("a b", " ", false).empty() && mv::findText("a b", "", false).empty());
+    CHECK((mv::findText("\xE6\x88\xB6\xE5\x8F\xA3\xE9\x80\xB2\xE6\x94\xAF", "\xE9\x80\xB2\xE6\x94\xAF", false) == Ranges{{2, 4}})); // 戶口進支
+
+    // On a page: a match in one run is one box over its letters; across two runs on a line (a
+    // space between them in the text), a box in each.
+    const std::string bytes = onePagePdf("BT /F1 12 Tf 20 60 Td (Account) Tj ET\nBT /F1 12 Tf 80 60 Td (Number) Tj ET\n"
+                                         "BT /F1 10 Tf 20 30 Td (account balance) Tj ET\n");
+    mv::ViewerDocument doc = mv::readViewerDocument("a.pdf", bytes);
+    CHECK(doc.shape == mv::Shape::Pages && doc.pages.load(0));
+    if (doc.pages.pages.empty() || !doc.pages.pages[0].loaded)
+        return;
+    const mv::Page& page = doc.pages.pages[0];
+    std::vector<mv::TextAt> where;
+    const std::string text = mv::pageText(page, &where);
+    CHECK_EQ(text, std::string("Account Number\naccount balance"));
+    CHECK(where.size() == 30 && where[7].run < 0 && where[14].run < 0 && where[0].letter == 0 && where[13].letter == 5);
+    CHECK_EQ(page.plainText(), text);
+    const std::vector<mv::TextHit> hits = mv::findOnPage(page, "account", false);
+    CHECK(hits.size() == mv::findText(text, "account", false).size() && hits.size() == 2);
+    if (hits.size() == 2) {
+        // "Account": from x 20, 12 points high above its baseline (100 - 60 = 40 from the top).
+        const mv::Rect b = hits[0].bounds();
+        CHECK(hits[0].quads.size() == 1 && std::fabs(b.x - 20.0f) < 0.01f && b.y < 40.0f - 9.0f && b.y + b.h > 40.0f);
+        CHECK(b.w > 30.0f && b.w < 50.0f);
+        CHECK(hits[1].bounds().y > b.y + 20.0f); // the second line, below
+    }
+    const std::vector<mv::TextHit> across = mv::findOnPage(page, "account NUMBER", false);
+    CHECK(across.size() == 1 && across[0].quads.size() == 2);
+    if (across.size() == 1 && across[0].quads.size() == 2)
+        CHECK(std::fabs(across[0].quads[1].corners[0].x - 80.0f) < 0.01f);
+    // "unt Num": the end of one run and the start of the next.
+    const std::vector<mv::TextHit> part = mv::findOnPage(page, "unt num", false);
+    CHECK(part.size() == 1 && part[0].quads.size() == 2 && part[0].bounds().x > 30.0f);
+    CHECK(mv::findOnPage(page, "nothing here", false).empty());
+}
+
+// The view-model searches every page of a PDF: the pages not read yet through the reader service
+// (in the background, after the pages shown), the matches counted page by page; next and previous
+// go round the document, waiting for pages not searched yet; a new query is counted at once from
+// the texts kept; the search ends with nothing left of it (docs/MEMORY.md).
+TEST(viewer_searches_every_page_of_a_pdf)
+{
+    using namespace viewertest;
+    using State = viewmodel::ViewerViewModel::State;
+    MemoryFiles files;
+    files.files["/docs/many.pdf"] = manyPagesPdf(24, 8); // "Page 1" ... "Page 24"
+    files.files["/docs/other.pdf"] = manyPagesPdf(3, 8);
+    services::DocumentReaderService reader(&files);
+    const std::uint64_t before = os::mem::liveBytes("viewer");
+    for (int cycle = 1; cycle <= 3; ++cycle) {
+        {
+            viewmodel::ViewerViewModel viewer(&reader, nullptr);
+            // Wanted before the document is open: it starts once the document is read. A move
+            // asked for at once waits for the pages on its way.
+            viewer.search(1, "page 1", false);
+            CHECK(viewer.searchStatus(1).active && viewer.searchStatus(1).searching);
+            viewer.open(1, "/docs/many.pdf");
+            CHECK(!viewer.searchNext(1, +1));
+            CHECK(pumpUntil([&]() { return viewer.loadingCount() == 0; }));
+            const viewmodel::ViewerViewModel::Entry* e = viewer.find(1);
+            CHECK(e && e->state == State::Ready);
+            if (!e || e->state != State::Ready)
+                return;
+            viewmodel::ViewerViewModel::SearchStatus status = viewer.searchStatus(1);
+            CHECK(!status.searching && status.total == 11); // pages 1 and 10 to 19
+            CHECK(e->search.page == 0 && e->search.ordinal == 0 && status.current == 0); // the move went on
+            CHECK(!e->doc.pages.pages[5].loaded); // read for its text only, not kept as a page
+            // Next and previous, round the document.
+            CHECK(viewer.searchNext(1, +1) && e->search.page == 9);
+            CHECK(viewer.searchNext(1, -1) && e->search.page == 0);
+            CHECK(viewer.searchNext(1, -1) && e->search.page == 18 && viewer.searchStatus(1).current == 10);
+            CHECK(viewer.searchNext(1, +1) && e->search.page == 0);
+            const std::uint64_t reveal = e->search.reveal;
+            CHECK(viewer.searchNext(1, +1) && e->search.reveal == reveal + 1);
+            // Without a current match a move starts at the page the reader is on.
+            viewer.search(1, "page 2", false);
+            CHECK(viewer.loadingCount() == 0 && viewer.searchStatus(1).total == 6); // 2, 20 to 24: counted from the texts kept
+            CHECK(e->search.page == -1);
+            viewer.searchFrom(1, 12);
+            CHECK(viewer.searchNext(1, +1) && e->search.page == 19);
+            viewer.searchFrom(1, 12);
+            viewer.search(1, "Page 2", true); // (another search: no current match)
+            CHECK(viewer.searchStatus(1).total == 6 && e->search.page == -1);
+            CHECK(viewer.searchNext(1, -1) && e->search.page == 1);
+            viewer.search(1, "PAGE", true);
+            CHECK(viewer.searchStatus(1).total == 0 && !viewer.searchNext(1, +1));
+            viewer.search(1, "Page", true);
+            CHECK(viewer.searchStatus(1).total == 24);
+            // Two views of the document far apart (two columns): each keeps the pages it shows;
+            // a view that goes lets its pages go.
+            const int columnA = 0, columnB = 0;
+            CHECK(pumpUntil([&]() {
+                viewer.showPages(1, 0, 0, 0, true, &columnA);
+                viewer.showPages(1, 20, 20, 20, true, &columnB);
+                return viewer.loadingCount() == 0;
+            }));
+            CHECK(e->doc.pages.pages[0].loaded && e->doc.pages.pages[20].loaded);
+            viewer.hidePages(1, &columnB);
+            viewer.showPages(1, 0, 0, 0, true, &columnA);
+            CHECK(e->doc.pages.pages[0].loaded && !e->doc.pages.pages[20].loaded);
+            viewer.hidePages(1, &columnA);
+
+            // Another document searched: the first one's search ends, its texts go.
+            viewer.open(2, "/docs/other.pdf");
+            viewer.search(2, "page", false);
+            CHECK(!e->search.active && e->search.texts.empty() && e->search.counts.empty());
+            CHECK(pumpUntil([&]() { return viewer.loadingCount() == 0; }));
+            CHECK(viewer.searchStatus(2).total == 3 && !viewer.searchStatus(1).active);
+            // Ended, and a search of a document closed while its pages are read.
+            viewer.search(-1, "", false);
+            CHECK(!viewer.find(2)->search.active && !viewer.searchStatus(2).active);
+            viewer.search(1, "page 1", false);
+            CHECK(viewer.loadingCount() == 1); // reading its texts again
+            viewer.release(1);
+            viewer.release(2);
+            CHECK(viewer.entryCount() == 0);
+        }
+        CHECK(pumpUntil([&]() { return reader.pendingTickets() == 0; }));
+        const std::uint64_t now = os::mem::liveBytes("viewer");
+        if (now != before)
+            std::printf("  viewer scope after search cycle %d: %llu bytes, %llu before\n", cycle, (unsigned long long)now,
+                        (unsigned long long)before);
+        CHECK(now == before);
+    }
+}
+
 // ---- Charts, text boxes, comments, shapes and SmartArt ---------------------------------------------
 
 namespace viewertest {

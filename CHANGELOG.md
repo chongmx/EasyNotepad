@@ -15,6 +15,14 @@ its release notes on GitHub.
   their certificates) still cannot be opened, and say so.
 - A font for Chinese, Japanese and Korean comes with the app (Noto Sans CJK, the 12,455 letters in
   common use, 2.5 MB). Documents use it when the system has no such font the app can read.
+- Search in PDF and PowerPoint documents: Ctrl+F, or the magnifier on the viewer's toolbar (on a
+  phone too), finds text on every page. Matches are highlighted where they are drawn, the current
+  one outlined; Enter, F3 and Shift+F3 go to the next and previous, round the document, and the
+  find bar counts them ("3 of 11", with "+" while pages are still being searched). Pages not
+  shown yet are read for their text in the background, after the pages in view. Case is ignored
+  unless "Aa" is on, ligatures match their letters, and a line break matches a space, so a phrase
+  is found across lines. In two columns, the column with the keyboard goes to each match; the
+  other, when it shows the same document, keeps its place and shows the highlights.
 
 ### Changed
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
@@ -25,6 +33,17 @@ its release notes on GitHub.
   Files brings it back. A document that cannot be shown still offers its text.
 
 ### Fixed
+- A picture opened from outside the open folder (on a phone: from the Download folder while the
+  sample workspace is shown) said "cannot be shown: not an image". It was given the sample
+  workspace's text instead of the file. Files by their full path are now always read from disk.
+- File types are recognised more carefully. A text file that starts with the letters of a
+  format's signature ("BMW models", "MZ-80 notes", "ID3 tags") opens as text, not as a
+  picture or a program; a file is taken for a COFF object (no signature of its own) only
+  after every format that has one. An uncompressed TGA picture was taken for a cursor (its
+  first bytes are the same) and could not be shown; icons and cursors now need a valid icon
+  directory. Every picture format is tested opened from outside the folder: PNG (colour,
+  transparent, palette, grey, 16-bit), JPEG (baseline, progressive, grey), GIF, BMP, TGA, PPM,
+  PGM, QOI, ICO and Radiance HDR show; WebP, TIFF and JPEG 2000 say they are not supported yet.
 - Android: the app closed a moment after showing a document with Chinese, Japanese or Korean
   text on phones whose system font for them it cannot read (Android 15 and later, such as
   Samsung's Galaxy S24: a variable font with CFF2 outlines). Every font is now checked before it
@@ -42,6 +61,11 @@ its release notes on GitHub.
   filled exactly, by the same sweep as shapes with holes.
 - PDF: Chinese, Japanese and Korean text set in a fixed-pitch font (common in bank statements)
   showed as "????". It is now drawn with the system's CJK font, as other CJK text is.
+- Two columns: the find bar's matches in the active document were also highlighted in the other
+  column's document, on the same lines and columns.
+- Two columns showing one PDF at pages far apart: each column let go of the pages the other was
+  reading, so one of them could stay at "Reading the page..." or read its pages over and over. A
+  page is now kept while either column is near it.
 
 ## [1.2.0] - 2026-11-14
 

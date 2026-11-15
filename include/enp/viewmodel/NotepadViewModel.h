@@ -568,6 +568,7 @@ private:
     void setZoom(float value);
 
     void refreshFind();
+    void syncDocumentSearch(); // the viewer searches the active document while the find bar is open
     void applyDetailLevel(model::Document& doc);
 
     struct OutlineCache {

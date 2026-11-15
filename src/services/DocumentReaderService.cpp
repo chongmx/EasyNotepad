@@ -15,17 +15,18 @@
 namespace enp::services {
 
 struct DocumentReaderService::Request {
-    enum class Kind { Document, Page, Image } kind = Kind::Page;
+    enum class Kind { Document, Page, Text, Image } kind = Kind::Page;
     std::string path;                                   // Document
     interfaces::IFileService* files = nullptr;          // Document
     std::string password;                               // Document: a PDF's, typed by the reader
-    std::shared_ptr<model::viewer::PageSource> source;  // Page, Image
-    std::size_t page = 0;                               // Page, Image
+    std::shared_ptr<model::viewer::PageSource> source;  // Page, Text, Image
+    std::size_t page = 0;                               // Page, Text, Image
     std::string key;                                    // Image
     int maxSide = 0;                                    // Image
     interfaces::IDocumentReaderService::DocumentDone documentDone;
     interfaces::IDocumentReaderService::PageDone pageDone;
     interfaces::IDocumentReaderService::ImageDone imageDone;
+    interfaces::IDocumentReaderService::TextDone textDone;
 };
 
 // Every ticket is in `inFlight` from its request until it is over (delivered, dropped or never
@@ -49,7 +50,8 @@ struct DocumentReaderService::Shared {
         return t;
     }
     // The waiting request to run now, of the kind asked for (pictures, or documents and pages'
-    // content): the nearest the page in view (see IDocumentReaderService::focus).
+    // content): the nearest the page in view (see IDocumentReaderService::focus). A search's
+    // page texts come after every page's content.
     std::optional<std::pair<Ticket, Request>> take(bool pictures)
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -61,8 +63,8 @@ struct DocumentReaderService::Shared {
                 continue;
             const bool here = r.source.get() == focusSource;
             const std::size_t distance = !here ? 0 : r.page > focusPage ? r.page - focusPage : focusPage - r.page;
-            const auto rank = std::make_tuple(r.kind == Request::Kind::Document ? 0 : 1, here ? 0 : 1, r.kind == Request::Kind::Image ? 1 : 0,
-                                              distance, it->first);
+            const auto rank = std::make_tuple(r.kind == Request::Kind::Document ? 0 : r.kind == Request::Kind::Text ? 2 : 1, here ? 0 : 1,
+                                              r.kind == Request::Kind::Image ? 1 : 0, distance, it->first);
             if (best == waiting.end() || rank < bestRank) {
                 best = it;
                 bestRank = rank;
@@ -183,6 +185,23 @@ void DocumentReaderService::run(const std::shared_ptr<Shared>& shared, Ticket ti
         });
         return;
     }
+    if (r.kind == Kind::Text) {
+        auto text = std::make_shared<std::string>();
+        {
+            os::mem::Scope scope("viewer");
+            model::viewer::Page page; // read and let go here: only its text goes on
+            if (r.source)
+                r.source->load(r.page, page);
+            *text = model::viewer::pageText(page);
+        }
+        r.source.reset();
+        os::dispatch::postToMain([shared, ticket, text = std::move(text), done = std::move(r.textDone)]() {
+            if (shared->finish(ticket))
+                return;
+            done(std::move(*text));
+        });
+        return;
+    }
     // A picture: read, then (unless no longer wanted by then) shrunk to the size it is shown.
     auto bytes = std::make_shared<std::string>();
     {
@@ -226,6 +245,19 @@ DocumentReaderService::Ticket DocumentReaderService::readPage(std::shared_ptr<mo
     r.source = std::move(source);
     r.page = index;
     r.pageDone = std::move(done);
+    const Ticket ticket = shared_->add(std::move(r));
+    content_.post(nextTask(false));
+    return ticket;
+}
+
+DocumentReaderService::Ticket DocumentReaderService::readText(std::shared_ptr<model::viewer::PageSource> source, std::size_t index,
+                                                              TextDone done)
+{
+    Request r;
+    r.kind = Request::Kind::Text;
+    r.source = std::move(source);
+    r.page = index;
+    r.textDone = std::move(done);
     const Ticket ticket = shared_->add(std::move(r));
     content_.post(nextTask(false));
     return ticket;

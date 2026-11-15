@@ -4,3 +4,4 @@
 *.png binary
 *.pdf binary
 *.otf binary
+tests/data/images/** binary

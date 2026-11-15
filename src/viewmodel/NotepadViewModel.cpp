@@ -100,6 +100,7 @@ NotepadViewModel::NotepadViewModel(interfaces::ITerminalService* terminalService
         [this](const std::string& path, const std::string& text) { applyText(path, text); }));
     subscriptions_.push_back(findQuery.subscribe([this](const std::string&) { refreshFind(); }));
     subscriptions_.push_back(matchCase.subscribe([this](const bool&) { refreshFind(); }));
+    subscriptions_.push_back(findVisible.subscribe([this](const bool&) { syncDocumentSearch(); }));
     subscriptions_.push_back(activeIndex.subscribe([this](const int&) {
         refreshFind();
         if (model::Document* doc = activeDocument(); doc && doc->detailLevel != detailLevel.get())
@@ -904,7 +905,9 @@ std::string NotepadViewModel::readWorkspaceFile(const std::string& path) const
     for (const auto& doc : documents_)
         if (doc->kind == model::FileKind::Text && (doc->path.empty() ? doc->title : doc->path) == path)
             return doc->buffer.text();
-    if (!workspaceRoot_.empty() && files_)
+    // A file on disk: in the workspace, or anywhere by its absolute path (a phone's Download folder
+    // opened while the sample workspace is shown). Sample text only for the sample's own files.
+    if (files_ && (!workspaceRoot_.empty() || FileDialogViewModel::isAbsolute(path)))
         return files_->read(absolutePath(path)).value_or(std::string());
     return dummy::fileContent(path);
 }
@@ -1426,13 +1429,23 @@ void NotepadViewModel::redo()
 
 // ---- Find ---------------------------------------------------------------------------------------
 
+void NotepadViewModel::syncDocumentSearch()
+{
+    // Word, Excel, PowerPoint, PDF: the viewer searches the active one while the find bar is open
+    // (in two columns, the document of the column with the keyboard).
+    const model::Document* doc = activeDocument();
+    const bool searching = doc && doc->kind == model::FileKind::Document && findVisible.get();
+    viewer_.search(searching ? doc->id : -1, findQuery.get(), matchCase.get());
+}
+
 void NotepadViewModel::refreshFind()
 {
     findMatches_.clear();
     currentMatch.set(-1);
+    syncDocumentSearch();
     const model::Document* doc = activeDocument();
     const std::string& query = findQuery.get();
-    if (!doc || query.empty())
+    if (!doc || query.empty() || doc->kind == model::FileKind::Document)
         return;
     auto fold = [this](std::string s) {
         if (!matchCase.get())
@@ -1453,6 +1466,24 @@ void NotepadViewModel::findNext(int direction)
     model::Document* doc = activeDocument();
     if (!doc)
         return;
+    if (doc->kind == model::FileKind::Document) { // the viewer's search
+        if (findQuery.get().empty()) {
+            statusText.set("Nothing to find");
+            return;
+        }
+        findVisible.set(true); // F3 with the bar closed: the search starts, and shows its matches
+        viewer_.searchNext(doc->id, direction);
+        const ViewerViewModel::SearchStatus status = viewer_.searchStatus(doc->id);
+        if (status.current >= 0)
+            statusText.set("Match " + std::to_string(status.current + 1) + " of " + std::to_string(status.total) + (status.searching ? "+" : ""));
+        else if (status.searching)
+            statusText.set("Searching...");
+        else if (!status.supported)
+            statusText.set("Search is for PDF and PowerPoint documents");
+        else
+            statusText.set("Can't find \"" + findQuery.get() + "\"");
+        return;
+    }
     if (findMatches_.empty()) {
         statusText.set(findQuery.get().empty() ? "Nothing to find" : "Can't find \"" + findQuery.get() + "\"");
         return;

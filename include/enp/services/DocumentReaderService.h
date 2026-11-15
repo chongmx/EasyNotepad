@@ -30,6 +30,7 @@ public:
     Ticket readPage(std::shared_ptr<model::viewer::PageSource> source, std::size_t index, PageDone done) override;
     Ticket readImage(std::shared_ptr<model::viewer::PageSource> source, std::size_t page, std::string key, int maxSide,
                      ImageDone done) override;
+    Ticket readText(std::shared_ptr<model::viewer::PageSource> source, std::size_t index, TextDone done) override;
     void focus(const model::viewer::PageSource* source, std::size_t page) override;
     void cancel(Ticket ticket) override;
     // Tickets the service still tracks (requests waiting, running or being handed over): 0 once
