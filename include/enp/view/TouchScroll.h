@@ -15,6 +15,18 @@ bool panning();     // that finger is moving content now
 bool moved();       // the current or last press became a pan (so its release is not a tap)
 bool gliding();     // content still moving after the finger lifted: keep drawing frames
 
+// One finger on a touch screen, from the platform (Android) in place of ImGui's backend, in screen
+// pixels as ImGui's mouse. ImGui sees where the finger is but not its press until the gesture is
+// known: a finger that lifts without having moved is a tap (a press and a release where it lifted);
+// one that drags content scrolls it and presses nothing; one that moves where nothing scrolls gets
+// its press where it landed and drags from there (a slider, a splitter, selecting text). So no row
+// opens and no tab switches under a finger that only meant to scroll. fingerCancelled(): the gesture
+// is over without a click (a second finger began a pinch, the system took the touch).
+void fingerLanded(float x, float y);
+void fingerMoved(float x, float y);
+void fingerLifted(float x, float y);
+void fingerCancelled();
+
 // Two fingers moving apart or together (a phone's pinch), as the platform reports them: the
 // number of fingers down and the first two's positions (screen pixels, as ImGui's mouse). Fewer
 // than two fingers ends the pinch. While it lasts no press, drag or tap acts.

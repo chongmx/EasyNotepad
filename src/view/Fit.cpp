@@ -56,4 +56,13 @@ void constrainNextWindow()
     ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), windowSize(ImVec2(FLT_MAX, FLT_MAX)));
 }
 
+void wheelScrollsSideways(float step)
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    const float max = ImGui::GetScrollMaxX();
+    if (io.MouseWheel == 0.0f || io.KeyShift || max <= 0.0f || !ImGui::IsWindowHovered())
+        return;
+    ImGui::SetScrollX(std::clamp(ImGui::GetScrollX() - io.MouseWheel * step, 0.0f, max));
+}
+
 } // namespace enp::view::fit

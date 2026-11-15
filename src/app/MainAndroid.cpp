@@ -283,9 +283,7 @@ int32_t onInputEvent(android_app*, AInputEvent* event)
         } else if (fingers >= 2 && action != AMOTION_EVENT_ACTION_POINTER_UP) {
             if (!g.pinching) {
                 g.pinching = true;
-                ImGuiIO& io = ImGui::GetIO();
-                io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-                io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+                enp::view::touch::fingerCancelled();
             }
             enp::view::touch::pinch(int(fingers), AMotionEvent_getX(event, 0), AMotionEvent_getY(event, 0), AMotionEvent_getX(event, 1),
                                     AMotionEvent_getY(event, 1));
@@ -294,6 +292,20 @@ int32_t onInputEvent(android_app*, AInputEvent* event)
             if (action == AMOTION_EVENT_ACTION_POINTER_UP && fingers <= 2)
                 enp::view::touch::pinch(1, 0.0f, 0.0f, 0.0f, 0.0f);
             return 1;
+        }
+        // One finger: its press reaches ImGui once the gesture is known (a tap on the lift, no press
+        // for a scroll), so a list dragged by a finger does not open the row it landed on. A mouse
+        // and a pen go to ImGui's backend as they are.
+        const int32_t tool = AMotionEvent_getToolType(event, 0);
+        if (tool == AMOTION_EVENT_TOOL_TYPE_FINGER || tool == AMOTION_EVENT_TOOL_TYPE_UNKNOWN) {
+            const float x = AMotionEvent_getX(event, 0), y = AMotionEvent_getY(event, 0);
+            switch (action) {
+            case AMOTION_EVENT_ACTION_DOWN: enp::view::touch::fingerLanded(x, y); return 1;
+            case AMOTION_EVENT_ACTION_MOVE: enp::view::touch::fingerMoved(x, y); return 1;
+            case AMOTION_EVENT_ACTION_UP: enp::view::touch::fingerLifted(x, y); return 1;
+            case AMOTION_EVENT_ACTION_CANCEL: enp::view::touch::fingerCancelled(); return 1;
+            default: break;
+            }
         }
     }
     return ImGui_ImplAndroid_HandleInputEvent(event);

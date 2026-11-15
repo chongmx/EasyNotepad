@@ -9,10 +9,15 @@ its release notes on GitHub.
 ### Changed
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
   settings fold away under Appearance. The dialog keeps its size from tab to tab and fits a phone.
+  The tab row scrolls with the mouse wheel or a finger, without arrow buttons; a sideways swipe
+  across a page moves to the next or previous tab.
 - Word, Excel, PowerPoint and PDF no longer show "Open as text" on their toolbar. Preferences >
   Files brings it back. A document that cannot be shown still offers its text.
 
 ### Fixed
+- On a phone, a finger that drags a list scrolls it and presses nothing: a touch reaches the app as a
+  tap when the finger lifts without moving. Before, a file in the file list opened as soon as the
+  finger touched it, so the list could not be dragged. Sliders and splitters still follow a drag.
 - Word, Excel, PowerPoint and PDF in two columns: the viewer's toolbar was drawn over the
   column's name. It now starts below it, as it does below the find bar.
 - The viewer's toolbar in a narrow column or window: the label (format, page) is cut short, then

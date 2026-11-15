@@ -178,9 +178,26 @@ public:
     {
         ImGuiIO& io = ImGui::GetIO();
         io.DeltaTime = 1.0f / 60.0f;
-        io.AddMouseSourceEvent(touch_ ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
-        io.AddMousePosEvent(pos.x, pos.y);
-        io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
+        if (touch_) { // a finger, as Android passes it: through the touch gestures, not straight to ImGui
+            if (button && !fingerDown_)
+                view::touch::fingerLanded(pos.x, pos.y);
+            else if (button)
+                view::touch::fingerMoved(pos.x, pos.y);
+            else if (fingerDown_)
+                view::touch::fingerLifted(pos.x, pos.y);
+            else {
+                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+                io.AddMousePosEvent(pos.x, pos.y);
+            }
+            fingerDown_ = button;
+        } else {
+            if (fingerDown_) // a finger left down when the test switched to the mouse
+                view::touch::fingerCancelled();
+            fingerDown_ = false;
+            io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+            io.AddMousePosEvent(pos.x, pos.y);
+            io.AddMouseButtonEvent(ImGuiMouseButton_Left, button);
+        }
         terminalService_.pump();
         os::dispatch::pump(); // results of background work (the reader service) arrive here, as in the app
         ImGui::NewFrame();
@@ -214,6 +231,8 @@ public:
         frame(pos);
         frame(pos, true);
         frame(pos, false);
+        if (touch_) // a finger's tap reaches ImGui when it lifts: the press, then the release a frame later
+            frame(pos);
     }
 
     // Visits every grid point of the rectangle, row by row.
@@ -280,6 +299,7 @@ private:
     int frames_ = 0;
     int maxVertices_ = 0;
     bool touch_ = false;
+    bool fingerDown_ = false; // the finger is on the screen (touch_)
 };
 
 } // namespace
@@ -513,6 +533,74 @@ int main(int argc, char** argv)
             h.click(ImVec2(390.0f * 0.5f / 4.0f, 844.0f - 29.0f)); // Files
             h.settle();
             check(scrollOf("##explorer", 1) >= 0.0f, "a tap on Files should show the files");
+
+            // A finger landing on a file in the explorer and dragging the list does not open it (a
+            // row acts when the finger lifts, and only if it did not drag); a tap opens it.
+            {
+                const int longDocument = h.vm().activeIndex.get();
+                // A short screen and the sample's folders open: a list longer than the screen.
+                const float shortH = 300.0f;
+                ImGui::GetIO().DisplaySize = ImVec2(390.0f, shortH);
+                h.settle();
+                for (const char* folder : {"folder:EasyDemo/docs", "folder:EasyDemo/scripts", "folder:EasyDemo/src", "folder:docs", "folder:scripts", "folder:src"})
+                    if (const view::UiElement* e = view::UiAutomation::instance().find(folder); e && e->activate) {
+                        e->activate();
+                        h.settle();
+                    }
+                auto explorerBody = []() -> ImGuiWindow* {
+                    for (ImGuiWindow* w : GImGui->Windows)
+                        if (w->WasActive && std::strstr(w->Name, "/##explorerBody"))
+                            return w;
+                    return nullptr;
+                };
+                ImGuiWindow* list = explorerBody();
+                check(list && list->ScrollMax.y > 20.0f, "the explorer should be longer than a short phone screen");
+                std::string path;
+                ImVec2 at;
+                for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                    if (e.id.rfind("file:", 0) == 0 && list && e.min.y > list->Pos.y + 20.0f && e.max.y < list->Pos.y + list->Size.y - 20.0f) {
+                        path = e.id.substr(5);
+                        at = ImVec2((e.min.x + e.max.x) * 0.5f, (e.min.y + e.max.y) * 0.5f); // the lowest: in view after scrolling up
+                    }
+                check(!path.empty(), "the explorer should show a file on a short phone screen");
+                if (list && !path.empty()) {
+                    auto opened = [&]() {
+                        const model::Document* d = h.vm().activeDocument();
+                        return d && d->path == path;
+                    };
+                    check(!opened(), "the file should not be open before the test");
+                    const float scrolled = list->Scroll.y;
+                    drag(at, ImVec2(at.x, at.y - 120.0f));
+                    h.settle();
+                    check(list->Scroll.y > scrolled + 20.0f, "a finger should scroll the explorer (" + std::to_string(scrolled) + " -> " +
+                                                                 std::to_string(list->Scroll.y) + ")");
+                    check(!opened(), "a finger dragging the explorer up from a file should not open it");
+                    for (int i = 0; i < 90; ++i) // the glide ends
+                        h.frame(ImVec2(-100.0f, -100.0f));
+                    if (const view::UiElement* e = view::UiAutomation::instance().find("file:" + path);
+                        e && e->min.y > list->Pos.y && e->max.y < list->Pos.y + list->Size.y) {
+                        const ImVec2 from((e->min.x + e->max.x) * 0.5f, (e->min.y + e->max.y) * 0.5f);
+                        drag(from, ImVec2(from.x, from.y + 120.0f));
+                        h.settle();
+                        check(!opened(), "a finger dragging the explorer down from a file should not open it");
+                    }
+                    for (int i = 0; i < 90; ++i)
+                        h.frame(ImVec2(-100.0f, -100.0f));
+                    if (const view::UiElement* e = view::UiAutomation::instance().find("file:" + path);
+                        e && e->min.y > list->Pos.y && e->max.y < list->Pos.y + list->Size.y) {
+                        h.click(ImVec2((e->min.x + e->max.x) * 0.5f, (e->min.y + e->max.y) * 0.5f));
+                        h.settle();
+                        check(opened(), "a tap on a file in the explorer should open it");
+                    } else {
+                        check(false, "the file should still be on the screen after the drags");
+                    }
+                }
+                ImGui::GetIO().DisplaySize = ImVec2(390.0f, 844.0f);
+                h.vm().activate(longDocument); // the long document again, for the tests below
+                h.settle();
+                h.click(ImVec2(390.0f * 0.5f / 4.0f, 844.0f - 29.0f)); // back to Files
+                h.settle();
+            }
 
             // A drag that starts on a ribbon button scrolls the ribbon and does not press the button.
             h.click(ImVec2(19.0f, 18.0f)); // the menu button: show the ribbon
@@ -1206,6 +1294,89 @@ int main(int argc, char** argv)
                     std::printf("  FAILED preferences: closed on %s\n", tab), ++checksFailed;
                 else if (w->Pos.x < -0.5f || w->Pos.y < -0.5f || w->Pos.x + w->Size.x > size.x + 0.5f || w->Pos.y + w->Size.y > size.y + 0.5f)
                     std::printf("  FAILED preferences: off the %.0f x %.0f screen on %s\n", size.x, size.y, tab), ++checksFailed;
+            }
+            // On a phone the tab row is wider than the dialog: the wheel and a finger scroll it, a
+            // finger dragging it does not change the tab, a tap picks one, and a swipe across the page
+            // moves to the next or previous tab.
+            if (size.x < 500.0f) {
+                auto check = [&](bool ok, const std::string& what) {
+                    if (!ok)
+                        std::printf("  FAILED preferences on a phone: %s\n", what.c_str()), ++checksFailed;
+                };
+                auto row = []() -> ImGuiWindow* {
+                    for (ImGuiWindow* w : GImGui->Windows)
+                        if (w->WasActive && std::strstr(w->Name, "/##preferencesTabRow"))
+                            return w;
+                    return nullptr;
+                };
+                auto shown = []() -> std::string { // the selected tab's name ("Editor")
+                    ImGuiContext& g = *GImGui;
+                    for (int i = 0; i < g.TabBars.GetMapSize(); ++i)
+                        if (ImGuiTabBar* bar = g.TabBars.TryGetMapData(i))
+                            if (ImGuiTabItem* t = ImGui::TabBarFindTabByID(bar, bar->SelectedTabId)) {
+                                const std::string name = ImGui::TabBarGetTabName(bar, t);
+                                if (const size_t at = name.find("###prefs"); at != std::string::npos)
+                                    return name.substr(at + 8);
+                            }
+                    return {};
+                };
+                auto pick = [&](const char* id) {
+                    if (const view::UiElement* e = view::UiAutomation::instance().find(id); e && e->activate)
+                        e->activate();
+                    h.settle();
+                    h.settle();
+                };
+                // A finger from `from` to `to` in small steps, then lifted.
+                auto drag = [&](ImVec2 from, ImVec2 to) {
+                    h.setTouch(true);
+                    h.frame(from);
+                    h.frame(from, true);
+                    for (int k = 1; k <= 12; ++k) {
+                        h.frame(ImVec2(from.x + (to.x - from.x) * k / 12.0f, from.y + (to.y - from.y) * k / 12.0f), true);
+                    }
+                    h.frame(to, false);
+                    h.setTouch(false);
+                    h.settle();
+                };
+                pick("preferences-tab:Appearance");
+                ImGuiWindow* r = row();
+                check(r != nullptr, "the tab row is shown");
+                if (r) {
+                    check(r->ScrollMax.x > 1.0f, "the tab row is wider than the dialog");
+                    check(r->Scroll.x < 0.5f, "Appearance brings the row to its start");
+                    const ImVec2 mid(r->Pos.x + r->Size.x * 0.5f, r->Pos.y + ImGui::GetFrameHeight() * 0.5f);
+                    // The mouse wheel.
+                    h.frame(mid);
+                    ImGui::GetIO().AddMouseWheelEvent(0.0f, -1.0f);
+                    h.frame(mid);
+                    h.settle();
+                    check(r->Scroll.x > 1.0f, "the mouse wheel scrolls the tab row");
+                    check(shown() == "Appearance", "the wheel leaves the tab as it was, not " + shown());
+                    pick("preferences-tab:Appearance");
+                    // A finger dragging the row leftwards, starting on a tab.
+                    drag(ImVec2(r->Pos.x + r->Size.x * 0.8f, mid.y), ImVec2(r->Pos.x + r->Size.x * 0.1f, mid.y));
+                    check(r->Scroll.x > 40.0f, "a finger drags the tab row (scrolled " + std::to_string(r->Scroll.x) + ")");
+                    check(shown() == "Appearance", "dragging the row leaves the tab as it was, not " + shown());
+                    // A tap on a tab picks it.
+                    if (const view::UiElement* e = view::UiAutomation::instance().find("preferences-tab:Performance")) {
+                        const ImVec2 at((std::max(e->min.x, r->Pos.x) + std::min(e->max.x, r->Pos.x + r->Size.x)) * 0.5f, (e->min.y + e->max.y) * 0.5f);
+                        drag(at, at);
+                        check(shown() == "Performance", "a tap picks the tab under it, not " + shown());
+                    }
+                    // A swipe across the page: leftwards to the next tab, rightwards to the previous.
+                    pick("preferences-tab:Editor");
+                    const ImVec2 page(r->Pos.x + r->Size.x * 0.5f, r->Pos.y + r->Size.y + 120.0f);
+                    drag(ImVec2(page.x + 120.0f, page.y), ImVec2(page.x - 120.0f, page.y + 6.0f));
+                    check(shown() == "Files", "a swipe leftwards moves to the next tab, not " + shown());
+                    drag(ImVec2(page.x - 120.0f, page.y), ImVec2(page.x + 120.0f, page.y));
+                    drag(ImVec2(page.x - 120.0f, page.y), ImVec2(page.x + 120.0f, page.y));
+                    check(shown() == "Appearance", "a swipe rightwards moves to the previous tab, not " + shown());
+                    drag(ImVec2(page.x - 120.0f, page.y), ImVec2(page.x + 120.0f, page.y));
+                    check(shown() == "Appearance", "no tab before the first, not " + shown());
+                    // A mostly vertical drag is not a swipe.
+                    drag(ImVec2(page.x, page.y), ImVec2(page.x - 70.0f, page.y + 160.0f));
+                    check(shown() == "Appearance", "a drag down the page is not a swipe, not " + shown());
+                }
             }
             if (const view::UiElement* close = view::UiAutomation::instance().find("dialog:preferences:close"); close && close->activate)
                 close->activate();
