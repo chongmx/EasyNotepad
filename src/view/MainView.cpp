@@ -3249,10 +3249,29 @@ void MainView::renderPreferencesPopup()
     static const char* const kTabIds[] = {"preferences-tab:Appearance", "preferences-tab:Editor", "preferences-tab:Files",
                                           "preferences-tab:Performance", "preferences-tab:Workspace"};
     static const char* const kTabNames[] = {"Appearance", "Editor", "Files", "Performance", "Workspace"};
+    // The tab row is as wide as its tabs and scrolls sideways when the dialog is narrower (a phone):
+    // a finger drags it (TouchScroll.cpp), the mouse wheel scrolls it. A thin bar under it shows
+    // there is more.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    float rowW = 0.0f;
+    for (int i = 0; i < 5; ++i)
+        rowW += ImGui::TabItemCalcSize(kTabs[i], false).x + (i > 0 ? style.ItemInnerSpacing.x : 0.0f);
+    const bool rowScrolls = rowW > bodySize.x + 0.5f;
+    const float rowH = ImGui::GetFrameHeight() + style.ItemSpacing.y;
+    const float barH = 4.0f * s_;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, barH);
+    ImGui::SetNextWindowContentSize(ImVec2(std::max(rowW, bodySize.x), rowH));
+    ImGui::BeginChild("##preferencesTabRow", ImVec2(bodySize.x, rowH + (rowScrolls ? barH : 0.0f)), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav);
+    fit::wheelScrollsSideways(60.0f * s_);
     int tab = -1;
-    if (ImGui::BeginTabBar("##preferencesTabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
+    if (ImGui::BeginTabBar("##preferencesTabs", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_NoTabListScrollingButtons)) {
         for (int i = 0; i < 5; ++i) {
-            if (ImGui::BeginTabItem(kTabs[i], nullptr, request == i ? ImGuiTabItemFlags_SetSelected : 0)) {
+            const bool selected = ImGui::BeginTabItem(kTabs[i], nullptr, request == i ? ImGuiTabItemFlags_SetSelected : 0);
+            if (request == i)
+                ImGui::SetScrollHereX(0.5f); // a tab chosen another way (a swipe, an agent) comes into view
+            if (selected) {
                 tab = i;
                 ImGui::EndTabItem();
             }
@@ -3260,6 +3279,8 @@ void MainView::renderPreferencesPopup()
         }
         ImGui::EndTabBar();
     }
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     ImGui::BeginChild("##preferencesBody", bodySize, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
     auto heading = [](const char* text) {
         ImGui::Spacing();
@@ -3350,6 +3371,31 @@ void MainView::renderPreferencesPopup()
     default: break;
     }
     ImGui::EndChild();
+    // A finger swiped sideways across the page moves to the next tab (leftwards) or the previous one
+    // (rightwards). Not when the finger moves a slider, edits text or scrolls the page; once it is a
+    // swipe, the control it started on is not clicked.
+    {
+        const ImGuiContext& g = *ImGui::GetCurrentContext();
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            preferencesSwipe_ = touch::fingerDown() && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+                                ImGui::IsMouseHoveringRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+            preferencesSwipeStart_ = mouse;
+        } else if (preferencesSwipe_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const float dx = mouse.x - preferencesSwipeStart_.x, dy = mouse.y - preferencesSwipeStart_.y;
+            if (touch::panning() || g.ActiveIdHasBeenEditedBefore || (g.ActiveId != 0 && g.ActiveId == g.InputTextState.ID)) {
+                preferencesSwipe_ = false;
+            } else if (std::fabs(dx) >= 56.0f * s_ && std::fabs(dx) > 2.0f * std::fabs(dy)) {
+                preferencesSwipe_ = false;
+                ImGui::ClearActiveID();
+                const int next = std::clamp(tab + (dx < 0.0f ? 1 : -1), 0, 4);
+                if (tab >= 0 && next != tab)
+                    preferencesTabRequest_ = next;
+            }
+        } else {
+            preferencesSwipe_ = false;
+        }
+    }
     ImGui::Spacing();
     ImGui::TextDisabled(vm_.settingsPath().empty() ? "Settings last for this session." : "Settings are saved automatically.");
     if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))

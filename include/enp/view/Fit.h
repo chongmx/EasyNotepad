@@ -36,6 +36,13 @@ ImVec2 windowSize(ImVec2 wanted);
 // it sizes itself to its content.
 void constrainNextWindow();
 
+// For a child window that scrolls sideways only (a row of tabs or buttons): the plain mouse wheel
+// over it scrolls it left/right by `step` pixels a notch. ImGui handles Shift+wheel and a
+// trackpad's sideways swipe itself, and passes a plain wheel to the parent (the child cannot scroll
+// up/down). Call inside the child. Not NoScrollWithMouse: touch dragging (TouchScroll.cpp) leaves
+// such windows alone.
+void wheelScrollsSideways(float step);
+
 // The room is narrow (a phone, a thin panel): `width` is less than `threshold` (unscaled dp * scale).
 inline bool narrow(float width, float threshold) { return width < threshold; }
 

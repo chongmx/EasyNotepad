@@ -24,6 +24,36 @@ struct State {
 
 State s;
 
+// The platform's finger (Android): where it is and what it did since the last frame. Its press is
+// not passed to ImGui when it lands; update() passes it on once it knows what the gesture is.
+struct Finger {
+    bool down = false;     // on the screen
+    bool landed = false;   // went down since the last frame
+    bool pressSent = false; // ImGui was given the press (a drag where nothing scrolls); the lift releases it
+    bool injected = false; // the next press ImGui reports is this one's (not a new gesture)
+    ImVec2 start, pos;
+};
+
+Finger f;
+float scale = 1.0f; // the UI's scale, as update() was last given it
+
+// How far a finger moves before it is a drag, not a tap (pixels at a scale of 1).
+constexpr float kSlop = 8.0f;
+
+void sendPos(ImVec2 at)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMousePosEvent(at.x, at.y);
+}
+
+void sendButton(bool down)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+}
+
 // The pinch: the fingers' distance last reported, and the zoom gathered since the last frame
 // (`gathered`) and this frame's for the view under the fingers (`factor`, at `centre`).
 struct Pinch {
@@ -153,6 +183,7 @@ void update(float uiScale)
     ImGuiContext& g = *GImGui;
     const ImGuiIO& io = g.IO;
     const float dt = io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f;
+    scale = uiScale;
 
     // This frame's zoom: what the fingers gathered, or Ctrl+wheel's (desktops); one the view
     // under it did not take last frame is dropped.
@@ -170,23 +201,47 @@ void update(float uiScale)
         return;
     }
 
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // The platform's finger: a new gesture when it lands (ImGui has seen no press).
+    if (f.landed) {
+        f.landed = false;
         s = State{};
-        s.finger = io.MouseSource == ImGuiMouseSource_TouchScreen;
-        s.pressed = s.finger;
-        s.start = s.last = io.MousePos;
-        return;
+        s.finger = s.pressed = true;
+        s.start = s.last = f.start;
     }
-
-    if (s.pressed && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        const ImVec2 pos = io.MousePos;
+    // The press ImGui reports for a finger is the one passed on below; a press from elsewhere (a
+    // mouse, or a platform that passes a finger's press straight on) starts a new gesture.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (f.injected) {
+            f.injected = false;
+        } else {
+            s = State{};
+            s.finger = io.MouseSource == ImGuiMouseSource_TouchScreen;
+            s.pressed = s.finger;
+            s.start = s.last = io.MousePos;
+            return;
+        }
+    }
+    const bool held = f.down || ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    if (s.pressed && held) {
+        const ImVec2 pos = f.down ? f.pos : io.MousePos;
+        // The platform's finger, once it is not a pan: ImGui gets the press where it landed and the
+        // drag from there (a slider, a splitter, selecting text); a press from elsewhere already has it.
+        auto press = [&]() {
+            s.pressed = false;
+            if (f.down && !f.pressSent) {
+                sendPos(f.start);
+                sendButton(true);
+                sendPos(pos);
+                f.pressSent = f.injected = true;
+            }
+        };
         if (!s.panning) {
             const ImVec2 d(pos.x - s.start.x, pos.y - s.start.y);
-            if (std::sqrt(d.x * d.x + d.y * d.y) < 8.0f * uiScale)
+            if (std::sqrt(d.x * d.x + d.y * d.y) < kSlop * uiScale)
                 return;
-            // Text being edited keeps its own drag (selecting).
-            if (g.ActiveId != 0 && g.ActiveId == g.InputTextState.ID) {
-                s.pressed = false;
+            // Text being edited keeps its own drag (selecting), when the finger is on it.
+            if (g.ActiveId != 0 && g.ActiveId == g.InputTextState.ID && (!s.finger || !f.down || g.HoveredIdPreviousFrame == g.ActiveId)) {
+                press();
                 return;
             }
             const int along = std::fabs(d.y) >= std::fabs(d.x) ? 1 : 0;
@@ -200,7 +255,7 @@ void update(float uiScale)
                 }
             }
             if (!target) {
-                s.pressed = false; // not a pan: whatever is under the finger keeps the press
+                press(); // not a pan: whatever is under the finger has the press
                 return;
             }
             s.panning = s.moved = true;
@@ -218,7 +273,7 @@ void update(float uiScale)
         return;
     }
 
-    if (s.pressed && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) { // lifted
+    if (s.pressed && !held) { // lifted
         s.pressed = false;
         s.panning = false;
         if (std::fabs(s.velocity) < 60.0f * uiScale)
@@ -242,5 +297,58 @@ bool fingerDown() { return s.finger; }
 bool panning() { return s.panning; }
 bool moved() { return s.moved; }
 bool gliding() { return s.velocity != 0.0f; }
+
+void fingerLanded(float x, float y)
+{
+    if (f.down && f.pressSent) // a gesture not ended (a lost lift): let go of its press
+        sendButton(false);
+    f = Finger{};
+    f.down = f.landed = true;
+    f.start = f.pos = ImVec2(x, y);
+    sendPos(f.pos); // ImGui sees where it is (hover), not a press
+}
+
+void fingerMoved(float x, float y)
+{
+    if (!f.down)
+        return;
+    f.pos = ImVec2(x, y);
+    sendPos(f.pos);
+}
+
+void fingerLifted(float x, float y)
+{
+    if (!f.down)
+        return;
+    f.down = false;
+    f.pos = ImVec2(x, y);
+    if (f.pressSent) { // the press it was given (a drag where nothing scrolls) is let go
+        sendPos(f.pos);
+        sendButton(false);
+    } else {
+        // A tap: it neither scrolled content (a gesture update() has not seen yet did not) nor moved
+        // past the slop. A press and a release where it lifted; ImGui takes queued events one change
+        // a frame, so they are a whole click.
+        const float dx = f.pos.x - f.start.x, dy = f.pos.y - f.start.y;
+        if ((f.landed || !s.moved) && std::sqrt(dx * dx + dy * dy) < kSlop * scale) {
+            sendPos(f.pos);
+            sendButton(true);
+            sendButton(false);
+            f.injected = true;
+        }
+    }
+    f.pressSent = false;
+}
+
+void fingerCancelled()
+{
+    if (f.pressSent) { // let go away from the content: nothing under the finger clicks
+        sendPos(ImVec2(-FLT_MAX, -FLT_MAX));
+        sendButton(false);
+    }
+    f = Finger{};
+    s.pressed = s.panning = false;
+    s.velocity = 0.0f;
+}
 
 } // namespace enp::view::touch

@@ -223,6 +223,9 @@ private:
     bool openComment_ = false;
     bool openPreferences_ = false;
     int preferencesTabRequest_ = -1; // switch on the next frame (agents)
+    // A finger on a Preferences page, which may swipe sideways to the next or previous tab.
+    bool preferencesSwipe_ = false;
+    ImVec2 preferencesSwipeStart_;
     bool openSyntaxColors_ = false;
     bool openIntellisenseSettings_ = false;
     // The IntelliSense dialog's text fields while it is open (released when it closes).
