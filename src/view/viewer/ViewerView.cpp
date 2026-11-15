@@ -74,6 +74,7 @@ ViewerView::ViewerView(viewmodel::NotepadViewModel& vm, const Fonts& fonts, cons
 ViewerView::~ViewerView()
 {
     for (auto& [id, e] : entries_) {
+        vm_.viewer().hidePages(id, this); // (a column closed: its place no longer keeps pages)
         releaseImages(e.images);
         for (auto& [page, held] : e.pageImages)
             releaseImages(held);
@@ -129,6 +130,21 @@ int ViewerView::pagePointAt(int documentId, ImVec2 at, ImVec2& point) const
     return i;
 }
 
+std::size_t ViewerView::searchHits(int documentId, std::size_t page, int* current) const
+{
+    if (current)
+        *current = -1;
+    const auto it = entries_.find(documentId);
+    if (it == entries_.end())
+        return 0;
+    const auto hits = it->second.hits.find(page);
+    if (hits == it->second.hits.end())
+        return 0;
+    if (const viewmodel::ViewerViewModel::Entry* model = vm_.viewer().find(documentId); current && model && model->search.page == int(page))
+        *current = model->search.ordinal;
+    return hits->second.size();
+}
+
 std::vector<std::string> ViewerView::failedPictures(int documentId, std::size_t page) const
 {
     std::vector<std::string> out;
@@ -160,6 +176,7 @@ void ViewerView::releaseEntry(Entry& e)
     releaseImages(e.images);
     for (auto& [page, held] : e.pageImages)
         releaseImages(held);
+    vm_.viewer().hidePages(e.id, this);
     if (shownDoc_ == e.id)
         shownDoc_ = -1;
     entries_.erase(e.id);
@@ -223,8 +240,9 @@ const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage
     return image;
 }
 
-void ViewerView::render(model::Document& doc, ImVec2 size)
+void ViewerView::render(model::Document& doc, ImVec2 size, bool active)
 {
+    active_ = active;
     viewmodel::ViewerViewModel& viewer = vm_.viewer();
     const viewmodel::ViewerViewModel::Entry* model = viewer.find(doc.id);
     if (!model) { // not asked for yet (a document restored with the session): the view-model reads it
@@ -259,6 +277,7 @@ void ViewerView::render(model::Document& doc, ImVec2 size)
     const float used = ImGui::GetCursorPosY() - before;
     const ImVec2 rest(size.x, std::max(1.0f, size.y - used));
     if (doc.id != shownDoc_) { // another document in the shared windows: its own scroll
+        leave();
         ImGui::SetNextWindowScroll(e.scroll);
         shownDoc_ = doc.id;
     }
@@ -307,6 +326,8 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
     const bool paging = d.shape == mv::Shape::Pages || printedPages;
     const bool zooming = paging && !printedPages; // slides and PDF pages: their own zoom (Word follows the editor's)
     const char* layoutLabel = e.reflow ? ICON_FA_FILE "  Pages##viewerLayout" : ICON_FA_ALIGN_LEFT "  Reflow##viewerLayout";
+    const char* const findLabel = ICON_FA_MAGNIFYING_GLASS "##viewerFind";
+    const bool findButton = d.shape == mv::Shape::Pages; // PDF and slides: their text is searched
     const char* const previousLabel = ICON_FA_CHEVRON_UP "##viewerPrevious";
     const char* const nextLabel = ICON_FA_CHEVRON_DOWN "##viewerNext";
     const char* const zoomOutLabel = ICON_FA_MAGNIFYING_GLASS_MINUS "##viewerZoomOut";
@@ -318,6 +339,8 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
     float controls = openButton ? gap + openW : 0.0f;
     if (wordLayout)
         controls += gap + smallWidth(layoutLabel);
+    if (findButton)
+        controls += gap + smallWidth(findLabel);
     if (paging)
         controls += gap * 2.0f + smallWidth(previousLabel) + smallWidth(nextLabel);
     if (zooming)
@@ -367,6 +390,13 @@ void ViewerView::toolbar(model::Document& doc, Entry& e, const mv::ViewerDocumen
         if (ImGui::SmallButton(layoutLabel))
             e.reflow = !e.reflow;
         registerLastItem("viewer:word-layout", "button", e.reflow ? "Show as pages" : "Reflow to the window", [&e]() { e.reflow = !e.reflow; });
+    }
+    if (findButton) { // the find bar (Ctrl+F): a phone has no keys for it
+        place(smallWidth(findLabel));
+        if (ImGui::SmallButton(findLabel))
+            vm_.execute(viewmodel::CommandId::Find);
+        ui::itemTooltip("Find in the document (Ctrl+F)");
+        registerLastItem("viewer:find", "button", "Find in the document", [this]() { vm_.execute(viewmodel::CommandId::Find); });
     }
     if (paging) {
         const int pageCount = printedPages ? int(e.wordPages.size()) : int(d.pages.pages.size());
@@ -1837,6 +1867,14 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         e.currentPage = e.goToPage;
         e.goToPage = -1;
     }
+    const viewmodel::ViewerViewModel::Entry* model = vm_.viewer().find(e.id);
+    static const viewmodel::ViewerViewModel::Entry::Search kNoSearch;
+    const viewmodel::ViewerViewModel::Entry::Search& search = model ? model->search : kNoSearch;
+    if (!search.active && (!e.hits.empty() || !e.hitsQuery.empty())) { // the search ended: its matches go
+        e.hits.clear();
+        os::mem::release(e.hitsQuery);
+    }
+    revealMatch(e, search, pd, viewW, ImGui::GetWindowSize().y, pad);
     const float scrollY = ImGui::GetScrollY();
     // How fast the pages move: while they fly past (a fling) faster than about two screens a
     // second, no page is asked for: the ones passed would only be cancelled again. A jump (Home,
@@ -1867,11 +1905,13 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     for (int i = first; i <= last && i < n; ++i)
         if (e.pageTop[size_t(i)] <= scrollY + viewH * 0.35f)
             e.currentPage = i;
+    if (active_ && search.active) // a search reads from the page the reader is on
+        vm_.viewer().searchFrom(e.id, size_t(e.currentPage));
     // The view-model reads the pages in view (and their neighbours) through the reader service,
     // and drops pages far away; the pictures of a page no longer read go here.
     if (n > 0) {
         const bool flying = e.scrollSpeed > ImGui::GetWindowSize().y * 2.0f;
-        vm_.viewer().showPages(e.id, size_t(first), size_t(std::max(first, last)), size_t(e.currentPage), !flying);
+        vm_.viewer().showPages(e.id, size_t(first), size_t(std::max(first, last)), size_t(e.currentPage), !flying, this);
     }
     for (auto it = e.pageImages.begin(); it != e.pageImages.end();) {
         if (it->first < pd.pages.size() && pd.pages[it->first].loaded) {
@@ -1880,6 +1920,12 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         }
         releaseImages(it->second);
         it = e.pageImages.erase(it);
+    }
+    for (auto it = e.hits.begin(); it != e.hits.end();) { // matches of pages let go: found again when read again
+        if (it->first < pd.pages.size() && pd.pages[it->first].loaded)
+            ++it;
+        else
+            it = e.hits.erase(it);
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float scrollX = ImGui::GetScrollX();
@@ -1892,6 +1938,20 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         PageImageSource source(*this, e, size_t(i));
         e.scripts |= page.scripts;
         painter_.draw(page, at, scale, fonts_, &source);
+        // The search's matches over the text: the current one stronger and outlined. In both
+        // columns when both show the document searched.
+        if (const std::vector<mv::TextHit>* hits = pageHits(e, search, page, size_t(i))) {
+            auto pt = [&at, scale](const mv::Point& p) { return ImVec2(at.x + p.x * scale, at.y + p.y * scale); };
+            for (std::size_t k = 0; k < hits->size(); ++k) {
+                const bool current = search.page == i && search.ordinal == int(k);
+                for (const mv::TextHit::Quad& q : (*hits)[k].quads) {
+                    const ImVec2 a = pt(q.corners[0]), b = pt(q.corners[1]), c = pt(q.corners[2]), d4 = pt(q.corners[3]);
+                    dl->AddQuadFilled(a, b, c, d4, current ? palette_.findMatchCurrent : palette_.findMatch);
+                    if (current)
+                        dl->AddQuad(a, b, c, d4, IM_COL32(234, 88, 12, 255), std::max(1.0f, 1.5f * s_));
+                }
+            }
+        }
         if (!page.loaded) // being read by the reader service
             dl->AddText(ImVec2(at.x + 12.0f * s_, at.y + 10.0f * s_), IM_COL32(120, 120, 120, 255), ICON_FA_HOURGLASS_HALF "  Reading the page...");
         if (!page.notes.empty()) {
@@ -1917,6 +1977,67 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             ImGui::SetScrollY(e.pageTop[size_t(std::max(0, first - (scrollY > e.pageTop[size_t(first)] - pad + 1.0f ? 0 : 1)))] - pad);
     }
     ImGui::EndChild();
+}
+
+void ViewerView::leave()
+{
+    if (shownDoc_ >= 0)
+        vm_.viewer().hidePages(shownDoc_, this);
+    shownDoc_ = -1;
+}
+
+const std::vector<mv::TextHit>* ViewerView::pageHits(Entry& e, const viewmodel::ViewerViewModel::Entry::Search& s, const mv::Page& page,
+                                                    std::size_t index)
+{
+    if (!s.active || !page.loaded)
+        return nullptr;
+    if (e.hitsQuery != s.query || e.hitsCase != s.matchCase || e.hitsGeneration != e.generation) { // another search: found again
+        e.hits.clear();
+        e.hitsQuery = s.query;
+        e.hitsCase = s.matchCase;
+        e.hitsGeneration = e.generation;
+    }
+    auto it = e.hits.find(index);
+    if (it == e.hits.end())
+        it = e.hits.emplace(index, mv::findOnPage(page, s.query, s.matchCase)).first;
+    return &it->second;
+}
+
+void ViewerView::revealMatch(Entry& e, const viewmodel::ViewerViewModel::Entry::Search& s, const mv::PageDocument& pd, float viewW, float viewH,
+                             float pad)
+{
+    const int n = int(pd.pages.size());
+    // Only the view with the keyboard moves; the other column (the same document) stays where it is.
+    if (e.revealed == s.reveal || !active_ || !s.active || s.page < 0 || s.page >= n) {
+        e.revealed = s.reveal;
+        e.revealPage = -1;
+        return;
+    }
+    const mv::Page& page = pd.pages[size_t(s.page)];
+    if (!page.loaded) { // its page first: once its content is read (it is in view now), the match
+        if (e.revealPage != s.page)
+            ImGui::SetScrollY(std::max(0.0f, e.pageTop[size_t(s.page)] - pad));
+        e.revealPage = s.page;
+        return;
+    }
+    e.revealed = s.reveal;
+    e.revealPage = -1;
+    const std::vector<mv::TextHit>* hits = pageHits(e, s, page, size_t(s.page));
+    if (!hits || s.ordinal >= int(hits->size())) {
+        ImGui::SetScrollY(std::max(0.0f, e.pageTop[size_t(s.page)] - pad));
+        return;
+    }
+    // Scrolled only as far as it takes: a match in view already stays where it is.
+    const mv::Rect b = (*hits)[size_t(s.ordinal)].bounds();
+    const float scale = e.pageScale;
+    const float top = e.pageTop[size_t(s.page)] + b.y * scale, bottom = top + b.h * scale;
+    const float y = ImGui::GetScrollY();
+    if (top < y + viewH * 0.1f || bottom > y + viewH * 0.9f)
+        ImGui::SetScrollY(std::max(0.0f, (top + bottom) * 0.5f - viewH * 0.4f));
+    const float left = std::max(pad, (viewW - page.width * scale) * 0.5f) + b.x * scale, right = left + b.w * scale;
+    const float x = ImGui::GetScrollX();
+    if (left < x || right > x + viewW)
+        ImGui::SetScrollX(std::max(0.0f, (left + right - viewW) * 0.5f));
 }
 
 } // namespace enp::view

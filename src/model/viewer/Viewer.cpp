@@ -182,41 +182,7 @@ void Page::add(ImageItem i)
 
 std::string Page::plainText() const
 {
-    std::string out;
-    // Glyph runs in reading order: by line (baseline, within half a size), then left to right.
-    std::vector<const GlyphRun*> runs; // invisible text too (the words over a scanned page)
-    for (const GlyphRun& g : glyphs)
-        runs.push_back(&g);
-    std::stable_sort(runs.begin(), runs.end(), [](const GlyphRun* a, const GlyphRun* b) {
-        if (std::abs(a->baseline - b->baseline) > std::min(a->size, b->size) * 0.5f)
-            return a->baseline < b->baseline;
-        return a->x < b->x;
-    });
-    const GlyphRun* previous = nullptr;
-    for (const GlyphRun* g : runs) {
-        if (previous) {
-            if (std::abs(g->baseline - previous->baseline) > std::min(g->size, previous->size) * 0.5f)
-                out += '\n';
-            else if (g->x > previous->x + previous->width + g->size * 0.15f && !out.empty() && out.back() != ' ')
-                out += ' ';
-        }
-        out += g->text;
-        previous = g;
-    }
-    for (const TextBox& b : boxes)
-        for (const TextParagraph& p : b.paragraphs) {
-            std::string line;
-            for (const TextRun& r : p.runs)
-                line += r.text == "\n" ? std::string(" ") : r.text;
-            if (line.empty())
-                continue;
-            if (!out.empty())
-                out += '\n';
-            if (!p.bullet.empty())
-                out += p.bullet + " ";
-            out += line;
-        }
-    return out;
+    return pageText(*this); // PageSearch.cpp: the same text a search looks in
 }
 
 bool PageDocument::load(std::size_t index)

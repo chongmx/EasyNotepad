@@ -15,6 +15,14 @@ its release notes on GitHub.
   their certificates) still cannot be opened, and say so.
 - A font for Chinese, Japanese and Korean comes with the app (Noto Sans CJK, the 12,455 letters in
   common use, 2.5 MB). Documents use it when the system has no such font the app can read.
+- Search in PDF and PowerPoint documents: Ctrl+F, or the magnifier on the viewer's toolbar (on a
+  phone too), finds text on every page. Matches are highlighted where they are drawn, the current
+  one outlined; Enter, F3 and Shift+F3 go to the next and previous, round the document, and the
+  find bar counts them ("3 of 11", with "+" while pages are still being searched). Pages not
+  shown yet are read for their text in the background, after the pages in view. Case is ignored
+  unless "Aa" is on, ligatures match their letters, and a line break matches a space, so a phrase
+  is found across lines. In two columns, the column with the keyboard goes to each match; the
+  other, when it shows the same document, keeps its place and shows the highlights.
 
 ### Changed
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
@@ -49,6 +57,11 @@ its release notes on GitHub.
   filled exactly, by the same sweep as shapes with holes.
 - PDF: Chinese, Japanese and Korean text set in a fixed-pitch font (common in bank statements)
   showed as "????". It is now drawn with the system's CJK font, as other CJK text is.
+- Two columns: the find bar's matches in the active document were also highlighted in the other
+  column's document, on the same lines and columns.
+- Two columns showing one PDF at pages far apart: each column let go of the pages the other was
+  reading, so one of them could stay at "Reading the page..." or read its pages over and over. A
+  page is now kept while either column is near it.
 
 ## [1.2.0] - 2026-11-14
 

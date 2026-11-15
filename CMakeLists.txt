@@ -362,6 +362,7 @@ add_library(enp_model STATIC
     src/model/package/Xml.cpp
     src/model/viewer/ImagePack.cpp
     src/model/viewer/Viewer.cpp
+    src/model/viewer/PageSearch.cpp
     src/model/viewer/NumberFormat.cpp
     src/model/viewer/Ooxml.cpp
     src/model/viewer/Chart.cpp

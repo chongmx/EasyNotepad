@@ -1649,6 +1649,95 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // Search in a PDF, in two columns showing it: the find bar searches every page; the
+        // column with the keyboard goes to each match, the other one stays where it is (with the
+        // same highlights), and takes over when the keyboard moves to it, without a jump. Another
+        // document beside it has no matches; the search ends with the find bar.
+        {
+            h.setContext("search in a PDF in two columns");
+            auto fail = [&checksFailed](const char* what) {
+                std::printf("  FAILED PDF search: %s\n", what);
+                ++checksFailed;
+            };
+            auto settleAll = [&h]() {
+                h.settle();
+                h.settleReading();
+                h.settle();
+            };
+            h.files().memory["/enp-ui-viewer/search.pdf"] = viewertest::manyPagesPdf(40, 16); // "Page 1" ... "Page 40"
+            h.vm().openFile("/enp-ui-viewer/search.pdf");
+            model::Document* doc = h.vm().activeDocument();
+            settleAll();
+            h.vm().splitView.set(true); // one document: both columns show it
+            settleAll();
+            const view::EditorView* second = h.view().secondColumn();
+            if (!doc || !second) {
+                fail("the PDF is not shown in two columns");
+            } else {
+                const int id = doc->id;
+                const view::ViewerView& left = h.view().editor().viewerView();
+                const view::ViewerView& right = second->viewerView();
+                h.vm().execute(viewmodel::CommandId::Find);
+                h.vm().findQuery.set("page 3"); // pages 3 and 30 to 39
+                settleAll();
+                viewmodel::ViewerViewModel::SearchStatus status = h.vm().viewer().searchStatus(id);
+                if (!status.active || status.searching || status.total != 11)
+                    std::printf("  FAILED PDF search: %d matches (%s), not 11\n", status.total, status.searching ? "searching" : "done"),
+                        ++checksFailed;
+                if (view::UiAutomation::instance().find("viewer:find") == nullptr)
+                    fail("no Find button on the viewer's toolbar");
+                h.vm().findNext(+1);
+                settleAll();
+                int current = -1;
+                if (left.currentPage(id) != 2 || left.searchHits(id, 2, &current) != 1 || current != 0)
+                    std::printf("  FAILED PDF search: the first match is not shown (page %d, current %d)\n", left.currentPage(id) + 1, current),
+                        ++checksFailed;
+                if (right.currentPage(id) != 0)
+                    fail("the column without the keyboard moved to the match");
+                h.vm().findNext(+1); // "Page 30", far down
+                settleAll();
+                if (left.currentPage(id) != 29 || left.searchHits(id, 29, &current) != 1 || current != 0) {
+                    const viewmodel::ViewerViewModel::Entry* m = h.vm().viewer().find(id);
+                    std::printf("  FAILED PDF search: the next match is not shown (page %d, %zu hits, current %d; search on page %d #%d, loaded %d)\n",
+                                left.currentPage(id) + 1, left.searchHits(id, 29), current, m ? m->search.page + 1 : 0, m ? m->search.ordinal : -1,
+                                m && m->doc.pages.pages.size() > 29 ? int(m->doc.pages.pages[29].loaded) : -1);
+                    ++checksFailed;
+                }
+                if (right.currentPage(id) != 0)
+                    fail("the column without the keyboard moved to the next match");
+                // The keyboard moves to the other column: it stays where it is, then goes on from the
+                // current match; the first column stays.
+                h.vm().execute(viewmodel::CommandId::FocusOtherColumn);
+                settleAll();
+                if (right.currentPage(id) != 0 || left.currentPage(id) != 29)
+                    fail("a column moved when the keyboard went to the other one");
+                h.vm().findNext(+1); // "Page 31"
+                settleAll();
+                if (right.currentPage(id) != 30 || left.currentPage(id) != 29)
+                    std::printf("  FAILED PDF search: after the move, the columns show pages %d and %d (not 30 and 31)\n",
+                                left.currentPage(id) + 1, right.currentPage(id) + 1),
+                        ++checksFailed;
+                // The column without the keyboard has the matches of the pages it shows drawn too.
+                if (left.searchHits(id, 29) != 1)
+                    fail("the other column showing the document has no highlight");
+                // The find bar closed: the search ends, its highlights go.
+                h.vm().findVisible.set(false);
+                settleAll();
+                const viewmodel::ViewerViewModel::Entry* entry = h.vm().viewer().find(id);
+                if (!entry || entry->search.active || !entry->search.texts.empty() || right.searchHits(id, 30) != 0)
+                    fail("the search did not end with the find bar");
+                h.vm().execute(viewmodel::CommandId::FocusOtherColumn);
+                settleAll();
+            }
+            h.vm().findQuery.set("");
+            h.vm().splitView.set(false);
+            h.settle();
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settleReading();
+            h.settle();
+        }
+
         // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,
         // sheets and zoom gone through; everything it read and every picture it decoded must go
         // when it is opened as text, and when it closes.

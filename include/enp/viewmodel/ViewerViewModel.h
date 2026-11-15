@@ -10,6 +10,12 @@
 // cancelled, a late result is dropped by the service), with a trim request. Callbacks hold a
 // weak_ptr to this and the entry's generation: a result for a closed or reopened document is
 // dropped. The `viewer` scope counts it all.
+//
+// Search (PDF, slides): one document at a time, the active one while the find bar is open
+// (search()). Every page's text is read once (the pages not read yet through the reader service,
+// one at a time, after the pages being shown) and kept while the search lasts: a new query is
+// counted again at once. The texts go when the search ends, moves to another document, or the
+// document closes.
 #pragma once
 
 #include "enp/interfaces/IDocumentReaderService.h"
@@ -60,10 +66,44 @@ public:
         std::map<std::string, Cached> pictureCache;
         std::size_t pictureCacheBytes = 0;
         std::uint64_t pictureClock = 0;
-        // The page being read last time, and which way the reader goes (+1 down, -1 up): the next
-        // page that way is read ahead.
-        std::size_t lastCurrent = 0;
-        int direction = 1;
+        // Where each view showing it is (two columns can show one document at different pages):
+        // the pages it shows, the one being read, and which way the reader goes (+1 down, -1 up:
+        // the next page that way is read ahead). A page is kept while it is near any of them.
+        struct Shown {
+            std::size_t first = 0, last = 0, from = 0, to = 0; // shown, and read (with those around)
+            std::size_t current = 0;
+            int direction = 1;
+        };
+        std::map<const void*, Shown> shown;
+
+        // The text search in its pages (search()).
+        struct Search {
+            bool active = false;
+            std::string query;
+            bool matchCase = false;
+            std::vector<std::string> texts; // by page: its text (model::viewer::pageText), once read
+            std::vector<int> counts;        // by page: its matches; -1 while its text is not read
+            int total = 0;                  // on the pages searched so far
+            std::size_t searched = 0;       // pages whose text is read
+            interfaces::IDocumentReaderService::Ticket ticket = 0; // the text being read
+            std::size_t from = 0;           // the page the reader is on: texts are read from there on
+            // The current match: the `ordinal`-th on page `page`; page -1: none chosen yet.
+            int page = -1;
+            int ordinal = 0;
+            int step = 0; // a move to the next (+1) or previous (-1) match waiting for pages not searched yet
+            int first = -1; // the page whose text is read first (the move waits for it), -1 none
+            std::uint64_t reveal = 0; // changes each time the current match is to be brought into view
+        };
+        Search search;
+    };
+
+    // The search, as the find bar shows it.
+    struct SearchStatus {
+        bool active = false;
+        int total = 0;       // matches found so far
+        int current = -1;    // the current one among them (0-based), -1 none
+        bool searching = false; // pages still to search (or the document still being read)
+        bool supported = true;  // false: a document whose text is not searched (Word, Excel)
     };
 
     // Shrunk pictures kept per document (Entry::pictureCache).
@@ -94,7 +134,10 @@ public:
     // each side are read (content, then pictures), nearest `current` first; reads further away are
     // cancelled, and pages more than kPagesKept away dropped (their content and images). `request`
     // false (the content flying past): nothing new is asked for, only what is not wanted cancelled.
-    void showPages(int id, std::size_t first, std::size_t last, std::size_t current, bool request = true);
+    // `view`: which view shows them (each keeps its own place; a page near any of them is kept).
+    void showPages(int id, std::size_t first, std::size_t last, std::size_t current, bool request = true, const void* view = nullptr);
+    // The view no longer shows document `id`: the pages near it are not kept for it any more.
+    void hidePages(int id, const void* view);
     // The picture `key` of a PDF page is still being read (or not asked for yet): the view draws a
     // placeholder and does not take its bytes.
     bool pictureWaiting(int id, const std::string& key) const;
@@ -108,6 +151,17 @@ public:
     // An image's encoded bytes, moved out (the view decodes them once; a page read again puts them
     // back). Empty when there are none.
     std::string takeMedia(int id, const std::string& key);
+    // Searches document `id` (PDF, slides) for `query`; the search of any other document ends. id
+    // -1 or an empty query: no search. A document not read yet is searched once it is.
+    void search(int id, const std::string& query, bool matchCase);
+    // The page the reader is on in document `id` (the view with the keyboard): a search reads from
+    // there on, and a move without a current match starts there.
+    void searchFrom(int id, std::size_t page);
+    // The next (+1) or previous (-1) match becomes the current one, wrapping round; when pages on
+    // the way are not searched yet, once they are. False when there is none (all searched).
+    bool searchNext(int id, int direction);
+    SearchStatus searchStatus(int id) const;
+
     // Everything about document `id` goes: its model, its images' bytes, its reads in flight.
     void release(int id);
     void releaseAll();
@@ -121,11 +175,20 @@ private:
     void readPictures(Entry& e, std::size_t index);
     static void cachePicture(Entry& e, const std::string& key, const std::string& bytes);
     void dropPage(Entry& e, std::size_t index);
+    void applySearch(Entry& e);  // starts, changes or ends e's search to match the one wanted
+    void stopSearch(Entry& e);   // its texts go, its read is cancelled
+    void continueSearch(Entry& e); // texts of loaded pages taken, the next page's asked for
+    void pageText(Entry& e, std::size_t index, std::string text); // a page's text is here
+    bool stepSearch(Entry& e, int direction);
 
     interfaces::IDocumentReaderService* reader_;
     std::function<void()> requestTrim_;
     std::map<int, Entry> entries_;
     std::uint64_t nextGeneration_ = 1;
+    // The search wanted (search()): document id (-1 none), query and case.
+    int searchId_ = -1;
+    std::string searchQuery_;
+    bool searchCase_ = false;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true); // callbacks hold a weak_ptr
 };
 
