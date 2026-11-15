@@ -38,7 +38,9 @@ What LibreOffice's sample documents still report as not shown: Word charts 2 fil
 charts or drawings 8 files (of 75; group shapes and chartex charts), PowerPoint SmartArt laid out
 only as text 38 files (they carry no drawing, only data), videos and sounds 7, PDF annotations 4.
 
-Not yet: encrypted PDFs, ZIP64, the rendering gaps below, the workspaces themselves (25.0).
+Not yet: ZIP64, the rendering gaps below, the workspaces themselves (25.0). Encrypted PDFs open
+(the standard security handler: RC4, AES-128, AES-256; a password field when one is needed);
+certificate-encrypted ones do not.
 
 ## Rendering gaps against Microsoft Office and LibreOffice
 
@@ -148,7 +150,7 @@ Done on `feature/word-rendering`:
 | B | JPEG 2000, JBIG2 and CCITT images (scanned documents) are not decoded | decoders (OpenJPEG and jbig2dec are the usual ones; new dependencies) |
 | B | Annotations and form fields (their appearance streams) are not drawn | draw `/AP` normal appearances as forms |
 | C | Mesh shadings (types 4-7), tiling patterns, blend modes, transparency groups and soft masks on content | per item |
-| C | Vertical writing (`Identity-V`), Type 3 fonts as their glyph procedures, encrypted files | per item |
+| C | Vertical writing (`Identity-V`), Type 3 fonts as their glyph procedures, files encrypted with certificates (public-key security) | per item |
 | C | Pictures are kept at 3 pixels per point of the size the page shows them (216 dpi at 100 %): sharp up to about twice the size on a high-density screen, soft beyond | read a page's pictures again at the zoom shown once it settles (levels of detail) |
 
 Done (2026-11-13, an image-heavy arXiv paper, 33 pages, 22.6 MB, against pdfium):

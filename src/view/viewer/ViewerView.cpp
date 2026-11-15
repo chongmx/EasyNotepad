@@ -240,7 +240,10 @@ void ViewerView::render(model::Document& doc, ImVec2 size)
     }
     const mv::ViewerDocument& d = model->doc;
     if (model->state == viewmodel::ViewerViewModel::State::Failed) {
-        unreadable(doc, d.format, d.error, size);
+        if (d.needsPassword)
+            passwordPrompt(doc, *model, size);
+        else
+            unreadable(doc, d.format, d.error, size);
         ImGui::PopFont();
         return;
     }
@@ -439,6 +442,75 @@ void ViewerView::unreadable(model::Document& doc, const std::string& format, con
     ImGui::Text("%s cannot be shown", doc.title.c_str());
     ImGui::TextDisabled("%s: %s.", format.empty() ? doc.format.c_str() : format.c_str(), error.c_str());
     ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    const int index = vm_.documentIndexById(doc.id);
+    if (ImGui::Button(ICON_FA_FILE_LINES "  Open as text anyway"))
+        vm_.openAsText(index);
+    registerLastItem("open-as-text", "button", "Open as text anyway", [this, index]() { vm_.openAsText(index); });
+    ImGui::EndGroup();
+}
+
+void ViewerView::forgetPassword()
+{
+    volatile char* p = password_; // not optimised away: the buffer stays alive
+    for (std::size_t i = 0; i < sizeof(password_); ++i)
+        p[i] = 0;
+}
+
+void ViewerView::passwordPrompt(model::Document& doc, const viewmodel::ViewerViewModel::Entry& model, ImVec2 size)
+{
+    if (passwordDoc_ != doc.id) { // another document's prompt: nothing typed carries over
+        forgetPassword();
+        passwordDoc_ = doc.id;
+        focusPassword_ = true;
+    }
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float pad = 24.0f * s_;
+    const float column = std::max(120.0f * s_, std::min(size.x - pad * 2.0f, 420.0f * s_));
+    ImGui::SetCursorPos(ImVec2(std::max(pad, (size.x - column) * 0.5f), ImGui::GetCursorPosY() + std::max(pad, size.y * 0.25f)));
+    ImGui::BeginGroup();
+    ImGui::PushFont(nullptr, ImGui::GetFontSize() * 2.0f);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconOrange), "%s", ICON_FA_LOCK);
+    ImGui::PopFont();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + column);
+    ImGui::Text("%s is protected by a password", doc.title.c_str());
+    ImGui::TextDisabled("Type its password to open it.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    const int id = doc.id;
+    auto submit = [this, id]() {
+        if (password_[0] == '\0')
+            return;
+        vm_.viewer().unlock(id, std::string(password_));
+        forgetPassword();
+        focusPassword_ = true; // back in the field if it is refused
+    };
+    if (focusPassword_) {
+        ImGui::SetKeyboardFocusHere();
+        focusPassword_ = false;
+    }
+    const char* openLabel = ICON_FA_LOCK_OPEN "  Open";
+    const float button = ImGui::CalcTextSize(openLabel).x + style.FramePadding.x * 2.0f;
+    ImGui::SetNextItemWidth(std::max(80.0f * s_, column - button - style.ItemSpacing.x));
+    const bool entered = ImGui::InputTextWithHint("##viewerPassword", "Password", password_, sizeof(password_),
+                                                  ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+    registerLastItem("viewer:password", "textbox", "Password", [this]() { focusPassword_ = true; });
+    ImGui::SameLine();
+    const bool typed = password_[0] != '\0';
+    ImGui::BeginDisabled(!typed);
+    const bool clicked = ImGui::Button(openLabel);
+    ImGui::EndDisabled();
+    registerLastItem("viewer:unlock", "button", "Open", submit, typed);
+    if (entered || clicked) {
+        submit();
+        ImGui::ClearActiveID(); // the field lets go of its copy of the text
+    }
+    if (model.passwordRefused) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + column);
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette_.iconOrange), "%s  That password does not open it.",
+                           ICON_FA_TRIANGLE_EXCLAMATION);
+        ImGui::PopTextWrapPos();
+    }
     ImGui::Spacing();
     const int index = vm_.documentIndexById(doc.id);
     if (ImGui::Button(ICON_FA_FILE_LINES "  Open as text anyway"))

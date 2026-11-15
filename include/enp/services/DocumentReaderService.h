@@ -26,7 +26,7 @@ public:
     explicit DocumentReaderService(interfaces::IFileService* files);
     ~DocumentReaderService() override;
 
-    Ticket read(const std::string& path, DocumentDone done) override;
+    Ticket read(const std::string& path, std::string password, DocumentDone done) override;
     Ticket readPage(std::shared_ptr<model::viewer::PageSource> source, std::size_t index, PageDone done) override;
     Ticket readImage(std::shared_ptr<model::viewer::PageSource> source, std::size_t page, std::string key, int maxSide,
                      ImageDone done) override;

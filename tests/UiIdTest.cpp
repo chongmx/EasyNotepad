@@ -1453,6 +1453,73 @@ int main(int argc, char** argv)
             h.settleReading();
         }
 
+        // A PDF protected by a password: the viewer asks for it (the field has the keyboard), says
+        // when one does not open it, and shows the pages once the right one is typed.
+        {
+            h.setContext("a PDF protected by a password");
+            const ImVec2 away(-100.0f, -100.0f);
+            auto fail = [&checksFailed](const char* what) {
+                std::printf("  FAILED password: %s\n", what);
+                ++checksFailed;
+            };
+            auto type = [&h, away](const char* text) {
+                ImGui::GetIO().AddInputCharactersUTF8(text);
+                h.frame(away);
+            };
+            auto enter = [&h, away]() {
+                ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, true);
+                h.frame(away);
+                ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, false);
+                h.frame(away);
+            };
+            auto element = [](const char* id) { return view::UiAutomation::instance().find(id); };
+            const std::optional<std::string> locked = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/viewer/aes-128.pdf");
+            h.files().memory["/enp-ui-viewer/locked.pdf"] = locked.value_or(std::string());
+            h.vm().openFile("/enp-ui-viewer/locked.pdf");
+            model::Document* doc = h.vm().activeDocument();
+            h.settleReading();
+            h.settle();
+            const viewmodel::ViewerViewModel::Entry* entry = doc ? h.vm().viewer().find(doc->id) : nullptr;
+            if (!doc || !entry || !entry->doc.needsPassword || !element("viewer:password")) {
+                fail("no password field for the locked PDF");
+            } else {
+                h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+                const view::UiElement* unlock = element("viewer:unlock");
+                if (!unlock || unlock->enabled)
+                    fail("Open can be pressed before anything is typed");
+                type("wrong");
+                if (!element("viewer:unlock") || !element("viewer:unlock")->enabled)
+                    fail("the typed password did not reach the field (it should have the keyboard)");
+                enter();
+                h.settleReading();
+                h.settle();
+                entry = h.vm().viewer().find(doc->id);
+                if (!entry || !entry->passwordRefused || !element("viewer:password"))
+                    fail("a wrong password is not said to be wrong");
+                if (element("viewer:unlock") && element("viewer:unlock")->enabled)
+                    fail("the refused password stayed in the field");
+                type("user"); // in the field again, at once
+                if (const view::UiElement* open = element("viewer:unlock"); open && open->enabled && open->activate)
+                    open->activate();
+                else
+                    fail("Open cannot be pressed with a password typed");
+                h.settleReading();
+                h.settle();
+                h.settleReading();
+                h.settle();
+                entry = h.vm().viewer().find(doc->id);
+                if (!entry || entry->state != viewmodel::ViewerViewModel::State::Ready || entry->doc.pages.pages.empty() ||
+                    !entry->doc.pages.pages[0].loaded || !viewertest::runWith(entry->doc.pages.pages[0], "Locked text"))
+                    fail("the right password did not open the PDF");
+                if (element("viewer:password"))
+                    fail("the password field stayed after the PDF opened");
+                h.sweep(0.0f, 0.0f, kWidth, kHeight, kCoarseStep);
+            }
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settleReading();
+        }
+
         // Documents in two narrow columns: the viewer's toolbar starts below the column's name
         // (it was drawn over it), its controls do not cover each other or the label, and stay
         // inside the column, wrapping to another line when the column is too narrow for them.

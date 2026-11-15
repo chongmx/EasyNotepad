@@ -1,4 +1,4 @@
-// SHA-256 (FIPS 180-4), for the Hash tool and for checking downloads.
+// SHA-256 (FIPS 180-4), for the Hash tool, for checking downloads and for reading encrypted PDFs.
 #pragma once
 
 #include <algorithm>
@@ -15,6 +15,7 @@ class Sha256 {
 public:
     void update(const void* data, size_t size);
     std::string hexDigest(); // 64 lower-case hex digits; the object is finished afterwards
+    std::string digest();    // the 32 bytes themselves; the object is finished afterwards
 
 private:
     void block(const uint8_t* p);

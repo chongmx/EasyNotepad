@@ -6,6 +6,14 @@ its release notes on GitHub.
 
 ## [1.3.0] - unreleased
 
+### Added
+- Encrypted PDFs open. One that only restricts printing or copying opens at once. One with a
+  password shows a field to type it; a wrong one is said to be wrong, and either the user's or the
+  owner's password opens it. Every method of PDF's standard security is read: RC4 (40 to
+  128-bit keys), AES-128 and AES-256 (PDF 1.7 extension level 3, and PDF 2.0). The password is not
+  kept: it is asked again the next time the file opens. Files encrypted for certain people (with
+  their certificates) still cannot be opened, and say so.
+
 ### Changed
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
   settings fold away under Appearance. The dialog keeps its size from tab to tab and fits a phone.

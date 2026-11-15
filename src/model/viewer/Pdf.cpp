@@ -2,9 +2,10 @@
 // interpreted into the shared display list: paths (filled and stroked, flattened), text placed
 // glyph by glyph from the fonts' widths and mapped to Unicode (ToUnicode maps, the standard
 // encodings and their glyph names), images (JPEG as is, raw samples as QOI) and form XObjects.
+// Encrypted files are read once unlocked (PdfCrypt.h): at once when they only restrict printing
+// or copying, else with the password the reader types.
 // Not yet: clipping, shadings and patterns, annotations, Type 3 glyph shapes (their text is
-// shown in our font), embedded font outlines (all text uses our font at the PDF's positions),
-// encrypted files.
+// shown in our font), embedded font outlines (all text uses our font at the PDF's positions).
 #include "enp/model/viewer/ImagePack.h"
 #include "enp/model/viewer/Viewer.h"
 
@@ -1626,7 +1627,7 @@ public:
 } // namespace
 } // namespace pdf
 
-ViewerDocument readPdf(std::string bytes)
+ViewerDocument readPdf(std::string bytes, std::string_view password)
 {
     ViewerDocument doc;
     doc.format = "PDF document";
@@ -1636,8 +1637,15 @@ ViewerDocument readPdf(std::string bytes)
         doc.error = error;
         return doc;
     }
-    if (source->file.encrypted()) {
-        doc.error = "the PDF is encrypted (a password or permissions): encrypted PDFs are not read yet";
+    switch (source->file.unlock(password, &error)) {
+    case pdf::File::Unlock::Opened:
+        break;
+    case pdf::File::Unlock::NeedsPassword:
+        doc.needsPassword = true;
+        doc.error = password.empty() ? "the PDF is protected by a password" : "the password does not open the PDF";
+        return doc;
+    case pdf::File::Unlock::Unsupported:
+        doc.error = error;
         return doc;
     }
     const pdf::Object* root = source->file.resolvedGet(source->file.trailer(), "Root");

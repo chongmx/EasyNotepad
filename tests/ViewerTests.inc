@@ -363,8 +363,86 @@ TEST(viewer_reads_pdf_pages)
     const mv::ViewerDocument locked = mv::readPdf(pdf({"<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>",
                                                        "<< /Filter /Standard /V 1 >>"},
                                                       "/Encrypt 3 0 R "));
-    CHECK(locked.shape == mv::Shape::None && locked.error.find("encrypted") != std::string::npos);
+    CHECK(locked.shape == mv::Shape::None && locked.error.find("encrypted") != std::string::npos && !locked.needsPassword);
     CHECK(mv::readPdf("hello").shape == mv::Shape::None);
+}
+
+TEST(viewer_opens_encrypted_pdfs)
+{
+    using namespace viewertest;
+    // tests/data/viewer/make_encrypted_pdfs.py writes them (a writer apart from this reader): one
+    // page each, "Locked text" (an encrypted content stream) over a box filled through an Indexed
+    // colour space whose lookup is an encrypted string: orange when it is decrypted right.
+    const std::string dir = std::string(ENP_SOURCE_DIR) + "/tests/data/viewer/";
+    auto file = [&](const char* name) {
+        const std::optional<std::string> bytes = os::fs::readFile(dir + name);
+        CHECK(bytes.has_value());
+        return bytes ? *bytes : std::string();
+    };
+    auto shown = [](mv::ViewerDocument& doc, const char* text) {
+        if (doc.shape != mv::Shape::Pages || doc.pages.pages.empty() || !doc.pages.load(0))
+            return false;
+        const mv::Page& page = doc.pages.pages[0];
+        bool orange = false;
+        for (const mv::PathItem& p : page.paths)
+            orange = orange || p.fill == mv::rgba(255, 128, 0);
+        return runWith(page, text) != nullptr && orange;
+    };
+    auto opens = [&](const char* name, const char* password) {
+        mv::ViewerDocument doc = mv::readPdf(file(name), password);
+        return shown(doc, "Locked text");
+    };
+    auto refuses = [&](const char* name, const char* password) {
+        const mv::ViewerDocument doc = mv::readPdf(file(name), password);
+        return doc.shape == mv::Shape::None && doc.needsPassword && doc.error.find("password") != std::string::npos;
+    };
+
+    // No user password (printing and copying restricted): open at once, and with the owner's.
+    CHECK(opens("rc4-40.pdf", ""));
+    CHECK(opens("rc4-40.pdf", "owner"));
+    CHECK(opens("aes-256.pdf", ""));
+    CHECK(opens("aes-256.pdf", "owner"));
+    {
+        mv::ViewerDocument doc = mv::readPdf(file("aes-256.pdf"));
+        CHECK(shown(doc, "Plain part")); // a stream that names the Identity crypt filter: as it is
+    }
+    // A user password: none or a wrong one is asked again (and says which); the user's or the
+    // owner's opens.
+    const char* const locked[][2] = {{"rc4-128.pdf", "caf\xC3\xA9"}, // typed in UTF-8, Latin-1 in the file
+                                     {"aes-128.pdf", "user"},       // object stream, cross-reference stream
+                                     {"aes-256-user.pdf", "p\xC3\xA4ssw\xC3\xB6rd"},
+                                     {"aes-256-r5.pdf", "user"}};
+    for (const auto& [name, user] : locked) {
+        CHECK(refuses(name, ""));
+        CHECK(refuses(name, "wrong"));
+        CHECK(opens(name, user));
+        CHECK(opens(name, "owner"));
+    }
+    CHECK(mv::readPdf(file("aes-128.pdf")).error.find("protected by a password") != std::string::npos);
+    CHECK(mv::readPdf(file("aes-128.pdf"), "wrong").error.find("does not open") != std::string::npos);
+    CHECK(!opens("aes-256-user.pdf", "passwort"));
+    // Through the viewer's entry point, by the file's name.
+    {
+        mv::ViewerDocument doc = mv::readViewerDocument("aes-128.pdf", file("aes-128.pdf"), "user");
+        CHECK(shown(doc, "Locked text"));
+    }
+    // A broken cross-reference table: the objects are found by scanning, and read again once
+    // the key is known.
+    {
+        std::string bytes = file("rc4-128.pdf");
+        const std::size_t at = bytes.rfind("startxref\n");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos)
+            bytes.replace(at + 10, bytes.find('\n', at + 10) - (at + 10), "17");
+        CHECK(refuses("rc4-128.pdf", ""));
+        mv::ViewerDocument doc = mv::readPdf(bytes, "caf\xC3\xA9");
+        CHECK(shown(doc, "Locked text"));
+    }
+    // Encrypted for certain people (certificates): said, not asked for a password.
+    const mv::ViewerDocument pubSec = mv::readPdf(pdf({"<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [] /Count 0 >>",
+                                                       "<< /Filter /Adobe.PubSec /V 4 /R 4 >>"},
+                                                      "/Encrypt 3 0 R "));
+    CHECK(pubSec.shape == mv::Shape::None && !pubSec.needsPassword && pubSec.error.find("certificates") != std::string::npos);
 }
 
 TEST(viewer_reads_pdf_fonts_and_object_streams)
@@ -615,7 +693,7 @@ TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
         std::vector<std::size_t> order;
         {
             std::unique_lock<std::mutex> hold(files.mutex);
-            reader.read("/docs/many.pdf", [](mv::ViewerDocument) {});
+            reader.read("/docs/many.pdf", "", [](mv::ViewerDocument) {});
             std::this_thread::sleep_for(std::chrono::milliseconds(20)); // the worker takes it and waits
             for (std::size_t i = 0; i < 20; ++i)
                 reader.readPage(source, i, [&order, i](mv::Page) { order.push_back(i); });
@@ -626,7 +704,7 @@ TEST(viewer_reads_the_page_in_view_first_and_keeps_nothing_it_cancelled)
         // Cancelled while waiting: forgotten at once, the source it held let go with it.
         {
             std::unique_lock<std::mutex> hold(files.mutex);
-            reader.read("/docs/many.pdf", [](mv::ViewerDocument) {});
+            reader.read("/docs/many.pdf", "", [](mv::ViewerDocument) {});
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             std::vector<interfaces::IDocumentReaderService::Ticket> tickets;
             int delivered = 0;

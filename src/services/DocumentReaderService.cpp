@@ -18,6 +18,7 @@ struct DocumentReaderService::Request {
     enum class Kind { Document, Page, Image } kind = Kind::Page;
     std::string path;                                   // Document
     interfaces::IFileService* files = nullptr;          // Document
+    std::string password;                               // Document: a PDF's, typed by the reader
     std::shared_ptr<model::viewer::PageSource> source;  // Page, Image
     std::size_t page = 0;                               // Page, Image
     std::string key;                                    // Image
@@ -156,7 +157,7 @@ void DocumentReaderService::run(const std::shared_ptr<Shared>& shared, Ticket ti
             if (!bytes)
                 result->error = error.empty() ? "the file cannot be read" : error;
             else
-                *result = model::viewer::readViewerDocument(r.path, std::move(*bytes));
+                *result = model::viewer::readViewerDocument(r.path, std::move(*bytes), r.password);
         }
         // (Moved, not copied: the worker keeps no part of a result the main thread may free first.)
         os::dispatch::postToMain([shared, ticket, result = std::move(result), done = std::move(r.documentDone)]() {
@@ -204,11 +205,12 @@ void DocumentReaderService::run(const std::shared_ptr<Shared>& shared, Ticket ti
     });
 }
 
-DocumentReaderService::Ticket DocumentReaderService::read(const std::string& path, DocumentDone done)
+DocumentReaderService::Ticket DocumentReaderService::read(const std::string& path, std::string password, DocumentDone done)
 {
     Request r;
     r.kind = Request::Kind::Document;
     r.path = path;
+    r.password = std::move(password);
     r.files = files_;
     r.documentDone = std::move(done);
     const Ticket ticket = shared_->add(std::move(r));
