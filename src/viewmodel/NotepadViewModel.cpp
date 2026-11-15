@@ -904,7 +904,9 @@ std::string NotepadViewModel::readWorkspaceFile(const std::string& path) const
     for (const auto& doc : documents_)
         if (doc->kind == model::FileKind::Text && (doc->path.empty() ? doc->title : doc->path) == path)
             return doc->buffer.text();
-    if (!workspaceRoot_.empty() && files_)
+    // A file on disk: in the workspace, or anywhere by its absolute path (a phone's Download folder
+    // opened while the sample workspace is shown). Sample text only for the sample's own files.
+    if (files_ && (!workspaceRoot_.empty() || FileDialogViewModel::isAbsolute(path)))
         return files_->read(absolutePath(path)).value_or(std::string());
     return dummy::fileContent(path);
 }

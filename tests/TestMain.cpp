@@ -933,6 +933,26 @@ TEST(workspace_files_are_parsed)
     CHECK(!model::parseWorkspaceFile("/w/notes.sln", "hello", &error));
 }
 
+TEST(a_file_outside_the_sample_workspace_is_read_from_disk)
+{
+    // The phone's case: the sample workspace is shown (no folder open) and a picture is opened from
+    // the Download folder by its absolute path. Its bytes come from the file, not the sample's text
+    // (the image view was given sample text and said "not an image").
+    services::FileService files;
+    const std::string base = scratchDirectory() + "/enp-test-outside";
+    os::fs::createDirectories(base);
+    const std::string jpeg("\xFF\xD8\xFF\xE0\0\x10JFIF\0\x01\x01\0\0\x48\0\x48\0\0", 20);
+    CHECK(files.write(base + "/photo.jpg", jpeg, nullptr));
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.workspaceRoot().empty());
+    CHECK(vm.readWorkspaceFile(base + "/photo.jpg") == jpeg);
+    vm.openFile(base + "/photo.jpg");
+    CHECK(vm.activeDocument() && vm.activeDocument()->kind == model::FileKind::Image && vm.activeDocument()->format == "JPEG");
+    CHECK(vm.readWorkspaceFile(vm.activeDocument() ? vm.activeDocument()->path : std::string()) == jpeg);
+    CHECK(!vm.readWorkspaceFile("src/main.cpp").empty()); // the sample's own files: their sample text
+    os::fs::deletePath(base);
+}
+
 TEST(open_workspace_file_opens_its_folder)
 {
     services::FileService files;
@@ -2150,6 +2170,27 @@ TEST(file_types_are_detected_before_loading_and_images_decode)
     CHECK(model::detectFileType("pic.svg", "<?xml version=\"1.0\"?><svg></svg>").kind == FileKind::Text); // SVG: XML to edit
     CHECK(model::detectFileType("x.ppm", "P6\n2 2\n255\n").kind == FileKind::Image);
     CHECK(model::detectFileType("empty.txt", "").kind == FileKind::Text);
+    // A magic number of letters only is not believed in text: "BM", "MZ", "ID3", "GIF89a" begin
+    // notes too. Real files of those kinds (NUL bytes in their headers) still are what they say.
+    CHECK(model::detectFileType("cars.txt", "BMW models\nX3, X5\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("noext", "BM is a bitmap's magic number\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("retro.md", "MZ-80 notes: " + std::string(80, 'x') + "\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("tags.txt", "ID3 tags hold an MP3's title\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("gif.txt", "GIF89a is the animated one\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("arch.txt", "!<arch>\nis how a static library starts\n" + std::string(64, 'y')).kind == FileKind::Text);
+    CHECK(model::detectFileType("pic.bmp", std::string("BM\x46\0\0\0\0\0\0\0\x36\0\0\0\x28\0\0\0", 18)).format == "BMP");
+    CHECK(model::detectFileType("anim", std::string("GIF89a\x01\0\x01\0\x80\0\0", 13)).format == "GIF");
+    std::string exe("MZ\x90\0\x03\0\0\0", 8);
+    exe.resize(128, '\0');
+    CHECK(model::detectFileType("tool.exe", exe).kind == FileKind::Binary);
+    CHECK(model::detectFileType("doc.txt", "%PDF-1.7\n1 0 obj\n").format == "PDF document"); // a PDF can be all text
+    // A COFF object has no magic number: found after every format that has one, never in text.
+    std::string coff(64, '\0');
+    coff[0] = '\x64';
+    coff[1] = '\x86'; // x64
+    coff[2] = 1;      // one section
+    CHECK(model::detectFileType("a.obj", coff).format == "COFF object file");
+    CHECK(model::detectFileType("photo.jpg", std::string("\xFF\xD8\xFF\xE0\0\x10JFIF\0\x01\x01\0\0\x48\0\0\0\0", 20)).format == "JPEG");
 
     // Decoders: PNM (stb), QOI and ICO (our own), and a refusal with a reason.
     services::DecodedImage img;

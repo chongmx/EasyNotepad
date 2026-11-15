@@ -25,6 +25,13 @@ its release notes on GitHub.
   Files brings it back. A document that cannot be shown still offers its text.
 
 ### Fixed
+- A picture opened from outside the open folder (on a phone: from the Download folder while the
+  sample workspace is shown) said "cannot be shown: not an image". It was given the sample
+  workspace's text instead of the file. Files by their full path are now always read from disk.
+- File types are recognised more carefully. A text file that starts with the letters of a
+  format's signature ("BMW models", "MZ-80 notes", "ID3 tags") opens as text, not as a
+  picture or a program; a file is taken for a COFF object (no signature of its own) only
+  after every format that has one.
 - Android: the app closed a moment after showing a document with Chinese, Japanese or Korean
   text on phones whose system font for them it cannot read (Android 15 and later, such as
   Samsung's Galaxy S24: a variable font with CFF2 outlines). Every font is now checked before it

@@ -109,6 +109,19 @@ bool looksLikeText(std::string_view bytes)
     return n == 0 || control * 10 < n; // under 10 % control characters
 }
 
+// A magic number of printable letters only ("BM", "MZ", "ID3", "GIF89a", ...) can begin a text
+// file too ("BMW", "MZ-80"): it counts only when the file does not read as text. Real files of
+// those kinds have NUL or control bytes in their first kilobytes (BMP's sizes, GIF's dimensions).
+bool printableMagic(const Magic& m)
+{
+    for (size_t i = 0; i < m.length; ++i) {
+        const unsigned char c = static_cast<unsigned char>(m.bytes[i]);
+        if (c < 0x20 || c >= 0x7F)
+            return false;
+    }
+    return true;
+}
+
 bool isPnm(std::string_view bytes)
 {
     return bytes.size() >= 3 && bytes[0] == 'P' && bytes[1] >= '1' && bytes[1] <= '7' && std::isspace(static_cast<unsigned char>(bytes[2]));
@@ -127,12 +140,20 @@ bool isImageExtension(std::string_view extension)
 FileType detectFileType(std::string_view path, std::string_view bytes)
 {
     FileType type;
-    // Libraries and programs (ELF, PE, COFF objects, ar archives) get a precise name: the editor
-    // shows what they contain.
-    if (bin::recognises(bytes)) {
-        type.kind = FileKind::Binary;
-        type.format = bin::describe(bytes);
-        return type;
+    const bool text = looksLikeText(bytes);
+    // Libraries and programs (ELF, PE, ar archives) get a precise name: the editor shows what they
+    // contain. A COFF object has no magic number (only a plausible header): it is looked for last,
+    // after every format that has one, so a picture is never taken for an object file. All of them
+    // have NUL bytes in their headers: text that starts with "MZ" or "!<arch>" is text.
+    bool coffObject = false;
+    if (!text && bin::recognises(bytes)) {
+        std::string format = bin::describe(bytes);
+        if (format != "COFF object file") {
+            type.kind = FileKind::Binary;
+            type.format = std::move(format);
+            return type;
+        }
+        coffObject = true;
     }
     // Documents the viewer reads: PDF by content, the ZIP-based Office formats by extension too.
     if (std::string format = viewer::viewerFormat(path, bytes); !format.empty()) {
@@ -146,10 +167,17 @@ FileType detectFileType(std::string_view path, std::string_view bytes)
                 continue;
             if (std::strcmp(m.format, "WAV audio") == 0 && bytes.substr(0, 4) != "RIFF")
                 continue;
+            if (text && printableMagic(m) && std::strcmp(m.format, "PDF document") != 0)
+                continue; // "BMW models" is a text file, not a bitmap
             type.kind = m.kind;
             type.format = m.format;
             return type;
         }
+    }
+    if (coffObject) {
+        type.kind = FileKind::Binary;
+        type.format = "COFF object file";
+        return type;
     }
     const std::string ext = extensionOf(path);
     if (isPnm(bytes) && (ext.empty() || isImageExtension(ext) || ext == "txt")) {
@@ -161,7 +189,6 @@ FileType detectFileType(std::string_view path, std::string_view bytes)
         type.format = "SVG"; // XML text: opened to edit (rasterizing SVG is not supported yet)
         return type;
     }
-    const bool text = looksLikeText(bytes);
     if (!text) {
         type.kind = FileKind::Binary;
         for (const Extension& e : kImageExtensions)
