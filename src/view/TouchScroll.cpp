@@ -170,20 +170,6 @@ void scrollTo(ImVec2 to, ImVec2& pending)
     scrollNow(ImGui::GetCurrentWindow(), pending);
 }
 
-bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
-{
-    const float before = zoom;
-    ImVec2 c;
-    if (!takeZoom(zoom, lowest, highest, c, pending))
-        return false;
-    // The point under the fingers stays: its place in the content grows with the zoom.
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    const float k = zoom / before;
-    const ImVec2 at(c.x - window->Pos.x, c.y - window->Pos.y);
-    scrollTo(ImVec2((window->Scroll.x + at.x) * k - at.x, (window->Scroll.y + at.y) * k - at.y), pending);
-    return true;
-}
-
 void update(float uiScale)
 {
     ImGuiContext& g = *GImGui;

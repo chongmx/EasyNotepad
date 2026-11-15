@@ -1517,6 +1517,85 @@ int main(int argc, char** argv)
             h.settleReading();
         }
 
+        // The same pinch on Word (its pages, and reflowed) and Excel, on a desktop and on a phone:
+        // on every frame, in and out, the same point stays under the fingers. Their content does
+        // not grow in proportion to the zoom either (page gaps, row and column headers, text that
+        // wraps anew); scaling the scroll made them jitter.
+        {
+            h.setContext("pinch on Word and Excel");
+            h.files().memory["/enp-ui-viewer/long.docx"] = viewertest::longDocx(160);
+            h.files().memory["/enp-ui-viewer/big.xlsx"] = viewertest::largeXlsx(400, 30);
+            const char* const kinds[] = {"Word's pages", "Word reflowed", "Excel"};
+            for (const ImVec2 display : {ImVec2(kWidth, kHeight), ImVec2(390.0f, 844.0f)}) {
+                ImGui::GetIO().DisplaySize = display;
+                h.settle();
+                for (int kind = 0; kind < 3; ++kind) {
+                    h.vm().openFile(kind < 2 ? "/enp-ui-viewer/long.docx" : "/enp-ui-viewer/big.xlsx");
+                    model::Document* doc = h.vm().activeDocument();
+                    h.settleReading();
+                    h.settle();
+                    if (kind == 1) { // Word: reflowed to the window
+                        if (const view::UiElement* e = view::UiAutomation::instance().find("viewer:word-layout"))
+                            e->activate();
+                        h.settle();
+                    }
+                    ImGuiWindow* w = nullptr;
+                    for (ImGuiWindow* win : GImGui->Windows)
+                        if (win->WasActive && std::strstr(win->Name, kind == 2 ? "##viewerSheet" : "##viewerFlow"))
+                            w = win;
+                    const view::ViewerView& viewer = h.view().editor().viewerView();
+                    if (!doc || !w) {
+                        std::printf("  FAILED pinch: %s is not shown (%.0f wide)\n", kinds[kind], display.x), ++checksFailed;
+                    } else {
+                        ImGui::SetScrollY(w, w->ScrollMax.y * 0.6f);
+                        ImGui::SetScrollX(w, w->ScrollMax.x * 0.3f);
+                        h.settle();
+                        const ImVec2 c(w->InnerRect.GetCenter().x, w->InnerRect.GetCenter().y + w->InnerRect.GetHeight() * 0.1f);
+                        ImVec2 p0;
+                        const int part0 = viewer.zoomPointAt(doc->id, c, p0);
+                        h.setTouch(true);
+                        float worst = 0.0f;
+                        int wrongPart = -2;
+                        std::vector<float> spreads;
+                        for (float d = 40.0f; d <= 160.0f; d += 10.0f) // apart: in
+                            spreads.push_back(d);
+                        for (float d = 160.0f; d >= 12.0f; d -= 8.0f) // together: out, past where it started
+                            spreads.push_back(d);
+                        for (const float d : spreads) {
+                            view::touch::pinch(2, c.x - d * 0.5f, c.y, c.x + d * 0.5f, c.y);
+                            h.frame(ImVec2(-100.0f, -100.0f));
+                            ImVec2 p;
+                            const int part = viewer.zoomPointAt(doc->id, c, p);
+                            // Each way only while the view can scroll to keep it: not when the
+                            // content is narrower than the view (centred, or at its left), nor when
+                            // the scroll stops at an end of its range (zoomed out, near the left).
+                            auto free = [](float scroll, float max) { return max > 1.0f && scroll > 0.5f && scroll < max - 0.5f; };
+                            const bool across = kind != 1 && free(w->Scroll.x, w->ScrollMax.x);
+                            const bool down = free(w->Scroll.y, w->ScrollMax.y);
+                            if (part != part0)
+                                wrongPart = part;
+                            else
+                                worst = std::max(worst, std::max(across ? std::fabs(p.x - p0.x) : 0.0f, down ? std::fabs(p.y - p0.y) : 0.0f));
+                        }
+                        view::touch::pinch(0, 0.0f, 0.0f, 0.0f, 0.0f);
+                        h.setTouch(false);
+                        h.settle();
+                        // (Points, a pixel of rounding at the smallest scale; reflowed text: a share
+                        // of the paragraph's height.)
+                        if (part0 < 0 || wrongPart != -2 || worst > (kind == 1 ? 0.05f : 3.0f))
+                            std::printf("  FAILED pinch on %s (%.0f wide): the point under the fingers moved (part %d -> %d, %.2f)\n",
+                                        kinds[kind], display.x, part0, wrongPart, worst),
+                                ++checksFailed;
+                    }
+                    while (!h.vm().documents().empty())
+                        h.vm().closeDocument(0);
+                    h.settleReading();
+                }
+            }
+            ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.settle();
+        }
+
         // A PDF protected by a password: the viewer asks for it (the field has the keyboard), says
         // when one does not open it, and shows the pages once the right one is typed.
         {

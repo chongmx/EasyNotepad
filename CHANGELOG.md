@@ -37,6 +37,13 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- A pinch (or Ctrl+wheel) on Word, Excel, Markdown and pictures made the content jitter and slide
+  away from the fingers; only PDF and slides zoomed about the point under them. Word and Excel
+  laid out at the old size while scrolling for the new one, and none of them grows in proportion
+  to its zoom (page gaps and headers keep their size; reflowed text wraps anew). Each now finds
+  the point under the fingers in its own terms when the pinch starts (a page and a point on it, a
+  place in the cells, a paragraph and how far into it, a pixel of the picture) and keeps it there
+  at every size.
 - Touch: a finger dragging a slider or a splitter in a view that scrolls the same way scrolled the
   view instead (the blame column's edge in the editor, for one). Sliders, splitters, the minimap
   and the map now keep a finger's drag along the way they move; a drag the other way still

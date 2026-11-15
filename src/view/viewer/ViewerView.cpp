@@ -130,6 +130,37 @@ int ViewerView::pagePointAt(int documentId, ImVec2 at, ImVec2& point) const
     return i;
 }
 
+int ViewerView::zoomPointAt(int documentId, ImVec2 at, ImVec2& point) const
+{
+    const auto it = entries_.find(documentId);
+    const viewmodel::ViewerViewModel::Entry* model = vm_.viewer().find(documentId);
+    if (it == entries_.end() || !model)
+        return -1;
+    if (model->doc.shape == mv::Shape::Pages)
+        return pagePointAt(documentId, at, point);
+    const Entry& e = it->second;
+    const Entry::Drawn& d = e.drawn;
+    const ImVec2 c(d.scroll.x + at.x - d.origin.x, d.scroll.y + at.y - d.origin.y); // in the content
+    if (d.view == 1) { // Word reflowed: the paragraph, and how far into it
+        std::size_t block = 0;
+        e.flow.anchorAt(c.y - d.start.y, block, point.y);
+        point.x = 0.0f;
+        return int(block);
+    }
+    if (d.view == 2 && e.wordScale > 0.0f && !e.wordPages.empty()) { // Word's pages: as wordPages() finds the anchor
+        const mv::FlowDocument::PageSetup& ps = model->doc.flow.page;
+        const float gap = 16.0f * s_, w = ps.width * e.wordScale, h = ps.height * e.wordScale;
+        const int p = std::clamp(int((c.y - gap) / (h + gap)), 0, int(e.wordPages.size()) - 1);
+        point = ImVec2((c.x - std::max(gap, (d.width - w) * 0.5f)) / e.wordScale, (c.y - (gap + float(p) * (h + gap))) / e.wordScale);
+        return p;
+    }
+    if (d.view == 3 && e.columnScale > 0.0f) { // Excel: the point in the cells, in points
+        point = ImVec2((c.x - d.start.x) / e.columnScale, (c.y - d.start.y) / e.columnScale);
+        return 0;
+    }
+    return -1;
+}
+
 std::size_t ViewerView::searchHits(int documentId, std::size_t page, int* current) const
 {
     if (current)
@@ -598,12 +629,43 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         return;
     }
     panel::beginChild("##viewerFlow", size, IM_COL32(128, 128, 128, 70), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
-    touch::zoomView(e.pinch, 0.3f, 5.0f, e.pendingScroll); // a pinch: the text larger or smaller (it reflows)
+    const float pad = 24.0f * s_;
+    // A pinch: the text larger or smaller. It reflows, so its height does not grow in proportion
+    // to the zoom: the place under the fingers is kept by the paragraph it is in and how far into
+    // it, found when the pinch starts (found again each frame, a scroll of whole pixels would creep)
+    // and put back under the fingers once the text is measured at the new size.
+    Entry::ZoomAnchor& anchor = e.zoomAnchor;
+    ImVec2 anchorAt;
+    bool zoomed = false;
+    {
+        float z = e.pinch;
+        ImVec2 centre;
+        if (touch::takeZoom(z, 0.3f, 5.0f, centre, e.pendingScroll)) {
+            const ImVec2 win = ImGui::GetWindowPos();
+            anchorAt = ImVec2(centre.x - win.x, centre.y - win.y);
+            if (!anchor.set) {
+                const float blocksTop = pad + 36.0f * s_ * vm_.zoom.get() * e.pinch; // at the old size
+                std::size_t block = 0;
+                e.flow.anchorAt(ImGui::GetScrollY() + anchorAt.y - blocksTop, block, anchor.y);
+                anchor.page = int(block);
+                anchor.set = true;
+            }
+            e.pinch = z;
+            zoomed = true;
+        }
+    }
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float zoom = vm_.zoom.get() * e.pinch;
-    const float pad = 24.0f * s_, margin = 36.0f * s_ * zoom;
+    const float margin = 36.0f * s_ * zoom;
     const float column = std::min(std::max(1.0f, viewW - pad * 2.0f - margin * 2.0f), 820.0f * s_ * zoom);
     const ImVec2 page(std::max(pad, (viewW - column) * 0.5f - margin), pad);
+    if (zoomed) { // measured at the new size now (renderBlocks below reuses it), the place goes back under the fingers
+        e.flow.measureBlocks(d.flow.blocks, e.generation, column, fonts_, paper, Fonts::kUiSize * 1.08f * zoom, s_, &d.flow.fonts, false);
+        touch::scrollTo(ImVec2(ImGui::GetScrollX(), pad + margin + e.flow.offsetOf(std::size_t(anchor.page), anchor.y) - anchorAt.y),
+                        e.pendingScroll);
+    }
+    if (!touch::pinching())
+        anchor.set = false; // (Ctrl+wheel: found again at the next notch)
     ImGui::SetCursorPos(ImVec2(page.x + margin, page.y + margin));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->ChannelsSplit(2); // the page goes under the text, once its height is known
@@ -618,6 +680,7 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     dl->ChannelsMerge();
     ImGui::Dummy(ImVec2(1.0f, margin + size.y * 0.4f));
     e.scroll = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
+    e.drawn = Entry::Drawn{1, ImGui::GetWindowPos(), e.scroll, ImVec2(0.0f, page.y + margin), 0.0f};
     ImGui::EndChild();
 }
 
@@ -626,6 +689,37 @@ void ViewerView::flow(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
 void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, const Palette& paper)
 {
     const mv::FlowDocument::PageSetup& ps = d.flow.page;
+    panel::beginChild("##viewerFlow", size, IM_COL32(128, 128, 128, 70), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav | ImGuiWindowFlags_HorizontalScrollbar);
+    const float gap = 16.0f * s_;
+    const ImVec2 view = ImGui::GetWindowSize();
+    // A pinch: the pages larger or smaller, about the point under the fingers. The gaps between
+    // pages keep their size (and the text is cut into pages again at each size), so the scroll is
+    // not scaled: the point is found on its page, in points, when the pinch starts, and put back
+    // under the fingers once the pages are laid out at the new size (as PDF pages do).
+    Entry::ZoomAnchor& anchor = e.zoomAnchor;
+    ImVec2 anchorAt;
+    bool zoomed = false;
+    {
+        float z = e.pinch;
+        ImVec2 centre;
+        if (touch::takeZoom(z, 0.3f, 5.0f, centre, e.pendingScroll)) {
+            const ImVec2 win = ImGui::GetWindowPos();
+            anchorAt = ImVec2(centre.x - win.x, centre.y - win.y);
+            if (!anchor.set && e.wordScale > 0.0f && !e.wordPages.empty()) {
+                const float oldW = ps.width * e.wordScale, oldH = ps.height * e.wordScale;
+                const float y = ImGui::GetScrollY() + anchorAt.y;
+                const int p = std::clamp(int((y - gap) / (oldH + gap)), 0, int(e.wordPages.size()) - 1);
+                const float local = y - (gap + float(p) * (oldH + gap));
+                anchor.page = p;
+                anchor.y = std::clamp(local, 0.0f, oldH) / e.wordScale;
+                anchor.beyond = local < 0.0f ? local : std::max(0.0f, local - oldH);
+                anchor.x = (ImGui::GetScrollX() + anchorAt.x - std::max(gap, (view.x - oldW) * 0.5f)) / e.wordScale;
+                anchor.set = true;
+            }
+            e.pinch = z;
+            zoomed = anchor.set;
+        }
+    }
     const float zoom = vm_.zoom.get() * e.pinch;
     const float fontSize = Fonts::kUiSize * 1.08f * zoom;
     ImGui::PushFont(fonts_.ui, fontSize);
@@ -652,11 +746,13 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
     e.wordScale = ppp;
     e.wordGeneration = e.generation;
     const int count = int(e.wordPages.size());
-
-    panel::beginChild("##viewerFlow", size, IM_COL32(128, 128, 128, 70), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav | ImGuiWindowFlags_HorizontalScrollbar);
-    touch::zoomView(e.pinch, 0.3f, 5.0f, e.pendingScroll); // a pinch: the pages larger or smaller
-    const float gap = 16.0f * s_;
-    const ImVec2 view = ImGui::GetWindowSize();
+    if (zoomed && count > 0) { // the point back under the fingers, on its page at the new size
+        const int p = std::min(anchor.page, count - 1);
+        const ImVec2 to(std::max(gap, (view.x - pageW) * 0.5f) + anchor.x * ppp, gap + float(p) * (pageH + gap) + anchor.y * ppp + anchor.beyond);
+        touch::scrollTo(ImVec2(to.x - anchorAt.x, to.y - anchorAt.y), e.pendingScroll);
+    }
+    if (!touch::pinching())
+        anchor.set = false; // (Ctrl+wheel: found again at the next notch)
     const float total = gap + float(count) * (pageH + gap);
     ImGui::Dummy(ImVec2(pageW + gap * 2.0f, total));
     if (e.goToPage >= 0) {
@@ -665,6 +761,7 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
     }
     const ImVec2 win = ImGui::GetWindowPos();
     const float scrollY = ImGui::GetScrollY(), scrollX = ImGui::GetScrollX();
+    e.drawn = Entry::Drawn{2, win, ImVec2(scrollX, scrollY), ImVec2(0.0f, 0.0f), view.x};
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float left = win.x + std::max(gap, (view.x - pageW) * 0.5f) - scrollX;
     // Header and footer: measured once at the text width, drawn on every page.
@@ -989,12 +1086,42 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     ImGui::SetCursorPos(ImVec2(0.0f, top));
     const ImVec2 gridSize(size.x, std::max(1.0f, size.y - (top - origin) - tabsH));
 
+    // The cells on white paper with Excel's grey grid and black automatic text, as Excel shows them.
+    const ImU32 paperInk = IM_COL32(0, 0, 0, 255);
+    panel::beginChild("##viewerSheet", gridSize, IM_COL32(255, 255, 255, 255), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoNav);
+    // A pinch: the cells larger or smaller, about the point under the fingers. The row and column
+    // headers keep their size, so the scroll is not scaled as a whole: the point is found in the
+    // cells, in unzoomed units, when the pinch starts, and put back under the fingers at each size.
+    const float headerH = ImGui::GetFontSize() + 6.0f * s_;
+    const std::uint32_t rows = std::min<std::uint32_t>(1048576, std::max<std::uint32_t>(sh.rowCount + 20, 60));
+    char rowLabel[16];
+    std::snprintf(rowLabel, sizeof(rowLabel), "%u", rows);
+    const float headerW = ImGui::CalcTextSize(rowLabel).x + 14.0f * s_;
+    Entry::ZoomAnchor& anchor = e.zoomAnchor;
+    ImVec2 anchorAt;
+    bool zoomed = false;
+    {
+        float z = e.pinch;
+        ImVec2 centre;
+        if (touch::takeZoom(z, 0.3f, 5.0f, centre, e.pendingScroll)) {
+            const ImVec2 win = ImGui::GetWindowPos();
+            anchorAt = ImVec2(centre.x - win.x, centre.y - win.y);
+            if (!anchor.set) {
+                const float old = 96.0f / 72.0f * s_ * vm_.zoom.get() * e.pinch;
+                anchor.x = (ImGui::GetScrollX() + anchorAt.x - headerW) / old;
+                anchor.y = (ImGui::GetScrollY() + anchorAt.y - headerH) / old;
+                anchor.set = true;
+            }
+            e.pinch = z;
+            zoomed = true;
+        }
+    }
     // Geometry: Excel's column width is in characters of the default font (7 pixels each at 96
     // dpi, plus 5 pixels of padding); row heights are in points.
     const float zoom = vm_.zoom.get() * e.pinch;
     const float pxPerPoint = 96.0f / 72.0f * s_ * zoom;
     const std::uint32_t columns = std::min<std::uint32_t>(16384, std::max<std::uint32_t>(sh.columnCount + 8, 26));
-    const std::uint32_t rows = std::min<std::uint32_t>(1048576, std::max<std::uint32_t>(sh.rowCount + 20, 60));
     if (e.columnSheet != e.sheet || e.columnScale != pxPerPoint || e.columnX.size() != columns + 1) {
         e.columnX.resize(columns + 1);
         e.columnX[0] = 0.0f;
@@ -1025,22 +1152,17 @@ void ViewerView::sheet(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         return y;
     };
     (void)rowHeight;
-    const float headerH = ImGui::GetFontSize() + 6.0f * s_;
-    char rowLabel[16];
-    std::snprintf(rowLabel, sizeof(rowLabel), "%u", rows);
-    const float headerW = ImGui::CalcTextSize(rowLabel).x + 14.0f * s_;
     const float totalW = headerW + e.columnX.back();
     const float totalH = headerH + rowTop(rows);
-
-    // The cells on white paper with Excel's grey grid and black automatic text, as Excel shows them.
-    const ImU32 paperInk = IM_COL32(0, 0, 0, 255);
-    panel::beginChild("##viewerSheet", gridSize, IM_COL32(255, 255, 255, 255), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoNav);
-    touch::zoomView(e.pinch, 0.3f, 5.0f, e.pendingScroll); // a pinch: the cells larger or smaller
+    if (zoomed) // the point back under the fingers (rows and columns grow exactly with the zoom)
+        touch::scrollTo(ImVec2(headerW + anchor.x * pxPerPoint - anchorAt.x, headerH + anchor.y * pxPerPoint - anchorAt.y), e.pendingScroll);
+    if (!touch::pinching())
+        anchor.set = false; // (Ctrl+wheel: found again at the next notch)
     ImGui::Dummy(ImVec2(totalW, totalH));
     const float scrollX = ImGui::GetScrollX(), scrollY = ImGui::GetScrollY();
     e.scroll = ImVec2(scrollX, scrollY);
     const ImVec2 win = ImGui::GetWindowPos();
+    e.drawn = Entry::Drawn{3, win, e.scroll, ImVec2(headerW, headerH), 0.0f};
     const ImVec2 view = ImGui::GetWindowSize();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const std::uint32_t fr = std::min(sh.frozenRows, rows), fc = std::min(sh.frozenColumns, columns);

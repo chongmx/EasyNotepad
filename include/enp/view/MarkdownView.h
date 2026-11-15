@@ -37,10 +37,20 @@ public:
     // block's height and the gap before it (after the block before it in `blocks`) are known; then
     // draws one block where the caller puts it, on page `pageNumber` of `pageCount` (its page-number
     // fields; 0: as saved).
+    // `pages` false: measured as renderBlocks lays them out (reflowed), not as the page view does.
     void measureBlocks(const std::vector<model::markdown::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
-                       const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr);
+                       const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames = nullptr,
+                       bool pages = true);
+    // Measures `text` as render() lays it out, without drawing.
+    void measureText(const std::string& text, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale);
     float blockHeight(std::size_t index) const { return index < heights_.size() ? heights_[index] : 0.0f; }
     float blockGap(std::size_t index) const;
+
+    // Zooming reflowed text keeps the place under the fingers: `y` (from the blocks' top, in the
+    // layout measured last) is that far into block `block` (0..1 of its height; more: in the gap
+    // after it). offsetOf() is where that place is in the layout measured now (at another size).
+    void anchorAt(float y, std::size_t& block, float& share) const;
+    float offsetOf(std::size_t block, float share) const;
     // The height of one of the measured blocks at another width (beside a floating picture).
     // A document table among them: each row's bottom, from the table's top, at `width` (where the
     // page view may break it: Word breaks a table between rows). None for another block.

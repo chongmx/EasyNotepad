@@ -155,10 +155,18 @@ private:
             const MarkdownImage* image = nullptr;
             float zoom = 1.0f; // an image document's pinch zoom, over its fit or its pixel size
             ImVec2 pendingScroll{-1.0f, -1.0f};
+            // The point a pinch zooms about, in the picture's own pixels, kept while the fingers stay down.
+            bool anchorSet = false;
+            ImVec2 anchor{0.0f, 0.0f};
         };
         std::map<std::string, HeldImage> images; // by source as written
-        float zoom = 1.0f; // its pinch zoom, over the editor's (touch::zoomView)
+        float zoom = 1.0f; // its pinch zoom, over the editor's
         ImVec2 pendingScroll{-1.0f, -1.0f};
+        // The place a pinch zooms about, kept while the fingers stay down: the block under them
+        // and how far into it (the text reflows, so its height does not grow with the zoom).
+        bool anchorSet = false;
+        std::size_t anchorBlock = 0;
+        float anchorShare = 0.0f;
     };
     std::map<int, RenderedMarkdown> markdown_; // by document id (open documents only)
     MarkdownImages images_;                     // shared by the documents, destroyed when unused

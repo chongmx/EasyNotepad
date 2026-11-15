@@ -1423,14 +1423,47 @@ void MarkdownView::renderBlocks(const std::vector<md::Block>& blocks, std::uint6
 }
 
 void MarkdownView::measureBlocks(const std::vector<md::Block>& blocks, std::uint64_t generation, float width, const Fonts& fonts,
-                                 const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames)
+                                 const Palette& palette, float fontSize, float uiScale, const std::vector<std::string>* fontNames, bool pages)
 {
     Style st;
     styleFor(st, fonts, palette, fontSize, uiScale);
     st.fontNames = fontNames;
-    st.pages = true;
+    st.pages = pages;
     use(blocks, generation);
     measure(st, std::max(width, 40.0f * uiScale));
+}
+
+void MarkdownView::measureText(const std::string& text, float width, const Fonts& fonts, const Palette& palette, float fontSize, float uiScale)
+{
+    Style st;
+    styleFor(st, fonts, palette, fontSize, uiScale);
+    if (text != text_ || external_) { // as render() does
+        text_ = text;
+        blocks_ = md::parse(text_);
+        external_ = nullptr;
+        math_.clear();
+        width_ = -1.0f;
+    }
+    measure(st, std::max(width, 40.0f * uiScale));
+}
+
+void MarkdownView::anchorAt(float y, std::size_t& block, float& share) const
+{
+    block = 0;
+    share = 0.0f;
+    if (tops_.empty())
+        return;
+    const auto it = std::upper_bound(tops_.begin(), tops_.end(), y);
+    block = it == tops_.begin() ? 0 : std::size_t(it - tops_.begin()) - 1;
+    share = (y - tops_[block]) / std::max(1.0f, heights_[block]);
+}
+
+float MarkdownView::offsetOf(std::size_t block, float share) const
+{
+    if (tops_.empty())
+        return 0.0f;
+    block = std::min(block, tops_.size() - 1);
+    return tops_[block] + share * std::max(1.0f, heights_[block]);
 }
 
 float MarkdownView::blockGap(std::size_t index) const

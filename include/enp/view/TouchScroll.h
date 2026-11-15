@@ -41,18 +41,19 @@ void fingerCancelled();
 void pinch(int fingers, float x0, float y0, float x1, float y1);
 bool pinching();
 
-// For a reader's view (the current window): takes this frame's zoom when it is centred in the
-// window (the pinch between the fingers, or Ctrl+wheel over it on a desktop) and zooms `zoom`
-// (kept within [lowest, highest]) about that point, keeping it where it is: the window's scroll
-// is moved for the new size at once, so this frame's content is drawn from it, and set again next
-// frame if the old content's range cut it short (`pending`). Call each frame inside the window, before the content; returns whether `zoom` changed.
-bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending);
-
-// For a view whose content does not grow in proportion to its zoom (pages with gaps of a fixed
-// size between them, centred when narrower than the view), which keeps the point under the
-// fingers in place itself: this frame's zoom for the current window, as zoomView takes it, but
-// without scrolling. `zoom` is changed within [lowest, highest] and `centre` is where (screen
-// pixels); true when it changed. Last frame's `pending` scroll is set again first, as zoomView does.
+// Zooming a reader's view about the point under the fingers. No view's content grows exactly in
+// proportion to its zoom (page gaps, headers and margins keep their size; reflowed text wraps
+// anew), so scaling the scroll would drift and jitter. Each view instead, inside its window and
+// before laying out its content:
+//   1. takeZoom(): this frame's zoom, when centred in the window (the pinch between the fingers,
+//      or Ctrl+wheel over it on a desktop);
+//   2. when a pinch starts, finds the point under the fingers in its own terms (a page and a
+//      point on it, a cell position before zooming, a paragraph and how far into it) and keeps
+//      it while the fingers stay down (found again each frame from a scroll of whole pixels, it
+//      would creep);
+//   3. lays out at the new zoom and scrollTo() puts that point back under the fingers.
+// takeZoom: `zoom` is changed within [lowest, highest] and `centre` is where (screen pixels);
+// true when it changed. Last frame's `pending` scroll is set again first.
 bool takeZoom(float& zoom, float lowest, float highest, ImVec2& centre, ImVec2& pending);
 // Scrolls the current window to `to` now (this frame's content is drawn from it), and again next
 // frame if the old content's range cut it short (`pending`): after takeZoom, before the content.
