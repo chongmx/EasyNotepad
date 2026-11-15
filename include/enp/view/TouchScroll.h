@@ -10,6 +10,14 @@ namespace enp::view::touch {
 // Once per frame, after ImGui::NewFrame() and before the UI is built.
 void update(float uiScale);
 
+// An item that moves with a drag itself claims the drag along the axes it moves on: a slider or a
+// splitter between columns across (ClaimX), a splitter between rows up and down (ClaimY), a canvas
+// both. A finger that lands on it and drags that way moves the item, never the window under it,
+// even when that window scrolls the same way; a drag the other way still scrolls (a page scrolls
+// up and down over its sliders, as on Android). Call right after the item, every frame.
+enum Claim { ClaimX = 1, ClaimY = 2, ClaimBoth = 3 };
+void claimDrag(int axes);
+
 bool fingerDown();  // the current press is a finger (or the last one, until the next press)
 bool panning();     // that finger is moving content now
 bool moved();       // the current or last press became a pan (so its release is not a tap)

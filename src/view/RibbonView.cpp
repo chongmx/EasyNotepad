@@ -141,7 +141,6 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
              {"Find", {C::Find, C::Replace, C::GoToLine}, {C::FindNext, C::FindPrevious, C::FindInFiles}},
              {"Assist", {C::AskAgent, C::ExplainSelection}, {C::RefactorSelection, C::GenerateTests}},
          }},
-        {"Read", {std::begin(read), std::end(read)}},
         {"Edit",
          {
              {"Lines", {C::DuplicateLine, C::DeleteLine, C::MoveLineUp, C::MoveLineDown}, {C::CopyLineUp, C::SortLines}},
@@ -152,9 +151,17 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
               {C::IntellisenseSettings, C::NavigateBack, C::NavigateForward, C::RebuildSymbolIndex}},
              {"Bookmarks", {C::ToggleBookmark, C::PreviousBookmark, C::NextBookmark}, {C::ClearBookmarks}},
          }},
-        {"Review", {std::begin(review), std::end(review)}},
-        {"Git", {std::begin(git), std::end(git)}},
         {"View", {std::begin(view), std::end(view)}},
+        {"Tools",
+         {
+             {"Terminal", {C::NewTerminal, C::ToggleTerminal, C::PopOutTerminal}, {C::ClearTerminal, C::KillTerminal}},
+             {"Macro", {C::StartRecording, C::StopRecording, C::PlayMacro}, {}},
+             {"Utilities", {C::HashSha256}, {}},
+             {"Application", {C::StartTour, C::Preferences, C::About}, {C::Exit}},
+         }},
+        {"Git", {std::begin(git), std::end(git)}},
+        {"Read", {std::begin(read), std::end(read)}},
+        {"Review", {std::begin(review), std::end(review)}},
         {"Document",
          {
              {"Line Endings", {C::EolCrLf, C::EolLf, C::EolCr}, {}},
@@ -162,13 +169,6 @@ std::vector<RibbonView::Tab> RibbonView::builtInTabs(bool agent) const
              {"Indentation", {C::ToggleSmartIndent, C::IndentWithSpaces, C::IndentWithTabs},
               {C::IndentWidth2, C::IndentWidth4, C::IndentWidth8, C::DetectIndentation, C::ConvertIndentation}},
              {"Language", {C::ChooseLanguage}, {}},
-         }},
-        {"Tools",
-         {
-             {"Terminal", {C::NewTerminal, C::ToggleTerminal, C::PopOutTerminal}, {C::ClearTerminal, C::KillTerminal}},
-             {"Macro", {C::StartRecording, C::StopRecording, C::PlayMacro}, {}},
-             {"Utilities", {C::HashSha256}, {}},
-             {"Application", {C::StartTour, C::Preferences, C::About}, {C::Exit}},
          }},
     };
     static const std::vector<Tab> agentTabs = {

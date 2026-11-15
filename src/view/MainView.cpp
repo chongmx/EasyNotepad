@@ -1836,6 +1836,7 @@ void MainView::verticalSplitter(const char* id, float& value, float direction, f
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float w = kGap * s_;
     ImGui::InvisibleButton(id, ImVec2(w, std::max(1.0f, height)));
+    touch::claimDrag(touch::ClaimX); // a finger resizes the columns
     const bool active = ImGui::IsItemActive();
     if (ImGui::IsItemHovered() || active) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
@@ -2025,6 +2026,7 @@ void MainView::horizontalSplitter(const char* id, float& value, float width, flo
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float h = kGap * s_;
     ImGui::InvisibleButton(id, ImVec2(std::max(1.0f, width), h));
+    touch::claimDrag(touch::ClaimY);
     const bool active = ImGui::IsItemActive();
     if (ImGui::IsItemHovered() || active) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
@@ -3294,6 +3296,7 @@ void MainView::renderPreferencesPopup()
         ImGui::SetNextItemWidth(220.0f * s_);
         if (ImGui::SliderFloat("Editor zoom", &zoom, 50.0f, 300.0f, "%.0f%%"))
             vm_.zoom.set(std::round(zoom / 10.0f) / 10.0f);
+        touch::claimDrag(touch::ClaimX); // a finger drags it sideways; up and down scrolls the page
         heading("ENHANCED UI");
         toggle("Enhanced UI", vm_.enhancedUi);
         ui::itemTooltip("%s", "Hints without a box: glowing text. A glow under the button the pointer is on, as in a game.");
@@ -3586,6 +3589,7 @@ void MainView::renderEnhancedUiSettings()
         ImGui::SetNextItemWidth(220.0f * s_);
         if (ImGui::SliderFloat(label, &value, min, max, format, ImGuiSliderFlags_AlwaysClamp))
             property.set(value / scale);
+        touch::claimDrag(touch::ClaimX);
         ui::itemTooltip("%s", tip);
     };
     slider("Glow intensity", vm_.glowStrength, 100.0f, 0.0f, 200.0f, "%.0f%%", "How strong every glow is: hints, buttons and labels");

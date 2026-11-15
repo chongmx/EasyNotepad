@@ -26,6 +26,7 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "misc/cpp/imgui_stdlib.h"
 
 #include <cctype>
 #include <algorithm>
@@ -172,6 +173,8 @@ public:
     }
     // Following frames come from a finger (ImGui's touch-screen source) instead of a mouse.
     void setTouch(bool touch) { touch_ = touch; }
+    // Drawn after the app each frame (a test's own window, on top); empty: none.
+    void setOverlay(std::function<void()> overlay) { overlay_ = std::move(overlay); }
 
     // One frame with the mouse at `pos`; `button` is the left button state for this frame.
     void frame(ImVec2 pos, bool button = false)
@@ -206,6 +209,8 @@ public:
         if (g.DebugDrawIdConflictsId != 0 && reportedIds_.insert(g.DebugDrawIdConflictsId).second)
             failures_.push_back({"conflicting ID 0x" + hex(g.DebugDrawIdConflictsId), where_, lastPos_});
         view_->render();
+        if (overlay_)
+            overlay_();
         if (g.HoveredId != 0 && frame_.inDragRegion(pos) && reportedIds_.insert(g.HoveredId).second)
             failures_.push_back({"item 0x" + hex(g.HoveredId) + " (window \"" + std::string(g.HoveredWindow ? g.HoveredWindow->Name : "?") + "\") lies inside a title-bar drag region", where_, pos});
         ImGui::Render();
@@ -250,6 +255,7 @@ public:
     }
 
 private:
+    std::function<void()> overlay_;
     // Last "[imgui-error]" line of the debug log, without the prefix.
     static std::string lastError()
     {
@@ -1646,6 +1652,107 @@ int main(int argc, char** argv)
             while (!h.vm().documents().empty())
                 h.vm().closeDocument(0);
             h.settleReading();
+            h.settle();
+        }
+
+        // A finger on items that move with a drag, in a window that scrolls both ways (as the
+        // editor's text does under the blame column's edge): a slider dragged sideways moves, the
+        // window does not; dragged up and down from the slider, the window scrolls (the slider
+        // claims only its own axis); a splitter between rows takes an up-and-down drag; a finger
+        // dragging across text being edited selects it.
+        {
+            h.setContext("touch: items that claim a drag");
+            auto fail = [&checksFailed](const char* what) {
+                std::printf("  FAILED touch claims: %s\n", what);
+                ++checksFailed;
+            };
+            float slider = 0.8f, split = 100.0f;
+            std::string text = "select these words with a finger";
+            ImRect sliderAt, splitAt, textAt;
+            ImVec2 scroll;
+            ImGuiID textId = 0;
+            h.setOverlay([&]() {
+                ImGui::SetNextWindowPos(ImVec2(200.0f, 150.0f));
+                ImGui::SetNextWindowSize(ImVec2(520.0f, 420.0f));
+                ImGui::SetNextWindowFocus();
+                ImGui::Begin("##touchClaims", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+                ImGui::BeginChild("##touchClaimsBody", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+                ImGui::Dummy(ImVec2(2400.0f, 20.0f)); // wider than the window: it scrolls sideways
+                ImGui::SetNextItemWidth(320.0f);
+                ImGui::SliderFloat("##slider", &slider, 0.0f, 1.0f);
+                view::touch::claimDrag(view::touch::ClaimX);
+                sliderAt = GImGui->LastItemData.Rect;
+                ImGui::InvisibleButton("##split", ImVec2(320.0f, 12.0f));
+                view::touch::claimDrag(view::touch::ClaimY);
+                if (ImGui::IsItemActive())
+                    split += ImGui::GetIO().MouseDelta.y;
+                splitAt = GImGui->LastItemData.Rect;
+                ImGui::SetNextItemWidth(320.0f);
+                ImGui::InputText("##text", &text);
+                textAt = GImGui->LastItemData.Rect;
+                textId = GImGui->LastItemData.ID;
+                ImGui::Dummy(ImVec2(20.0f, 2400.0f)); // taller than the window: it scrolls up and down
+                scroll = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
+                ImGui::EndChild();
+                ImGui::End();
+            });
+            const ImVec2 away(-100.0f, -100.0f);
+            h.settle();
+            h.setTouch(true);
+            auto drag = [&h, away](ImVec2 from, ImVec2 to) { // a finger from `from` to `to` in small steps, then lifted
+                h.frame(from, true);
+                for (int i = 1; i <= 12; ++i)
+                    h.frame(ImVec2(from.x + (to.x - from.x) * float(i) / 12.0f, from.y + (to.y - from.y) * float(i) / 12.0f), true);
+                h.frame(to, false);
+                for (int i = 0; i < 90; ++i) // any glide ends
+                    h.frame(away);
+            };
+            // The slider, sideways (leftwards: a pan would show as the window scrolled right): it
+            // moves; the window stays.
+            float before = slider;
+            ImVec2 was = scroll;
+            drag(ImVec2(sliderAt.Min.x + 260.0f, sliderAt.GetCenter().y), ImVec2(sliderAt.Min.x + 60.0f, sliderAt.GetCenter().y + 3.0f));
+            if (!(slider < before - 0.3f))
+                std::printf("  FAILED touch claims: the slider did not follow a finger (%.2f -> %.2f)\n", before, slider), ++checksFailed;
+            if (scroll.x != was.x || scroll.y != was.y)
+                fail("the window scrolled under a slider dragged sideways");
+            // The splitter between rows, up and down: it moves; the window stays.
+            const float splitBefore = split;
+            was = scroll;
+            drag(splitAt.GetCenter(), ImVec2(splitAt.GetCenter().x + 2.0f, splitAt.GetCenter().y + 60.0f));
+            if (!(split > splitBefore + 30.0f))
+                std::printf("  FAILED touch claims: the splitter did not follow a finger (%.0f -> %.0f)\n", splitBefore, split), ++checksFailed;
+            if (scroll.x != was.x || scroll.y != was.y)
+                fail("the window scrolled under a splitter dragged up and down");
+            // Text being edited: a tap puts the caret in it, then a finger across it selects.
+            h.click(ImVec2(textAt.Min.x + 8.0f, textAt.GetCenter().y));
+            h.settle();
+            was = scroll;
+            const ImVec2 from(textAt.Min.x + 6.0f, textAt.GetCenter().y), to(textAt.Min.x + 150.0f, textAt.GetCenter().y);
+            h.frame(from, true);
+            for (int i = 1; i <= 12; ++i)
+                h.frame(ImVec2(from.x + (to.x - from.x) * float(i) / 12.0f, from.y), true);
+            const bool selected = GImGui->InputTextState.ID == textId && GImGui->InputTextState.HasSelection();
+            h.frame(to, false);
+            if (!selected)
+                fail("a finger dragged across text being edited did not select it");
+            if (scroll.x != was.x || scroll.y != was.y)
+                fail("the window scrolled under a finger selecting text");
+            ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape, true);
+            h.frame(away);
+            ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape, false);
+            h.settle();
+            // Up and down from the slider (last: it scrolls the others away): the window scrolls,
+            // the slider keeps its value.
+            before = slider;
+            was = scroll;
+            drag(sliderAt.GetCenter(), ImVec2(sliderAt.GetCenter().x + 2.0f, sliderAt.GetCenter().y - 120.0f));
+            if (!(scroll.y > was.y + 50.0f))
+                fail("an up-and-down drag starting on a slider did not scroll the window");
+            if (slider != before)
+                fail("an up-and-down drag starting on a slider moved it");
+            h.setTouch(false);
+            h.setOverlay(nullptr);
             h.settle();
         }
 

@@ -249,6 +249,10 @@ narrow desktop window and the web behave alike.
   - The content follows the finger and glides on after release; the next touch stops it.
   - A drag that starts on a button scrolls instead of pressing it, while a tap still presses.
   - In the editor a tap places the caret and a drag scrolls (a mouse still selects by dragging).
+  - Sliders and splitters keep their own drag: a finger moves a slider or resizes the panels and
+    columns, even where the content under them scrolls the same way. A drag the other way still
+    scrolls (a settings page scrolls up and down over its sliders). In text being edited, a finger
+    selects.
   - It works on Windows touch screens too.
 - The editor's side bar (layers, minimap) is hidden in the phone layouts, giving the text the
   full width.

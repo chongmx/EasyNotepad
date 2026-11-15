@@ -20,6 +20,15 @@ This is redone only when `BASE` or a patch changes. These files are build-only: 
 | `0001-common-optional-downloader.patch` | Adds the `LLAMA_COMMON_DOWNLOAD` option. When it is off, the argument parser, the model downloader and cpp-httplib are left out. cpp-httplib needs Windows 10, the app downloads models itself, and the Windows build must still start on Windows 7. |
 | `0002-build-info-from-embedder.patch` | ggml and common take the build number and commit from the embedding project. The exported copy has no `.git`, so asking git would report this repository's commit instead. |
 
+## Dear ImGui (`BASE`: v1.93.0-docking-42, `d682dc4`)
+
+No patches: ImGui is built from the submodule as it is. `BASE` only locks the version
+(`cmake/PinnedSource.cmake`): configuring fails when the submodule is at another commit, and
+`.gitmodules` names no branch, so `git submodule update --remote` has nothing to follow. To try
+another version on purpose, configure with `-DENP_ALLOW_UNPINNED=ON`. To upgrade, check out the new
+commit in `3rdparty/imgui`, put its hash in `BASE`, run the tests (the touch tests included), and
+commit both together.
+
 ## Upgrading
 
 1. Check out the new commit in the submodule.

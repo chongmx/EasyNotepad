@@ -120,6 +120,9 @@ if(ENP_PLATFORM STREQUAL "web")
 endif()
 
 # ---- Dear ImGui ---------------------------------------------------------------------------
+# Locked to the commit in patches/imgui/BASE (cmake/PinnedSource.cmake): built as it is, unpatched.
+include(cmake/PinnedSource.cmake)
+enp_pinned_source(imgui SOURCE ${ENP_THIRD_PARTY}/imgui BASE ${CMAKE_CURRENT_SOURCE_DIR}/patches/imgui/BASE)
 set(IMGUI_DIR ${ENP_THIRD_PARTY}/imgui)
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp

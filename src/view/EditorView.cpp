@@ -779,6 +779,7 @@ void EditorView::markdownRuler(ImVec2 winPos, float viewW, float column, float w
     auto end = [&](const char* id, float x, float sign) {
         ImGui::SetCursorScreenPos(ImVec2(x - grip, winPos.y));
         ImGui::InvisibleButton(id, ImVec2(grip * 2.0f, h));
+        touch::claimDrag(touch::ClaimX); // a finger sets the width, the text does not scroll
         if (ImGui::IsItemActivated()) {
             rulerDragStart_ = column;
             rulerDragMouse_ = ImGui::GetIO().MousePos.x;
@@ -1763,6 +1764,7 @@ void EditorView::renderSideBar(const model::Document& doc, ImVec2 size)
     const ImVec2 handle = ImGui::GetCursorScreenPos();
     const float handleW = 5.0f * s_;
     ImGui::InvisibleButton("##sideBarResize", ImVec2(handleW, std::max(1.0f, size.y)));
+    touch::claimDrag(touch::ClaimX);
     if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         parentDl->AddLine(ImVec2(handle.x + handleW * 0.5f, handle.y), ImVec2(handle.x + handleW * 0.5f, handle.y + size.y),
@@ -1919,6 +1921,7 @@ void EditorView::renderMinimap(const model::Document& doc, ImVec2 size)
     const ImVec2 v1(p.x + w - 1.0f, top + float(lastVisibleLine_ + 1) * lineH);
     ImGui::SetCursorScreenPos(p);
     ImGui::InvisibleButton("##minimapArea", ImVec2(w, h));
+    touch::claimDrag(touch::ClaimY); // a finger moves the view along the minimap
     const bool hovered = ImGui::IsItemHovered();
     if (ImGui::IsItemActive()) {
         pendingScrollLine_ = std::clamp(int((ImGui::GetIO().MousePos.y - top) / lineH), 0, std::max(0, lines - 1));
@@ -2244,6 +2247,7 @@ void EditorView::drawBlame(const model::Document& doc, const Metrics& m, int fir
     const ImVec2 cursor = ImGui::GetCursorScreenPos();
     ImGui::SetCursorScreenPos(ImVec2(edge - 3.0f * s_, m.viewMin.y));
     ImGui::InvisibleButton("##blameEdge", ImVec2(6.0f * s_, std::max(1.0f, m.viewMax.y - m.viewMin.y)));
+    touch::claimDrag(touch::ClaimX); // inside the text, which scrolls sideways too: the edge has the drag
     const bool edgeActive = ImGui::IsItemActive();
     const bool edgeHovered = ImGui::IsItemHovered();
     if (edgeHovered || edgeActive)
