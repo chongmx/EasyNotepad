@@ -25,6 +25,12 @@ its release notes on GitHub.
   other, when it shows the same document, keeps its place and shows the highlights.
 
 ### Changed
+- The app has its logo as its icon everywhere, instead of each system's generic one: the Windows
+  executable, its windows and the taskbar; the macOS Dock; Linux windows (X11), and the menu
+  entry and theme icons an installed copy has (a `.desktop` file; Wayland shows its windows with
+  it); Android's launcher (an adaptive icon, round and themed where the launcher asks for them);
+  the web page's tab. All are drawn from the logo by `tools/icons/make_icons.cpp`
+  (`resources/icons`).
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
   settings fold away under Appearance. The dialog keeps its size from tab to tab and fits a phone.
   The tab row scrolls with the mouse wheel or a finger, without arrow buttons; a sideways swipe

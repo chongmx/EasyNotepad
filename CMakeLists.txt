@@ -283,6 +283,13 @@ if(ENP_PLATFORM STREQUAL "android")
 else()
     list(APPEND ENP_OS_SOURCES src/os/common/Download.cpp)
 endif()
+# The app's icon at run time (os::applyAppIcon): the Dock's on macOS; elsewhere it comes with the
+# program (Windows: the .rc's icon; Android: launcher icons; Linux: the .desktop file).
+if(ENP_PLATFORM STREQUAL "macos")
+    list(APPEND ENP_OS_SOURCES src/os/unix/AppIconApple.cpp)
+else()
+    list(APPEND ENP_OS_SOURCES src/os/common/AppIconNone.cpp)
+endif()
 
 add_library(enp_os STATIC ${ENP_OS_SOURCES})
 if(ENP_MEMORY_ACCOUNTING)
@@ -296,7 +303,7 @@ if(ENP_PLATFORM STREQUAL "macos" AND ENP_MEMORY_ACCOUNTING AND ENP_APPLE_LARGE_A
 endif()
 target_include_directories(enp_os PUBLIC include)
 if(ENP_PLATFORM STREQUAL "macos")
-    target_link_libraries(enp_os PRIVATE "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
+    target_link_libraries(enp_os PRIVATE "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation" "-framework AppKit")
 endif()
 if(ENP_PLATFORM STREQUAL "windows")
     target_link_libraries(enp_os PRIVATE comdlg32 shell32 user32 ws2_32 ole32 windowscodecs)
@@ -520,9 +527,11 @@ else()
     add_dependencies(EasyNotepad enp_version)
     target_include_directories(EasyNotepad PRIVATE ${ENP_GENERATED_DIR})
     if(WIN32)
-        # Explorer's Properties > Details: the version, the product and its description.
+        # The icon, and Explorer's Properties > Details: the version, the product and its description.
         enable_language(RC)
+        set(ENP_WINDOWS_ICON ${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/windows/easynotepad.ico)
         configure_file(cmake/EasyNotepad.rc.in ${ENP_GENERATED_DIR}/EasyNotepad.rc @ONLY)
+        set_property(SOURCE ${ENP_GENERATED_DIR}/EasyNotepad.rc APPEND PROPERTY OBJECT_DEPENDS ${ENP_WINDOWS_ICON})
         target_sources(EasyNotepad PRIVATE ${ENP_GENERATED_DIR}/EasyNotepad.rc)
     endif()
 
@@ -540,6 +549,14 @@ else()
             COMMENT "Copying resources")
         install(TARGETS EasyNotepad RUNTIME DESTINATION bin)
         install(DIRECTORY resources/ DESTINATION share/easynotepad/resources)
+        if(ENP_PLATFORM STREQUAL "linux")
+            # The menu entry and the icon desktops show for the app (Wayland: also its windows').
+            install(FILES resources/icons/linux/easynotepad.desktop DESTINATION share/applications)
+            foreach(size 16 24 32 48 64 128 256 512)
+                install(FILES resources/icons/easynotepad-${size}.png DESTINATION share/icons/hicolor/${size}x${size}/apps
+                        RENAME easynotepad.png)
+            endforeach()
+        endif()
     endif()
 
     if(ENP_PLATFORM STREQUAL "windows")
@@ -560,6 +577,7 @@ else()
             "-sEXPORTED_FUNCTIONS=_main,_enp_web_file_dialog_result"
             "-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=$UTF8ToString"
             --preload-file ${CMAKE_CURRENT_SOURCE_DIR}/resources@/assets
+            --exclude-file ${CMAKE_CURRENT_SOURCE_DIR}/resources/icons # the page's favicon is inline (web/shell.html)
             --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
         set_property(TARGET EasyNotepad APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html)
     endif()
