@@ -1572,3 +1572,30 @@ TEST(viewer_fills_outlines_with_holes)
     CHECK(page.paths[3].bands.empty());
     CHECK(std::fabs(area(page.paths[4]) - 150.0f) < 0.5f); // the bow tie's two triangles (50) and the square (100)
 }
+
+// One concave outline (a logo's letter drawn as a path, with a repeated point and a straight run)
+// is filled by the sweep, exactly: ear clipping overfilled such outlines (SIMPLE·AI on an arXiv
+// paper came out as black bars). A convex one keeps no bands.
+TEST(viewer_fills_a_concave_outline_exactly)
+{
+    auto area = [](const mv::PathItem& p) {
+        float a = 0.0f;
+        for (const mv::FillBand& b : p.bands)
+            a += ((b.right0 - b.left0) + (b.right1 - b.left1)) * 0.5f * (b.y1 - b.y0);
+        return a;
+    };
+    mv::Page page;
+    mv::PathItem u; // a U: 10 x 10 with a 6 x 8 notch from the top, the top-right corner twice
+    u.fill = mv::kBlack;
+    u.subpaths = {{{0, 0}, {2, 0}, {2, 8}, {5, 8}, {8, 8}, {8, 0}, {10, 0}, {10, 0}, {10, 10}, {0, 10}}};
+    u.closed = {true};
+    page.add(u);
+    mv::PathItem hexagon; // convex, a straight run along one side
+    hexagon.fill = mv::kBlack;
+    hexagon.subpaths = {{{2, 0}, {6, 0}, {8, 3}, {6, 6}, {4, 6}, {2, 6}, {0, 3}}};
+    hexagon.closed = {true};
+    page.add(hexagon);
+    CHECK(!page.paths[0].bands.empty());
+    CHECK(std::fabs(area(page.paths[0]) - 52.0f) < 0.01f);
+    CHECK(page.paths[1].bands.empty());
+}

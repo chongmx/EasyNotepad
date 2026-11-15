@@ -2109,6 +2109,7 @@ void NotepadViewModel::bindSettings()
     settings_.bind("view.showAgentPanel", showAgentPanel);
     settings_.bind("view.splitView", splitView);
     settings_.bind("explorer.showHiddenFiles", showHiddenFiles);
+    settings_.bind("viewer.showOpenAsText", showOpenAsText);
     settings_.bind("view.showSideBar", showLayersMap);
     settings_.bind("view.sideBar", sideBar);
     settings_.bind("view.detailLevel", detailLevel);

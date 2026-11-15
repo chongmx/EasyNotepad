@@ -1971,7 +1971,16 @@ void MainView::renderEditors(ImVec2 size)
             ImGui::AlignTextToFramePadding();
             ImGui::TextColored(col(focused ? palette_.accent : palette_.textDim), "%s", fileIcon(doc->title));
             ImGui::SameLine(0.0f, 6.0f * s_);
-            ImGui::TextColored(col(focused ? palette_.text : palette_.textDim), "%s%s", doc->title.c_str(), doc->modified ? "  \xe2\x97\x8f" : "");
+            // The name ends before the close button, cut short with "..." in a narrow column; the
+            // modified mark stays after it.
+            const char* const mark = "  \xe2\x97\x8f";
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            const float textY = at.y + ImGui::GetStyle().FramePadding.y;
+            const float end = p.x + w - frameH - 10.0f * s_ - (doc->modified ? ImGui::CalcTextSize(mark).x : 0.0f);
+            const ImU32 color = focused ? palette_.text : palette_.textDim;
+            const float x = fit::text(dl, ImVec2(at.x, textY), end, color, doc->title);
+            if (doc->modified)
+                dl->AddText(ImVec2(x, textY), color, mark);
         }
         ImGui::SetCursorScreenPos(ImVec2(p.x + w - frameH - 6.0f * s_, p.y + (headerH - frameH) * 0.5f));
         bool closing = false;
@@ -3228,30 +3237,57 @@ void MainView::renderPreferencesPopup()
         if (ImGui::Checkbox(label, &value))
             property.set(value);
     };
-    ImGui::TextDisabled("APPEARANCE");
-    toggle("Dark theme", vm_.darkTheme);
-    toggle("Enhanced UI", vm_.enhancedUi);
-    ui::itemTooltip("%s", "Hints without a box: glowing text. A glow under the button the pointer is on, as in a game.");
-    float zoom = vm_.zoom.get() * 100.0f;
-    ImGui::SetNextItemWidth(220.0f * s_);
-    if (ImGui::SliderFloat("Editor zoom", &zoom, 50.0f, 300.0f, "%.0f%%"))
-        vm_.zoom.set(std::round(zoom / 10.0f) / 10.0f);
-    ImGui::Spacing();
-    renderEnhancedUiSettings();
-    ImGui::Spacing();
-    ImGui::TextDisabled("EDITOR");
-    toggle("Line numbers", vm_.showLineNumbers);
-    toggle("Indent guides", vm_.showIndentGuides);
-    toggle("Show whitespace", vm_.showWhitespace);
-    toggle("Word wrap", vm_.wordWrap);
-    toggle("Smart indent", vm_.smartIndent);
-    ImGui::Spacing();
-    ImGui::TextDisabled("EXPLORER");
-    toggle("Show hidden files and folders", vm_.showHiddenFiles);
-    ui::itemTooltip("%s", "Dot files and folders such as .github and .gitignore (and, on Windows, hidden ones). The .git folder never shows.");
-    ImGui::Spacing();
-    ImGui::TextDisabled("INDENTATION");
-    {
+    // Sections as tabs; each tab's page scrolls in a body of a fixed size, so the dialog does not
+    // change size from tab to tab (and fits a phone's screen).
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    const ImVec2 bodySize(std::min(500.0f * s_, work.x - 48.0f * s_), std::min(380.0f * s_, std::max(160.0f * s_, work.y - 220.0f * s_)));
+    const int request = preferencesTabRequest_;
+    preferencesTabRequest_ = -1;
+    static const char* const kTabs[] = {ICON_FA_PALETTE "  Appearance###prefsAppearance", ICON_FA_PEN "  Editor###prefsEditor",
+                                        ICON_FA_FOLDER_OPEN "  Files###prefsFiles", ICON_FA_GAUGE_HIGH "  Performance###prefsPerformance",
+                                        ICON_FA_TABLE_COLUMNS "  Workspace###prefsWorkspace"};
+    static const char* const kTabIds[] = {"preferences-tab:Appearance", "preferences-tab:Editor", "preferences-tab:Files",
+                                          "preferences-tab:Performance", "preferences-tab:Workspace"};
+    static const char* const kTabNames[] = {"Appearance", "Editor", "Files", "Performance", "Workspace"};
+    int tab = -1;
+    if (ImGui::BeginTabBar("##preferencesTabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
+        for (int i = 0; i < 5; ++i) {
+            if (ImGui::BeginTabItem(kTabs[i], nullptr, request == i ? ImGuiTabItemFlags_SetSelected : 0)) {
+                tab = i;
+                ImGui::EndTabItem();
+            }
+            registerLastItem(kTabIds[i], "tab", kTabNames[i], [this, i]() { preferencesTabRequest_ = i; });
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::BeginChild("##preferencesBody", bodySize, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
+    auto heading = [](const char* text) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", text);
+    };
+    switch (tab) {
+    case 0: { // Appearance
+        heading("THEME");
+        toggle("Dark theme", vm_.darkTheme);
+        float zoom = vm_.zoom.get() * 100.0f;
+        ImGui::SetNextItemWidth(220.0f * s_);
+        if (ImGui::SliderFloat("Editor zoom", &zoom, 50.0f, 300.0f, "%.0f%%"))
+            vm_.zoom.set(std::round(zoom / 10.0f) / 10.0f);
+        heading("ENHANCED UI");
+        toggle("Enhanced UI", vm_.enhancedUi);
+        ui::itemTooltip("%s", "Hints without a box: glowing text. A glow under the button the pointer is on, as in a game.");
+        if (ImGui::CollapsingHeader("Glow, light and motion##enhancedUiSettings"))
+            renderEnhancedUiSettings();
+        break;
+    }
+    case 1: { // Editor
+        heading("DISPLAY");
+        toggle("Line numbers", vm_.showLineNumbers);
+        toggle("Indent guides", vm_.showIndentGuides);
+        toggle("Show whitespace", vm_.showWhitespace);
+        toggle("Word wrap", vm_.wordWrap);
+        heading("INDENTATION");
+        toggle("Smart indent", vm_.smartIndent);
         // Default indentation for new and not-yet-indented files (indented files keep theirs).
         const auto& preferred = vm_.preferredIndent();
         const char* const labels[] = {"Language default", "2 spaces", "4 spaces", "Tabs"};
@@ -3266,10 +3302,20 @@ void MainView::renderPreferencesPopup()
             }
         }
         ui::itemTooltip("For new files and files with nothing indented yet; indented files keep their own style");
+        break;
     }
-    ImGui::Spacing();
-    ImGui::TextDisabled("PERFORMANCE");
-    {
+    case 2: { // Files
+        heading("EXPLORER");
+        toggle("Show hidden files and folders", vm_.showHiddenFiles);
+        ui::itemTooltip("%s", "Dot files and folders such as .github and .gitignore (and, on Windows, hidden ones). The .git folder never shows.");
+        heading("DOCUMENTS");
+        toggle("Show \"Open as text\" for Word, Excel, PowerPoint and PDF", vm_.showOpenAsText);
+        ui::itemTooltip("%s", "A button on the document's toolbar that opens its raw contents in the editor. A document that "
+                              "cannot be shown always offers it.");
+        break;
+    }
+    case 3: { // Performance
+        heading("REDRAWING");
         // The app redraws only when something changes; this caps how often it does while it does.
         const int options[] = {15, 30, 60, 0};
         const char* const labels[] = {"15 fps (saves the most power)", "30 fps", "60 fps", "Uncapped (display rate)"};
@@ -3281,22 +3327,29 @@ void MainView::renderPreferencesPopup()
         if (ImGui::Combo("Max redraw rate", &current, labels, 4))
             vm_.maxFramesPerSecond.set(options[current]);
         ui::itemTooltip("While something moves (typing, scrolling, a terminal program). When nothing changes the app does not redraw at all.");
+        toggle("Blinking caret (off: an idle app does not redraw at all)", vm_.blinkCaret);
+        break;
     }
-    toggle("Blinking caret (off: an idle app does not redraw at all)", vm_.blinkCaret);
-    ImGui::Spacing();
-    ImGui::TextDisabled("WORKSPACE");
-    int mode = vm_.workspace.get() == WorkspaceMode::Agent ? 0 : 1;
-    if (ImGui::RadioButton("Agent", mode == 0))
-        vm_.workspace.set(WorkspaceMode::Agent);
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Code", mode == 1))
-        vm_.workspace.set(WorkspaceMode::Code);
-    if (ImGui::Button(ICON_FA_PALETTE "  Syntax colours..."))
-        openSyntaxColors_ = true;
-    ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_SLIDERS "  IntelliSense..."))
-        openIntellisenseSettings_ = true;
-    ui::itemTooltip("Suggestions, the model that writes code from comments (local or online), C/C++ standards and include folders");
+    case 4: { // Workspace
+        heading("MODE");
+        const int mode = vm_.workspace.get() == WorkspaceMode::Agent ? 0 : 1;
+        if (ImGui::RadioButton("Agent", mode == 0))
+            vm_.workspace.set(WorkspaceMode::Agent);
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Code", mode == 1))
+            vm_.workspace.set(WorkspaceMode::Code);
+        heading("MORE SETTINGS");
+        if (ImGui::Button(ICON_FA_PALETTE "  Syntax colours..."))
+            openSyntaxColors_ = true;
+        fit::sameLineIfFitsButton(ICON_FA_SLIDERS "  IntelliSense...");
+        if (ImGui::Button(ICON_FA_SLIDERS "  IntelliSense..."))
+            openIntellisenseSettings_ = true;
+        ui::itemTooltip("Suggestions, the model that writes code from comments (local or online), C/C++ standards and include folders");
+        break;
+    }
+    default: break;
+    }
+    ImGui::EndChild();
     ImGui::Spacing();
     ImGui::TextDisabled(vm_.settingsPath().empty() ? "Settings last for this session." : "Settings are saved automatically.");
     if (ImGui::Button("Close", ImVec2(96.0f * s_, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -3477,8 +3530,7 @@ const char* colorSample(model::Language language)
 
 void MainView::renderEnhancedUiSettings()
 {
-    // The enhanced look's parameters: shown always, usable when it is on.
-    ImGui::TextDisabled("ENHANCED UI");
+    // The enhanced look's parameters (under Preferences > Appearance): shown always, usable when it is on.
     const bool on = vm_.enhancedUi.get();
     ImGui::BeginDisabled(!on);
     // `scale` shows the value as the user reads it (percent, milliseconds).

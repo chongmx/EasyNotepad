@@ -1184,6 +1184,38 @@ int main(int argc, char** argv)
             h.settle();
         }
 
+        // Preferences in tabs: every tab drawn and swept (no ID conflicts), at a desktop size and a
+        // phone's, where the dialog stays on the screen.
+        for (const ImVec2 size : {ImVec2(kWidth, kHeight), ImVec2(390.0f, 844.0f)}) {
+            h.setContext(size.x < 500.0f ? "preferences tabs (phone)" : "preferences tabs");
+            ImGui::GetIO().DisplaySize = size;
+            h.vm().execute(viewmodel::CommandId::Preferences);
+            h.settle();
+            for (const char* tab : {"preferences-tab:Appearance", "preferences-tab:Editor", "preferences-tab:Files",
+                                    "preferences-tab:Performance", "preferences-tab:Workspace"}) {
+                const view::UiElement* e = view::UiAutomation::instance().find(tab);
+                if (!e || !e->activate) {
+                    std::printf("  FAILED preferences: no tab %s\n", tab), ++checksFailed;
+                    continue;
+                }
+                e->activate();
+                h.settle();
+                h.sweep(0.0f, 0.0f, size.x, size.y, kCoarseStep);
+                const ImGuiWindow* w = ImGui::FindWindowByName("Preferences");
+                if (!w || !w->WasActive)
+                    std::printf("  FAILED preferences: closed on %s\n", tab), ++checksFailed;
+                else if (w->Pos.x < -0.5f || w->Pos.y < -0.5f || w->Pos.x + w->Size.x > size.x + 0.5f || w->Pos.y + w->Size.y > size.y + 0.5f)
+                    std::printf("  FAILED preferences: off the %.0f x %.0f screen on %s\n", size.x, size.y, tab), ++checksFailed;
+            }
+            if (const view::UiElement* close = view::UiAutomation::instance().find("dialog:preferences:close"); close && close->activate)
+                close->activate();
+            h.settle();
+            if (ImGui::IsPopupOpen("Preferences", ImGuiPopupFlags_AnyPopupId))
+                std::printf("  FAILED preferences tabs: the dialog did not close\n"), ++checksFailed;
+        }
+        ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+        h.settle();
+
         // A pinch deep in a long PDF zooms about the point under the fingers: on every frame of it,
         // in and out, the same point of the same page stays there (the gaps between pages keep
         // their size, so scaling the scroll drifted by the zoom times the gaps above: a page's
@@ -1248,6 +1280,77 @@ int main(int argc, char** argv)
             while (!h.vm().documents().empty())
                 h.vm().closeDocument(0);
             h.settleReading();
+        }
+
+        // Documents in two narrow columns: the viewer's toolbar starts below the column's name
+        // (it was drawn over it), its controls do not cover each other or the label, and stay
+        // inside the column, wrapping to another line when the column is too narrow for them.
+        {
+            h.setContext("documents in two columns");
+            std::vector<std::string> paths;
+            for (const auto& [name, bytes] : viewertest::sampleDocuments()) {
+                paths.push_back("/enp-ui-viewer/columns-" + name);
+                h.files().memory[paths.back()] = bytes;
+            }
+            for (const std::string& path : paths)
+                h.vm().openFile(path);
+            h.settleReading();
+            h.settle();
+            for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                if (e.id == "open-as-text") // hidden by default (Preferences > Files)
+                    std::printf("  FAILED documents: \"Open as text\" shown though it is off\n"), ++checksFailed;
+            h.vm().showOpenAsText.set(true); // the widest toolbar
+            h.vm().splitView.set(true);
+            for (const float width : {float(kWidth), 900.0f}) {
+                ImGui::GetIO().DisplaySize = ImVec2(width, kHeight);
+                for (const std::string& path : paths) {
+                    h.vm().openFile(path); // into the column with the keyboard
+                    h.settle();
+                    h.settleReading();
+                    h.settle();
+                    const view::UiElement* close[2] = {view::UiAutomation::instance().find("column:0:close"),
+                                                       view::UiAutomation::instance().find("column:1:close")};
+                    if (!close[0] || !close[1]) {
+                        std::printf("  FAILED two columns: no column headers for %s\n", path.c_str()), ++checksFailed;
+                        continue;
+                    }
+                    std::vector<const view::UiElement*> controls[2];
+                    for (const view::UiElement& e : view::UiAutomation::instance().elements())
+                        if (e.id == "open-as-text" || e.id.rfind("viewer:", 0) == 0)
+                            controls[e.min.x > close[0]->max.x ? 1 : 0].push_back(&e);
+                    if (controls[0].empty() && controls[1].empty())
+                        std::printf("  FAILED two columns: no viewer toolbar for %s\n", path.c_str()), ++checksFailed;
+                    for (int c = 0; c < 2; ++c)
+                        for (std::size_t i = 0; i < controls[c].size(); ++i) {
+                            const view::UiElement& e = *controls[c][i];
+                            if (e.min.y < close[c]->max.y - 0.5f)
+                                std::printf("  FAILED two columns (%.0f wide): %s of %s is over the column's name (top %.1f, name to %.1f)\n",
+                                            width, e.id.c_str(), path.c_str(), e.min.y, close[c]->max.y),
+                                    ++checksFailed;
+                            if (e.max.x > close[c]->max.x + 8.0f)
+                                std::printf("  FAILED two columns (%.0f wide): %s of %s runs past the column (%.1f > %.1f)\n", width, e.id.c_str(),
+                                            path.c_str(), e.max.x, close[c]->max.x),
+                                    ++checksFailed;
+                            for (std::size_t j = i + 1; j < controls[c].size(); ++j) {
+                                const view::UiElement& o = *controls[c][j];
+                                const float ox = std::min(e.max.x, o.max.x) - std::max(e.min.x, o.min.x);
+                                const float oy = std::min(e.max.y, o.max.y) - std::max(e.min.y, o.min.y);
+                                if (ox > 1.0f && oy > 1.0f)
+                                    std::printf("  FAILED two columns (%.0f wide): %s and %s of %s cover each other\n", width, e.id.c_str(),
+                                                o.id.c_str(), path.c_str()),
+                                        ++checksFailed;
+                            }
+                        }
+                }
+            }
+            ImGui::GetIO().DisplaySize = ImVec2(kWidth, kHeight);
+            h.vm().showOpenAsText.set(false);
+            h.vm().splitView.set(false);
+            h.settle();
+            while (!h.vm().documents().empty())
+                h.vm().closeDocument(0);
+            h.settleReading();
+            h.settle();
         }
 
         // Word, Excel, PowerPoint and PDF documents (plan 25): each drawn and swept, its pages,

@@ -126,6 +126,9 @@ public:
     // Explorer: dot files and folders (.github, .gitignore) and, on Windows, entries with the
     // hidden attribute. The .git folder itself never shows.
     Property<bool> showHiddenFiles{true};
+    // Word, Excel, PowerPoint and PDF: an "Open as text" button on the viewer's toolbar (off: the
+    // document as drawn only; one that cannot be read still offers its text).
+    Property<bool> showOpenAsText{false};
     Property<bool> wordWrap{false};
     Property<bool> showWhitespace{false};
     Property<bool> showLineNumbers{true};
