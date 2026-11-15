@@ -6,6 +6,16 @@ its release notes on GitHub.
 
 ## [1.3.0] - unreleased
 
+### Added
+- Encrypted PDFs open. One that only restricts printing or copying opens at once. One with a
+  password shows a field to type it; a wrong one is said to be wrong, and either the user's or the
+  owner's password opens it. Every method of PDF's standard security is read: RC4 (40 to
+  128-bit keys), AES-128 and AES-256 (PDF 1.7 extension level 3, and PDF 2.0). The password is not
+  kept: it is asked again the next time the file opens. Files encrypted for certain people (with
+  their certificates) still cannot be opened, and say so.
+- A font for Chinese, Japanese and Korean comes with the app (Noto Sans CJK, the 12,455 letters in
+  common use, 2.5 MB). Documents use it when the system has no such font the app can read.
+
 ### Changed
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
   settings fold away under Appearance. The dialog keeps its size from tab to tab and fits a phone.
@@ -15,6 +25,10 @@ its release notes on GitHub.
   Files brings it back. A document that cannot be shown still offers its text.
 
 ### Fixed
+- Android: the app closed a moment after showing a document with Chinese, Japanese or Korean
+  text on phones whose system font for them it cannot read (Android 15 and later, such as
+  Samsung's Galaxy S24: a variable font with CFF2 outlines). Every font is now checked before it
+  is used, and one that cannot be read is skipped for another; at worst a letter shows as "?".
 - On a phone, a finger that drags a list scrolls it and presses nothing: a touch reaches the app as a
   tap when the finger lifts without moving. Before, a file in the file list opened as soon as the
   finger touched it, so the list could not be dragged. Sliders and splitters still follow a drag.
@@ -26,6 +40,8 @@ its release notes on GitHub.
 - PDF and slides: a filled shape of one concave outline (a logo's letters drawn as paths, such as
   SIMPLE·AI on an arXiv paper) was filled past its edges, as solid bars. Such outlines are now
   filled exactly, by the same sweep as shapes with holes.
+- PDF: Chinese, Japanese and Korean text set in a fixed-pitch font (common in bank statements)
+  showed as "????". It is now drawn with the system's CJK font, as other CJK text is.
 
 ## [1.2.0] - 2026-11-14
 

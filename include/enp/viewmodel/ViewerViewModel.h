@@ -35,6 +35,8 @@ public:
         State state = State::Loading;
         model::viewer::ViewerDocument doc;
         std::uint64_t generation = 0; // changes when the document is read again: the views' caches start over
+        // A PDF protected by a password (doc.needsPassword): the last one typed did not open it.
+        bool passwordRefused = false;
         // Reads in flight: the document's, then its pages' (page index -> ticket).
         interfaces::IDocumentReaderService::Ticket ticket = 0;
         std::map<std::size_t, interfaces::IDocumentReaderService::Ticket> pageTickets;
@@ -79,6 +81,9 @@ public:
 
     // Starts reading the document at `absolutePath` for document `id`, unless it is read or being read.
     void open(int id, const std::string& absolutePath);
+    // Reads document `id` again with `password`: a PDF that needs one (doc.needsPassword). The
+    // password goes with the read; nothing here keeps it.
+    void unlock(int id, std::string password);
     const Entry* find(int id) const;
     // A picture's size: shrunk to this many pixels for each point of the page it fills (a page
     // seen at about twice its size on a high-density screen), and never more than kMaxPictureSide.
@@ -111,6 +116,7 @@ public:
     std::size_t loadingCount() const; // documents, pages and pictures being read
 
 private:
+    void read(Entry& e, std::string password);
     void readPage(Entry& e, std::size_t index);
     void readPictures(Entry& e, std::size_t index);
     static void cachePicture(Entry& e, const std::string& key, const std::string& bytes);

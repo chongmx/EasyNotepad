@@ -351,6 +351,7 @@ add_library(enp_model STATIC
     src/model/Indent.cpp
     src/model/Search.cpp
     src/model/Hash.cpp
+    src/model/Crypto.cpp
     src/model/Json.cpp
     src/model/LogicalMap.cpp
     src/model/Git.cpp
@@ -372,6 +373,7 @@ add_library(enp_model STATIC
     src/model/viewer/Xlsx.cpp
     src/model/viewer/Pptx.cpp
     src/model/viewer/PdfObjects.cpp
+    src/model/viewer/PdfCrypt.cpp
     src/model/viewer/Pdf.cpp
 )
 target_include_directories(enp_model PUBLIC include)

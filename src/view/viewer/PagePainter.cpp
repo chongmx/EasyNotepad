@@ -1,5 +1,6 @@
 #include "enp/view/viewer/PagePainter.h"
 
+#include "enp/model/viewer/Viewer.h" // scriptsIn
 #include "enp/os/Memory.h"
 #include "enp/view/DocumentFonts.h"
 #include "enp/view/MarkdownImages.h"
@@ -24,9 +25,12 @@ std::size_t utf8Length(unsigned char c)
     return c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
 }
 
-ImFont* fontFor(const Fonts& fonts, std::uint8_t flags)
+// The view's font for a run: the code font for a fixed-pitch run, unless it has Chinese, Japanese
+// or Korean letters (a PDF's CJK fonts are often fixed pitch). The system font with those letters
+// is merged into the UI font only (ScriptFonts): the code font would draw them as "?".
+ImFont* fontFor(const Fonts& fonts, std::uint8_t flags, std::string_view text)
 {
-    return (flags & mv::Mono) && fonts.mono ? fonts.mono : fonts.ui;
+    return (flags & mv::Mono) && fonts.mono && !mv::scriptsIn(text) ? fonts.mono : fonts.ui;
 }
 
 // The face a slide's run is drawn in: its typeface with the face's own weight and slant (the
@@ -62,7 +66,7 @@ Ink inkFor(const Fonts& fonts, const mv::TextRun& r)
         if (face.font && DocumentFonts::covers(face.font, r.text.data(), r.text.data() + r.text.size()))
             return Ink{face.font, std::uint8_t(r.flags & ~((face.bold ? mv::Bold : 0) | (face.italic ? mv::Italic : 0))), face.emScale};
     }
-    return Ink{fontFor(fonts, r.flags), r.flags, 1.0f};
+    return Ink{fontFor(fonts, r.flags, r.text), r.flags, 1.0f};
 }
 
 float measure(ImFont* font, float px, const char* b, const char* e)
@@ -476,7 +480,7 @@ void PagePainter::drawGlyphs(ImDrawList* dl, const mv::GlyphRun& g, ImVec2 origi
     const float px = g.size * scale;
     if (px < 1.0f)
         return;
-    ImFont* font = fontFor(fonts, g.flags);
+    ImFont* font = fontFor(fonts, g.flags, g.text);
     const float ascent = font->GetFontBaked(px)->Ascent;
     const ImVec2 runAt(origin.x + g.x * scale, origin.y + g.baseline * scale);
     const int firstVertex = dl->VtxBuffer.Size;

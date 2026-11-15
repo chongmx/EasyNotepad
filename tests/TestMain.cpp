@@ -5,6 +5,7 @@
 #include "enp/model/Git.h"
 #include "enp/model/Document.h"
 #include "enp/model/AgentRoute.h"
+#include "enp/model/Crypto.h"
 #include "enp/model/Hash.h"
 #include "enp/model/Highlighter.h"
 #include "enp/model/Indent.h"
@@ -976,6 +977,54 @@ std::vector<int> fullScan(const model::TextBuffer& b, const model::LanguageSpec&
         model::highlightLine(b.line(l), spec, state, toks);
     }
     return states;
+}
+
+TEST(crypto_test_vectors)
+{
+    // The published vectors: RFC 1321 (MD5), FIPS 180-4 (SHA-384, SHA-512), FIPS 197 appendix C
+    // (AES: one block, so CBC with a zero IV is the block cipher itself), and RC4's usual one.
+    namespace cr = model::crypto;
+    auto hex = [](const std::string& bytes) {
+        static const char kHex[] = "0123456789abcdef";
+        std::string out;
+        for (unsigned char c : bytes) {
+            out += kHex[c >> 4];
+            out += kHex[c & 15];
+        }
+        return out;
+    };
+    auto bytes = [](const std::string& hexText) {
+        std::string out;
+        for (std::size_t i = 0; i + 1 < hexText.size(); i += 2)
+            out += char(std::stoi(hexText.substr(i, 2), nullptr, 16));
+        return out;
+    };
+    CHECK_EQ(hex(cr::md5("")), std::string("d41d8cd98f00b204e9800998ecf8427e"));
+    CHECK_EQ(hex(cr::md5("abc")), std::string("900150983cd24fb0d6963f7d28e17f72"));
+    CHECK_EQ(hex(cr::md5("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+             std::string("57edf4a22be3c955ac49da2e2107b67a"));
+    CHECK_EQ(hex(cr::sha256("abc")), model::sha256Hex("abc"));
+    CHECK_EQ(hex(cr::sha384("abc")),
+             std::string("cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"));
+    CHECK_EQ(hex(cr::sha512("abc")), std::string("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                                                 "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"));
+    CHECK_EQ(hex(cr::sha512("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")),
+             std::string("8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"));
+    CHECK_EQ(hex(cr::rc4("Key", "Plaintext")), std::string("bbf316e8d940af0ad3"));
+    CHECK_EQ(cr::rc4("Key", cr::rc4("Key", "Plaintext")), std::string("Plaintext"));
+    const std::string zero(16, '\0'), plain = bytes("00112233445566778899aabbccddeeff");
+    const std::string keys[3] = {bytes("000102030405060708090a0b0c0d0e0f"), bytes("000102030405060708090a0b0c0d0e0f1011121314151617"),
+                                 bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")};
+    const char* const cipher[3] = {"69c4e0d86a7b0430d8cdb78070b4c55a", "dda97ca4864cdfe06eaf70a0ec0d7191", "8ea2b7ca516745bfeafc49904b496089"};
+    for (int i = 0; i < 3; ++i) {
+        CHECK_EQ(hex(cr::aesCbcEncrypt(keys[i], zero, plain).value_or("")), std::string(cipher[i]));
+        CHECK_EQ(cr::aesCbcDecrypt(keys[i], zero, bytes(cipher[i])).value_or(""), plain);
+    }
+    // CBC chains the blocks: several come back as they went in; wrong sizes give nothing.
+    const std::string longer = plain + "sixteen bytes!!!" + plain;
+    CHECK_EQ(cr::aesCbcDecrypt(keys[2], plain, cr::aesCbcEncrypt(keys[2], plain, longer).value_or("")).value_or(""), longer);
+    CHECK(!cr::aesCbcEncrypt(keys[0], zero, "not a block").has_value());
+    CHECK(!cr::aesCbcDecrypt("short key", zero, plain).has_value());
 }
 
 TEST(sha256_and_macros)

@@ -164,6 +164,9 @@ private:
     void pages(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);
     void loading(model::Document& doc, ImVec2 size);
     void unreadable(model::Document& doc, const std::string& format, const std::string& error, ImVec2 size);
+    // A PDF protected by a password: a field to type it, read again with it on Enter or Open.
+    void passwordPrompt(model::Document& doc, const viewmodel::ViewerViewModel::Entry& model, ImVec2 size);
+    void forgetPassword(); // the typed password's bytes are wiped
 
     viewmodel::NotepadViewModel& vm_;
     const Fonts& fonts_;
@@ -175,6 +178,11 @@ private:
     std::map<int, Entry> entries_; // by document id: documents shown here only
     int shownDoc_ = -1;            // the document the shared windows showed last
     char label_[512] = {};         // scratch for labels drawn this frame (no allocation per frame)
+    // The password being typed for document `passwordDoc_` (one prompt at a time): wiped once
+    // handed to the view-model, and when another document's prompt shows.
+    char password_[128] = {};
+    int passwordDoc_ = -1;
+    bool focusPassword_ = false;
 };
 
 } // namespace enp::view

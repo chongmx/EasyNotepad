@@ -363,12 +363,12 @@ std::uint8_t scriptsOf(ViewerDocument& doc)
 
 } // namespace
 
-ViewerDocument readViewerDocument(std::string_view path, std::string bytes)
+ViewerDocument readViewerDocument(std::string_view path, std::string bytes, std::string_view password)
 {
     const std::string format = viewerFormat(path, bytes);
     ViewerDocument doc;
     if (format == "PDF document")
-        doc = readPdf(std::move(bytes));
+        doc = readPdf(std::move(bytes), password);
     else if (format == "Word document")
         doc = readDocx(std::move(bytes));
     else if (format == "Excel workbook")

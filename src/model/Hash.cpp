@@ -69,7 +69,7 @@ void Sha256::update(const void* data, size_t size)
     buffered_ = size;
 }
 
-std::string Sha256::hexDigest()
+std::string Sha256::digest()
 {
     // Padding: 0x80, zeros, then the length in bits (big-endian) so the total is a multiple of 64.
     const uint64_t bits = length_ * 8;
@@ -81,11 +81,23 @@ std::string Sha256::hexDigest()
     for (int i = 0; i < 8; ++i)
         len[i] = uint8_t(bits >> ((7 - i) * 8));
     update(len, 8);
+    std::string out;
+    out.reserve(32);
+    for (uint32_t v : h_)
+        for (int i = 3; i >= 0; --i)
+            out += char(uint8_t(v >> (i * 8)));
+    return out;
+}
+
+std::string Sha256::hexDigest()
+{
+    static const char kHex[] = "0123456789abcdef";
+    const std::string bytes = digest();
     std::string hex;
-    char buf[9];
-    for (uint32_t v : h_) {
-        std::snprintf(buf, sizeof(buf), "%08x", unsigned(v));
-        hex += buf;
+    hex.reserve(64);
+    for (unsigned char c : bytes) {
+        hex += kHex[c >> 4];
+        hex += kHex[c & 15];
     }
     return hex;
 }

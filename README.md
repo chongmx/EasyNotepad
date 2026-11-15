@@ -17,6 +17,7 @@ collaborator**. C++17 with Dear ImGui; one code base for Windows, Linux, macOS, 
   keys, IntelliSense, Git, and an integrated terminal running your real shell.
 - **Office documents and PDF**: Word, Excel, PowerPoint and PDF files open read-only, laid out as
   their authors see them, with images decoded by the platform's native decoder where available.
+  Encrypted PDFs open too, with their password when they have one.
 - **Files shown as what they are**: rendered Markdown with math and emoji, CSV tables, JSON and
   YAML trees, images, and the contents of libraries and executables.
 - **Desktop and phone**: one interface adapts to windows, tablets and phones, with touch scrolling

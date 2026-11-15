@@ -28,7 +28,8 @@ public:
 
     // Reads the file at `path` (absolute) and parses it; `done` runs on the main thread with the
     // result (shape None and an error when it cannot be read), unless the ticket was cancelled.
-    virtual Ticket read(const std::string& path, DocumentDone done) = 0;
+    // `password` opens a PDF protected by one ("" for none: the result says when one is needed).
+    virtual Ticket read(const std::string& path, std::string password, DocumentDone done) = 0;
     // Reads page `index`'s content through the document's page source.
     virtual Ticket readPage(std::shared_ptr<model::viewer::PageSource> source, std::size_t index, PageDone done) = 0;
     // Reads the picture `key` that page `page` draws, shrunk to at most `maxSide` pixels a side.

@@ -1,6 +1,7 @@
 // PDF's object layer (internal to the PDF reader): the lexer, objects, the cross-reference table
-// (tables and streams, incremental updates, object streams), stream filters, and a rebuilt table
-// for files whose own is broken.
+// (tables and streams, incremental updates, object streams), stream filters, a rebuilt table
+// for files whose own is broken, and encrypted files (unlock: strings and streams come out
+// decrypted, PdfCrypt.h).
 #pragma once
 
 #include <cstddef>
@@ -26,7 +27,9 @@ struct Object {
     std::vector<Object> array;
     std::vector<DictEntry> dict; // Dict and Stream
     std::size_t streamStart = 0, streamLength = 0; // Stream: where its raw data lies in the file
-    int streamOwner = 0;         // Stream: 0 = in the file; else data lives in an object stream (not allowed: unused)
+    // Stream: the indirect object it is (its key in an encrypted file); 0 when not known (a
+    // cross-reference stream read before the table, which is never encrypted).
+    int objectNumber = 0, objectGeneration = 0;
 
     bool isNull() const { return type == Type::Null; }
     bool isNumber() const { return type == Type::Number; }
@@ -35,6 +38,8 @@ struct Object {
     const Object* get(std::string_view key) const; // in a Dict / Stream, or null
     double num(double otherwise = 0.0) const { return type == Type::Number ? number : otherwise; }
 };
+
+class Security;
 
 struct DictEntry {
     std::string key;
@@ -65,8 +70,17 @@ class File {
 public:
     static constexpr std::size_t kMaxStreamBytes = std::size_t(128) << 20;
 
+    File();
+    ~File();
+    File(const File&) = delete;
+    File& operator=(const File&) = delete;
+
     // False (and `error`) when it is not a PDF this reads.
     bool open(std::string bytes, std::string* error);
+    // An encrypted file (encrypted()) is read once unlocked with its user's or owner's password
+    // ("" first: most encrypted files only restrict printing or copying, and open without one).
+    enum class Unlock { Opened, NeedsPassword, Unsupported };
+    Unlock unlock(std::string_view password, std::string* error);
 
     // The object an indirect reference names (cached); `o` itself when it is not a reference.
     const Object& resolve(const Object& o);
@@ -91,6 +105,7 @@ private:
     std::optional<Object> parseAt(std::size_t offset, int expected);
     std::optional<Object> fromObjectStream(int stream, int index, int number);
     std::size_t streamLength(const Object& dict, std::size_t start);
+    void decryptStrings(Object& o, int number, int generation, int depth) const;
 
     std::string bytes_;
     std::map<int, XrefEntry> xref_;
@@ -100,6 +115,9 @@ private:
     Object trailer_;
     Object null_;
     bool encrypted_ = false;
+    bool rebuilt_ = false;               // the table was rebuilt (read again once unlocked)
+    std::unique_ptr<Security> security_; // unlocked: decrypts strings and streams
+    int encryptNumber_ = -1;             // the /Encrypt dictionary's object: never encrypted
     int resolving_ = 0; // depth guard
 };
 

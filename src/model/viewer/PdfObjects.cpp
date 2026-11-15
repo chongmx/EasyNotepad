@@ -1,5 +1,6 @@
 #include "PdfObjects.h"
 
+#include "PdfCrypt.h"
 #include "enp/model/package/Inflate.h"
 
 #include <algorithm>
@@ -492,6 +493,9 @@ std::optional<std::string> decodeFilter(std::string_view name, std::string data,
 
 // ---- the file ---------------------------------------------------------------------------------
 
+File::File() = default;
+File::~File() = default;
+
 bool File::open(std::string bytes, std::string* error)
 {
     bytes_ = std::move(bytes);
@@ -519,6 +523,56 @@ bool File::open(std::string bytes, std::string* error)
     }
     encrypted_ = trailer_.get("Encrypt") != nullptr && !trailer_.get("Encrypt")->isNull();
     return true;
+}
+
+File::Unlock File::unlock(std::string_view password, std::string* error)
+{
+    if (!encrypted_ || security_)
+        return Unlock::Opened;
+    const Object* entry = trailer_.get("Encrypt");
+    encryptNumber_ = entry->type == Object::Type::Ref ? int(entry->number) : -1;
+    const Object encrypt = resolve(*entry); // a copy: the cache starts over below
+    if (!encrypt.isDict()) {
+        if (error)
+            *error = "the PDF's encryption dictionary is missing (damaged file)";
+        return Unlock::Unsupported;
+    }
+    std::string firstId;
+    if (const Object* id = resolvedGet(trailer_, "ID"); id && id->type == Object::Type::Array && !id->array.empty()) {
+        const Object& first = resolve(id->array[0]);
+        if (first.type == Object::Type::String)
+            firstId = first.text;
+    }
+    auto security = std::make_unique<Security>();
+    switch (security->open(*this, encrypt, firstId, password, error)) {
+    case Security::Result::Unsupported:
+        return Unlock::Unsupported;
+    case Security::Result::WrongPassword:
+        return Unlock::NeedsPassword;
+    case Security::Result::Opened:
+        break;
+    }
+    security_ = std::move(security);
+    // What was read before the key was known holds encrypted strings (and, in a rebuilt table,
+    // object streams that could not be read): read again from here.
+    cache_.clear();
+    objStmIndex_.clear();
+    objStmData_.clear();
+    if (rebuilt_)
+        rebuildXref();
+    return Unlock::Opened;
+}
+
+void File::decryptStrings(Object& o, int number, int generation, int depth) const
+{
+    if (depth > 64)
+        return;
+    if (o.type == Object::Type::String)
+        o.text = security_->string(number, generation, o.text);
+    for (Object& item : o.array)
+        decryptStrings(item, number, generation, depth + 1);
+    for (DictEntry& e : o.dict)
+        decryptStrings(e.value, number, generation, depth + 1);
 }
 
 bool File::readXref(std::size_t offset, int depth)
@@ -654,6 +708,7 @@ bool File::readXrefStream(const Object& stream)
 
 void File::rebuildXref()
 {
+    rebuilt_ = true;
     xref_.clear();
     cache_.clear();
     const std::string_view b(bytes_);
@@ -788,6 +843,11 @@ std::optional<Object> File::parseAt(std::size_t offset, int expected)
         return std::nullopt;
     if (o.type == Object::Type::Operator && o.text == "endobj")
         return Object();
+    const int generation = int(gen.num());
+    // Encrypted: its strings with its own key (not those of the encryption dictionary itself).
+    // Objects in an object stream are not: the stream was decrypted as a whole.
+    if (security_ && expected != encryptNumber_)
+        decryptStrings(o, expected, generation, 0);
     if (o.isDict()) {
         const std::size_t save = lex.position();
         Object kw2;
@@ -800,6 +860,8 @@ std::optional<Object> File::parseAt(std::size_t offset, int expected)
             o.type = Object::Type::Stream;
             o.streamStart = start;
             o.streamLength = streamLength(o, start);
+            o.objectNumber = expected;
+            o.objectGeneration = generation;
         } else {
             lex.seek(save);
         }
@@ -900,6 +962,23 @@ std::optional<std::string> File::streamData(const Object& stream, std::string* i
         parms = resolvedGet(stream, "DP");
     if (!filter)
         filter = resolvedGet(stream, "F");
+    if (security_ && stream.objectNumber > 0 && stream.objectNumber != encryptNumber_) {
+        // Encrypted before its filters: not cross-reference streams, nor metadata when the file
+        // says so; a stream whose first filter is /Crypt names its own crypt filter.
+        const Object* type = stream.get("Type");
+        bool plain = type && (type->isName("XRef") || (type->isName("Metadata") && !security_->encryptsMetadata()));
+        std::string own;
+        const Object* first = !filter ? nullptr
+                              : filter->type == Object::Type::Array && !filter->array.empty() ? &resolve(filter->array[0])
+                                                                                               : filter;
+        if (first && first->isName("Crypt")) {
+            const Object* p = parms && parms->type == Object::Type::Array && !parms->array.empty() ? &resolve(parms->array[0]) : parms;
+            const Object* name = p && p->isDict() ? p->get("Name") : nullptr;
+            own = name && name->type == Object::Type::Name ? name->text : "Identity";
+        }
+        if (!plain)
+            data = security_->stream(stream.objectNumber, stream.objectGeneration, data, own);
+    }
     if (!filter)
         return data;
     std::vector<std::pair<std::string, const Object*>> chain;

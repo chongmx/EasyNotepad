@@ -35,9 +35,30 @@ void ViewerViewModel::open(int id, const std::string& absolutePath)
         e.doc.error = "no document reader in this build";
         return;
     }
+    read(e, std::string());
+}
+
+void ViewerViewModel::unlock(int id, std::string password)
+{
+    const auto it = entries_.find(id);
+    if (it == entries_.end() || !reader_ || it->second.state != State::Failed || !it->second.doc.needsPassword)
+        return;
+    os::mem::Scope scope("viewer");
+    Entry& e = it->second;
+    e.doc = mv::ViewerDocument();
+    e.state = State::Loading;
+    e.generation = nextGeneration_++;
+    read(e, std::move(password));
+}
+
+void ViewerViewModel::read(Entry& e, std::string password)
+{
     const std::weak_ptr<bool> alive = alive_;
+    const int id = e.id;
     const std::uint64_t generation = e.generation;
-    e.ticket = reader_->read(absolutePath, [this, alive, id, generation](mv::ViewerDocument doc) {
+    const bool typed = !password.empty();
+    e.passwordRefused = false;
+    e.ticket = reader_->read(e.path, std::move(password), [this, alive, id, generation, typed](mv::ViewerDocument doc) {
         if (alive.expired())
             return;
         const auto it = entries_.find(id);
@@ -48,6 +69,7 @@ void ViewerViewModel::open(int id, const std::string& absolutePath)
         entry.ticket = 0;
         entry.doc = std::move(doc);
         entry.state = entry.doc.shape == mv::Shape::None ? State::Failed : State::Ready;
+        entry.passwordRefused = typed && entry.doc.needsPassword;
     });
 }
 

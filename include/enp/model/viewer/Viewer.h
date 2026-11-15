@@ -83,6 +83,9 @@ struct ViewerDocument {
     Shape shape = Shape::None;
     std::string format; // "Word document", "Excel workbook", "PowerPoint presentation", "PDF document"
     std::string error;  // why nothing could be read (shape None)
+    // Shape None because the file is protected by a password and the one given (none, or a wrong
+    // one) does not open it: read it again with another (readViewerDocument's `password`).
+    bool needsPassword = false;
     // What was in the file but is not shown ("2 charts", "comments"): said, never dropped silently.
     std::vector<std::string> notShown;
     FlowDocument flow;
@@ -96,13 +99,14 @@ struct ViewerDocument {
 std::string viewerFormat(std::string_view path, std::string_view bytes);
 
 // Reads the whole file. Never throws; a file that cannot be read gives shape None and `error`.
-ViewerDocument readViewerDocument(std::string_view path, std::string bytes);
+// `password` opens an encrypted PDF (the user's or the owner's); none is tried first.
+ViewerDocument readViewerDocument(std::string_view path, std::string bytes, std::string_view password = {});
 
 // The readers, for tests and tools.
 ViewerDocument readDocx(std::string bytes);
 ViewerDocument readXlsx(std::string bytes);
 ViewerDocument readPptx(std::string bytes);
-ViewerDocument readPdf(std::string bytes);
+ViewerDocument readPdf(std::string bytes, std::string_view password = {});
 
 // The document's text in reading order (copying, agents, tests).
 std::string plainText(const ViewerDocument& doc);
