@@ -953,6 +953,71 @@ TEST(a_file_outside_the_sample_workspace_is_read_from_disk)
     os::fs::deletePath(base);
 }
 
+TEST(every_image_format_opens_from_outside_the_workspace_and_decodes)
+{
+    // tests/data/images (make_images.py): 8 x 4 pictures, left half red and right half blue (grey
+    // ones light and dark). Each is opened as the phone opens one, by its absolute path with no
+    // folder open: an image document of its format, whose bytes (read as the image view reads them)
+    // decode to those colours. Formats not decoded yet are images that say so, never binary files.
+    struct Case {
+        const char* name;
+        const char* format;
+        bool decodes;
+        bool grey;
+    };
+    const Case cases[] = {
+        {"rgb.png", "PNG", true, false},          {"rgba.png", "PNG", true, false},        {"palette.png", "PNG", true, false},
+        {"grey.png", "PNG", true, true},          {"grey16.png", "PNG", true, true},       {"upper.PNG", "PNG", true, false},
+        {"png-named.jpg", "PNG", true, false},    {"baseline.jpg", "JPEG", true, false},   {"progressive.jpeg", "JPEG", true, false},
+        {"grey.jpg", "JPEG", true, true},         {"subsampled.jpg", "JPEG", true, false}, {"anim.gif", "GIF", true, false},
+        {"rgb.bmp", "BMP", true, false},          {"rgba.bmp", "BMP", true, false},        {"palette.bmp", "BMP", true, false},
+        {"rgb.tga", "TGA", true, false},          {"rle.tga", "TGA", true, false},         {"rgb.ppm", "PNM", true, false},
+        {"grey.pgm", "PNM", true, true},          {"rgb.qoi", "QOI", true, false},         {"icon.ico", "ICO", true, false},
+        {"flat.hdr", "Radiance HDR", true, false}, {"lossy.webp", "WebP", false, false},   {"rgb.tif", "TIFF", false, false},
+        {"rgb.jp2", "JPEG 2000", false, false},
+    };
+    auto expect = [](bool ok, const std::string& what) {
+        ++g_checks;
+        if (!ok) {
+            ++g_failures;
+            std::printf("  FAILED image formats: %s\n", what.c_str());
+        }
+        return ok;
+    };
+    services::FileService files;
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.workspaceRoot().empty());
+    const std::string dir = std::string(ENP_SOURCE_DIR) + "/tests/data/images/";
+    for (const Case& c : cases) {
+        const std::string path = dir + c.name;
+        const std::optional<std::string> bytes = files.read(path);
+        if (!expect(bytes && !bytes->empty(), std::string(c.name) + ": read"))
+            continue;
+        const model::FileType type = model::detectFileType(path, *bytes);
+        expect(type.kind == model::FileKind::Image && type.format == c.format, std::string(c.name) + ": " + type.format);
+        vm.openFile(path);
+        const model::Document* doc = vm.activeDocument();
+        expect(doc && doc->kind == model::FileKind::Image && doc->format == c.format, c.name);
+        const std::string read = vm.readWorkspaceFile(doc ? doc->path : path);
+        expect(read == *bytes, std::string(c.name) + ": the image view gets the file's bytes");
+        services::DecodedImage img;
+        std::string note;
+        const bool decoded = services::decodeImage(read, img, note);
+        if (!c.decodes) {
+            expect(!decoded && note.find(c.format) != std::string::npos, std::string(c.name) + ": " + note);
+            continue;
+        }
+        if (!expect(decoded && img.width == 8 && img.height == 4 && img.rgba.size() == 8 * 4 * 4, std::string(c.name) + ": " + note))
+            continue;
+        auto px = [&img](int x, int y, int channel) { return int(img.rgba[size_t((y * img.width + x) * 4 + channel)]); };
+        if (c.grey)
+            expect(px(1, 1, 0) > px(6, 1, 0) + 80, std::string(c.name) + ": light left, dark right");
+        else
+            expect(px(1, 1, 0) > px(1, 1, 2) + 80 && px(6, 1, 2) > px(6, 1, 0) + 80, std::string(c.name) + ": red left, blue right");
+    }
+    vm.closeAll();
+}
+
 TEST(open_workspace_file_opens_its_folder)
 {
     services::FileService files;
@@ -2170,13 +2235,15 @@ TEST(file_types_are_detected_before_loading_and_images_decode)
     CHECK(model::detectFileType("pic.svg", "<?xml version=\"1.0\"?><svg></svg>").kind == FileKind::Text); // SVG: XML to edit
     CHECK(model::detectFileType("x.ppm", "P6\n2 2\n255\n").kind == FileKind::Image);
     CHECK(model::detectFileType("empty.txt", "").kind == FileKind::Text);
-    // A magic number of letters only is not believed in text: "BM", "MZ", "ID3", "GIF89a" begin
+    // A short magic number of letters only is not believed in text: "BM", "MZ", "ID3", "OggS" begin
     // notes too. Real files of those kinds (NUL bytes in their headers) still are what they say.
     CHECK(model::detectFileType("cars.txt", "BMW models\nX3, X5\n").kind == FileKind::Text);
     CHECK(model::detectFileType("noext", "BM is a bitmap's magic number\n").kind == FileKind::Text);
     CHECK(model::detectFileType("retro.md", "MZ-80 notes: " + std::string(80, 'x') + "\n").kind == FileKind::Text);
     CHECK(model::detectFileType("tags.txt", "ID3 tags hold an MP3's title\n").kind == FileKind::Text);
-    CHECK(model::detectFileType("gif.txt", "GIF89a is the animated one\n").kind == FileKind::Text);
+    CHECK(model::detectFileType("ogg.txt", "OggS is Ogg's page marker\n").kind == FileKind::Text);
+    // ICO and CUR need an icon directory: an uncompressed TGA starts 00 00 02 00 as a cursor does.
+    CHECK(model::detectFileType("pic.tga", std::string("\0\0\x02\0\0\0\0\0\0\0\0\0\x08\0\x04\0\x18\0", 18) + std::string(96, '\x7F')).format == "TGA");
     CHECK(model::detectFileType("arch.txt", "!<arch>\nis how a static library starts\n" + std::string(64, 'y')).kind == FileKind::Text);
     CHECK(model::detectFileType("pic.bmp", std::string("BM\x46\0\0\0\0\0\0\0\x36\0\0\0\x28\0\0\0", 18)).format == "BMP");
     CHECK(model::detectFileType("anim", std::string("GIF89a\x01\0\x01\0\x80\0\0", 13)).format == "GIF");

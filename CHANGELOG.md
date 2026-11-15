@@ -39,7 +39,11 @@ its release notes on GitHub.
 - File types are recognised more carefully. A text file that starts with the letters of a
   format's signature ("BMW models", "MZ-80 notes", "ID3 tags") opens as text, not as a
   picture or a program; a file is taken for a COFF object (no signature of its own) only
-  after every format that has one.
+  after every format that has one. An uncompressed TGA picture was taken for a cursor (its
+  first bytes are the same) and could not be shown; icons and cursors now need a valid icon
+  directory. Every picture format is tested opened from outside the folder: PNG (colour,
+  transparent, palette, grey, 16-bit), JPEG (baseline, progressive, grey), GIF, BMP, TGA, PPM,
+  PGM, QOI, ICO and Radiance HDR show; WebP, TIFF and JPEG 2000 say they are not supported yet.
 - Android: the app closed a moment after showing a document with Chinese, Japanese or Korean
   text on phones whose system font for them it cannot read (Android 15 and later, such as
   Samsung's Galaxy S24: a variable font with CFF2 outlines). Every font is now checked before it

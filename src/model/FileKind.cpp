@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 
 namespace enp::model {
@@ -109,17 +110,34 @@ bool looksLikeText(std::string_view bytes)
     return n == 0 || control * 10 < n; // under 10 % control characters
 }
 
-// A magic number of printable letters only ("BM", "MZ", "ID3", "GIF89a", ...) can begin a text
-// file too ("BMW", "MZ-80"): it counts only when the file does not read as text. Real files of
-// those kinds have NUL or control bytes in their first kilobytes (BMP's sizes, GIF's dimensions).
+// A short magic number of printable letters only ("BM", "MZ", "ID3", "BZh", "OggS", ...) can begin
+// a text file too ("BMW", "MZ-80"): it counts only when the file does not read as text. Real files
+// of those kinds have NUL or control bytes in their first kilobytes (BMP's sizes, ...). Longer ones
+// ("GIF89a", "#?RADIANCE", "SQLite format 3") are believed: a Radiance HDR file's header is text,
+// and a small one can read as text throughout.
 bool printableMagic(const Magic& m)
 {
+    if (m.length >= 6)
+        return false;
     for (size_t i = 0; i < m.length; ++i) {
         const unsigned char c = static_cast<unsigned char>(m.bytes[i]);
         if (c < 0x20 || c >= 0x7F)
             return false;
     }
     return true;
+}
+
+// ICO and CUR begin 00 00 01 00 / 00 00 02 00, as other files can (an uncompressed TGA: 00 00 02
+// 00): the icon directory after it must make sense too. At least one image, its entry's reserved
+// byte 0, a size, and its data after the directory.
+bool isIconDirectory(std::string_view b)
+{
+    if (b.size() < 22)
+        return false;
+    auto u16 = [&b](size_t i) { return std::uint32_t(static_cast<unsigned char>(b[i])) | std::uint32_t(static_cast<unsigned char>(b[i + 1])) << 8; };
+    auto u32 = [&u16](size_t i) { return u16(i) | u16(i + 2) << 16; };
+    const std::uint32_t count = u16(4);
+    return count > 0 && b[9] == 0 && u32(14) > 0 && u32(18) >= 6 + 16 * count;
 }
 
 bool isPnm(std::string_view bytes)
@@ -167,6 +185,8 @@ FileType detectFileType(std::string_view path, std::string_view bytes)
                 continue;
             if (std::strcmp(m.format, "WAV audio") == 0 && bytes.substr(0, 4) != "RIFF")
                 continue;
+            if ((std::strcmp(m.format, "ICO") == 0 || std::strcmp(m.format, "CUR") == 0) && !isIconDirectory(bytes))
+                continue; // an uncompressed TGA starts 00 00 02 00 too
             if (text && printableMagic(m) && std::strcmp(m.format, "PDF document") != 0)
                 continue; // "BMW models" is a text file, not a bitmap
             type.kind = m.kind;
