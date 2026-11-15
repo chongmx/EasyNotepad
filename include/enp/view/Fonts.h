@@ -13,6 +13,13 @@ namespace enp::view {
 
 class DocumentFonts;
 
+// True when ImGui's font loader (stb_truetype) can read the font at `data`: the tables it needs in
+// the file's first face, with TrueType (glyf) or CFF outlines. ImGui stops the app (an assertion)
+// on a font it cannot read, so every font is checked before it is added; one that fails is left
+// out (another candidate, or the UI font's '?' for its letters). A variable font with CFF2
+// outlines is one it cannot read (Android 15 and later: Samsung's NotoSansCJK-Regular.ttc).
+bool fontReadable(const void* data, std::size_t size);
+
 struct Fonts {
     ImFont* ui = nullptr;   // proportional UI text + icons
     ImFont* mono = nullptr; // editor and diff text + icons
@@ -32,7 +39,8 @@ struct Fonts {
 // Fonts for the scripts the bundled ones lack (Chinese, Japanese, Korean: model::viewer::Script
 // bits), from the system's, merged into a font while a document that uses them is shown and
 // removed after: such a font is 4 to 20 MB, mapped (the file cache's pages, not the heap) only
-// while it is merged.
+// while it is merged. Without a system font ImGui can read, a bundled one with the common letters
+// (2.5 MB, read into the `fonts` scope while merged).
 class ScriptFonts {
 public:
     ScriptFonts() = default;
@@ -49,7 +57,10 @@ public:
 private:
     struct Source {
         std::uint8_t scripts = 0; // what it covers; 0: this slot is free
-        os::fs::MappedFile file;  // the font file: the atlas reads it in place (it does not own it)
+        os::fs::MappedFile file;  // a system font file: the atlas reads it in place (it does not own it)
+        std::string bytes;        // or the bundled font (an app asset, read): released with the slot
+        const void* data() const { return file.size() ? file.data() : bytes.data(); }
+        std::size_t size() const { return file.size() ? file.size() : bytes.size(); }
     };
     void remove(Source& source);
 

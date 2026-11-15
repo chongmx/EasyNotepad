@@ -7,9 +7,47 @@
 #include "IconsFontAwesome6.h"
 #include "imgui_internal.h" // a merged source removed again (ImFontAtlasFontDiscardBakes and the like)
 
+#include <cstdint>
 #include <cstring>
 
 namespace enp::view {
+
+bool fontReadable(const void* data, std::size_t size)
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    if (!p || size < 12)
+        return false;
+    auto u16 = [p](std::size_t at) { return std::uint32_t(p[at]) << 8 | p[at + 1]; };
+    auto u32 = [&u16](std::size_t at) { return u16(at) << 16 | u16(at + 2); };
+    std::size_t face = 0;
+    if (std::memcmp(p, "ttcf", 4) == 0) { // a collection: its first face
+        if (size < 16 || (u32(4) != 0x00010000 && u32(4) != 0x00020000) || u32(8) == 0)
+            return false;
+        face = u32(12);
+        if (face > size - 12)
+            return false;
+    }
+    const std::uint32_t version = u32(face);
+    if (version != 0x00010000 && std::memcmp(p + face, "OTTO", 4) != 0 && std::memcmp(p + face, "true", 4) != 0 &&
+        std::memcmp(p + face, "typ1", 4) != 0 && std::memcmp(p + face, "1\0\0\0", 4) != 0)
+        return false;
+    const std::size_t tables = u16(face + 4);
+    if (tables > (size - face - 12) / 16)
+        return false;
+    auto has = [&](const char* tag) {
+        for (std::size_t i = 0; i < tables; ++i) {
+            const std::size_t entry = face + 12 + 16 * i;
+            if (std::memcmp(p + entry, tag, 4) == 0)
+                return u32(entry + 8) <= size && u32(entry + 12) <= size - u32(entry + 8);
+        }
+        return false;
+    };
+    if (!has("cmap") || !has("head") || !has("hhea") || !has("hmtx"))
+        return false;
+    if (has("glyf"))
+        return has("loca");
+    return has("CFF "); // CFF2 (variable outlines) is not read
+}
 
 namespace {
 
@@ -17,7 +55,7 @@ namespace {
 ImFont* addFont(const char* asset, float size, const ImFontConfig& config, const ImWchar* ranges = nullptr)
 {
     std::optional<std::string> data = os::fs::readAsset(asset);
-    if (!data || data->empty())
+    if (!data || !fontReadable(data->data(), data->size()))
         return nullptr;
     void* buffer = IM_ALLOC(data->size());
     std::memcpy(buffer, data->data(), data->size());
@@ -45,14 +83,13 @@ void mergeSymbolFallback(float size, bool monospace)
     };
     auto merge = [size](const char* path) {
         std::optional<std::string> data = os::fs::readFile(path);
-        if (!data || data->empty())
+        if (!data || !fontReadable(data->data(), data->size()))
             return false;
         void* buffer = IM_ALLOC(data->size());
         std::memcpy(buffer, data->data(), data->size());
         ImFontConfig config;
         config.MergeMode = true;
-        ImGui::GetIO().Fonts->AddFontFromMemoryTTF(buffer, int(data->size()), size, &config);
-        return true;
+        return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(buffer, int(data->size()), size, &config) != nullptr;
     };
 #if defined(_WIN32)
     if (monospace) { // a merged font gives the glyphs that the fonts before it lack
@@ -122,7 +159,10 @@ const ScriptFont kScriptFonts[] = {
     {"C:/Windows/Fonts/msyh.ttc", kHan}, {"C:/Windows/Fonts/YuGothM.ttc", kHan}, {"C:/Windows/Fonts/simsun.ttc", kHan},
     {"C:/Windows/Fonts/malgun.ttf", kHangul}, {"C:/Windows/Fonts/gulim.ttc", kHangul},
 #elif defined(__ANDROID__)
-    {"/system/fonts/NotoSansCJK-Regular.ttc", kCjk}, {"/system/fonts/DroidSansFallback.ttf", kCjk},
+    // NotoSansCJK is a variable font with CFF2 outlines from Android 15 (not readable: skipped);
+    // Samsung's own SECCJK, and NotoSerifCJK, have CFF outlines.
+    {"/system/fonts/NotoSansCJK-Regular.ttc", kCjk}, {"/system/fonts/SECCJK-Regular.ttc", kCjk},
+    {"/system/fonts/DroidSansFallback.ttf", kCjk}, {"/system/fonts/NotoSerifCJK-Regular.ttc", kCjk},
 #elif defined(__APPLE__)
     {"/System/Library/Fonts/Hiragino Sans GB.ttc", kHan}, {"/System/Library/Fonts/STHeiti Light.ttc", kHan},
     {"/System/Library/Fonts/AppleSDGothicNeo.ttc", kHangul},
@@ -135,6 +175,11 @@ const ScriptFont kScriptFonts[] = {
     {"~/.local/share/fonts/wqy-microhei.ttc", kCjk}, {"~/.fonts/NotoSansCJK-Regular.ttc", kCjk}, {"~/.fonts/DroidSansFallbackFull.ttf", kCjk},
 #endif
 };
+
+// Bundled: Noto Sans CJK SC cut to the common letters (GB 2312, Big5 level 1, JIS level 1, KS X
+// 1001 Hangul, kana, punctuation), CFF outlines; for a system without a CJK font ImGui can read.
+// Made by scripts/fonts/build_cjk_font.py.
+constexpr const char* kBundledCjkFont = "fonts/NotoSansCJK-Common.otf";
 
 } // namespace
 
@@ -157,7 +202,7 @@ std::size_t ScriptFonts::mappedBytes() const
 {
     std::size_t bytes = 0;
     for (const Source& s : sources_)
-        bytes += s.file.size();
+        bytes += s.size();
     return bytes;
 }
 
@@ -172,32 +217,50 @@ void ScriptFonts::update(ImFont* font, std::uint8_t wanted)
     std::uint8_t need = std::uint8_t(wanted & ~merged() & ~missing_);
     if (!font || !need)
         return;
-    os::mem::Scope scope("fonts"); // the atlas's record of the source (the file is mapped, not read)
+    os::mem::Scope scope("fonts"); // the atlas's record of the source, and the bundled font's bytes
+    auto freeSlot = [this]() { return !sources_[0].scripts ? &sources_[0] : !sources_[1].scripts ? &sources_[1] : nullptr; };
+    // Merges the slot's font (its mapped file, or its bytes) into `font`; a font ImGui cannot read
+    // is let go instead (ImGui would stop the app on it).
+    auto merge = [font](Source& slot, std::uint8_t scripts) {
+        const void* data = slot.data();
+        const std::size_t size = slot.size();
+        if (size <= std::size_t(INT32_MAX) && fontReadable(data, size)) {
+            ImFontConfig config;
+            config.MergeMode = true;
+            config.DstFont = font;
+            config.FontDataOwnedByAtlas = false;
+            // Read only: ImGui's loader parses the font in place and never writes to it.
+            if (ImGui::GetIO().Fonts->AddFontFromMemoryTTF(const_cast<void*>(data), int(size), font->LegacySize, &config)) {
+                slot.scripts = scripts;
+                return true;
+            }
+        }
+        slot.file.close();
+        os::mem::release(slot.bytes);
+        return false;
+    };
     for (const ScriptFont& candidate : kScriptFonts) {
         if (!(candidate.scripts & need))
             continue;
-        Source* slot = !sources_[0].scripts ? &sources_[0] : !sources_[1].scripts ? &sources_[1] : nullptr;
+        Source* slot = freeSlot();
         if (!slot)
             break;
         const std::string path = std::strncmp(candidate.path, "~/", 2) == 0 ? os::fs::homeDirectory() + (candidate.path + 1) : candidate.path;
-        if (!slot->file.open(path) || slot->file.size() < 12 || slot->file.size() > std::size_t(INT32_MAX)) {
-            slot->file.close();
+        if (!slot->file.open(path) || !merge(*slot, candidate.scripts))
             continue;
-        }
-        ImFontConfig config;
-        config.MergeMode = true;
-        config.DstFont = font;
-        config.FontDataOwnedByAtlas = false;
-        // Read only: ImGui's loader parses the file in place and never writes to it.
-        if (!ImGui::GetIO().Fonts->AddFontFromMemoryTTF(const_cast<void*>(slot->file.data()), int(slot->file.size()), font->LegacySize,
-                                                        &config)) {
-            slot->file.close();
-            continue;
-        }
-        slot->scripts = candidate.scripts;
         need = std::uint8_t(need & ~candidate.scripts);
         if (!need)
             break;
+    }
+    // No system font for them (or none ImGui can read): the bundled one, common letters only.
+    if (need & kCjk) {
+        if (Source* slot = freeSlot()) {
+            if (std::optional<std::string> bytes = os::fs::readAsset(kBundledCjkFont)) {
+                slot->bytes = std::move(*bytes);
+                if (merge(*slot, kCjk))
+                    need = std::uint8_t(need & ~kCjk);
+            }
+        }
     }
     missing_ = std::uint8_t(missing_ | need);
 }
@@ -211,7 +274,7 @@ void ScriptFonts::remove(Source& source)
         ImFontAtlasFontDiscardBakes(atlas, font_, 0);
         for (int i = 0; i < atlas->Sources.Size; ++i) {
             ImFontConfig* src = &atlas->Sources[i];
-            if (src->FontData != source.file.data())
+            if (src->FontData != source.data())
                 continue;
             const ImFontLoader* loader = src->FontLoader ? src->FontLoader : atlas->FontLoader;
             if (loader && loader->FontSrcDestroy)
@@ -224,6 +287,7 @@ void ScriptFonts::remove(Source& source)
     }
     source.scripts = 0;
     source.file.close();
+    os::mem::release(source.bytes);
 }
 
 } // namespace enp::view

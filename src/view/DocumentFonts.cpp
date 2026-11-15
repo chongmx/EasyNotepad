@@ -234,7 +234,7 @@ DocumentFonts::Loaded* DocumentFonts::load(const std::string& key)
         bytes = l->file.data();
         size = l->file.size();
     }
-    if (size >= 12 && size <= std::size_t(INT32_MAX)) {
+    if (size <= std::size_t(INT32_MAX) && fontReadable(bytes, size)) { // one ImGui cannot read: the UI font
         ImFontConfig config;
         config.FontDataOwnedByAtlas = false; // the bytes stay ours: released with the face
         config.OversampleH = 2;

@@ -317,6 +317,64 @@ int main(int argc, char** argv)
         Harness h;
         int checksFailed = 0; // behaviour checks (layout, touch, IntelliSense, ...) that failed
         h.frame(ImVec2(-100.0f, -100.0f)); // first frame lays everything out
+
+        // Fonts ImGui cannot read are left out, never added (ImGui stops the app on one: the
+        // assertion that closed the app on a Samsung phone, whose system CJK font has CFF2 outlines).
+        {
+            auto check = [&](bool ok, const std::string& what) {
+                if (!ok)
+                    std::printf("  FAILED %s\n", what.c_str()), ++checksFailed;
+            };
+            std::optional<std::string> roboto = os::fs::readAsset("fonts/Roboto-Medium.ttf");
+            check(roboto && view::fontReadable(roboto->data(), roboto->size()), "fonts: Roboto is readable");
+            std::string cff2 = roboto ? *roboto : std::string();
+            const std::size_t glyf = cff2.find("glyf");
+            if (glyf != std::string::npos)
+                cff2.replace(glyf, 4, "CFF2"); // variable outlines: neither glyf nor CFF
+            check(glyf != std::string::npos && !view::fontReadable(cff2.data(), cff2.size()), "fonts: CFF2 outlines are not readable");
+            check(!view::fontReadable(roboto ? roboto->data() : "", 11), "fonts: a truncated file is not readable");
+            std::string many = roboto ? roboto->substr(0, 64) : std::string(64, ' ');
+            many[4] = char(0xff);
+            many[5] = char(0xff); // 65535 tables in 64 bytes
+            check(!view::fontReadable(many.data(), many.size()), "fonts: a table directory past the end is not readable");
+            check(!view::fontReadable(nullptr, 0), "fonts: no data is not readable");
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__ANDROID__)
+            // A CJK font with CFF2 outlines where ScriptFonts looks for one: skipped, not merged.
+            const char* home = std::getenv("HOME");
+            const std::string savedHome = home ? home : "";
+            const std::string fakeHome = os::fs::appDataDirectory() + "/font-test-home";
+            os::fs::createDirectories(fakeHome + "/.local/share/fonts");
+            {
+                std::ofstream out(fakeHome + "/.local/share/fonts/NotoSansCJK-Regular.ttc", std::ios::binary | std::ios::trunc);
+                out.write(cff2.data(), std::streamsize(cff2.size()));
+            }
+            setenv("HOME", fakeHome.c_str(), 1);
+            {
+                view::ScriptFonts scriptFonts;
+                ImFont* ui = ImGui::GetIO().Fonts->Fonts[0];
+                const int sourcesBefore = ImGui::GetIO().Fonts->Sources.Size;
+                scriptFonts.update(ui, model::viewer::ScriptHan); // must not stop the app
+                // One font merged: a readable system one (in /usr/share, before the home folder), or
+                // else the bundled one; never the CFF2 file.
+                const std::optional<std::string> bundled = os::fs::readAsset("fonts/NotoSansCJK-Common.otf");
+                check(bundled && view::fontReadable(bundled->data(), bundled->size()), "fonts: the bundled CJK font is readable");
+                check((scriptFonts.merged() & model::viewer::ScriptHan) && ImGui::GetIO().Fonts->Sources.Size == sourcesBefore + 1,
+                      "fonts: an unreadable CJK font is skipped for another one");
+                check(scriptFonts.mappedBytes() != cff2.size(), "fonts: the CFF2 font is not the one merged");
+                h.frame(ImVec2(-100.0f, -100.0f));
+                check(ui->IsGlyphInFont(0x6236) && ui->IsGlyphInFont(0x9918) && ui->IsGlyphInFont(0xD55C),
+                      "fonts: a statement's Chinese letters (and Korean) have glyphs");
+                scriptFonts.update(ui, 0);
+                check(ImGui::GetIO().Fonts->Sources.Size == sourcesBefore && scriptFonts.mappedBytes() == 0,
+                      "fonts: the CJK font goes when no longer wanted");
+            }
+            if (home)
+                setenv("HOME", savedHome.c_str(), 1);
+            else
+                unsetenv("HOME");
+            std::remove((fakeHome + "/.local/share/fonts/NotoSansCJK-Regular.ttc").c_str());
+#endif
+        }
         const float ribbonTop = 36.0f, ribbonBottom = 145.0f, tabRowY = ribbonTop + 15.0f;
 
         for (viewmodel::WorkspaceMode mode : {viewmodel::WorkspaceMode::Code, viewmodel::WorkspaceMode::Agent}) {

@@ -13,6 +13,8 @@ its release notes on GitHub.
   128-bit keys), AES-128 and AES-256 (PDF 1.7 extension level 3, and PDF 2.0). The password is not
   kept: it is asked again the next time the file opens. Files encrypted for certain people (with
   their certificates) still cannot be opened, and say so.
+- A font for Chinese, Japanese and Korean comes with the app (Noto Sans CJK, the 12,455 letters in
+  common use, 2.5 MB). Documents use it when the system has no such font the app can read.
 
 ### Changed
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
@@ -23,6 +25,10 @@ its release notes on GitHub.
   Files brings it back. A document that cannot be shown still offers its text.
 
 ### Fixed
+- Android: the app closed a moment after showing a document with Chinese, Japanese or Korean
+  text on phones whose system font for them it cannot read (Android 15 and later, such as
+  Samsung's Galaxy S24: a variable font with CFF2 outlines). Every font is now checked before it
+  is used, and one that cannot be read is skipped for another; at worst a letter shows as "?".
 - On a phone, a finger that drags a list scrolls it and presses nothing: a touch reaches the app as a
   tap when the finger lifts without moving. Before, a file in the file list opened as soon as the
   finger touched it, so the list could not be dragged. Sliders and splitters still follow a drag.
