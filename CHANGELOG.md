@@ -34,6 +34,8 @@ its release notes on GitHub.
 - PDF and slides: a filled shape of one concave outline (a logo's letters drawn as paths, such as
   SIMPLE·AI on an arXiv paper) was filled past its edges, as solid bars. Such outlines are now
   filled exactly, by the same sweep as shapes with holes.
+- PDF: Chinese, Japanese and Korean text set in a fixed-pitch font (common in bank statements)
+  showed as "????". It is now drawn with the system's CJK font, as other CJK text is.
 
 ## [1.2.0] - 2026-11-14
 
