@@ -266,6 +266,40 @@ inline std::vector<std::pair<std::string, std::string>> sampleDocuments()
     return out;
 }
 
+// A Word document of `paragraphs` paragraphs of different lengths (a few lines each): several pages.
+inline std::string longDocx(int paragraphs)
+{
+    std::string body;
+    for (int i = 0; i < paragraphs; ++i) {
+        std::string text = "Paragraph " + std::to_string(i + 1) + ".";
+        for (int w = 0; w < 20 + (i * 7) % 45; ++w)
+            text += " word" + std::to_string(w);
+        body += "<w:p><w:r><w:t>" + text + "</w:t></w:r></w:p>";
+    }
+    return zip({{"_rels/.rels", packageRels("word/document.xml")},
+                {"word/document.xml", R"(<w:document xmlns:w="w"><w:body>)" + body + "</w:body></w:document>"}});
+}
+
+// An Excel workbook of one sheet, `rows` x `columns` numbers.
+inline std::string largeXlsx(int rows, int columns)
+{
+    std::string data;
+    for (int r = 1; r <= rows; ++r) {
+        data += "<row r=\"" + std::to_string(r) + "\">";
+        for (int c = 0; c < columns; ++c) {
+            std::string ref(1, char('A' + c % 26));
+            if (c >= 26)
+                ref = std::string(1, char('A' + c / 26 - 1)) + ref;
+            data += "<c r=\"" + ref + std::to_string(r) + "\"><v>" + std::to_string(r * 100 + c) + "</v></c>";
+        }
+        data += "</row>";
+    }
+    return zip({{"_rels/.rels", packageRels("xl/workbook.xml")},
+                {"xl/_rels/workbook.xml.rels", rels({{"rId1", "worksheet", "worksheets/sheet1.xml"}})},
+                {"xl/workbook.xml", R"(<workbook xmlns:r="r"><sheets><sheet name="Numbers" r:id="rId1"/></sheets></workbook>)"},
+                {"xl/worksheets/sheet1.xml", "<worksheet><sheetData>" + data + "</sheetData></worksheet>"}});
+}
+
 // A PDF of `pages` pages, each with a line of text and a picture of its own (`side` pixels square,
 // drawn half an inch wide: read, then shrunk).
 inline std::string manyPagesPdf(int pages, int side = 96)

@@ -4,6 +4,7 @@
 #include "enp/view/PanelFrame.h"
 #include "enp/view/TableReset.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
@@ -502,6 +503,7 @@ void DataViews::renderTree(model::Document& doc, ImVec2 size)
     // ---- The splitter ----
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::InvisibleButton("##treeSplit", ImVec2(6.0f * s_, height));
+    touch::claimDrag(touch::ClaimX);
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     if (ImGui::IsItemActive())

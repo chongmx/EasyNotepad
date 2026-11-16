@@ -3,7 +3,7 @@
 Work items from the review of what is missing or worth streamlining, in the order they are done.
 Each file says what the item is for, how it is built, and how it is tested. When an item is done,
 it is described as a feature in [../FEATURES.md](../FEATURES.md), marked here, and its file moves to
-[done/](done/).
+[done/](done/). An item set aside (likely not needed, kept in case) moves to [kiv/](kiv/).
 
 | # | Item | Why | Status |
 |---|------|-----|--------|
@@ -28,10 +28,11 @@ it is described as a feature in [../FEATURES.md](../FEATURES.md), marked here, a
 | 19 | [Learn Git: an interactive guide](done/19-learn-git-guide.md) | Beginners need git's ideas explained on the real controls, safely; reviewers need a walkthrough of 14–18 | Done |
 | 20 | [Shared control: connected agents, acting agents and the task manager](20-shared-control.md) | Up to 16 agents connect and read; 2 may act; one task manager drives the pointer; the user first | Planned |
 | 21 | [A local agent on the device (Gemma 4 E2B)](21-local-agent.md) | Offline code completion, judging agent requests, small tasks locally, escalating big ones; a safety net for its faults | In progress: Claude / Local / Auto in the Agent panel, fallback, local answers (done); request judging, watching agents, inline completion (to do) |
-| 22 | [Drag-to-scroll inside Dear ImGui](22-imgui-drag-scroll.md) | Touch scrolling belongs in ImGui, not in an app-side workaround; and the ImGui version is not truly locked | Planned (not started) |
+| 22 | [Drag-to-scroll inside Dear ImGui](kiv/22-imgui-drag-scroll.md) | Touch scrolling belongs in ImGui, not in an app-side workaround; and the ImGui version is not truly locked | Kept in view ([kiv/](kiv/)): done in the app instead (`TouchScroll`: drag, glide, tap vs drag, pinch, per-item `claimDrag`), ImGui locked to `patches/imgui/BASE`; moving it into ImGui is not planned |
 | 23 | [Local inference engines: start on the CPU, climb to the fastest](23-local-inference-engines.md) | The local agent's speed depends on reaching the GPU/NPU; each vendor's path differs. Bootstrap on CPU, probe, build or download, verify, switch, drop back. Phase 1: ggml (CPU + Vulkan) and fixed TensorRT | In progress: 23.0 spike done on Linux; Windows, Android and R2 INT4 next |
 | 24 | [Compact text in memory](24-compact-text.md) | With a repository open the index holds 12 MB (2.7 MB of it reserved and unused), a document's lines cost 2.9x their text, Find in Files uses `std::regex` on per-line copies; measured: pooling, then byte-aligned compressed text that can be searched (ETDC) | Planned (measured, not started) |
 | 25 | [A universal viewer: Page, Plot and Pitch workspaces](25-universal-viewer.md) | Most of what people read is not code: Office documents, spreadsheets and presentations, read by the user and by agents as structure; LibreOffice's essence (models, format rules) rebuilt small on the Markdown renderer, made the one shared rich-text renderer; stage 1: DOCX, XLSX and PPTX read-only; stage 2: limited editing; stage 3: .doc, .xls, .ppt, .rtf ported from LibreOffice; CSV stays in Code | In progress: the readers (DOCX, XLSX, PPTX and PDF) and their viewers, in the Code workspace for now |
+| 26 | [AI features: what is connected, and what is not yet](26-ai-features-status.md) | Some AI buttons reach a real model, some show sample data in a real folder, some have no model behind them; the status of each, and the order to connect the rest | Checked 15 Nov 2026: connecting (documents in AI, plan and changes in a real folder, local fallback for the Claude-only tasks next) |
 
 Done without a plan item (see [../FEATURES.md](../FEATURES.md)):
 - The in-app agent: Claude Code streaming, set-up, Stop, and Markdown answers.

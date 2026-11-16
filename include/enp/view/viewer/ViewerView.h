@@ -51,6 +51,11 @@ public:
     // For the tests: the page under screen position `at` in a paged document as drawn last frame,
     // and the point on it in points (from its top left); -1 when none is shown.
     int pagePointAt(int documentId, ImVec2 at, ImVec2& point) const;
+    // For the tests: what is under screen position `at` as drawn last frame, in the terms a pinch
+    // keeps under the fingers: PDF and slides, Word's pages: the page (returned) and the point on
+    // it in points; Word reflowed: the paragraph (returned) and, in point.y, how far into it (a
+    // share of its height); Excel: 0, and the point in the cells in points. -1 when none.
+    int zoomPointAt(int documentId, ImVec2 at, ImVec2& point) const;
     // For the tests: the search's matches drawn on page `page` last frame (its highlights), and
     // which of them is the current one (-1 none).
     std::size_t searchHits(int documentId, std::size_t page, int* current = nullptr) const;
@@ -81,8 +86,8 @@ private:
         std::map<std::size_t, std::map<std::string, HeldImage>> pageImages; // slides and pages: by page
         MarkdownView flow;
         ImVec2 scroll{0.0f, 0.0f};
-        // Pinch zoom (touch::zoomView): Word's and Excel's on top of the editor's zoom (slides and
-        // PDF pages pinch `zoom`), and the scroll it set for next frame.
+        // Pinch zoom: Word's and Excel's on top of the editor's zoom (slides and PDF pages pinch
+        // `zoom`), and the scroll it set for next frame.
         float pinch = 1.0f;
         ImVec2 pendingScroll{-1.0f, -1.0f};
         // Sheet
@@ -98,14 +103,25 @@ private:
         int currentPage = 0;
         int goToPage = -1;          // scroll to this page's top next frame (the toolbar's arrows, Home / End)
         float scrollSpeed = 0.0f;   // pages: how fast the content moves (pixels a second, smoothed)
-        // Pages: the point a pinch zooms about, kept while the fingers stay down (found once:
-        // found again each frame from a scroll of whole pixels, it would creep).
+        // The point a pinch zooms about, kept while the fingers stay down (found once: found again
+        // each frame from a scroll of whole pixels, it would creep). PDF and slides, and Word's
+        // pages: a page and a point on it in points, and pixels past its edge (in a gap). Word
+        // reflowed: the paragraph (`page`) and how far into it (`y`, a share of its height).
+        // Excel: the point in the cells before zooming (`x`, `y`, in points).
         struct ZoomAnchor {
             bool set = false;
             int page = 0;
-            float x = 0.0f, y = 0.0f; // on the page, in points
-            float beyond = 0.0f;      // pixels past the page's top or bottom edge (in a gap: a fixed size)
+            float x = 0.0f, y = 0.0f;
+            float beyond = 0.0f;
         } zoomAnchor;
+        // What Word and Excel drew last frame, for zoomPointAt (tests): which view (1 Word
+        // reflowed, 2 Word's pages, 3 Excel), the window's top left and scroll, and where the
+        // content starts (Word reflowed: the text's top; Excel: the headers' width and height).
+        struct Drawn {
+            int view = 0;
+            ImVec2 origin, scroll, start;
+            float width = 0.0f; // Word's pages: the window's width
+        } drawn;
         ImVec2 pagesOrigin;         // pages: the window's top left, and the width pages are laid out in
         float pagesWidth = 0.0f;    // (last frame's: what pagePointAt reads)
         std::uint8_t scripts = 0;   // of the document and the pages it has shown

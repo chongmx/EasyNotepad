@@ -1,6 +1,10 @@
-// Windows version resource (configured by CMakeLists.txt from the VERSION file): what Explorer's
-// Properties > Details shows for EasyNotepad.exe.
+// Windows resources (configured by CMakeLists.txt): the app's icon, and the version (from the
+// VERSION file) Explorer's Properties > Details shows for EasyNotepad.exe.
 #include <winver.h>
+
+// The logo (resources/icons, drawn by tools/icons/make_icons.cpp). Explorer shows the first icon
+// of the executable; GLFW gives its windows the one named GLFW_ICON (title bar, taskbar, Alt+Tab).
+GLFW_ICON ICON "@ENP_WINDOWS_ICON@"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0

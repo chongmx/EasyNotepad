@@ -25,14 +25,35 @@ its release notes on GitHub.
   other, when it shows the same document, keeps its place and shows the highlights.
 
 ### Changed
+- The app has its logo as its icon everywhere, instead of each system's generic one: the Windows
+  executable, its windows and the taskbar; the macOS Dock; Linux windows (X11), and the menu
+  entry and theme icons an installed copy has (a `.desktop` file; Wayland shows its windows with
+  it); Android's launcher (an adaptive icon, round and themed where the launcher asks for them);
+  the web page's tab. All are drawn from the logo by `tools/icons/make_icons.cpp`
+  (`resources/icons`).
 - Preferences are in tabs: Appearance, Editor, Files, Performance and Workspace. The Enhanced UI
   settings fold away under Appearance. The dialog keeps its size from tab to tab and fits a phone.
   The tab row scrolls with the mouse wheel or a finger, without arrow buttons; a sideways swipe
   across a page moves to the next or previous tab.
 - Word, Excel, PowerPoint and PDF no longer show "Open as text" on their toolbar. Preferences >
   Files brings it back. A document that cannot be shown still offers its text.
+- The ribbon's tabs in the Code workspace are in a new order: Home, Edit, View, Tools, Git, Read,
+  Review, Document (then My Tools). An order you set yourself is kept.
+- The Dear ImGui version is locked: configuring stops when its submodule is at another commit than
+  `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- A pinch (or Ctrl+wheel) on Word, Excel, Markdown and pictures made the content jitter and slide
+  away from the fingers; only PDF and slides zoomed about the point under them. Word and Excel
+  laid out at the old size while scrolling for the new one, and none of them grows in proportion
+  to its zoom (page gaps and headers keep their size; reflowed text wraps anew). Each now finds
+  the point under the fingers in its own terms when the pinch starts (a page and a point on it, a
+  place in the cells, a paragraph and how far into it, a pixel of the picture) and keeps it there
+  at every size.
+- Touch: a finger dragging a slider or a splitter in a view that scrolls the same way scrolled the
+  view instead (the blame column's edge in the editor, for one). Sliders, splitters, the minimap
+  and the map now keep a finger's drag along the way they move; a drag the other way still
+  scrolls.
 - A picture opened from outside the open folder (on a phone: from the Download folder while the
   sample workspace is shown) said "cannot be shown: not an image". It was given the sample
   workspace's text instead of the file. Files by their full path are now always read from disk.

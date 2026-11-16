@@ -18,6 +18,8 @@ struct State {
     bool moved = false;
     int axis = -1;         // 0 = x, 1 = y
     ImGuiID window = 0;    // the window being scrolled
+    int claimed = 0;       // the axes the item under the finger moves on itself (claimDrag)
+    bool landing = false;  // the frame the platform's finger landed: the last frame's UI was built without it
     ImVec2 start, last;
     float velocity = 0.0f; // pixels per second along `axis`, for the glide
 };
@@ -36,6 +38,10 @@ struct Finger {
 
 Finger f;
 float scale = 1.0f; // the UI's scale, as update() was last given it
+
+// Axes claimed by the item under the pointer: this frame's (claimDrag while the UI is built), and
+// the last frame's (read by update(), before the UI).
+int claimNow = 0, claimLast = 0;
 
 // How far a finger moves before it is a drag, not a tap (pixels at a scale of 1).
 constexpr float kSlop = 8.0f;
@@ -164,26 +170,14 @@ void scrollTo(ImVec2 to, ImVec2& pending)
     scrollNow(ImGui::GetCurrentWindow(), pending);
 }
 
-bool zoomView(float& zoom, float lowest, float highest, ImVec2& pending)
-{
-    const float before = zoom;
-    ImVec2 c;
-    if (!takeZoom(zoom, lowest, highest, c, pending))
-        return false;
-    // The point under the fingers stays: its place in the content grows with the zoom.
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    const float k = zoom / before;
-    const ImVec2 at(c.x - window->Pos.x, c.y - window->Pos.y);
-    scrollTo(ImVec2((window->Scroll.x + at.x) * k - at.x, (window->Scroll.y + at.y) * k - at.y), pending);
-    return true;
-}
-
 void update(float uiScale)
 {
     ImGuiContext& g = *GImGui;
     const ImGuiIO& io = g.IO;
     const float dt = io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f;
     scale = uiScale;
+    claimLast = claimNow;
+    claimNow = 0;
 
     // This frame's zoom: what the fingers gathered, or Ctrl+wheel's (desktops); one the view
     // under it did not take last frame is dropped.
@@ -206,6 +200,7 @@ void update(float uiScale)
         f.landed = false;
         s = State{};
         s.finger = s.pressed = true;
+        s.landing = true;
         s.start = s.last = f.start;
     }
     // The press ImGui reports for a finger is the one passed on below; a press from elsewhere (a
@@ -236,6 +231,11 @@ void update(float uiScale)
             }
         };
         if (!s.panning) {
+            // What the finger is on: the last frame's UI was built with it there (on the frame it
+            // landed, not yet: that UI had the pointer where the previous finger left it).
+            if (!s.landing)
+                s.claimed |= claimLast;
+            s.landing = false;
             const ImVec2 d(pos.x - s.start.x, pos.y - s.start.y);
             if (std::sqrt(d.x * d.x + d.y * d.y) < kSlop * uiScale)
                 return;
@@ -245,6 +245,10 @@ void update(float uiScale)
                 return;
             }
             const int along = std::fabs(d.y) >= std::fabs(d.x) ? 1 : 0;
+            if (s.claimed & (along == 0 ? ClaimX : ClaimY)) { // the item moves that way itself
+                press();
+                return;
+            }
             ImGuiWindow* target = scrollableAlong(g.HoveredWindow, along);
             int axis = along;
             if (!target) { // nothing scrolls that way: the other way, when the drag leans to it too
@@ -291,6 +295,12 @@ void update(float uiScale)
         if (std::fabs(s.velocity) < 20.0f * uiScale)
             s.velocity = 0.0f;
     }
+}
+
+void claimDrag(int axes)
+{
+    if (ImGui::IsItemActive() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        claimNow |= axes;
 }
 
 bool fingerDown() { return s.finger; }

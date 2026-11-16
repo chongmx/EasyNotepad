@@ -34,6 +34,13 @@ std::optional<std::string> getEnv(const std::string& name);
 // Monotonic clock in seconds.
 double now();
 
+// The app's icon (resources/icons) where the platform takes it from the running program: macOS's
+// Dock (the app runs outside a bundle, which would otherwise show a generic one). Elsewhere the
+// icon comes with the program and this does nothing: Windows from the executable's icon resource,
+// Android from the APK's launcher icons, Linux from its .desktop file (and, on X11, the window's
+// icon the app sets), the web from the page's favicon. Call once, after the window exists.
+void applyAppIcon();
+
 // What the process holds right now, for tracking down leaks on a user's machine: a count that
 // climbs while the app idles names the culprit (handles: processes, sockets, files; GDI/USER
 // objects: windows, cursors, fonts; threads: work never joined). 0 where the platform cannot tell.

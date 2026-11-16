@@ -4,6 +4,7 @@
 #include "enp/view/PanelFrame.h"
 
 #include "enp/view/UiAutomation.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
@@ -311,6 +312,7 @@ void MapView::render(ImVec2 size)
     ImGui::SetCursorScreenPos(canvasMin);
     ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton("##mapCanvas", canvasSize, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+    touch::claimDrag(touch::ClaimBoth); // a finger pans the map itself
     const bool canvasHovered = ImGui::IsItemHovered();
     ImGuiIO& io = ImGui::GetIO();
     if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 2.0f))) {

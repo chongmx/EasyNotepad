@@ -16,6 +16,73 @@ The root of it is that ImGui has no notion of drag scrolling. The fix belongs in
 `git submodule update --remote` would silently move it. It also says `ignore = dirty`, which would
 hide edits made inside the submodule.
 
+## Where it stands (checked 15 Nov 2026)
+
+Drag-scrolling works today, in every content window, on Android and on Windows touch screens. It is
+built in the app (`view/TouchScroll.cpp`, about 350 lines), not in ImGui. Since this plan was
+written it grew a gesture layer: on Android the finger's press is held back from ImGui until the
+gesture is known, so a drag never clicks.
+
+**What the app-side version already does (the plan's behaviour goals):**
+
+| Goal | State | How |
+|---|---|---|
+| A finger drag scrolls any window or child that can scroll, 1:1 | Done | `update()`: the innermost window under the finger that scrolls along the drag's main axis (or the other axis, when only that one scrolls); the content catches up from where the finger went down |
+| It glides after release | Done | velocity decays (about 4 per second), stops at the ends |
+| A tap is a click; a drag never is | Done | Android: `fingerLanded/Moved/Lifted` hold the press back; a finger that lifts within the slop (8 px) is a press and release where it lifted; a pan presses nothing. Other touch screens: the press is cleared (`ClearActiveID`) when a pan starts |
+| Windows that do not scroll are not shifted | Done | `userScrollable()`: only windows a wheel or scrollbar could scroll |
+| Text being edited keeps its drag (selecting) | Done | the active `InputText` under the finger gets the press |
+| Sliders and splitters keep their drag | **Partly** | by direction, not by asking the widget: a drag that nothing under the finger can scroll that way gets the press. A horizontal slider in a window that scrolls only vertically works. A slider or splitter in a window that scrolls the same way as the drag is panned instead |
+| Pinch to zoom; two fingers never click | Done (beyond the plan) | `pinch()`, `zoomView()`, `takeZoom()` for the editor, Markdown and the document viewer |
+| The editor's tap rule | Done | `EditorView` asks `touch::moved()` |
+| Tested | Partly | UI tests: the editor scrolls and glides, a navigation tap, a list dragged without opening a file, the Preferences tab row, swipes, a pinch about the fingers on a 120-page PDF. **Not tested:** a finger drag on a slider, on a splitter, or selecting in an `InputText` |
+
+**What is not done (the plan's mechanism):**
+- **Nothing is in ImGui.** No patch, no `io.ConfigDragScroll*`, no per-window or per-item opt-out
+  (`NoDragScroll`), no `IsDragScrolling()`. The submodule is unmodified upstream ImGui
+  (`v1.93.0-docking-42`, `d682dc41f`).
+- **The lock.** `.gitmodules` still names `branch = docking` and `ignore = dirty`; there is no
+  `patches/imgui/BASE` and no configure check for ImGui. (CI checks out the recorded commit, so CI
+  builds are pinned in practice.)
+- **The patched-copy build exists, for llama.cpp only.** `cmake/PatchedSource.cmake`
+  (`enp_patched_source`: checks `BASE`, exports the commit, applies `patches/<name>/*.patch`) was
+  built for plan 23 and names this plan; ImGui does not use it yet. Step 2 below is therefore mostly
+  done: ImGui only needs to be routed through it.
+- No pen or mouse "hand tool", no chaining from a child at its end to its parent, no
+  `scripts/imgui-update.sh`.
+
+**What this changes in the plan.** The user-facing problem is solved. What remains is (a) the
+lock, which is cheap and worth doing now, (b) the one behaviour gap (a widget that drags the same
+way its window scrolls), and (c) whether to move the mechanism into ImGui at all. Two ways on:
+
+1. **Keep it in the app** (smaller): do the lock (step 1); add an item-level opt-out in the app
+   (an id list `touch::claimDrag(id)` that splitters and sliders call, checked before a pan
+   starts, using `g.HoveredIdPreviousFrame`); add the missing tests. No ImGui patch to rebase on
+   upgrades.
+2. **Move it into ImGui** as planned below (larger): steps 1 to 5, with `TouchScroll`'s gesture
+   rules (press held back until known, slop, pinch) carried into the patch, and the existing touch
+   tests as the check that nothing changed.
+
+Recommended: 1 now, and 2 only if upstream ImGui shows interest in taking the patch.
+
+## Done, and why this plan is kept here (kiv: keep in view)
+
+Way 1 was done on 15 Nov 2026:
+- **The lock.** `patches/imgui/BASE` names the commit (`d682dc41f`, v1.93.0-docking-42);
+  `cmake/PinnedSource.cmake` (`enp_pinned_source`) fails configuring when the submodule is at
+  another commit (`-DENP_ALLOW_UNPINNED=ON` for experiments). `.gitmodules` no longer names a branch
+  or says `ignore = dirty` for ImGui. No patched copy is made: ImGui needs no patch.
+- **Per-item claims.** `touch::claimDrag(ClaimX | ClaimY)` after an item that moves with a drag: a
+  finger that lands on it and drags along a claimed axis moves the item, even in a window that
+  scrolls that way; the other axis still scrolls. Called by the sliders (Preferences, Engine Lab),
+  the splitters (columns, panels, side bar, the data and library trees), the blame column's edge,
+  the Markdown ruler, the minimap and the map canvas.
+- **Tests.** A UI test drags a finger on a slider, a splitter and text being edited, in a window
+  that scrolls both ways.
+
+Way 2 (moving the mechanism into ImGui) is not planned. This file stays for that case: if upstream
+ImGui takes drag scrolling, or the app-side rules stop being enough.
+
 ## Goal
 
 - ImGui itself scrolls a window when a finger (or, optionally, a pen or mouse) drags its content.

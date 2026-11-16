@@ -173,8 +173,8 @@ without a border.
 
 ## A ribbon you can make your own
 
-Commands are organised in a flat ribbon (Home, Read, Edit, Review, View, Document, Tools; in the Agent
-workspace: Agent, Read, Review, Files, View) with a command search box. **My Tools** holds the
+Commands are organised in a flat ribbon (Home, Edit, View, Tools, Git, Read, Review, Document; in the Agent
+workspace: Agent, Read, Review, Git, Files, View) with a command search box. **My Tools** holds the
 commands you pin and **custom actions**: buttons that run your own shell commands in the terminal.
 
 **Customize Ribbon** (the sliders button after the tabs) has three sections. **Tabs**: tick the tabs

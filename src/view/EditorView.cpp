@@ -319,10 +319,39 @@ void EditorView::renderFileView(model::Document& doc, ImVec2 size)
         float scale = 1.0f;
         if (imageFit_)
             scale = std::min({1.0f, avail.x / std::max(1.0f, sourceW), avail.y / std::max(1.0f, sourceH)});
-        touch::zoomView(heldImage->zoom, 0.1f, 16.0f, heldImage->pendingScroll); // a pinch: larger or smaller
-        scale *= heldImage->zoom;
-        const ImVec2 shown(sourceW * scale, sourceH * scale);
+        // A pinch: larger or smaller, about the point under the fingers. The picture sits below the
+        // toolbar and is centred while narrower than the view, so it does not grow from the
+        // content's corner: the point is found in the picture's pixels when the pinch starts and put
+        // back under the fingers at each size.
         const ImVec2 cursor = ImGui::GetCursorPos();
+        auto origin = [&](float sc) { return ImVec2(pad + std::max(0.0f, (avail.x - sourceW * sc) * 0.5f), cursor.y + pad * 0.5f); };
+        ImVec2 anchorAt;
+        bool zoomed = false;
+        {
+            float z = heldImage->zoom;
+            ImVec2 centre;
+            if (touch::takeZoom(z, 0.1f, 16.0f, centre, heldImage->pendingScroll)) {
+                const ImVec2 win = ImGui::GetWindowPos();
+                anchorAt = ImVec2(centre.x - win.x, centre.y - win.y);
+                if (!heldImage->anchorSet) {
+                    const float old = scale * heldImage->zoom;
+                    const ImVec2 o = origin(old);
+                    heldImage->anchor = ImVec2((ImGui::GetScrollX() + anchorAt.x - o.x) / old, (ImGui::GetScrollY() + anchorAt.y - o.y) / old);
+                    heldImage->anchorSet = true;
+                }
+                heldImage->zoom = z;
+                zoomed = true;
+            }
+        }
+        scale *= heldImage->zoom;
+        if (zoomed) {
+            const ImVec2 o = origin(scale);
+            touch::scrollTo(ImVec2(o.x + heldImage->anchor.x * scale - anchorAt.x, o.y + heldImage->anchor.y * scale - anchorAt.y),
+                            heldImage->pendingScroll);
+        }
+        if (!touch::pinching())
+            heldImage->anchorSet = false; // (Ctrl+wheel: found again at the next notch)
+        const ImVec2 shown(sourceW * scale, sourceH * scale);
         ImGui::SetCursorPos(ImVec2(pad + std::max(0.0f, (avail.x - shown.x) * 0.5f), cursor.y + pad * 0.5f));
         const ImVec2 at = ImGui::GetCursorScreenPos();
         // A checkerboard under it shows transparency.
@@ -779,6 +808,7 @@ void EditorView::markdownRuler(ImVec2 winPos, float viewW, float column, float w
     auto end = [&](const char* id, float x, float sign) {
         ImGui::SetCursorScreenPos(ImVec2(x - grip, winPos.y));
         ImGui::InvisibleButton(id, ImVec2(grip * 2.0f, h));
+        touch::claimDrag(touch::ClaimX); // a finger sets the width, the text does not scroll
         if (ImGui::IsItemActivated()) {
             rulerDragStart_ = column;
             rulerDragMouse_ = ImGui::GetIO().MousePos.x;
@@ -853,7 +883,26 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
         shownMarkdownDoc_ = doc.id;
     }
     panel::beginChild("##markdownText", size, palette_.editorBg, ImGuiChildFlags_None, ImGuiWindowFlags_NoNav);
-    touch::zoomView(md.zoom, 0.4f, 4.0f, md.pendingScroll); // a pinch: the text larger or smaller (it reflows)
+    const float pad = 24.0f * s_;
+    // A pinch: the text larger or smaller. It reflows, so the place under the fingers is kept by
+    // the block it is in and how far into it (found when the pinch starts), and put back under the
+    // fingers once the text is measured at the new size.
+    ImVec2 anchorAt;
+    bool zoomed = false;
+    {
+        float z = md.zoom;
+        ImVec2 centre;
+        if (touch::takeZoom(z, 0.4f, 4.0f, centre, md.pendingScroll)) {
+            const ImVec2 win = ImGui::GetWindowPos();
+            anchorAt = ImVec2(centre.x - win.x, centre.y - win.y);
+            if (!md.anchorSet) {
+                md.view.anchorAt(ImGui::GetScrollY() + anchorAt.y - pad, md.anchorBlock, md.anchorShare);
+                md.anchorSet = true;
+            }
+            md.zoom = z;
+            zoomed = true;
+        }
+    }
     if (focusRequested_ && !vm_.findVisible.get() && !passive_) {
         ImGui::SetWindowFocus();
         focusRequested_ = false;
@@ -863,9 +912,14 @@ void EditorView::renderMarkdown(model::Document& doc, ImVec2 size)
     const float viewW = ImGui::GetContentRegionAvail().x;
     const float zoom = vm_.zoom.get() * md.zoom;
     // A readable column: centred, at most ~90 characters wide unless the ruler set another width.
-    const float pad = 24.0f * s_;
     const float widest = std::max(1.0f, viewW - pad * 2.0f);
     const float column = markdownColumn_ > 0.0f ? std::min(widest, markdownColumn_) : std::min(widest, 820.0f * s_ * zoom);
+    if (zoomed) { // measured at the new size now (render below reuses it), the place goes back under the fingers
+        md.view.measureText(md.text, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
+        touch::scrollTo(ImVec2(ImGui::GetScrollX(), pad + md.view.offsetOf(md.anchorBlock, md.anchorShare) - anchorAt.y), md.pendingScroll);
+    }
+    if (!touch::pinching())
+        md.anchorSet = false; // (Ctrl+wheel: found again at the next notch)
     ImGui::SetCursorPos(ImVec2(std::max(pad, (viewW - column) * 0.5f), pad));
     md.view.render(md.text, column, fonts_, palette_, Fonts::kUiSize * 1.08f * zoom, s_);
     ImGui::Dummy(ImVec2(1.0f, size.y * 0.4f)); // room to scroll the end up
@@ -1763,6 +1817,7 @@ void EditorView::renderSideBar(const model::Document& doc, ImVec2 size)
     const ImVec2 handle = ImGui::GetCursorScreenPos();
     const float handleW = 5.0f * s_;
     ImGui::InvisibleButton("##sideBarResize", ImVec2(handleW, std::max(1.0f, size.y)));
+    touch::claimDrag(touch::ClaimX);
     if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         parentDl->AddLine(ImVec2(handle.x + handleW * 0.5f, handle.y), ImVec2(handle.x + handleW * 0.5f, handle.y + size.y),
@@ -1919,6 +1974,7 @@ void EditorView::renderMinimap(const model::Document& doc, ImVec2 size)
     const ImVec2 v1(p.x + w - 1.0f, top + float(lastVisibleLine_ + 1) * lineH);
     ImGui::SetCursorScreenPos(p);
     ImGui::InvisibleButton("##minimapArea", ImVec2(w, h));
+    touch::claimDrag(touch::ClaimY); // a finger moves the view along the minimap
     const bool hovered = ImGui::IsItemHovered();
     if (ImGui::IsItemActive()) {
         pendingScrollLine_ = std::clamp(int((ImGui::GetIO().MousePos.y - top) / lineH), 0, std::max(0, lines - 1));
@@ -2244,6 +2300,7 @@ void EditorView::drawBlame(const model::Document& doc, const Metrics& m, int fir
     const ImVec2 cursor = ImGui::GetCursorScreenPos();
     ImGui::SetCursorScreenPos(ImVec2(edge - 3.0f * s_, m.viewMin.y));
     ImGui::InvisibleButton("##blameEdge", ImVec2(6.0f * s_, std::max(1.0f, m.viewMax.y - m.viewMin.y)));
+    touch::claimDrag(touch::ClaimX); // inside the text, which scrolls sideways too: the edge has the drag
     const bool edgeActive = ImGui::IsItemActive();
     const bool edgeHovered = ImGui::IsItemHovered();
     if (edgeHovered || edgeActive)

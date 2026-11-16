@@ -10,6 +10,7 @@
 #include "enp/os/Memory.h"
 #include "enp/services/debug/MemoryTrace.h"
 #include "enp/os/Os.h"
+#include "enp/services/ImageDecoder.h"
 
 #include "FrameCapture.h"
 
@@ -53,6 +54,30 @@ struct AppState {
 };
 
 AppState* g_state = nullptr;
+
+#if defined(__linux__)
+// X11: the window's icon is the app's logo (resources/icons) at the sizes a desktop shows it.
+// Wayland has no window icons: the compositor shows the .desktop file's (resources/icons/linux),
+// matched by the app id set before the window is made. Decoded here and let go at once.
+void setWindowIcon(GLFWwindow* window)
+{
+    if (glfwGetPlatform() != GLFW_PLATFORM_X11)
+        return;
+    std::vector<enp::services::DecodedImage> decoded;
+    for (const int size : {16, 32, 48, 64, 128, 256}) {
+        const std::optional<std::string> png = enp::os::fs::readAsset("icons/easynotepad-" + std::to_string(size) + ".png");
+        enp::services::DecodedImage image;
+        std::string note;
+        if (png && enp::services::decodeImage(*png, image, note))
+            decoded.push_back(std::move(image));
+    }
+    std::vector<GLFWimage> images;
+    for (enp::services::DecodedImage& image : decoded)
+        images.push_back(GLFWimage{image.width, image.height, image.rgba.data()});
+    if (!images.empty())
+        glfwSetWindowIcon(window, int(images.size()), images.data());
+}
+#endif
 
 #if !defined(__EMSCRIPTEN__)
 void onDrop(GLFWwindow*, int count, const char** paths)
@@ -350,6 +375,13 @@ int main(int argc, char** argv)
     // loads; shaders are compiled on first draws) are counted as "gl-driver", not "other"
     // (docs/MEMORY.md section 2).
     std::optional<enp::os::mem::Scope> driverScope(std::in_place, "gl-driver");
+#if defined(__linux__)
+    // The app's name for the desktop: its .desktop file (resources/icons/linux) gives the icon
+    // and groups the windows under it. Wayland's app id, X11's class.
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "easynotepad");
+    glfwWindowHintString(GLFW_X11_CLASS_NAME, "easynotepad");
+    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "easynotepad");
+#endif
     GLFWwindow* window = glfwCreateWindow(width, height, "EasyNotepad", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "EasyNotepad: no window with an OpenGL %s context could be created\n", glslVersion);
@@ -360,6 +392,10 @@ int main(int argc, char** argv)
     if (areaW > 0 && areaH > 0)
         glfwSetWindowPos(window, areaX + (areaW - width) / 2, areaY + (areaH - height) / 2);
 #endif
+#if defined(__linux__)
+    setWindowIcon(window);
+#endif
+    enp::os::applyAppIcon(); // macOS: the Dock's (os/Os.h); elsewhere it comes with the program
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 

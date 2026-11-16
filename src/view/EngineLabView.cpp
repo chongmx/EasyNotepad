@@ -2,6 +2,7 @@
 
 #include "enp/view/Fit.h"
 #include "enp/view/UiAutomation.h"
+#include "enp/view/TouchScroll.h"
 #include "enp/view/UiStyle.h"
 
 #include "IconsFontAwesome6.h"
@@ -335,6 +336,7 @@ void EngineLabView::renderRun()
     ImGui::SetNextItemWidth(fit::itemWidth(220.0f * s_, 120.0f * s_));
     if (ImGui::SliderInt("CPU threads", &threads, 1, std::max(1, info.cpuThreads)))
         l.threads.set(threads);
+    touch::claimDrag(touch::ClaimX);
     const bool hasGpu = std::any_of(info.devices.begin(), info.devices.end(), [](const auto& d) { return d.kind != "CPU"; });
     bool gpu = l.useGpu.get() && hasGpu;
     ImGui::BeginDisabled(!hasGpu);
@@ -347,6 +349,7 @@ void EngineLabView::renderRun()
     ImGui::SetNextItemWidth(fit::itemWidth(220.0f * s_, 120.0f * s_));
     if (ImGui::SliderInt("Tokens to generate", &tokens, 32, 512))
         l.generateTokens.set(tokens);
+    touch::claimDrag(touch::ClaimX);
 
     const bool modelReady = l.fileUsable(Which::Model);
     const bool drafterReady = l.fileUsable(Which::Drafter);
