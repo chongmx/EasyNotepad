@@ -39,23 +39,23 @@
 #endif
 #endif
 
+#include <csignal>
+#include <cstdlib>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <sys/prctl.h>
+#endif
+
+#include "enp/engine/EngineJson.h"
+#include "enp/engine/EnpEngine.h"
+#include "enp/os/Library.h"
+#include "enp/services/EngineHelper.h"
 #if ENP_HAS_LOCAL_ENGINE
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function" // helpers defined in llama.cpp's headers
+#include "enp/engine/LlamaRunner.h"
 #endif
-#include "build-info.h"
-#include "chat.h"
-#include "common.h"
-#include "ggml-backend.h"
-#include "llama.h"
-#include "log.h"
-#include "sampling.h"
-#include "speculative.h"
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-#endif
+
+#include <condition_variable>
+#include <deque>
+#include <iostream>
 
 namespace enp::services {
 
@@ -230,350 +230,368 @@ bool cpuSupported(std::string& features, std::string& missing)
 #endif
 }
 
-#if ENP_HAS_LOCAL_ENGINE
-void initBackend()
+// The faster engine library looked for next to the app (plan 21). Desktop builds with an engine.
+constexpr const char* kAcceleratorBase = "enp-engine-cuda";
+
+// ---- The helper process (`--local-engine <library>`) --------------------------------------------
+
+#if !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
+// stdio that also works for a Windows GUI-subsystem executable started with redirected handles.
+bool readInputLine(std::string& line)
 {
-    static const bool once = []() {
-        // llama.cpp's log ring and backend registry live for the process: counted as theirs.
-        os::mem::Scope scope("local-engine");
-        // The lab shows what matters; nothing goes to stdout or stderr.
-        llama_log_set([](ggml_log_level, const char*, void*) {}, nullptr);
-        common_log_set_stdo(common_log_main(), false);
-        llama_backend_init();
-        return true;
-    }();
-    (void)once;
+#if defined(_WIN32)
+    static std::string buffer;
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    for (;;) {
+        const size_t newline = buffer.find('\n');
+        if (newline != std::string::npos) {
+            line = buffer.substr(0, newline);
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            buffer.erase(0, newline + 1);
+            return true;
+        }
+        char chunk[4096];
+        DWORD read = 0;
+        if (!in || in == INVALID_HANDLE_VALUE || !ReadFile(in, chunk, sizeof(chunk), &read, nullptr) || read == 0)
+            return false;
+        buffer.append(chunk, read);
+    }
+#else
+    return bool(std::getline(std::cin, line));
+#endif
 }
 
-// A realistic code prefix to continue (the agent's main job), not random tokens.
-const char* const kGeneratePrompt =
-    "// C++17\n#include <string_view>\n#include <vector>\n\n"
-    "// Splits text into lines. Handles \"\\r\\n\" and \"\\n\"; the last line may be empty.\n"
-    "std::vector<std::string_view> splitLines(std::string_view text)\n{\n";
-
-// Text for measuring prompt processing: varied prose and code, repeated as needed.
-const char* const kPromptText =
-    "The editor keeps each document as a piece table: an original buffer, an append buffer and a list of "
-    "pieces that say which parts of either make up the text. Inserting splits one piece and adds another; "
-    "deleting trims or removes pieces. Undo records the pieces changed, not a copy of the text.\n"
-    "struct Piece { bool added; size_t start; size_t length; };\n"
-    "size_t TextBuffer::lineCount() const { return lineStarts_.size(); }\n"
-    "void TextBuffer::insert(size_t at, std::string_view text) {\n"
-    "    auto [index, offset] = locate(at);\n    split(index, offset);\n"
-    "    pieces_.insert(pieces_.begin() + index + 1, Piece{true, added_.size(), text.size()});\n"
-    "    added_.append(text);\n    reindexLines(index);\n}\n";
-
-using Clock = std::chrono::steady_clock;
-double secondsBetween(Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double>(b - a).count(); }
-
-// Parameters shared by the lab's runs and the agent's chats.
-common_params engineParams(const std::string& modelPath, const std::string& drafterPath, int threads, bool gpu,
-                           int contextTokens, int batchTokens, const std::atomic<bool>* cancel)
+void writeOutputLine(const std::string& text)
 {
-    common_params params;
-    params.model.path = modelPath;
-    params.n_ctx = contextTokens;
-    params.n_batch = std::max(512, batchTokens);
-    params.n_ubatch = 512;
-    params.cpuparams.n_threads = threads;
-    params.cpuparams_batch.n_threads = threads;
-    params.n_gpu_layers = gpu ? 999 : 0;
-    params.load_progress_callback = [](float, void* flag) { return !static_cast<const std::atomic<bool>*>(flag)->load(); };
-    params.load_progress_callback_user_data = const_cast<std::atomic<bool>*>(cancel);
-    if (!drafterPath.empty()) {
-        params.speculative.types = {COMMON_SPECULATIVE_TYPE_DRAFT_MTP};
-        params.speculative.draft.mparams.path = drafterPath;
-        params.speculative.draft.n_gpu_layers = gpu ? 999 : 0;
-        const auto limits = common_speculative_get_output_limits(params.n_batch, params.n_parallel,
-                                                                 common_speculative_n_max(&params.speculative));
-        params.n_outputs_max = limits.total;
-        params.n_outputs_max_per_seq = limits.per_seq;
-    }
-    return params;
-}
-
-// A model in memory, with its drafter when there is one.
-struct Loaded {
-    common_params params;
-    common_init_result_ptr init;
-    common_speculative_init_result_ptr specInit;
-    common_chat_templates_ptr templates; // the agent's chat format (loaded when first needed)
-    llama_context* ctxDraft = nullptr;
-    llama_model* model() const { return init ? init->model() : nullptr; }
-    llama_context* ctx() const { return init ? init->context() : nullptr; }
-    bool drafter() const { return ctxDraft != nullptr; }
-};
-
-// Loads the model (and drafter); null with `error` set when it cannot.
-std::unique_ptr<Loaded> loadModel(common_params params, std::string& error)
-{
-    auto m = std::make_unique<Loaded>();
-    m->init = common_init_from_params(params);
-    if (!m->model() || !m->ctx()) {
-        error = "the model could not be loaded (file, memory or format)";
-        return nullptr;
-    }
-    if (!params.speculative.draft.mparams.path.empty()) {
-        common_params draftParams = common_base_params_to_speculative(params);
-        m->specInit = common_speculative_init_from_params(draftParams, m->model(), m->ctx());
-        m->ctxDraft = m->specInit ? m->specInit->context() : nullptr;
-        if (!m->ctxDraft) {
-            error = "the drafter could not be loaded with this model";
-            return nullptr;
-        }
-        params.speculative.draft.ctx_tgt = m->ctx();
-        params.speculative.draft.ctx_dft = m->ctxDraft;
-    }
-    m->params = std::move(params);
-    return m;
-}
-
-struct Generated {
-    int produced = 0;
-    int drafted = 0;
-    int accepted = 0;
-    double firstTokenSeconds = 0; // the prompt processed and the first token sampled
-    double decodeSeconds = 0;     // after the first token
-};
-
-// Generates up to `maxTokens` after the prompt `inp`, from an empty context, as llama.cpp's
-// speculative example does: the drafter (when loaded) proposes tokens, the model checks them in
-// one batch and keeps those it agrees with. Each piece of text goes to `onPiece` (this thread).
-Generated generate(Loaded& m, const std::vector<llama_token>& inp, int maxTokens, const std::atomic<bool>& cancel,
-                   const std::function<void(const std::string&)>& onPiece)
-{
-    Generated g;
-    llama_context* ctx = m.ctx();
-    llama_context* ctxDraft = m.ctxDraft;
-    const llama_vocab* vocab = llama_model_get_vocab(m.model());
-    llama_memory_clear(llama_get_memory(ctx), true);
-    if (ctxDraft)
-        llama_memory_clear(llama_get_memory(ctxDraft), true);
-    if (inp.empty())
-        return g;
-
-    common_speculative* spec = nullptr;
-    if (m.drafter()) {
-        spec = common_speculative_init(m.params.speculative, 1);
-        if (!spec)
-            throw std::runtime_error("the drafter could not be used with this model");
-    }
-    struct SpecFree {
-        common_speculative* s;
-        ~SpecFree()
-        {
-            if (s)
-                common_speculative_free(s);
-        }
-    } specFree{spec};
-    const bool ckptTarget = common_context_can_seq_rm(ctx) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-    const bool ckptDraft = ctxDraft && common_context_can_seq_rm(ctxDraft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-
-    const auto tFirst = Clock::now();
-    common_sampler_ptr sampler(common_sampler_init(m.model(), m.params.sampling));
-    const llama_seq_id seq = 0;
-    {
-        common_batch batch(ctx);
-        for (size_t i = 0; i + 1 < inp.size(); ++i)
-            batch.add(inp[i], llama_pos(i), seq, false);
-        llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
-        if (spec && !common_speculative_process(spec, batch))
-            throw std::runtime_error("the drafter failed on the prompt");
-    }
-    llama_token last = inp.back();
-    llama_tokens context(inp.begin(), inp.end() - 1);
-    int past = int(inp.size()) - 1;
-    if (spec)
-        common_speculative_begin(spec, seq, context);
-    common_batch batch(ctx);
-    llama_tokens draft;
-    common_prompt_checkpoint ckpt;
-    bool first = true;
-    Clock::time_point tDecode = Clock::now();
-    while (g.produced < maxTokens && !cancel.load()) {
-        if (spec && draft.empty()) {
-            ckpt.update_pos(context.size(), llama_memory_seq_pos_min(llama_get_memory(ctx), seq),
-                            llama_memory_seq_pos_max(llama_get_memory(ctx), seq));
-            if (ckptDraft)
-                ckpt.update_dft(ctxDraft, seq, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-            const int room = std::max(0, std::min(int(llama_n_ctx(ctx)) - past - 2, maxTokens - g.produced - 1));
-            common_speculative_get_draft_params(spec, seq) = {true, room, past, last, &context, &draft};
-            common_speculative_draft(spec);
-            if (!draft.empty() && ckptTarget)
-                ckpt.update_tgt(ctx, seq, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-            if (ctxDraft) {
-                if (ckptDraft)
-                    ckpt.load_dft(ctxDraft, seq, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                llama_memory_seq_rm(llama_get_memory(ctxDraft), seq, ckpt.pos_max + 1, -1);
-            }
-        }
-        batch.clear();
-        batch.add(last, past++, seq, true);
-        for (size_t i = 0; i < draft.size(); ++i)
-            batch.add(draft[i], llama_pos(past + int(i)), seq, true);
-        llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
-        if (spec && !common_speculative_process(spec, batch))
-            throw std::runtime_error("the drafter failed");
-
-        common_sampler_ptr saved;
-        if (spec && ckptTarget)
-            saved.reset(common_sampler_clone(sampler.get()));
-        const size_t drafted = draft.size();
-        std::vector<llama_token> ids = common_sampler_sample_and_accept_n(sampler.get(), ctx, draft);
-        if (first) {
-            g.firstTokenSeconds = secondsBetween(tFirst, Clock::now());
-            tDecode = Clock::now();
-            first = false;
-        }
-        if (spec && ckptTarget && ids.size() - 1 < drafted) {
-            // Partly accepted and the context cannot drop a tail: go back to the checkpoint and
-            // evaluate the accepted part as the next draft.
-            draft = std::move(ids);
-            ckpt.load_tgt(ctx, seq, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-            llama_memory_seq_rm(llama_get_memory(ctx), seq, ckpt.pos_max + 1, -1);
-            if (ctxDraft) {
-                if (ckptDraft)
-                    ckpt.load_dft(ctxDraft, seq, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                llama_memory_seq_rm(llama_get_memory(ctxDraft), seq, ckpt.pos_max + 1, -1);
-            }
-            context.resize(ckpt.n_tokens);
-            sampler = std::move(saved);
-            past = int(context.size());
-            continue;
-        }
-        if (spec)
-            common_speculative_accept(spec, seq, uint16_t(ids.size() - 1));
-        past += int(ids.size()) - 1;
-        g.drafted += int(drafted);
-        g.accepted += int(ids.size()) - 1;
-        g.produced += int(ids.size());
-        bool end = false;
-        for (llama_token id : ids) {
-            context.push_back(last);
-            last = id;
-            if (llama_vocab_is_eog(vocab, id)) {
-                end = true;
-                break;
-            }
-            onPiece(common_token_to_piece(ctx, id));
-        }
-        draft.clear();
-        llama_memory_seq_rm(llama_get_memory(ctx), seq, past, -1);
-        if (ctxDraft)
-            llama_memory_seq_rm(llama_get_memory(ctxDraft), seq, past, -1);
-        if (end)
-            break;
-    }
-    g.decodeSeconds = secondsBetween(tDecode, Clock::now());
-    return g;
-}
-
-// A chat prompt as tokens: template text may hold special tokens, the user's text may not.
-std::vector<llama_token> chatTokens(Loaded& m, const std::vector<interfaces::LocalChatMessage>& messages)
-{
-    if (!m.templates)
-        m.templates = common_chat_templates_init(m.model(), "");
-    common_chat_templates_inputs inputs;
-    for (const interfaces::LocalChatMessage& message : messages) {
-        common_chat_msg msg;
-        msg.role = message.role;
-        msg.content = message.text;
-        inputs.messages.push_back(std::move(msg));
-    }
-    inputs.add_generation_prompt = true;
-    inputs.enable_thinking = false; // quick answers; thinking used the whole budget in the trial
-    const common_chat_params formatted = common_chat_templates_apply(m.templates.get(), inputs);
-    const llama_vocab* vocab = llama_model_get_vocab(m.model());
-    std::vector<llama_token> tokens;
-    for (const common_chat_prompt_part& part : formatted.prompt.parts) {
-        const std::vector<llama_token> t = common_tokenize(vocab, part.text, false, !part.is_input);
-        tokens.insert(tokens.end(), t.begin(), t.end());
-    }
-    return tokens;
+    const std::string data = text + "\n";
+#if defined(_WIN32)
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD written = 0;
+    if (out && out != INVALID_HANDLE_VALUE)
+        WriteFile(out, data.data(), DWORD(data.size()), &written, nullptr);
+#else
+    std::fwrite(data.data(), 1, data.size(), stdout);
+    std::fflush(stdout);
+#endif
 }
 #endif
 
 } // namespace
 
-// The agent's model, kept loaded between questions.
+int runLocalEngineHelper(const std::string& library)
+{
+#if defined(__ANDROID__) || defined(__EMSCRIPTEN__)
+    (void)library;
+    return 2; // no helper processes there
+#else
+#if defined(__linux__) && !defined(__ANDROID__)
+    prctl(PR_SET_PDEATHSIG, SIGKILL); // the app gone, the helper goes too
+#endif
+#if defined(_WIN32)
+    // A crash or abort ends the helper at once: no error dialog (it would wait, unseen, for a
+    // click) and no fault report holding the process, so the app falls back to the CPU at once.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#if defined(_MSC_VER) || defined(_UCRT) // (MinGW's msvcrt has no such call; the SIGABRT handler does it)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+#endif
+    std::signal(SIGABRT, [](int) { std::_Exit(3); });
+    using model::Json;
+    auto refuse = [](const std::string& why) {
+        writeOutputLine(Json::object().set("event", "ready").set("ok", false).set("error", why).dump());
+        return 2;
+    };
+    std::string error;
+    void* lib = os::lib::open(library, &error);
+    if (!lib)
+        return refuse("the engine library could not be loaded: " + error);
+    const auto abi = reinterpret_cast<enp_engine_abi_fn>(os::lib::symbol(lib, "enp_engine_abi"));
+    const auto describe = reinterpret_cast<enp_engine_describe_fn>(os::lib::symbol(lib, "enp_engine_describe"));
+    const auto create = reinterpret_cast<enp_engine_create_fn>(os::lib::symbol(lib, "enp_engine_create"));
+    const auto request = reinterpret_cast<enp_engine_request_fn>(os::lib::symbol(lib, "enp_engine_request"));
+    const auto unload = reinterpret_cast<enp_engine_unload_fn>(os::lib::symbol(lib, "enp_engine_unload"));
+    const auto destroy = reinterpret_cast<enp_engine_destroy_fn>(os::lib::symbol(lib, "enp_engine_destroy"));
+    if (!abi || !describe || !create || !request || !unload || !destroy)
+        return refuse("not an engine library (an enp_engine function is missing)");
+    if (abi() != ENP_ENGINE_ABI)
+        return refuse("the engine library is for another version of EasyNotepad (interface " + std::to_string(abi()) +
+                      ", this one needs " + std::to_string(ENP_ENGINE_ABI) + ")");
+    const char* text = describe();
+    std::optional<Json> description = Json::parse(text ? text : "");
+    if (!description || !description->isObject())
+        return refuse("the engine library did not say what it can use");
+    if (const std::string why = description->getString("error"); !why.empty())
+        return refuse(why);
+    enp_engine* engine = create();
+    if (!engine)
+        return refuse("the engine could not start");
+    writeOutputLine(Json::object().set("event", "ready").set("ok", true).set("engine", *description).dump());
+
+    // Requests are read on their own thread, so a cancel reaches the request running.
+    struct Inbox {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::deque<Json> requests;
+        std::atomic<bool> cancel{false};
+        bool end = false;
+    } inbox;
+    std::thread reader([&inbox]() {
+        std::string line;
+        while (readInputLine(line)) {
+            std::optional<Json> j = Json::parse(line);
+            if (!j || !j->isObject())
+                continue;
+            std::lock_guard<std::mutex> lock(inbox.mutex);
+            if (j->getString("op") == "cancel") {
+                inbox.cancel = true;
+                continue;
+            }
+            inbox.cancel = false; // a new request: a cancel from now on is for it
+            inbox.requests.push_back(std::move(*j));
+            inbox.ready.notify_one();
+        }
+        std::lock_guard<std::mutex> lock(inbox.mutex); // the app closed our input, or is gone
+        inbox.end = true;
+        inbox.cancel = true;
+        inbox.ready.notify_one();
+    });
+    for (;;) {
+        Json next;
+        {
+            std::unique_lock<std::mutex> lock(inbox.mutex);
+            inbox.ready.wait(lock, [&]() { return inbox.end || !inbox.requests.empty(); });
+            if (inbox.end)
+                break;
+            next = std::move(inbox.requests.front());
+            inbox.requests.pop_front();
+        }
+        if (next.getString("op") == "unload") {
+            unload(engine);
+            continue;
+        }
+        resetPeakMemory();
+        const char* answer = request(
+            engine, next.dump().c_str(),
+            [](void*, const char* kind, const char* piece) {
+                writeOutputLine(Json::object().set("event", kind ? kind : "").set("text", piece ? piece : "").dump());
+            },
+            [](void* user) { return static_cast<Inbox*>(user)->cancel.load() ? 1 : 0; }, &inbox);
+        std::optional<Json> result = Json::parse(answer ? answer : "");
+        if (!result || !result->isObject())
+            result = Json::object().set("ok", false).set("error", "the engine gave no result");
+        if (next.getString("op") == "run")
+            result->set("peakMemory", double(peakMemory()));
+        writeOutputLine(Json::object().set("event", "done").set("result", std::move(*result)).dump());
+    }
+    destroy(engine); // the model and the device's memory given back before the process ends
+    reader.join();
+    return 0; // the library stays loaded: a GPU runtime is not made to be unloaded
+#endif
+}
+
+// The agent's model, kept loaded between questions; and the faster engine when there is one.
 struct LocalEngineService::ChatModel {
-    std::mutex mutex; // held while a chat uses or (un)loads it
-    std::string key;  // model, drafter, threads, GPU, context: a change means loading again
-    std::chrono::steady_clock::time_point lastUse;
+    std::mutex mutex; // held while a chat or a run uses or (un)loads the model
 #if ENP_HAS_LOCAL_ENGINE
-    std::unique_ptr<Loaded> loaded;
+    engine::Runner runner;
 #endif
     bool isLoaded() const
     {
 #if ENP_HAS_LOCAL_ENGINE
-        return loaded != nullptr;
+        return runner.loaded();
 #else
         return false;
+#endif
+    }
+    std::chrono::steady_clock::time_point lastUse() const
+    {
+#if ENP_HAS_LOCAL_ENGINE
+        return runner.lastUse();
+#else
+        return {};
 #endif
     }
     void unload()
     {
 #if ENP_HAS_LOCAL_ENGINE
-        loaded.reset();
+        runner.unload();
 #endif
-        key.clear();
+    }
+
+    // The engine library (enp-engine-cuda) through its helper process.
+    std::unique_ptr<EngineHelper> helper;
+    std::mutex acceleratorMutex; // guards what follows
+    enum class Accel { None, Unknown, Probing, Ready, Failed } accel = Accel::None;
+    std::string accelName = "CUDA";
+    std::string accelReason;
+    std::vector<EngineDevice> accelDevices;
+    std::chrono::steady_clock::time_point helperLastUse;
+
+    // Whether to try the library now (it is there and has not failed).
+    bool acceleratorWanted()
+    {
+        if (!helper)
+            return false;
+        std::lock_guard<std::mutex> lock(acceleratorMutex);
+        if (accel == Accel::Failed)
+            return false;
+        if (os::fs::stat(helper->options().library).size == 0) {
+            accel = Accel::Unknown; // dropped next to the app later: tried then
+            return false;
+        }
+        return true;
+    }
+    // Starts the helper; false (and the reason kept) when the library cannot be used.
+    bool startAccelerator()
+    {
+        std::string reason;
+        EngineHelper::Description d;
+        const bool ok = helper->start(reason, &d);
+        std::lock_guard<std::mutex> lock(acceleratorMutex);
+        if (ok) {
+            accel = Accel::Ready;
+            if (!d.name.empty())
+                accelName = d.name;
+            accelDevices.clear();
+            for (EngineDevice& e : d.devices)
+                if (e.kind != "CPU")
+                    accelDevices.push_back(std::move(e));
+        } else {
+            accel = Accel::Failed;
+            accelReason = reason;
+        }
+        return ok;
+    }
+    void acceleratorFailed(const std::string& reason)
+    {
+        helper->stop();
+        std::lock_guard<std::mutex> lock(acceleratorMutex);
+        accel = Accel::Failed;
+        accelReason = reason;
     }
 };
 
-LocalEngineService::LocalEngineService() : chat_(std::make_shared<ChatModel>()) {}
+LocalEngineService::LocalEngineService() : LocalEngineService(defaultAccelerator()) {}
+
+LocalEngineService::LocalEngineService(std::optional<Accelerator> accelerator) : chat_(std::make_shared<ChatModel>())
+{
+#if ENP_HAS_LOCAL_ENGINE
+    if (accelerator && !accelerator->library.empty() && !accelerator->helper.empty()) {
+        EngineHelper::Options o;
+        o.library = accelerator->library;
+        o.command = accelerator->helper;
+        o.startSeconds = accelerator->startSeconds;
+        o.silenceSeconds = accelerator->silenceSeconds;
+        chat_->helper = std::make_unique<EngineHelper>(std::move(o));
+        chat_->accel = ChatModel::Accel::Unknown;
+    }
+#else
+    (void)accelerator;
+#endif
+}
+
+std::optional<LocalEngineService::Accelerator> LocalEngineService::defaultAccelerator()
+{
+#if ENP_HAS_LOCAL_ENGINE && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
+    const std::string exe = os::fs::executablePath();
+    if (exe.empty())
+        return std::nullopt;
+    Accelerator a;
+    a.library = os::fs::path::join(os::fs::path::parent(exe), os::lib::fileName(kAcceleratorBase));
+    a.helper = {exe, "--local-engine", a.library};
+    return a;
+#else
+    return std::nullopt;
+#endif
+}
 
 LocalEngineService::~LocalEngineService()
 {
     alive_->store(false);
     cancel_->store(true);
+    if (chat_->helper)
+        chat_->helper->stop();
 }
 
 EngineInfo LocalEngineService::info()
 {
-    if (info_)
-        return *info_;
-    EngineInfo i;
-    i.cpuName = cpuName();
-    i.cpuThreads = int(std::max(1u, std::thread::hardware_concurrency()));
-    memoryInfo(i.memoryTotal, i.memoryAvailable);
+    if (!info_) {
+        EngineInfo i;
+        i.cpuName = cpuName();
+        i.cpuThreads = int(std::max(1u, std::thread::hardware_concurrency()));
+        memoryInfo(i.memoryTotal, i.memoryAvailable);
 #if defined(__ANDROID__)
-    const std::string soc = property("ro.soc.manufacturer") + " " + property("ro.soc.model");
-    i.socName = soc == " " ? property("ro.board.platform") : soc;
-    if (i.cpuName.empty())
-        i.cpuName = property("ro.product.model");
+        const std::string soc = property("ro.soc.manufacturer") + " " + property("ro.soc.model");
+        i.socName = soc == " " ? property("ro.board.platform") : soc;
+        if (i.cpuName.empty())
+            i.cpuName = property("ro.product.model");
 #endif
-    std::string missing;
-    const bool cpuOk = cpuSupported(i.cpuFeatures, missing);
+        std::string missing;
+        const bool cpuOk = cpuSupported(i.cpuFeatures, missing);
 #if ENP_HAS_LOCAL_ENGINE
-    i.engineVersion = "llama.cpp b" + std::to_string(llama_build_number()) + " (" + llama_commit() + ")";
-    if (!cpuOk) {
-        i.unavailableReason = "This processor lacks " + missing + ", which this build of the engine needs.";
-    } else {
-        initBackend();
-        i.available = true;
-        for (size_t d = 0; d < ggml_backend_dev_count(); ++d) {
-            ggml_backend_dev_t dev = ggml_backend_dev_get(d);
-            EngineDevice e;
-            e.name = ggml_backend_dev_name(dev);
-            e.description = ggml_backend_dev_description(dev);
-            switch (ggml_backend_dev_type(dev)) {
-            case GGML_BACKEND_DEVICE_TYPE_CPU: e.kind = "CPU"; break;
-            case GGML_BACKEND_DEVICE_TYPE_GPU: e.kind = "GPU"; break;
-            case GGML_BACKEND_DEVICE_TYPE_IGPU: e.kind = "iGPU"; break;
-            default: e.kind = "accelerator"; break;
+        i.engineVersion = engine::version();
+        if (!cpuOk) {
+            i.unavailableReason = "This processor lacks " + missing + ", which this build of the engine needs.";
+            if (chat_->helper) {
+                std::lock_guard<std::mutex> lock(chat_->acceleratorMutex);
+                chat_->accel = ChatModel::Accel::None; // its CPU part needs the same
             }
-            size_t free = 0, total = 0;
-            ggml_backend_dev_memory(dev, &free, &total);
-            e.memoryFree = free;
-            e.memoryTotal = total;
-            i.devices.push_back(std::move(e));
+        } else {
+            {
+                os::mem::Scope scope("local-engine"); // llama.cpp's log ring and backend registry live for the process
+                engine::initBackend();
+            }
+            i.available = true;
+            i.devices = engine::devices();
         }
-    }
 #else
-    (void)cpuOk;
-    i.unavailableReason = "This build has no inference engine (32-bit and web builds leave it out).";
+        (void)cpuOk;
+        i.unavailableReason = "This build has no inference engine (32-bit and web builds leave it out).";
 #endif
-    info_ = i;
+        info_ = i;
+    }
+    EngineInfo i = *info_;
+    if (!chat_->helper)
+        return i;
+    // The engine library: looked at once in the background (its helper started, asked, ended).
+    const bool there = os::fs::stat(chat_->helper->options().library).size > 0;
+    std::lock_guard<std::mutex> lock(chat_->acceleratorMutex);
+    using A = ChatModel::Accel;
+    const std::string& name = chat_->accelName;
+    switch (chat_->accel) {
+    case A::None: break;
+    case A::Unknown:
+        if (!there) {
+            i.accelerator = name + ": not installed (" + os::lib::fileName(kAcceleratorBase) + " is not next to EasyNotepad)";
+            break;
+        }
+        chat_->accel = A::Probing;
+        {
+            auto model = chat_;
+            os::dispatch::runAsync([model]() {
+                std::lock_guard<std::mutex> busy(model->mutex);
+                if (model->startAccelerator())
+                    model->helper->stop(); // known now; started again by the first question
+            });
+        }
+        [[fallthrough]];
+    case A::Probing: i.accelerator = name + ": starting"; break;
+    case A::Ready: {
+        std::string devices;
+        for (const EngineDevice& d : chat_->accelDevices) {
+            char memory[32];
+            std::snprintf(memory, sizeof(memory), " (%.1f GB)", double(d.memoryTotal) / (1024.0 * 1024.0 * 1024.0));
+            devices += (devices.empty() ? "" : ", ") + d.description + (d.memoryTotal ? memory : "");
+        }
+        i.accelerator = name + ": " + (devices.empty() ? "ready" : devices);
+        i.acceleratorReady = true;
+        for (const EngineDevice& d : chat_->accelDevices)
+            i.devices.push_back(d);
+        break;
+    }
+    case A::Failed: i.accelerator = name + ": not used (" + chat_->accelReason + "); the CPU answers"; break;
+    }
     return i;
 }
 
@@ -624,89 +642,39 @@ void LocalEngineService::run(const EngineRunSettings& settings, std::function<vo
         finish(r);
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(chat_->mutex);
-        chat_->unload();
-    }
-    os::dispatch::runAsync([settings, report, finish, cancel]() {
-        EngineRunResult r;
-        r.drafter = !settings.drafterPath.empty();
-        try {
-            resetPeakMemory();
-            common_params params = engineParams(settings.modelPath, settings.drafterPath, settings.threads, settings.useGpu,
-                                                settings.contextTokens, settings.promptTokens, cancel.get());
-            params.sampling.temp = 0.0f; // greedy: the same text every run
-
-            report("Loading the model");
-            const auto t0 = Clock::now();
-            std::string error;
-            std::unique_ptr<Loaded> m = loadModel(params, error);
-            if (!m) {
-                r.error = cancel->load() ? "cancelled" : error;
-                finish(r);
-                return;
-            }
-            r.loadSeconds = secondsBetween(t0, Clock::now());
-            r.backend = "CPU, " + std::to_string(settings.threads) + " threads";
-            for (size_t d = 0; settings.useGpu && d < ggml_backend_dev_count(); ++d) {
-                ggml_backend_dev_t dev = ggml_backend_dev_get(d);
-                if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU) {
-                    r.backend = std::string(ggml_backend_dev_name(dev)) + ": " + ggml_backend_dev_description(dev);
-                    break;
+    auto model = chat_;
+    os::dispatch::runAsync([settings, report, finish, cancel, model]() {
+        std::lock_guard<std::mutex> lock(model->mutex);
+        model->unload();
+        const engine::Cancelled cancelled = [cancel]() { return cancel->load(); };
+        std::string gpuFailed;
+        // On the GPU: through the engine library, when there is one that works.
+        if (settings.useGpu && model->acceleratorWanted()) {
+            model::Json answer;
+            std::string reason;
+            if (model->startAccelerator()) {
+                if (model->helper->request(engine::toJson(settings), report, nullptr, cancelled, answer, reason)) {
+                    model->helper->stop(); // a run unloads after measuring, like the CPU's
+                    EngineRunResult r = engine::runResultFrom(answer);
+                    if (r.ok || cancel->load()) {
+                        finish(r);
+                        return;
+                    }
+                    reason = r.error;
                 }
+                model->acceleratorFailed(reason);
             }
-            llama_context* ctx = m->ctx();
-
-            // 1. Prompt processing: one batch of promptTokens tokens.
-            report("Processing a " + std::to_string(settings.promptTokens) + "-token prompt");
-            std::string text;
-            std::vector<llama_token> tokens;
-            while (int(tokens.size()) < settings.promptTokens) {
-                text += kPromptText;
-                tokens = common_tokenize(ctx, text, true, true);
-            }
-            tokens.resize(size_t(settings.promptTokens));
-            {
-                common_batch batch(ctx);
-                for (size_t i = 0; i < tokens.size(); ++i)
-                    batch.add(tokens[i], llama_pos(i), 0, i + 1 == tokens.size());
-                const auto t = Clock::now();
-                llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
-                const double s = secondsBetween(t, Clock::now());
-                r.promptTokens = int(tokens.size());
-                r.promptTokensPerSecond = s > 0 ? tokens.size() / s : 0;
-            }
-            if (cancel->load()) {
-                r.error = "cancelled";
-                finish(r);
-                return;
-            }
-
-            // 2. Generation, continuing a piece of code.
-            report(r.drafter ? "Generating with the drafter" : "Generating");
-            std::string sample;
-            const Generated g = generate(*m, common_tokenize(ctx, kGeneratePrompt, true, true), settings.generateTokens,
-                                         *cancel, [&sample](const std::string& piece) {
-                                             if (sample.size() < 400)
-                                                 sample += piece;
-                                         });
-            if (cancel->load()) {
-                r.error = "cancelled";
-                finish(r);
-                return;
-            }
-            r.firstTokenSeconds = g.firstTokenSeconds;
-            r.drafted = g.drafted;
-            r.accepted = g.accepted;
-            r.generatedTokens = g.produced;
-            // The first token's time is in firstTokenSeconds; the rate is over the rest.
-            r.generateTokensPerSecond = g.decodeSeconds > 0 && g.produced > 1 ? (g.produced - 1) / g.decodeSeconds : 0;
-            r.sample = sample;
-            r.peakMemory = peakMemory();
-            r.ok = true;
-        } catch (const std::exception& e) {
-            r.error = std::string("engine error: ") + e.what();
+            std::lock_guard<std::mutex> a(model->acceleratorMutex);
+            gpuFailed = model->accelName + " failed: " + model->accelReason;
         }
+        resetPeakMemory();
+        EngineRunSettings cpu = settings;
+        if (!gpuFailed.empty())
+            cpu.useGpu = false;
+        EngineRunResult r = model->runner.run(cpu, report, cancelled);
+        r.peakMemory = peakMemory();
+        if (!gpuFailed.empty())
+            r.backend += " (" + gpuFailed + ")";
         finish(r);
     });
 #endif
@@ -753,58 +721,41 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
         });
     };
     os::dispatch::runAsync([request, stage, text, finish, cancel, model, post]() {
-        interfaces::LocalChatResult r;
-        try {
-            std::lock_guard<std::mutex> lock(model->mutex);
-            const std::string key = request.modelPath + "|" + request.drafterPath + "|" + std::to_string(request.threads) + "|" +
-                                    (request.useGpu ? "gpu" : "cpu") + "|" + std::to_string(request.contextTokens);
-            if (!model->loaded || model->key != key) {
-                model->unload();
-                post(stage, "Loading the local model");
-                common_params params = engineParams(request.modelPath, request.drafterPath, request.threads, request.useGpu,
-                                                    request.contextTokens, request.contextTokens, cancel.get());
-                params.sampling.temp = 0.3f; // a little variety; greedy answers from a small model loop easily
-                params.sampling.top_p = 0.95f;
-                std::string error;
-                model->loaded = loadModel(params, error);
-                if (!model->loaded) {
-                    r.error = cancel->load() ? "cancelled" : error;
+        std::lock_guard<std::mutex> lock(model->mutex);
+        const engine::Cancelled cancelled = [cancel]() { return cancel->load(); };
+        const engine::Report toStage = [&](const std::string& s) { post(stage, s); };
+        bool wrote = false;
+        const engine::Report toText = [&](const std::string& t) {
+            wrote = true;
+            post(text, t);
+        };
+        // The engine library first, when there is one that works; anything wrong, the CPU.
+        if (model->acceleratorWanted()) {
+            std::string reason;
+            if (model->startAccelerator()) {
+                model->runner.unload(); // one copy of the model in memory
+                model::Json answer;
+                if (model->helper->request(engine::toJson(request), toStage, toText, cancelled, answer, reason)) {
+                    model->helperLastUse = std::chrono::steady_clock::now();
+                    interfaces::LocalChatResult r = engine::chatResultFrom(answer);
+                    if (r.ok || wrote || cancel->load()) {
+                        finish(r);
+                        return;
+                    }
+                    reason = r.error; // nothing written: the CPU answers instead
+                }
+                model->acceleratorFailed(reason);
+                if (wrote) { // half an answer shown: say so, and the next question goes to the CPU
+                    interfaces::LocalChatResult r;
+                    r.error = "the " + model->accelName + " engine stopped (" + reason + "); ask again: the CPU answers now";
                     finish(r);
                     return;
                 }
-                model->key = key;
-                r.loaded = true;
             }
-            Loaded& m = *model->loaded;
-            const std::vector<llama_token> prompt = chatTokens(m, request.messages);
-            r.promptTokens = int(prompt.size());
-            if (int(prompt.size()) + request.maxTokens > int(llama_n_ctx(m.ctx()))) {
-                r.error = "the conversation is too long for the local model: start a new chat";
-                finish(r);
-                return;
-            }
-            post(stage, "Reading " + std::to_string(prompt.size()) + " tokens");
-            bool started = false;
-            const Generated g = generate(m, prompt, request.maxTokens, *cancel, [&](const std::string& piece) {
-                if (!started) {
-                    started = true;
-                    post(stage, "Writing");
-                }
-                post(text, piece);
-            });
-            model->lastUse = std::chrono::steady_clock::now();
-            if (cancel->load()) {
-                r.error = "stopped";
-                finish(r);
-                return;
-            }
-            r.generatedTokens = g.produced;
-            r.firstTokenSeconds = g.firstTokenSeconds;
-            r.tokensPerSecond = g.decodeSeconds > 0 && g.produced > 1 ? (g.produced - 1) / g.decodeSeconds : 0;
-            r.ok = true;
-        } catch (const std::exception& e) {
-            r.error = std::string("engine error: ") + e.what();
         }
+        interfaces::LocalChatResult r = model->runner.chat(request, toStage, toText, cancelled);
+        if (r.ok)
+            r.backend = "CPU";
         finish(r);
     });
 #endif
@@ -812,15 +763,19 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
 
 void LocalEngineService::unloadIfIdle(double idleSeconds)
 {
-    if (chatting_->load() || !chat_->isLoaded())
+    if (chatting_->load() || running_->load())
         return;
     std::unique_lock<std::mutex> lock(chat_->mutex, std::try_to_lock);
     if (!lock.owns_lock())
         return;
-    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - chat_->lastUse).count() >= idleSeconds)
+    const auto now = std::chrono::steady_clock::now();
+    if (chat_->isLoaded() && std::chrono::duration<double>(now - chat_->lastUse()).count() >= idleSeconds)
         chat_->unload();
+    // The helper (and the GPU memory it holds) ends when idle too; the next question starts it.
+    if (chat_->helper && chat_->helper->running() &&
+        std::chrono::duration<double>(now - chat_->helperLastUse).count() >= idleSeconds)
+        chat_->helper->stop();
 }
-
 
 void LocalEngineService::cancel() { cancel_->store(true); }
 

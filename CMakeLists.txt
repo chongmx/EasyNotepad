@@ -259,6 +259,7 @@ set(ENP_OS_SOURCES
     src/os/common/Memory.cpp
     src/os/common/Dispatch.cpp
     src/os/common/Path.cpp
+    src/os/common/Library.cpp
 )
 if(ENP_PLATFORM STREQUAL "windows")
     list(APPEND ENP_OS_SOURCES src/os/win32/OsWin32.cpp src/os/win32/PtyWin32.cpp src/os/win32/ImageWin32.cpp)
@@ -405,11 +406,13 @@ add_library(enp_services STATIC
     src/services/ProcessService.cpp
     src/services/AutomationServer.cpp
     src/services/LocalEngineService.cpp
+    src/services/EngineHelper.cpp
     src/services/DocumentReaderService.cpp
     src/services/ServiceContainer.cpp
     src/services/ImageDecoder.cpp
     src/services/ImageEncoder.cpp
     src/services/EmojiPack.cpp
+    src/engine/EngineJson.cpp
 )
 target_include_directories(enp_services PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stb)
 target_link_libraries(enp_services PUBLIC enp_interfaces PRIVATE enp_os)
@@ -418,6 +421,8 @@ if(ENP_MEMORY_TRACE)
     target_compile_definitions(enp_services PUBLIC ENP_MEMORY_TRACE=1)
 endif()
 if(ENP_LOCAL_ENGINE)
+    # The model code shared with the engine libraries (engines/cuda) runs the built-in CPU engine.
+    target_sources(enp_services PRIVATE src/engine/LlamaRunner.cpp)
     target_link_libraries(enp_services PRIVATE llama-common llama)
     target_compile_definitions(enp_services PRIVATE ENP_HAS_LOCAL_ENGINE=1)
     if(WIN32)
@@ -601,6 +606,12 @@ if(ENP_BUILD_TESTS AND ENP_IS_DESKTOP)
     target_compile_definitions(enp_tests PRIVATE ENP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     enp_set_warnings(enp_tests)
     add_test(NAME enp_tests COMMAND enp_tests)
+    # An engine library that misbehaves on request, for the tests of the fallback to the CPU.
+    add_library(enp_fake_engine SHARED tests/FakeEngine.cpp)
+    target_include_directories(enp_fake_engine PRIVATE include)
+    set_target_properties(enp_fake_engine PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)
+    add_dependencies(enp_tests enp_fake_engine)
+    target_compile_definitions(enp_tests PRIVATE ENP_FAKE_ENGINE="$<TARGET_FILE:enp_fake_engine>")
 
     # Headless UI test (no GPU): ImGui ID conflicts and title-bar drag regions.
     add_executable(enp_ui_tests tests/UiIdTest.cpp)

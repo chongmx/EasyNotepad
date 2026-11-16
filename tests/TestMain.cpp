@@ -47,6 +47,7 @@
 #include "enp/services/ImageEncoder.h"
 #include "enp/services/ProcessService.h"
 #include "enp/services/DocumentReaderService.h"
+#include "enp/services/LocalEngineService.h"
 #include "enp/viewmodel/ViewerViewModel.h"
 
 #include "AutomationController.h"
@@ -4092,6 +4093,167 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     }
 };
 
+#if defined(ENP_FAKE_ENGINE)
+namespace {
+
+void setFakeEngineStart(const char* mode)
+{
+#if defined(_WIN32)
+    _putenv_s("ENP_FAKE_ENGINE_START", mode);
+#else
+    setenv("ENP_FAKE_ENGINE_START", mode, 1);
+#endif
+}
+
+services::LocalEngineService::Accelerator fakeAccelerator(const std::string& library = ENP_FAKE_ENGINE, int silenceSeconds = 3)
+{
+    services::LocalEngineService::Accelerator a;
+    a.library = library;
+    a.helper = {os::fs::executablePath(), "--local-engine", library};
+    a.startSeconds = 20;
+    a.silenceSeconds = silenceSeconds;
+    return a;
+}
+
+struct ChatRun {
+    bool done = false;
+    interfaces::LocalChatResult result;
+    std::string text;
+};
+
+// One question to the local agent, waited for; `onText` runs on each piece of the answer.
+ChatRun askLocal(services::LocalEngineService& engine, const std::string& model, std::function<void()> onText = {})
+{
+    auto run = std::make_shared<ChatRun>();
+    interfaces::LocalChatRequest q;
+    q.modelPath = model;
+    q.messages = {{"user", "Hi"}};
+    q.threads = 1;
+    q.maxTokens = 8;
+    q.contextTokens = 256;
+    engine.chat(
+        q, [](const std::string&) {},
+        [run, onText](const std::string& t) {
+            run->text += t;
+            if (onText)
+                onText();
+        },
+        [run](const interfaces::LocalChatResult& r) {
+            run->result = r;
+            run->done = true;
+        });
+    for (int i = 0; i < 6000 && !run->done; ++i) {
+        os::dispatch::pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return *run;
+}
+
+// The CPU engine answered (it cannot load a "fake:" model, so it says so).
+bool answeredOnCpu(const ChatRun& c) { return c.done && !c.result.ok && c.result.error.find("could not be loaded") != std::string::npos; }
+bool answeredOnFake(const ChatRun& c) { return c.done && c.result.ok && c.text == "Hello from the GPU" && c.result.backend == "FAKE0: Fake GPU"; }
+
+} // namespace
+
+TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
+{
+    {
+        services::LocalEngineService plain(std::nullopt);
+        if (!plain.info().available)
+            return; // no CPU engine in this build (or this CPU): nothing to fall back to
+        CHECK(plain.info().accelerator.empty());
+    }
+    setFakeEngineStart("ok");
+
+    // Absent: the CPU, and the lab says it is not installed.
+    {
+        services::LocalEngineService s(fakeAccelerator(os::fs::path::join(os::fs::currentDirectory(), "no-such-engine.so")));
+        CHECK(s.info().accelerator.find("not installed") != std::string::npos);
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+    }
+
+    // Present and working: it answers, streaming; its device is listed; then a failure without any
+    // text goes to the CPU, and stays there.
+    {
+        services::LocalEngineService s(fakeAccelerator());
+        const ChatRun c = askLocal(s, "fake:answer");
+        CHECK(answeredOnFake(c));
+        const interfaces::EngineInfo info = s.info();
+        CHECK(info.acceleratorReady);
+        CHECK(info.accelerator.find("Fake GPU (8.0 GB)") != std::string::npos);
+        CHECK(std::any_of(info.devices.begin(), info.devices.end(), [](const auto& d) { return d.name == "FAKE0"; }));
+        // Stopped mid-answer: it stops, and the next question still goes to it.
+        bool asked = false;
+        const ChatRun stopped = askLocal(s, "fake:slow", [&]() {
+            if (!asked) {
+                asked = true;
+                s.cancel();
+            }
+        });
+        CHECK(stopped.done && !stopped.result.ok && !stopped.text.empty());
+        CHECK(answeredOnFake(askLocal(s, "fake:answer")));
+        // A lab run on the GPU goes to it too.
+        bool ran = false;
+        interfaces::EngineRunResult run;
+        interfaces::EngineRunSettings settings;
+        settings.modelPath = "fake:answer";
+        settings.useGpu = true;
+        s.run(settings, nullptr, [&](const interfaces::EngineRunResult& r) {
+            run = r;
+            ran = true;
+        });
+        for (int i = 0; i < 3000 && !ran; ++i) {
+            os::dispatch::pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(ran && run.ok && run.backend == "FAKE0: Fake GPU" && run.generateTokensPerSecond == 123);
+
+        CHECK(answeredOnCpu(askLocal(s, "fake:fail")));
+        CHECK(s.info().accelerator.find("not used (out of fake memory)") != std::string::npos);
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+    }
+
+    // It crashes before writing: the same question is answered on the CPU.
+    {
+        services::LocalEngineService s(fakeAccelerator());
+        CHECK(answeredOnCpu(askLocal(s, "fake:crash")));
+        const std::string crashed = s.info().accelerator;
+        CHECK(crashed.find("the helper stopped") != std::string::npos);
+        if (crashed.find("the helper stopped") == std::string::npos)
+            std::printf("    status: %s\n", crashed.c_str());
+    }
+
+    // It crashes after writing: the app says so (the half answer stays), and the CPU answers next.
+    {
+        services::LocalEngineService s(fakeAccelerator());
+        const ChatRun c = askLocal(s, "fake:crash-after-text");
+        CHECK(c.done && !c.result.ok && c.text == "Half" && c.result.error.find("the CPU answers now") != std::string::npos);
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+    }
+
+    // It hangs: ended after the silence, and the CPU answers.
+    {
+        services::LocalEngineService s(fakeAccelerator(ENP_FAKE_ENGINE, 2));
+        CHECK(answeredOnCpu(askLocal(s, "fake:hang")));
+        CHECK(s.info().accelerator.find("stopped responding") != std::string::npos);
+    }
+
+    // It cannot start: no device, another interface version, a crash while starting.
+    for (const char* mode : {"nodevice", "abi", "crash"}) {
+        setFakeEngineStart(mode);
+        services::LocalEngineService s(fakeAccelerator());
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+        const std::string status = s.info().accelerator;
+        CHECK(status.find("not used") != std::string::npos);
+        if (std::strcmp(mode, "nodevice") == 0)
+            CHECK(status.find("no fake device") != std::string::npos);
+        if (std::strcmp(mode, "abi") == 0)
+            CHECK(status.find("another version") != std::string::npos);
+    }
+    setFakeEngineStart("ok");
+}
+#endif
+
 TEST(engine_lab_downloads_checks_and_compares)
 {
     using Lab = viewmodel::EngineLabViewModel;
@@ -6181,6 +6343,9 @@ int main(int argc, char** argv)
     params.argc = argc;
     params.argv = argv;
     os::init(params);
+    // The engine tests start this program as the helper of an engine library (FakeEngine.cpp).
+    if (argc >= 3 && std::strcmp(argv[1], "--local-engine") == 0)
+        return services::runLocalEngineHelper(argv[2]);
     // ENP_TEST_FILTER=text runs only the tests whose name contains it.
     const char* filter = std::getenv("ENP_TEST_FILTER");
     for (auto& [name, fn] : registry()) {

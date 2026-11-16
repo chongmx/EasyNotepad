@@ -139,6 +139,8 @@ namespace fs {
 
 std::string executableDirectory() { return android::app()->activity->internalDataPath; }
 
+std::string executablePath() { return {}; }
+
 std::string appDataDirectory()
 {
     std::string dir = android::app()->activity->internalDataPath;

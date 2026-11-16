@@ -98,6 +98,17 @@ const interfaces::EngineInfo& EngineLabViewModel::info()
             const int n = std::max(1, info_.cpuThreads);
             threads.set(info_.socName.empty() ? std::max(1, n / 2) : std::min(4, n));
         }
+    } else if (engine_ && (acceleratorStale_ || info_.accelerator.find(": starting") != std::string::npos)) {
+        // The engine library is looked at in the background, and may stop working: asked again
+        // while it starts, and after each run.
+        acceleratorStale_ = false;
+        interfaces::EngineInfo fresh = engine_->info();
+        if (fresh.accelerator != info_.accelerator) {
+            info_.accelerator = std::move(fresh.accelerator);
+            info_.acceleratorReady = fresh.acceleratorReady;
+            info_.devices = std::move(fresh.devices);
+            changed.emit();
+        }
     }
     return info_;
 }
@@ -374,6 +385,7 @@ void EngineLabViewModel::startRun(bool withDrafter, bool thenWithDrafter)
         [this, settings, thenWithDrafter](const EngineRunResult& result) {
             running_ = false;
             stage_.clear();
+            acceleratorStale_ = true;
             history_.insert(history_.begin(), Record{nowText(), deviceLabel(), settings, result});
             if (history_.size() > 100)
                 history_.resize(100);

@@ -120,6 +120,7 @@ private:
     interfaces::ILocalEngineService* engine_ = nullptr;
     interfaces::EngineInfo info_;
     bool infoLoaded_ = false;
+    bool acceleratorStale_ = false; // a run ended: the engine library's status may have changed
     int downloading_ = -1; // Which, while a catalogue download runs
     interfaces::DownloadStatus lastDownload_;
     int verifying_ = -1;

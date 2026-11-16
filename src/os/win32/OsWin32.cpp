@@ -392,11 +392,13 @@ std::string currentDirectory()
     return path::normalize(narrow(std::wstring_view(buf, n)));
 }
 
-std::string executableDirectory()
+std::string executableDirectory() { return path::parent(executablePath()); }
+
+std::string executablePath()
 {
     wchar_t buf[MAX_PATH * 4];
     DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
-    return path::parent(narrow(std::wstring_view(buf, n)));
+    return narrow(std::wstring_view(buf, n));
 }
 
 std::string homeDirectory()

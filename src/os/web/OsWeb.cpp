@@ -97,6 +97,8 @@ namespace fs {
 
 std::string executableDirectory() { return "/"; }
 
+std::string executablePath() { return {}; }
+
 std::string appDataDirectory()
 {
     std::string dir = "/home/web_user/.easynotepad";

@@ -222,6 +222,38 @@ lists and task lists, quotes, tables, links and coloured code blocks.
 - Links open in the browser, or open the file they point to in the workspace.
 - New untitled Markdown documents start as text.
 
+## Documents: Word, Excel, PowerPoint and PDF
+
+Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`) and PDF files open read-only in a tab of the
+Code workspace, as a picture does. No workspace of its own is needed to read them (editing is
+plan 27). They are read off the UI thread; "Reading" shows until a document or a page is ready.
+
+- **Word:** pages as printed (size, margins, headers and footers with page numbers, footnotes at the
+  foot of their page), or **Reflow to the window**. The document's own fonts, from the system or a
+  bundled metric-compatible set (Carlito for Calibri, Caladea for Cambria, Liberation for Times,
+  Arial and Courier). Styles, numbered headings and lists, tab stops and leaders, tables with their
+  styles, floating pictures, charts; comments listed at the end.
+- **Excel:** the sheet as Excel draws it, with sheet tabs along the bottom: number formats, fonts,
+  fills, borders, merged cells, frozen panes, conditional formatting (rules, colour scales, data
+  bars, icon sets), table styles, and pictures and charts over the cells. A click selects a cell,
+  the arrows move, **Ctrl+C** copies it. Values are as the file saved them; formulas are not
+  recalculated.
+- **PowerPoint:** one slide after another, fitted to the window (**Fit the slide**): masters and
+  layouts, theme colours and fonts, shapes, tables, pictures, charts, SmartArt.
+- **PDF:** pages read as they come into view, text in the document's place, pictures at the size
+  shown, shadings and clips. **Encrypted PDFs** open (RC4 and AES); one that needs a password asks
+  for it.
+- **Find** (**Ctrl+F**, or the magnifier on a phone) in PDFs and slides: matches in reading order,
+  two-column pages included, ligatures and line breaks ignored, every match marked on the page.
+- **Zoom:** the buttons, **Ctrl+wheel**, or a pinch, which keeps the point under the fingers where
+  it is, for every kind. Previous and next page or slide, and a page number.
+- A file that cannot be read says why and offers **Open as text anyway**; what a document holds
+  but the viewer does not show (videos, some charts) is listed, not dropped silently.
+- Chinese, Japanese and Korean text use a system font, loaded while such a document is open.
+- **Memory:** closing a document gives back its pages, pictures and fonts.
+- Not yet: the agents reading a document's text (plan 26 step 1), the old `.doc`, `.xls`, `.ppt`
+  and `.rtf` formats, and editing (plan 27).
+
 ## Phones, tablets and small windows
 
 The layout follows the shape of the window. It is the same view on every platform, so Android, a
@@ -307,6 +339,18 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
   - the model loads on the first question (a few seconds) and is unloaded after 5 idle minutes,
     giving its memory back;
   - S24 Ultra (CPU): about 30 tokens/s writing, about 100 tokens/s reading the question.
+- **On an NVIDIA GPU** (Windows x64 and Linux x64): put `enp-engine-cuda` next to EasyNotepad
+  (on Windows with the `cublas64_*.dll` and `cublasLt64_*.dll` that come with it; it is a separate
+  download from the release) and the local agent answers on the GPU, with nothing to set.
+  RTX 5060 laptop: 105 tokens/s writing (185 with the drafter), against 19 on its CPU.
+  - It is optional. Without it the app is the same, and the CPU answers.
+  - It is fail-safe: it runs in a helper process (`EasyNotepad --local-engine`). When it cannot
+    start (no NVIDIA GPU, a driver too old, a DLL missing) or fails while answering (a crash, a
+    hang, too little GPU memory), the CPU answers instead, the same question when nothing was
+    written yet, and the next question otherwise. It is not tried again until the app restarts.
+  - The Engine Lab shows which GPU it uses, or why it is not used; *Use the GPU* runs its
+    measurements on it.
+  - When idle for 5 minutes its helper ends, giving the GPU's memory back.
 
 ## Engine lab (developer view)
 

@@ -23,6 +23,14 @@ its release notes on GitHub.
   unless "Aa" is on, ligatures match their letters, and a line break matches a space, so a phrase
   is found across lines. In two columns, the column with the keyboard goes to each match; the
   other, when it shows the same document, keeps its place and shows the highlights.
+- The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
+  a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
+  RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a
+  prompt at about 7,400 tokens/s. It is optional: without it, or when it
+  cannot start (no NVIDIA GPU, an old driver, a missing cuBLAS DLL) or fails while answering
+  (a crash, a hang, out of memory), the CPU answers as before. It is loaded in a helper process
+  (`EasyNotepad --local-engine`), so even a crash in it or in the driver leaves the editor running.
+  The Engine Lab says whether it is used, and why not.
 
 ### Changed
 - The app has its logo as its icon everywhere, instead of each system's generic one: the Windows

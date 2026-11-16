@@ -76,7 +76,7 @@ void writeLogSink(log::Level level, const char* message)
 
 namespace fs {
 
-std::string executableDirectory()
+std::string executablePath()
 {
 #if defined(ENP_OS_MACOS)
     char buf[PATH_MAX];
@@ -84,18 +84,24 @@ std::string executableDirectory()
     if (_NSGetExecutablePath(buf, &size) == 0) {
         char resolved[PATH_MAX];
         if (::realpath(buf, resolved))
-            return path::parent(resolved);
-        return path::parent(buf);
+            return resolved;
+        return buf;
     }
 #else
     char buf[PATH_MAX];
     ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n > 0) {
         buf[n] = '\0';
-        return path::parent(buf);
+        return buf;
     }
 #endif
-    return currentDirectory();
+    return {};
+}
+
+std::string executableDirectory()
+{
+    const std::string exe = executablePath();
+    return exe.empty() ? currentDirectory() : path::parent(exe);
 }
 
 std::string appDataDirectory()

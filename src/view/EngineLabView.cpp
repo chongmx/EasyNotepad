@@ -220,6 +220,8 @@ void EngineLabView::renderDevice()
     }
     if (info.available && std::none_of(info.devices.begin(), info.devices.end(), [](const auto& d) { return d.kind != "CPU"; }))
         ImGui::TextDisabled("No GPU reachable by this build (CPU only).");
+    if (!info.accelerator.empty()) // the engine library next to the app (enp-engine-cuda), or why not
+        ImGui::TextWrapped("%s %s", info.acceleratorReady ? ICON_FA_BOLT : ICON_FA_MICROCHIP, info.accelerator.c_str());
     if (!info.engineVersion.empty())
         ImGui::TextDisabled("Engine: %s", info.engineVersion.c_str());
     if (!info.available)
@@ -344,7 +346,7 @@ void EngineLabView::renderRun()
         l.useGpu.set(gpu);
     ImGui::EndDisabled();
     if (!hasGpu && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ui::tooltip("No GPU backend in this build yet.");
+        ui::tooltip("No GPU here: put enp-engine-cuda next to EasyNotepad for an NVIDIA GPU.");
     int tokens = l.generateTokens.get();
     ImGui::SetNextItemWidth(fit::itemWidth(220.0f * s_, 120.0f * s_));
     if (ImGui::SliderInt("Tokens to generate", &tokens, 32, 512))

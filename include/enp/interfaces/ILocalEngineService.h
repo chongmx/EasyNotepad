@@ -29,6 +29,11 @@ struct EngineInfo {
     uint64_t memoryTotal = 0;
     uint64_t memoryAvailable = 0;
     std::vector<EngineDevice> devices;
+    // A faster engine library next to the app (enp-engine-cuda), in words: "CUDA: NVIDIA GeForce RTX
+    // 5060 (8.0 GB)", "CUDA: not installed", "CUDA: starting", "CUDA: stopped (why); using the CPU".
+    // Empty where the platform has none.
+    std::string accelerator;
+    bool acceleratorReady = false; // chats and GPU runs go to it
 };
 
 struct EngineRunSettings {
@@ -82,6 +87,7 @@ struct LocalChatResult {
     double firstTokenSeconds = 0;
     double tokensPerSecond = 0;
     bool loaded = false; // the model was loaded for this answer (not already in memory)
+    std::string backend; // what answered: "CPU", or the engine library's device ("CUDA0: ...")
 };
 
 // Where a download stands.

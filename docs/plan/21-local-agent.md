@@ -148,6 +148,89 @@ exhaustion. Nothing it does can freeze or crash the editor.
 - **Thermal and battery (Android):** completion pauses on battery saver or when the phone is hot.
 - Every intervention is logged and shown briefly in the status bar. Nothing is silent.
 
+## Execution: hardware engines as run-time libraries (from 16 Nov 2026)
+
+**Today.** llama.cpp is linked into the app statically, CPU only (AVX2 on PCs, ARMv8.2 dot product on
+phones), and the model runs inside the app's own process. On this PC (RTX 5060 Laptop, 8 GB, sm_120)
+that is about 20 tokens/s; the spike measured 116 with ggml CUDA (plan 23).
+
+**Aim.** Each accelerator is a library loaded at run time: **TensorRT for NVIDIA RTX first, then the
+Qualcomm Hexagon NPU**. The CPU engine stays built in. **When a library is absent, or present but
+unusable, the local agent runs on the CPU**, as it does today: no error dialog, only the reason, shown
+in the Engine Lab and the status bar ("Local agent: on the CPU; TensorRT is not installed").
+
+**Done first (16 Nov 2026): ggml CUDA as the first library**, ahead of TensorRT, because it reads
+the same GGUF as the CPU and was already measured on this PC:
+- `include/enp/engine/EnpEngine.h`: the C interface (ABI 1; JSON requests and results).
+- `src/engine/LlamaRunner.cpp`: the model code, shared by the CPU engine in the app and the library.
+- `engines/cuda/`: `enp-engine-cuda` (`.dll` / `.so`), its own CMake project (nvcc needs MSVC on
+  Windows), built by CI's `engine-cuda` job for Windows x64 (with the cuBLAS DLLs) and Linux x64.
+- `os::lib` (load a library), `os::process::InputStream` (a program fed while it runs).
+- `EngineHelper` and `EasyNotepad --local-engine <library>`: the helper process (part of 21.E2: no
+  watchdog of token rates yet, but a helper silent for 3 minutes, or not stopping 15 s after a
+  cancel, is ended).
+- `LocalEngineService`: looks for the library next to the executable; uses it for chats and for
+  the Engine Lab's GPU runs; falls back to the CPU in every case of the table below, and keeps
+  using the CPU until the app restarts. Tests: `engine_library_answers_and_anything_wrong_falls_back_to_the_cpu`
+  with a fake library (`tests/FakeEngine.cpp`) that answers, fails, crashes, hangs or will not start.
+- Measured on this PC (WSL, CUDA 13.2, sm_120, through the helper): 105 tok/s writing, 185 with
+  the drafter (61% of drafts accepted), prompt 7,417 tok/s; the CPU 19 tok/s. A chat answer: 198
+  tok/s. The library is 635 MB on Linux (cuBLAS linked in; it needs only the NVIDIA driver); on
+  Windows cuBLAS's DLLs sit beside it.
+
+**Shape.**
+```
+ EasyNotepad (UI)                   EasyNotepad --local-agent (helper)
+ LocalAgentService ──JSON lines──►  EngineHost
+                                      ├─ built-in CPU engine (llama.cpp, static)  ◄── always there
+                                      └─ os::lib::open("<appdata>/local-agent/engines/<rung>/enp-engine-<rung>.dll|so")
+                                           enp_engine_abi / describe / open / generate / score / close
+```
+- One small C interface for every engine (plan 23, `enp_engine.h`), so a library built with MSVC and
+  the CUDA/TensorRT SDK loads into the MinGW-built app, and memory never crosses it.
+- Loading goes through the OS layer: `LoadLibraryExW` with the library's own folder on the search
+  path (its `nvinfer`, `cudart` beside it) on Windows, `dlopen(RTLD_NOW | RTLD_LOCAL)` elsewhere.
+- Libraries load only in the helper process: a driver fault kills the helper, not the editor, and
+  the helper's exit gives back everything the vendor runtime held (CUDA does not unload cleanly).
+
+**When the CPU is used instead** (each is a test with a fake engine library):
+
+| Case | Result |
+|---|---|
+| No library in the engine folder | CPU; "not installed" |
+| Library fails to load (a missing dependency DLL, wrong architecture) | CPU; the loader's message |
+| `enp_engine_abi()` differs, or an export is missing | CPU; "built for another version" |
+| `enp_engine_open` fails: no NVIDIA GPU, driver too old, too little VRAM, no Hexagon DSP | CPU; the engine's `last_error` |
+| The engine for this GPU and driver cannot be built (TensorRT) | CPU; the build log kept |
+| Verify fails: wrong answers, or not 20% faster than the CPU | CPU; the measurements |
+| Later: two crashes in 10 minutes, NaN output, a hang | back to the CPU, marked bad for this fingerprint until *Try again* |
+
+**Steps.**
+
+| # | Step | Done when |
+|---|---|---|
+| 21.E1 | **The seam.** `enp_engine.h` (ABI 1); the built-in CPU engine behind it (today's `LocalEngineService` code, unchanged in behaviour); `os::lib` (`open`, `symbol`, `close`, last error) for Windows, POSIX and Android; `EngineHost` picks a library or the CPU by the table above | unit tests with fake libraries built by the test build: good, missing, wrong ABI, missing export, failing open, crashing open; each ends on the CPU with its reason |
+| 21.E2 | **The helper process.** `EasyNotepad --local-agent` hosts `EngineHost`; `LocalAgentService` speaks JSON lines to it (requests, streamed text, cancel); the watchdog (no token for 10 s), restarts, three faults in five minutes turn it off. Android: a second service process | the safety-net tests of this plan with a fake helper; the memory cycle shows the helper's memory gone after an idle unload |
+| 21.E3 | **Probe, small first.** NVIDIA through `nvml` loaded at run time (name, compute capability, VRAM, driver); Qualcomm through the SoC model and the Hexagon version; the fingerprint (GPU, driver, OS build). Writes `environment.json` | this PC reports the RTX 5060, sm_120, 8 GB, the driver; a phone reports its Snapdragon and Hexagon version; no NVIDIA or Qualcomm means no rung, not an error |
+| 21.E4 | **TensorRT spike: an INT4 model that fits 8 GB.** fp16 does not fit (plan 23 spike: 11 GB working set, 16 tok/s). First try, CPU only: repack Google's QAT `w4a16` checkpoint (compressed-tensors) into the AWQ / GPTQ layout TensorRT-Edge-LLM reads; the weights are already 4-bit, so nothing is re-quantized. Else quantize once with ModelOpt on a rented 16–24 GB GPU and publish the checkpoint. Also answers: does Edge-LLM's C++ runtime build with MSVC on Windows, or does Windows need TensorRT-RTX | an INT4 engine runs on this PC under 8 GB with no shared-memory spill; its speed and its agreement with the CPU written into plan 23 |
+| 21.E5 | **`enp-engine-tensorrt`.** The library: Edge-LLM's runtime for the LLM part only (no vision or audio), Gemma 4's per-layer embeddings kept on the host, our sampler and stop rules; built by MSVC (Windows x64) and GCC (Linux x64) in CI into a pack: the library, the TensorRT runtime it needs, a manifest with SHA-256s. Downloaded from Preferences ▸ Local agent ▸ Engine like the model, never inside the app | the pack downloads, checks and loads on this PC; with the pack deleted, the agent answers on the CPU |
+| 21.E6 | **Engine built on the device.** The first open builds the TensorRT engine for this GPU (batch 1, context 4,096), cancellable, with progress; kept under `engines/tensorrt/<fingerprint>/`; a new driver or GPU builds again, and a failed build leaves the CPU in use | built once, then cached starts; a faked fingerprint change rebuilds or falls back |
+| 21.E7 | **Verify and switch.** Teacher-forced agreement with the CPU engine on the golden texts (top-1 ≥ 92%, mean KL < 0.05, no NaN; the weights differ), the task checks, the speed rule (≥ 20% faster at writing), 2 minutes of mixed load; then new requests go to it and the CPU stays the fallback | on this PC TensorRT is chosen; a fake engine that is wrong, slow or crashes never is, or is dropped |
+| 21.E8 | **Shown to the user.** Preferences ▸ Local agent ▸ Engine: automatic / pin / CPU only; what each rung needs, whether it is installed, its measurements, why it is or is not used; *Try again*. The Engine Lab runs any installed engine | UI tests for each state, on desktop and phone layouts |
+| 21.E9 | **Hexagon (Android first).** `enp-engine-hexagon`: llama.cpp with its Hexagon backend (experimental upstream; ops it lacks run on the CPU), built in CI with Qualcomm's Snapdragon toolchain image. **Shipped inside the APK** (Google Play does not allow downloading native code), with the HTP libraries for v73, v75, v79 and v81; no FastRPC, an older DSP or a failed open means the CPU. Reads the same GGUF, so there is nothing to prepare. Measured on the S24 Ultra (Snapdragon 8 Gen 3, v75) against its 30 tok/s on the CPU; kept only if verify passes and it is faster or saves power | chosen on a Snapdragon phone that gains; the CPU everywhere else, including phones without Hexagon |
+| 21.E10 | Later: Windows on Snapdragon (Hexagon needs a signed driver package there), ggml CUDA and Vulkan as further rungs on the same seam (plan 23) | — |
+
+**Risks.**
+- **The INT4 model (21.E4)** decides whether TensorRT is worth it on an 8 GB card. If neither
+  route works, ggml CUDA is the NVIDIA rung on the same seam (measured 116 tok/s, 165 with the
+  drafter on this GPU, and it reads the GGUF the CPU uses, so verify is simple).
+- **TensorRT on Windows**: the spike ran Edge-LLM in WSL. If its runtime does not build with MSVC,
+  the Windows library uses TensorRT-RTX directly.
+- **Size**: the TensorRT runtime is hundreds of megabytes, so it is an optional download with the
+  engine, like the model.
+- **Hexagon is experimental upstream**: Gemma 4 E2B may run only partly on the DSP. Measured, not
+  assumed.
+
 ## Settings (Preferences ▸ Local agent)
 
 - **Model:** none (default) / Gemma 4 E2B / Gemma 4 E4B, with download, remove and the size on disk.
