@@ -389,15 +389,16 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
         {"calculate", "Calculates exactly: + - * / % ^ ( ), and sqrt abs round floor ceil min max sum avg pow log ln exp "
                       "sin cos tan, pi, e. Use it for every sum, total, percentage or conversion.",
          schema({{"expression", "string", "e.g. 15% of 2340 + 7.5% of 980, (1200 * 1.08) - 50, round(17.5 / 3, 2)"}}, {"expression"})},
-        {"query_table", "Filters, sorts and sums the rows of a CSV file or an Excel sheet: pick rows, columns, groups and "
-                        "totals without reading everything.",
+        {"query_table", "Filters, sorts and totals the rows of a CSV file or an Excel sheet. Totals per group: group_by and "
+                        "aggregate. Which group has the most: group_by Country, aggregate sum(Profit), sort 'sum(Profit) desc', "
+                        "limit 1. Call it again for another grouping.",
          schema({{"path", "string", "CSV, TSV or Excel file, relative to the open folder"},
                  {"sheet", "string", "Excel: the sheet's name (default the first)"},
                  {"where", "string", "Conditions joined by 'and', e.g. Country = Canada and Units Sold > 1000; also != >= <= contains"},
                  {"columns", "string", "Columns to show, comma-separated (default all)"},
                  {"group_by", "string", "A column to group by (optional)"},
                  {"aggregate", "string", "count, or sum/avg/min/max of a column, comma-separated, e.g. sum(Profit), count"},
-                 {"sort", "string", "A column, with ' desc' for largest first (optional)"},
+                 {"sort", "string", "A column, or with group_by an aggregate such as sum(Profit); add ' desc' for largest first"},
                  {"limit", "integer", "Rows to show (default 30)"}},
                 {"path"})},
         // Memory and skills.
@@ -1668,11 +1669,10 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
         for (const Agg& g : aggs)
             out += " | " + g.label;
         out += "\n";
-        int shown = 0;
+        // Each group's values first, so the groups can be sorted by one ("sum(Profit) desc").
+        std::vector<std::pair<std::string, std::vector<double>>> results;
         for (const std::string& key : order) {
-            if (++shown > limit)
-                break;
-            out += key;
+            std::vector<double> values;
             for (const Agg& g : aggs) {
                 double total = 0, low = 0, high = 0;
                 int count = 0;
@@ -1687,14 +1687,51 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                         ++count;
                     }
                 }
-                const double value = g.fn == "count" ? count : g.fn == "sum" ? total : g.fn == "avg" ? (count ? total / count : 0.0)
-                                     : g.fn == "min" ? low : high;
-                out += " | " + numberText(std::round(value * 1e6) / 1e6);
+                values.push_back(g.fn == "count" ? count : g.fn == "sum" ? total : g.fn == "avg" ? (count ? total / count : 0.0)
+                                 : g.fn == "min" ? low : high);
             }
+            results.emplace_back(key, std::move(values));
+        }
+        std::string sort = lower(trimmed(args.getString("sort")));
+        bool descending = false;
+        if (sort.size() > 5 && sort.compare(sort.size() - 5, 5, " desc") == 0) {
+            descending = true;
+            sort = trimmed(sort.substr(0, sort.size() - 5));
+        } else if (sort.size() > 4 && sort.compare(sort.size() - 4, 4, " asc") == 0) {
+            sort = trimmed(sort.substr(0, sort.size() - 4));
+        }
+        auto squeezed = [](std::string s) {
+            s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }), s.end());
+            return lower(s);
+        };
+        if (!sort.empty()) {
+            int by = -1;
+            for (size_t k = 0; k < aggs.size(); ++k)
+                if (squeezed(aggs[k].label) == squeezed(sort) || (aggs.size() == 1 && column(sort) == aggs[k].column))
+                    by = int(k);
+            if (by >= 0)
+                std::stable_sort(results.begin(), results.end(), [&](const auto& a, const auto& b) {
+                    return descending ? a.second[size_t(by)] > b.second[size_t(by)] : a.second[size_t(by)] < b.second[size_t(by)];
+                });
+            else if (group >= 0 && column(sort) == group)
+                std::stable_sort(results.begin(), results.end(), [&](const auto& a, const auto& b) {
+                    return descending ? lower(a.first) > lower(b.first) : lower(a.first) < lower(b.first);
+                });
+            else
+                return reply(done, "Sort the groups by one of: " + (group >= 0 ? trimmed(header[size_t(group)]) + ", " : std::string()) +
+                                       args.getString("aggregate") + " (add desc for largest first).");
+        }
+        int shown = 0;
+        for (const auto& [key, values] : results) {
+            if (++shown > limit)
+                break;
+            out += key;
+            for (double value : values)
+                out += " | " + numberText(std::round(value * 1e6) / 1e6);
             out += "\n";
         }
-        if (int(order.size()) > limit)
-            out += "[" + std::to_string(order.size() - size_t(limit)) + " more groups]\n";
+        if (int(results.size()) > limit)
+            out += "[" + std::to_string(results.size() - size_t(limit)) + " more groups]\n";
         return reply(done, out);
     }
 

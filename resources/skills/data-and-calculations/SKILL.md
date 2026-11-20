@@ -17,6 +17,9 @@ Functions: sqrt abs round(x, places) floor ceil min max sum avg pow log ln exp, 
    Operators: = != > < >= <= contains. Text matches ignore case; numbers may have $ and commas.
 3. Totals: `"aggregate": "sum(Profit), avg(Discount), count"`, by group: `"group_by": "Segment"`.
 4. Top rows: `"sort": "Profit desc", "limit": 5, "columns": "Country, Product, Profit"`.
+5. Which group has the most (or least): group, total, and sort by the total -
+   `"group_by": "Country", "aggregate": "sum(Profit)", "sort": "sum(Profit) desc", "limit": 1`.
+   Do not take the largest single row for "the most overall".
 
 Use the column names exactly as listed. If a call fails, the reply lists the columns: fix the name
 and call again.

@@ -4791,6 +4791,9 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(sorted.find("Product | Units\nPens | 120\nPens | 80\n") != std::string::npos && sorted.find("2 more rows") != std::string::npos);
     const std::string totals = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units), sum(Price), count"})j");
     CHECK(totals.find("East | 150 | 1290.5 | 2") != std::string::npos && totals.find("West | 85 | 750 | 2") != std::string::npos);
+    const std::string top = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units)", "sort": "sum(Units) desc", "limit": 1})j");
+    CHECK(top.find("East | 150") != std::string::npos && top.find("West") == std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units)", "sort": "Units asc", "limit": 1})j").find("West | 85") != std::string::npos);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Colour = red"})j").find("The columns are: Region, Product") != std::string::npos);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product contains pa"})j").find("1 of 4") != std::string::npos);
 
