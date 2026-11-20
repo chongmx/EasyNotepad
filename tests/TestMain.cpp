@@ -4621,6 +4621,81 @@ TEST(local_agent_calls_tools_until_it_answers)
     CHECK(engine.chats.back().tools.size() == 2);
 }
 
+TEST(local_agent_takes_a_question_in_steps)
+{
+    using viewmodel::AgentViewModel;
+    // The plan as a small model writes it: bold, mixed numbering, a line around it.
+    const std::vector<std::string> parsed =
+        AgentViewModel::planSteps("Here are the steps:\n1. **Find** the profit by country.\n2) Find the total profit.\n"
+                                  "  - Step 3: Work out the share.\nThat is all.");
+    CHECK(parsed.size() == 3 && parsed[0] == "Find the profit by country." && parsed[2] == "Work out the share.");
+    CHECK(AgentViewModel::planSteps("1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h").size() == AgentViewModel::kMaxPlanSteps);
+    CHECK(AgentViewModel::planSteps("No list at all.").empty());
+
+    FakeEngine engine;
+    AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(AgentViewModel::Choice::Local));
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"query_table", "Filters a table. More text.", "{}"}}; },
+                        [](const interfaces::LocalToolCall&, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            done(AgentViewModel::ToolOutput{"ok", {}, {}});
+                        },
+                        []() { return std::string("Guide."); });
+    agent.setLocalPlanner([]() { return std::string("---\nname: planning\n---\nWrite the steps."); });
+
+    const std::string question = "Which country made the most profit, and what share of the total is it?";
+    engine.textAnswers = {"1. Find the profit of each country.\n2. Find the total profit.\n3. Work out the share.",
+                          "Canada: 100.", "Total: 400.", "25 %.", "Canada, 25 % of the total."};
+    agent.submitPrompt(question);
+    CHECK_EQ(engine.chats.size(), size_t(5));
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Canada, 25 % of the total.");
+    // The plan: its own request, without tools, the skill without its front matter, the tools named.
+    const interfaces::LocalChatRequest& plan = engine.chats[0];
+    CHECK(plan.tools.empty() && plan.messages.size() == 2 && plan.messages[0].text.rfind("Write the steps.", 0) == 0);
+    CHECK(plan.messages[0].text.find("- query_table: Filters a table\n") != std::string::npos);
+    CHECK(plan.messages[1].text.find(question) != std::string::npos);
+    // Then one step at a time, each after the last one's answer, and the answer asked for at the end.
+    CHECK(engine.chats[1].tools.size() == 1 && engine.chats[1].messages.back().text.find("Do step 1 only now: Find the profit") != std::string::npos);
+    CHECK(engine.chats[2].messages.back().text.find("Now step 2: Find the total profit.") != std::string::npos);
+    CHECK(engine.chats[2].messages[engine.chats[2].messages.size() - 2].text == "Canada: 100.");
+    CHECK(engine.chats[3].messages.back().text.find("Now step 3") != std::string::npos);
+    CHECK(engine.chats[4].messages.back().text.find("All the steps are done") != std::string::npos &&
+          engine.chats[4].messages.back().text.find(question) != std::string::npos);
+    // The chat shows the plan and each step.
+    int shown = 0;
+    for (const model::ChatMessage& m : agent.messages())
+        shown += m.role == model::ChatRole::Tool && (m.text.rfind("Plan", 0) == 0 || m.text.rfind("Step ", 0) == 0);
+    CHECK_EQ(shown, 4);
+
+    // A one-step plan: the question as it is. A short one: no plan at all.
+    engine.textAnswers = {"1. Read the readme.", "It says hello."};
+    agent.submitPrompt("What does the readme say about it?");
+    CHECK_EQ(engine.chats.size(), size_t(7));
+    CHECK(engine.chats[6].messages.back().text.find("step") == std::string::npos);
+    // The next question's history has the last answer of the steps, not the first.
+    bool last = false, first = false;
+    for (const interfaces::LocalChatMessage& m : engine.chats[6].messages) {
+        last = last || m.text == "Canada, 25 % of the total.";
+        first = first || m.text == "Canada: 100.";
+    }
+    CHECK(last && !first);
+    agent.submitPrompt("Hi");
+    CHECK_EQ(engine.chats.size(), size_t(8));
+    // Turned off: the question as it is.
+    agent.localInSteps.set(false);
+    agent.submitPrompt("Which country made the most profit this year?");
+    CHECK_EQ(engine.chats.size(), size_t(9));
+    CHECK(engine.chats[8].messages.back().text.find("step") == std::string::npos);
+}
+
 TEST(agent_proposals_replace_one_waiting_for_the_same_file)
 {
     viewmodel::AgentViewModel agent;

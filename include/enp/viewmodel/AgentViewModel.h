@@ -64,6 +64,14 @@ public:
                        std::function<std::string()> guide);
     // Added to each question (the end of the prompt, where a small model looks): the user's preferences.
     void setLocalReminder(std::function<std::string()> reminder) { localReminder_ = std::move(reminder); }
+    // Questions taken in steps: before the work, the model splits the question into steps with these
+    // instructions (the planning skill); the app then gives it one step at a time, and asks for the
+    // answer from what the steps found. No instructions, or a one-step plan: the question as it is.
+    void setLocalPlanner(std::function<std::string()> instructions) { localPlanner_ = std::move(instructions); }
+    Property<bool> localInSteps{true};
+    // The steps in a plan the model wrote ("1. ...", "2) ...", "Step 3: ..."), at most kMaxPlanSteps.
+    static std::vector<std::string> planSteps(const std::string& plan);
+    static constexpr size_t kMaxPlanSteps = 6;
     bool hasLocalTools() const { return runTool_ != nullptr; }
     // An edit the local model proposes (its edit tools): listed for review, applied when accepted.
     void proposeChange(const std::string& path, const std::string& before, const std::string& after);
@@ -145,6 +153,11 @@ private:
     interfaces::LocalChatRequest localRequest_;
     int localRounds_ = 0;
     int localNudges_ = 0; // times it was told to make the call it announced
+    std::function<std::string()> localPlanner_;
+    std::vector<std::string> localSteps_; // the plan of the question in progress
+    size_t localStep_ = 0;                // steps given so far (steps + 1: the answer was asked for)
+    void planLocal(int generation, std::string question);
+    bool nextLocalStep(int generation, const std::string& answer);
     std::string localPrompt_;
     void sendLocal(int generation);
     void localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r);

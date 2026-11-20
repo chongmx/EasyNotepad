@@ -361,6 +361,10 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
   - **memory** between conversations (`agent-memory/memories.json` in the app's data folder):
     preferences, lessons from mistakes, facts, notes for a week, temporary notes for the session;
     it corrects, forgets and compacts them, and follows your preferences in every answer.
+- **Questions in steps**: before the work, the model splits the question into at most six steps
+  (the `planning` skill); the app gives it one step at a time, each with its own rounds of tools,
+  then asks for the answer from what the steps found. The plan and each step show in the chat. A
+  question under 20 characters, or one the plan keeps as a single step, goes as it is.
 - **Forgiving calls**: arguments with single quotes, a trailing comma or a code fence are read; a
   wrong call is answered with the tool's usage and an example; a call written as text (JSON or
   `tool(key="value")`) is run; an answer that only announces a call is told to make it.

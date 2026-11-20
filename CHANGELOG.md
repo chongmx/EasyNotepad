@@ -44,7 +44,13 @@ its release notes on GitHub.
   compacted by the agent. Small-model slips are caught: loose JSON, calls written as text, calls
   announced but not made, a preference said but not saved. Tested with Gemma 4 E2B on Microsoft's
   Financial Sample workbook, a photographed receipt, a mock meeting and a test DLL
-  (`C:pgent-samples`, a small downloaded set, outside the repository).
+  (`C:\cpp\agent-samples`, a small downloaded set, outside the repository).
+- The local agent takes a question in steps: it first splits it into steps (the `planning` skill,
+  at most six), then the app gives it one step at a time and asks for the answer from what the
+  steps found. The plan and each step show in the chat; a simple question is one step and goes
+  as before. With Gemma 4 E2B, "which country made the most profit, how much, and what share of
+  the total" went from an invented figure to three tool-backed steps and the right answer (19 s
+  on an RTX 5060).
 - The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
   a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
   RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a

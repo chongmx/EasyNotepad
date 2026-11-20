@@ -448,6 +448,117 @@ void AgentViewModel::endLocal()
     os::mem::release(localRequest_.tools);
     localRounds_ = 0;
     localNudges_ = 0;
+    os::mem::release(localSteps_);
+    localStep_ = 0;
+}
+
+std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
+{
+    std::vector<std::string> steps;
+    auto space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    for (size_t start = 0; start <= plan.size() && steps.size() < kMaxPlanSteps;) {
+        size_t end = plan.find('\n', start);
+        if (end == std::string::npos)
+            end = plan.size();
+        std::string line = plan.substr(start, end - start);
+        start = end + 1;
+        line.erase(std::remove(line.begin(), line.end(), '*'), line.end()); // **bold**
+        size_t i = 0;
+        while (i < line.size() && (space(line[i]) || line[i] == '#' || line[i] == '-'))
+            ++i;
+        if (line.size() - i > 5 && std::tolower(static_cast<unsigned char>(line[i])) == 's' &&
+            std::tolower(static_cast<unsigned char>(line[i + 1])) == 't' && line.compare(i + 2, 3, "ep ") == 0)
+            i += 5; // "Step 2: ..."
+        const size_t digits = i;
+        while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i])))
+            ++i;
+        if (i == digits || i >= line.size() || (line[i] != '.' && line[i] != ')' && line[i] != ':'))
+            continue;
+        ++i;
+        while (i < line.size() && space(line[i]))
+            ++i;
+        std::string text = line.substr(i);
+        while (!text.empty() && space(text.back()))
+            text.pop_back();
+        if (!text.empty())
+            steps.push_back(std::move(text));
+    }
+    return steps;
+}
+
+void AgentViewModel::planLocal(int generation, std::string question)
+{
+    std::string instructions = localPlanner_ ? localPlanner_() : std::string();
+    if (instructions.rfind("---", 0) == 0) // the skill's front matter
+        if (const size_t end = instructions.find("\n---", 3); end != std::string::npos) {
+            const size_t body = instructions.find('\n', end + 4);
+            instructions.erase(0, body == std::string::npos ? instructions.size() : body + 1);
+        }
+    if (instructions.empty()) {
+        sendLocal(generation);
+        return;
+    }
+    // A request of its own, without tools: the model only writes the steps. The model's settings are
+    // the question's, so the engine keeps what it has loaded.
+    interfaces::LocalChatRequest plan;
+    plan.modelPath = localRequest_.modelPath;
+    plan.drafterPath = localRequest_.drafterPath;
+    plan.projectorPath = localRequest_.projectorPath;
+    plan.threads = localRequest_.threads;
+    plan.useGpu = localRequest_.useGpu;
+    plan.contextTokens = localRequest_.contextTokens;
+    plan.maxTokens = 512;
+    std::string tools;
+    for (const interfaces::LocalTool& t : localRequest_.tools)
+        tools += "- " + t.name + ": " + t.description.substr(0, t.description.find(". ")) + "\n";
+    plan.messages.emplace_back("system", instructions + "\n\nThe tools you will have:\n" + tools);
+    plan.messages.emplace_back("user", "Write the steps for this question:\n\n" + question);
+    activity_ = "Local model: planning the steps";
+    local_->chat(
+        plan, [](const std::string&) {}, [](const std::string&) {}, // the plan is shown once it is read
+        [this, generation](const interfaces::LocalChatResult& r) {
+            if (generation != generation_)
+                return; // stopped or replaced
+            std::vector<std::string> steps = r.ok ? planSteps(r.text) : std::vector<std::string>();
+            if (steps.size() >= 2 && !localRequest_.messages.empty()) {
+                std::string list;
+                for (size_t i = 0; i < steps.size(); ++i)
+                    list += std::to_string(i + 1) + ". " + steps[i] + "\n";
+                messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + list});
+                messages_.push_back({model::ChatRole::Tool, "Step 1 of " + std::to_string(steps.size()) + ": " + steps[0]});
+                localRequest_.messages.back().text += "\n\nWe will work through this in steps:\n" + list + "\nDo step 1 only now: " +
+                                                      steps[0] + "\nUse your tools, then tell me what you found.";
+                localSteps_ = std::move(steps);
+                localStep_ = 1;
+            }
+            sendLocal(generation); // a one-step plan, or none: the question as it is
+        });
+}
+
+bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
+{
+    if (localSteps_.empty() || localStep_ > localSteps_.size())
+        return false;
+    localRequest_.messages.emplace_back("assistant", answer);
+    std::string next;
+    if (localStep_ < localSteps_.size()) {
+        const std::string number = std::to_string(localStep_ + 1);
+        messages_.push_back({model::ChatRole::Tool,
+                             "Step " + number + " of " + std::to_string(localSteps_.size()) + ": " + localSteps_[localStep_]});
+        next = "Now step " + number + ": " + localSteps_[localStep_] + "\nUse your tools, then tell me what you found.";
+    } else {
+        messages_.push_back({model::ChatRole::Tool, "All steps done: the answer"});
+        next = "All the steps are done. Now answer my question in full, from what the steps found, with the figures exactly "
+               "as the tools gave them: " + localPrompt_;
+        if (const std::string reminder = localReminder_ ? localReminder_() : std::string(); !reminder.empty())
+            next += "\n\n(" + reminder + ")";
+    }
+    ++localStep_;
+    localRounds_ = 0; // each step has its own rounds of tools
+    localNudges_ = 0;
+    localRequest_.messages.emplace_back("user", std::move(next));
+    sendLocal(generation);
+    return true;
 }
 
 void AgentViewModel::askLocal(const std::string& prompt, const std::string& context, const std::string& note)
@@ -517,6 +628,8 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     for (interfaces::LocalChatMessage& m : history)
         if (request.messages.back().role != m.role)
             request.messages.push_back(std::move(m));
+        else if (m.role == "assistant")
+            request.messages.back().text = std::move(m.text); // a question taken in steps: its last answer
     if (request.messages.back().role == "user")
         request.messages.pop_back();
     std::string question = prompt;
@@ -533,7 +646,12 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     request.messages.push_back(std::move(asked));
 
     localPrompt_ = prompt;
-    sendLocal(++generation_);
+    const int generation = ++generation_;
+    // A question of some length is split into steps first (one word or a greeting is not worth it).
+    if (tools && localInSteps.get() && localPlanner_ && prompt.size() >= 20)
+        planLocal(generation, context.empty() ? prompt : "I am looking at " + context + ".\n\n" + prompt);
+    else
+        sendLocal(generation);
 }
 
 void AgentViewModel::sendLocal(int generation)
@@ -608,6 +726,13 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
             turn.toolCalls = r.toolCalls;
             localRequest_.messages.push_back(std::move(turn));
             runLocalTools(generation, r.toolCalls, 0, {});
+            return;
+        }
+        // A question taken in steps: this step is answered, give the next (or ask for the answer).
+        if (r.toolCalls.empty() && !localSteps_.empty() && localStep_ <= localSteps_.size()) {
+            if (empty)
+                messages_.erase(messages_.begin() + long(at));
+            nextLocalStep(generation, r.text);
             return;
         }
         if (!r.toolCalls.empty())

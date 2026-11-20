@@ -334,6 +334,8 @@ void LocalAgentTools::attach()
                 prefs += (prefs.empty() ? "" : "; ") + m.getString("text");
         return prefs.empty() ? std::string() : "Follow my preferences in your answer: " + prefs;
     });
+    // Questions split into steps first, with the planning skill (resources/skills/planning).
+    vm_.agent().setLocalPlanner([]() { return os::fs::readAsset("skills/planning/SKILL.md").value_or(std::string()); });
 }
 
 std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const

@@ -17,6 +17,10 @@ app's tools (`src/app/LocalAgentTools.cpp`). Its guide lists these skills by nam
 | [editing](editing/SKILL.md) | proposing changes and new files for the user to review |
 | [easynotepad](easynotepad/SKILL.md) | the app: what the user sees, showing them things |
 
+The app itself uses one more, not listed in `index.json`: [planning](planning/SKILL.md), the
+instructions with which the model splits a question into steps before the work starts (the app
+then gives it the steps one at a time, `AgentViewModel::planLocal`).
+
 Adding a skill: a folder with a `SKILL.md` (front matter `name` and `description`, then the
 instructions), and a line in `index.json`. Keep each short and concrete: the model is small, and a
 skill is read into its context whole.
