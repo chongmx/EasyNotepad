@@ -36,7 +36,7 @@ Application::Application()
             });
         });
     // The local model's tools: the open folder, the document readers and the viewer (the agent panel).
-    agentTools_ = std::make_unique<LocalAgentTools>(*viewModel_, [this]() { return view_.get(); });
+    agentTools_ = std::make_unique<LocalAgentTools>(*viewModel_, [this]() { return view_.get(); }, services_.localEngine.get());
     agentTools_->attach();
     bool enabled = !os::isWeb();
     for (const std::string& arg : os::arguments())
@@ -64,6 +64,7 @@ Application::~Application()
         c.reply(model::Json::object().set("error", "the application is closing"));
     os::mem::release(captures_);
     viewModel_->agent().setLocalTools({}, {}, {}); // looks waiting for a frame are dropped with the tools
+    viewModel_->agent().setLocalReminder({});
     agentTools_.reset();
     automation_.reset(); // no requests may reach the view-model while it is destroyed
     detachUi();

@@ -219,12 +219,20 @@ Generated generate(Model& m, const Prompt& prompt, int maxTokens, common_params_
         }
         onPiece(common_token_to_piece(ctx, last), last);
     } else {
+        // The prompt (all but its last token) in pieces of the context's batch size: a batch holds no
+        // more (a longer one aborted in llama.cpp).
+        const size_t step = std::max<size_t>(1, llama_n_batch(ctx));
         common_batch batch(ctx);
-        for (size_t i = 0; i + 1 < inp.size(); ++i)
-            batch.add(inp[i], llama_pos(i), seq, false);
-        llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
-        if (spec && !common_speculative_process(spec, batch))
-            throw std::runtime_error("the drafter failed on the prompt");
+        for (size_t from = 0; from + 1 < inp.size() && !cancelled(); from += step) {
+            batch.clear();
+            for (size_t i = from; i < std::min(from + step, inp.size() - 1); ++i)
+                batch.add(inp[i], llama_pos(i), seq, false);
+            llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+            if (spec && !common_speculative_process(spec, batch))
+                throw std::runtime_error("the drafter failed on the prompt");
+        }
+        if (cancelled())
+            return g;
         last = inp.back();
         context.assign(inp.begin(), inp.end() - 1);
         past = int(inp.size()) - 1;
@@ -312,6 +320,8 @@ Generated generate(Model& m, const Prompt& prompt, int maxTokens, common_params_
     return g;
 }
 
+constexpr int kCpuContextTokens = 32768; // the CPU's context when the largest that fits is asked for
+
 // Where a message's picture or sound goes in its text (the projector's tokens replace it). Not a
 // token of the model's, and not text anyone types.
 const char* const kMediaMarker = "<\x01enp-media\x01>";
@@ -342,6 +352,7 @@ common_chat_templates_inputs chatInputs(const interfaces::LocalChatRequest& requ
     inputs.parallel_tool_calls = !request.tools.empty();
     inputs.add_generation_prompt = true;
     inputs.enable_thinking = false; // quick answers; thinking used the whole budget in the trial
+    inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO; // thinking it writes anyway goes apart, not into the answer
     return inputs;
 }
 
@@ -435,6 +446,61 @@ Prompt chatPrompt(Model& m, const common_chat_prompt& formatted, const std::vect
     }
     return p;
 }
+// The answer without a thinking channel Gemma writes now and then even with thinking off
+// ("<|channel>thought ... <channel|>"): not for the user.
+std::string withoutChannels(std::string text)
+{
+    for (size_t open = text.find("<|channel>"); open != std::string::npos; open = text.find("<|channel>", open)) {
+        const size_t close = text.find("<channel|>", open);
+        text.erase(open, close == std::string::npos ? std::string::npos : close + 10 - open);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+        text.erase(text.begin());
+    return text;
+}
+
+std::string trimText(std::string s)
+{
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.pop_back();
+    size_t start = 0;
+    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
+        ++start;
+    return s.substr(start);
+}
+
+// A window written all in capitals or all in small letters (the model does either now and then) as
+// sentences: lower case, a capital after . ! ? and at the start, and "I". Mixed case is left alone.
+std::string sentenceCase(std::string s)
+{
+    bool upper = false, lower = false;
+    for (char c : s) {
+        upper = upper || std::isupper(static_cast<unsigned char>(c));
+        lower = lower || std::islower(static_cast<unsigned char>(c));
+    }
+    if (upper && lower)
+        return s;
+    bool start = true;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c >= 0x80) { // not ASCII: left as written
+            start = false;
+            continue;
+        }
+        if (std::isalpha(c)) {
+            const bool word = (i == 0 || !std::isalnum(static_cast<unsigned char>(s[i - 1]))) &&
+                              (i + 1 >= s.size() || !std::isalnum(static_cast<unsigned char>(s[i + 1])) || s[i + 1] == '\'');
+            s[i] = char(start || (word && (c == 'i' || c == 'I')) ? std::toupper(c) : std::tolower(c));
+            start = false;
+        } else if (c == '.' || c == '!' || c == '?') {
+            start = true;
+        } else if (std::isdigit(c)) {
+            start = false;
+        }
+    }
+    return s;
+}
+
 // "[01:30]" for 90 seconds.
 std::string clockText(int seconds)
 {
@@ -456,8 +522,8 @@ void transcribeAudio(Model& m, const interfaces::LocalChatRequest& request, cons
         throw std::runtime_error("nothing to transcribe");
     const interfaces::LocalChatMessage& last = request.messages.back();
     const std::string instruction =
-        last.text.empty() ? std::string("Transcribe the speech in this audio exactly as spoken, in the language spoken. Write "
-                                        "only the words, in sentences with capital letters and punctuation. If there is no speech, write [no speech].")
+        last.text.empty() ? std::string("Transcribe this audio word for word, in the language spoken, with punctuation. "
+                                        "If there is no speech, write [no speech].")
                           : last.text;
     const int sampleRate = std::max(1, mtmd_get_audio_sample_rate(m.media.get()));
     const int window = std::clamp(request.audioWindowSeconds, 5, 30);
@@ -487,18 +553,18 @@ void transcribeAudio(Model& m, const interfaces::LocalChatRequest& request, cons
             stage("Transcribing " + media.name + ": " + clockText(at) + " of " + clockText(total));
             std::vector<mtmd::bitmap_ptr> bitmaps;
             bitmaps.emplace_back(mtmd_bitmap_init_from_audio(n, samples + from));
+            // Each window on its own (told what came before, the model copied it instead of listening).
             common_chat_session session(m.templates.get(), llama_model_get_vocab(m.model()), chatInputs(one));
             int mediaTokens = 0;
             const Prompt prompt = chatPrompt(m, session.prompt(), bitmaps, mediaTokens);
             r.mediaTokens += mediaTokens;
             r.promptTokens += int(prompt.size());
-            const std::string head = (r.text.empty() ? "" : "\n\n") + std::string("[") + clockText(at) + "] ";
-            r.text += head;
-            text(head);
-            const Generated g = generate(m, prompt, 512, sampling, cancelled, [&](const std::string& piece, llama_token) {
-                r.text += piece;
-                text(piece);
-            });
+            std::string words;
+            const Generated g = generate(m, prompt, 512, sampling, cancelled,
+                                         [&](const std::string& piece, llama_token) { words += piece; });
+            const std::string part = (r.text.empty() ? "" : "\n\n") + std::string("[") + clockText(at) + "] " + sentenceCase(trimText(words));
+            r.text += part;
+            text(part);
             r.generatedTokens += g.produced;
             if (r.firstTokenSeconds == 0)
                 r.firstTokenSeconds = g.firstTokenSeconds;
@@ -574,14 +640,18 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
     interfaces::LocalChatResult r;
     try {
         initBackend();
+        // "As large as fits" is measured on a GPU (llama.cpp's fit, in the helper process: a failure there
+        // only ends the helper). On the CPU, in the app's own process, a fixed size: fitting 128k tokens
+        // into the RAM that happens to be free aborted the app.
+        const int contextTokens = request.contextTokens > 0 ? request.contextTokens : request.useGpu ? 0 : kCpuContextTokens;
         const std::string key = request.modelPath + "|" + request.drafterPath + "|" + std::to_string(request.threads) + "|" +
-                                (request.useGpu ? "gpu" : "cpu") + "|" + std::to_string(request.contextTokens);
+                                (request.useGpu ? "gpu" : "cpu") + "|" + std::to_string(contextTokens);
         if (!loaded_ || key_ != key) {
             unload();
             stage("Loading the local model");
             LoadWatch watch{&cancelled, &stage, "Loading the local model"};
             common_params params = engineParams(request.modelPath, request.drafterPath, request.threads, request.useGpu,
-                                                request.contextTokens, request.contextTokens, &watch);
+                                                contextTokens, 2048, &watch); // prompts read 2048 tokens a batch
             params.sampling.temp = 0.3f; // a little variety; greedy answers from a small model loop easily
             params.sampling.top_p = 0.95f;
             std::string error;
@@ -661,7 +731,7 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
             return r;
         }
         const common_chat_msg& answer = session.finish();
-        r.text = answer.content;
+        r.text = withoutChannels(answer.content);
         for (size_t i = 0; i < answer.tool_calls.size(); ++i) {
             const common_chat_tool_call& call = answer.tool_calls[i];
             r.toolCalls.push_back({call.id.empty() ? "call_" + std::to_string(i + 1) : call.id, call.name, call.arguments});

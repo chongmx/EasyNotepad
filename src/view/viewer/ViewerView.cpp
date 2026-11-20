@@ -274,11 +274,6 @@ const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage
 void ViewerView::render(model::Document& doc, ImVec2 size, bool active)
 {
     active_ = active;
-    if (active) {
-        // Where the document is drawn: the local agent's look at a page is cut from the window there.
-        const ImVec2 at = ImGui::GetCursorScreenPos();
-        UiAutomation::instance().add({"viewer:document", "region", doc.title, at, ImVec2(at.x + size.x, at.y + size.y), true, {}});
-    }
     viewmodel::ViewerViewModel& viewer = vm_.viewer();
     const viewmodel::ViewerViewModel::Entry* model = viewer.find(doc.id);
     if (!model) { // not asked for yet (a document restored with the session): the view-model reads it
@@ -312,6 +307,11 @@ void ViewerView::render(model::Document& doc, ImVec2 size, bool active)
     ImGui::SetCursorPosX(0.0f);
     const float used = ImGui::GetCursorPosY() - before;
     const ImVec2 rest(size.x, std::max(1.0f, size.y - used));
+    if (active) {
+        // Where the pages are drawn (below the toolbar): the local agent's look at a page is cut from there.
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        UiAutomation::instance().add({"document-area", "region", doc.title, at, ImVec2(at.x + rest.x, at.y + rest.y), true, {}});
+    }
     if (doc.id != shownDoc_) { // another document in the shared windows: its own scroll
         leave();
         ImGui::SetNextWindowScroll(e.scroll);

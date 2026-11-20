@@ -29,7 +29,20 @@ public:
     using Done = std::function<void(viewmodel::AgentViewModel::ToolOutput)>;
 
     // `view` gives the window's view (null before it exists: looks at pages then fail).
-    LocalAgentTools(viewmodel::NotepadViewModel& vm, std::function<view::MainView*()> view);
+    // `engine` transcribes recordings (null: transcribe says it cannot).
+    LocalAgentTools(viewmodel::NotepadViewModel& vm, std::function<view::MainView*()> view,
+                    interfaces::ILocalEngineService* engine = nullptr);
+    // Where its memories are kept (a JSON file in the app's data folder; tests point elsewhere).
+    void setMemoryPath(std::string path) { memoryPath_ = std::move(path); }
+    const std::string& memoryPath() const { return memoryPath_; }
+    // How a tool is called, with an example of each argument: told back when a call is wrong.
+    std::string usage(const std::string& name) const;
+    // Where tools put the pictures they make (temp/agent-images next to the app): kept a day. A tool
+    // that makes pictures (a diffusion model, a segmenter...) saves them here and lists them in
+    // ToolOutput::shown, and the chat shows them.
+    static std::string imagesDirectory();
+    // Saves an RGB picture there as PNG; its path, or empty when it could not be written.
+    static std::string savePicture(const interfaces::LocalMedia& rgb, const std::string& stem);
     ~LocalAgentTools();
 
     // Hands the tools, the runner and the guide to the agent panel.
@@ -51,11 +64,15 @@ private:
         Done done;
         std::string what;   // "page 3 of report.pdf at 200%"
         std::string region; // "all", "top", "bottom-left", ...
+        int side = 800;     // the picture's longest side for the model (its detail)
         int frames = 0;
     };
     viewmodel::NotepadViewModel& vm_;
     std::function<view::MainView*()> view_;
     std::vector<Look> looks_;
+    interfaces::ILocalEngineService* engine_ = nullptr;
+    std::string memoryPath_;
+    std::string session_; // this run of the app: temporary memories belong to it
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true); // background reads answer only while it lives
 
     // The absolute path of `path` (workspace-relative or absolute) when it is inside the open folder
@@ -74,6 +91,22 @@ private:
     void editFile(const model::Json& args, Done done);
     void writeFile(const model::Json& args, Done done);
     void readSkill(const model::Json& args, Done done);
+    void showImage(const model::Json& args, Done done);
+    // Memory: what it learnt about the user and the work, kept between conversations.
+    void remember(const model::Json& args, Done done);
+    void recall(const model::Json& args, Done done);
+    void amendMemory(const model::Json& args, Done done);
+    void forgetMemory(const model::Json& args, Done done);
+    void rewriteMemories(const model::Json& args, Done done);
+    model::Json loadMemories() const; // expired notes and other sessions' temporary ones left out
+    bool saveMemories(const model::Json& list) const;
+    std::string memorySummary() const; // for the guide
+    // Work tools.
+    void calculate(const model::Json& args, Done done);
+    void queryTable(const model::Json& args, Done done);
+    void inspectBinary(const model::Json& args, Done done);
+    void readBytes(const model::Json& args, Done done);
+    void transcribe(const model::Json& args, Done done);
 };
 
 } // namespace enp::app

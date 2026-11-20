@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace enp::interfaces {
@@ -88,6 +89,8 @@ struct LocalToolCall {
 };
 
 struct LocalChatMessage {
+    LocalChatMessage() = default;
+    LocalChatMessage(std::string role, std::string text) : role(std::move(role)), text(std::move(text)) {}
     std::string role; // "system", "user", "assistant" or "tool"
     std::string text;
     std::vector<LocalMedia> media;        // shown to the model before the text

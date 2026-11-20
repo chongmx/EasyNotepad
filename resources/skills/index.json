@@ -1,7 +1,12 @@
 [
   {"name": "workspace", "description": "find your way in the open folder: list folders, find text, read code and notes"},
   {"name": "documents", "description": "read PDF, Word, Excel and PowerPoint files: their text by page, and their pages as pictures"},
-  {"name": "pictures-and-sound", "description": "look at pictures and pages closely (zoom, regions), and listen to recordings"},
+  {"name": "office-work", "description": "everyday office tasks: summaries, figures from spreadsheets, letters, minutes, checking numbers"},
+  {"name": "data-and-calculations", "description": "filter, sort, group and total tables (CSV, Excel) and calculate exactly"},
+  {"name": "pictures-and-sound", "description": "look at pictures and pages (how carefully: low, normal, high detail and OCR), and listen"},
+  {"name": "meetings", "description": "transcribe recordings and meetings into a text file, then write minutes and action items"},
+  {"name": "binaries", "description": "read programs and libraries (.dll .exe .so): exported and imported functions, sections, raw bytes"},
+  {"name": "memory", "description": "remember the user's preferences, learn from mistakes, correct and compact what you remember"},
   {"name": "editing", "description": "change files safely: edits the user reviews, new files, what to do in Plan only"},
   {"name": "easynotepad", "description": "the app around you: what the user sees, showing them things, what to suggest they do"}
 ]

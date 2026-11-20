@@ -347,6 +347,25 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
     the conversation (*N changes to review*: **Review** side by side, **Accept all**, **Reject
     all**); an accepted change opens in the editor, unsaved. With *Plan only* it has no edit tools.
   - **open a file** at a line, to show you what it means.
+  - **office work**: `query_table` filters, sorts, groups and totals CSV and Excel sheets;
+    `calculate` does every sum exactly (`15% of 2340 + 7.5% of 980`).
+  - **meetings**: `transcribe` writes a recording down word for word, however long (30-second
+    windows with [mm:ss] times), into `<recording>.transcript.md`, then it writes the minutes.
+  - **programs and libraries**: `inspect_binary` reads what the binary view shows (exports with
+    readable C++ names, imports and their libraries, sections); `read_bytes` shows any file as hex.
+  - **how carefully it looks**: `detail` low, normal or high (about 70, 280 or 1,100 tokens a
+    picture) - high for reading text (OCR) and small print.
+  - **pictures in the chat**: what it looks at shows under the tool's step, `show_image` shows a
+    picture, and its answers may hold `![caption](path)`. Tools that make pictures keep them in
+    `temp/agent-images` next to the app (a day).
+  - **memory** between conversations (`agent-memory/memories.json` in the app's data folder):
+    preferences, lessons from mistakes, facts, notes for a week, temporary notes for the session;
+    it corrects, forgets and compacts them, and follows your preferences in every answer.
+- **Forgiving calls**: arguments with single quotes, a trailing comma or a code fence are read; a
+  wrong call is answered with the tool's usage and an example; a call written as text (JSON or
+  `tool(key="value")`) is run; an answer that only announces a call is told to make it.
+- **Context**: the largest that fits on a GPU (128k tokens on an RTX 5060 with the eyes and ears);
+  32k on the CPU.
 - **Skills** (`resources/skills/`): short guides it reads before a kind of task (the folder,
   documents, pictures and sound, editing, the app). Its guide lists them with every question,
   with which tool reads which kind of file.

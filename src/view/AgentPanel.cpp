@@ -5,6 +5,8 @@
 #include "enp/view/UiAutomation.h"
 #include "enp/view/UiStyle.h"
 
+#include "enp/os/Fs.h"
+#include "enp/os/Memory.h"
 #include "enp/os/Os.h"
 
 #include "IconsFontAwesome6.h"
@@ -151,12 +153,15 @@ void AgentPanel::bubble(const model::ChatMessage& message, size_t index, float w
                        "%s", role.c_str());
     ImGui::PopFont();
     // The wrap position is window-local, not screen space.
-    if (message.role == model::ChatRole::Agent) { // the agent writes Markdown
+    // The agent writes Markdown; a tool step shows the pictures its tool brought (![name](path)).
+    if (message.role == model::ChatRole::Agent || (message.role == model::ChatRole::Tool && message.text.find("![") != std::string::npos)) {
         while (markdown_.size() <= index)
             markdown_.emplace_back();
         MarkdownView& view = markdown_[index];
         if (!view.onLink)
             view.onLink = [this](const std::string& url) { openLink(url); };
+        if (!view.onImage)
+            view.onImage = [this](const std::string& source) { return chatImage(source); };
         view.emoji = emoji_;
         view.render(message.text, bubbleW - pad * 2.0f, fonts_, palette_, Fonts::kUiSize, s_);
     } else {
@@ -225,8 +230,11 @@ void AgentPanel::renderMessages(float height)
     }
     // A new session (another folder was opened) starts with fewer messages: the rendered Markdown
     // of the old ones goes too.
-    if (markdown_.size() > agent.messages().size())
+    if (markdown_.size() > agent.messages().size()) {
         markdown_.resize(agent.messages().size());
+        releaseImages(); // another conversation: its pictures go
+    }
+    images_.collect();
     for (const model::ChatMessage& message : agent.messages())
         bubble(message, size_t(&message - agent.messages().data()), width);
     // The last answer came from the local model: Claude Code can have a go too.
@@ -271,6 +279,38 @@ void AgentPanel::renderMessages(float height)
         ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
+}
+
+// A picture in the conversation: a file in the open folder (relative or absolute) or one the
+// agent's tools made (temp/agent-images next to the app). Read and decoded once.
+const MarkdownImage* AgentPanel::chatImage(const std::string& source)
+{
+    if (const auto it = heldImages_.find(source); it != heldImages_.end())
+        return it->second;
+    std::string path = source;
+    if (path.rfind("file://", 0) == 0)
+        path = path.substr(7);
+    for (size_t at = path.find("%20"); at != std::string::npos; at = path.find("%20", at + 1))
+        path.replace(at, 3, " ");
+    const bool absolute = !path.empty() && (path[0] == '/' || (path.size() > 1 && path[1] == ':'));
+    const MarkdownImage* image = nullptr;
+    os::mem::Scope scope("images");
+    if (path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0) {
+        image = images_.acquireUnavailable(source, "remote image, not fetched");
+    } else {
+        const std::string full = absolute ? path : vm_.absolutePath(path);
+        const std::optional<std::string> bytes = os::fs::stat(full).isDirectory ? std::nullopt : os::fs::readFile(full);
+        image = bytes ? images_.acquire(source, *bytes) : images_.acquireUnavailable(source, "not found");
+    }
+    heldImages_.emplace(source, image);
+    return image;
+}
+
+void AgentPanel::releaseImages()
+{
+    for (const auto& [source, image] : heldImages_)
+        images_.release(source);
+    os::mem::release(heldImages_);
 }
 
 void AgentPanel::renderSetup(float width)

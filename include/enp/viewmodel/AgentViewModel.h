@@ -55,10 +55,15 @@ public:
     struct ToolOutput {
         std::string text;
         std::vector<interfaces::LocalMedia> media; // pictures or sounds for the model to take in
+        // Pictures for the user to see in the chat (paths: in the open folder, or a tool's output in
+        // temp/agent-images next to the app), shown under the tool's step.
+        std::vector<std::string> shown;
     };
     using ToolRunner = std::function<void(const interfaces::LocalToolCall& call, std::function<void(ToolOutput)> done)>;
     void setLocalTools(std::function<std::vector<interfaces::LocalTool>(bool canEdit)> tools, ToolRunner run,
                        std::function<std::string()> guide);
+    // Added to each question (the end of the prompt, where a small model looks): the user's preferences.
+    void setLocalReminder(std::function<std::string()> reminder) { localReminder_ = std::move(reminder); }
     bool hasLocalTools() const { return runTool_ != nullptr; }
     // An edit the local model proposes (its edit tools): listed for review, applied when accepted.
     void proposeChange(const std::string& path, const std::string& before, const std::string& after);
@@ -136,8 +141,10 @@ private:
     std::function<std::vector<interfaces::LocalTool>(bool)> localTools_;
     ToolRunner runTool_;
     std::function<std::string()> localGuide_;
+    std::function<std::string()> localReminder_;
     interfaces::LocalChatRequest localRequest_;
     int localRounds_ = 0;
+    int localNudges_ = 0; // times it was told to make the call it announced
     std::string localPrompt_;
     void sendLocal(int generation);
     void localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r);

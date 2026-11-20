@@ -35,6 +35,16 @@ its release notes on GitHub.
   task. Tested with Gemma 4 E2B on the CPU: it read a datasheet's numbers, described a chart on a
   slide and took down a voicemail. The engine library's interface is version 2: an
   `enp-engine-cuda` built before this is not loaded (the CPU answers) until it is replaced.
+- The local agent does office work and remembers: `query_table` (filter, sort, group and total CSV
+  and Excel sheets) and `calculate` (exact sums, percentages); `transcribe` writes a meeting down
+  word for word into a text file next to it, with times, for minutes; `inspect_binary` and
+  `read_bytes` read programs and libraries as the binary view does; how carefully it looks at a
+  picture is chosen per look (low, normal, high for OCR); pictures show in the chat; a memory
+  between conversations keeps your preferences, its lessons and notes, and is corrected and
+  compacted by the agent. Small-model slips are caught: loose JSON, calls written as text, calls
+  announced but not made, a preference said but not saved. Tested with Gemma 4 E2B on Microsoft's
+  Financial Sample workbook, a photographed receipt, a mock meeting and a test DLL
+  (`C:pgent-samples`, a small downloaded set, outside the repository).
 - The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
   a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
   RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a

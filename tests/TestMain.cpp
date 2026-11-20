@@ -4074,6 +4074,7 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     bool chatFails = false;
     std::vector<std::vector<interfaces::LocalToolCall>> toolRounds;
     bool alwaysTools = false;
+    std::vector<std::string> textAnswers;
     void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
               std::function<void(const std::string&)> text, std::function<void(const interfaces::LocalChatResult&)> done) override
     {
@@ -4081,6 +4082,15 @@ struct FakeEngine final : interfaces::ILocalEngineService {
         interfaces::LocalChatResult r;
         if (chatFails) {
             r.error = "out of memory";
+            done(r);
+            return;
+        }
+        // Scripted answers, streamed as written (one per chat).
+        if (!textAnswers.empty()) {
+            r.ok = true;
+            r.text = textAnswers.front();
+            textAnswers.erase(textAnswers.begin());
+            text(r.text);
             done(r);
             return;
         }
@@ -4584,7 +4594,7 @@ TEST(local_agent_calls_tools_until_it_answers)
     agent.submitPrompt("Look once more");
     const size_t asked = engine.chats.size();
     agent.stop();
-    later(viewmodel::AgentViewModel::ToolOutput{"late", {}});
+    later(viewmodel::AgentViewModel::ToolOutput{"late", {}, {}});
     CHECK_EQ(engine.chats.size(), asked);
     CHECK(!agent.busy.get());
     // The same when the folder closes meanwhile.
@@ -4594,7 +4604,7 @@ TEST(local_agent_calls_tools_until_it_answers)
     const size_t asked2 = engine.chats.size();
     agent.workspaceChanged();
     CHECK(!agent.busy.get());
-    later(viewmodel::AgentViewModel::ToolOutput{"late", {}});
+    later(viewmodel::AgentViewModel::ToolOutput{"late", {}, {}});
     CHECK_EQ(engine.chats.size(), asked2);
 
     // A model that never stops calling tools is stopped after the limit, and says so.
@@ -4735,6 +4745,155 @@ TEST(local_agent_tools_read_the_folder_and_propose_careful_edits)
         CHECK(call("read_skill", model::Json::object().set("name", "editing")).find("old_text") != std::string::npos);
     }
     CHECK(call("read_skill", model::Json::object().set("name", "../../secrets")).find("no skill") != std::string::npos);
+}
+
+TEST(local_agent_work_tools_memory_and_forgiving_calls)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-work";
+    os::fs::createDirectories(root + "/data");
+    files.write(root + "/data/sales.csv",
+                "Region,Product,Units,Price\nEast,Pens,120,\"$1,200.50\"\nWest,Pens,80,800\nEast,Paper,30,90\nWest,Ink,5,(50)\n", nullptr);
+    std::optional<std::string> dll = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/binary/fixture.dll");
+    if (dll)
+        files.write(root + "/fixture.dll", *dll, nullptr);
+    FakeAgentCli cli;
+    FakeProcesses processes;
+    viewmodel::NotepadViewModel vm(nullptr, &files, &cli, &processes);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); });
+    const std::string memoryFile = root + "/memory/memories.json";
+    os::fs::createDirectories(root + "/memory");
+    files.write(memoryFile, "[]", nullptr); // a fresh start each run
+    tools.setMemoryPath(memoryFile);
+    auto call = [&](const char* name, const std::string& args) {
+        std::string text;
+        tools.run({"c", name, args}, [&](viewmodel::AgentViewModel::ToolOutput out) { text = out.text; });
+        return text;
+    };
+
+    // Calculator: precedence, functions, thousands separators; errors say how.
+    CHECK(call("calculate", R"j({"expression": "(1200 * 1.08) - 50"})j").find("= 1246") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2^3^2"})j").find("= 512") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "round(17.5 / 3, 2) + sqrt(16)"})j").find("= 9.83") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "sum(1,2,3) * avg(2, 4) + max(1, 9)"})j").find("= 27") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "$1,234.50 + 0.5"})j").find("= 1235") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "15% of 2340 + 7.5% of 980"})j").find("= 424.5") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "200 * 15%"})j").find("= 30") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "7 % 3"})j").find("= 1") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "1 / 0"})j").find("division by zero") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2 +"})j").find("Cannot calculate") != std::string::npos);
+
+    // Tables: filter, sort, columns, groups and totals; currency and (negative) cells as numbers.
+    const std::string east = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = east and Units > 50"})j");
+    CHECK(east.find("1 of 4 rows match") != std::string::npos && east.find("East | Pens | 120") != std::string::npos);
+    const std::string sorted = call("query_table", R"j({"path": "data/sales.csv", "sort": "Units desc", "columns": "Product, Units", "limit": 2})j");
+    CHECK(sorted.find("Product | Units\nPens | 120\nPens | 80\n") != std::string::npos && sorted.find("2 more rows") != std::string::npos);
+    const std::string totals = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units), sum(Price), count"})j");
+    CHECK(totals.find("East | 150 | 1290.5 | 2") != std::string::npos && totals.find("West | 85 | 750 | 2") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Colour = red"})j").find("The columns are: Region, Product") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product contains pa"})j").find("1 of 4") != std::string::npos);
+
+    // Memory: kept in its file, recalled, corrected, forgotten, compacted; temporary ones end with the run.
+    CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("#1") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "query_table needs the column names exactly", "kind": "lesson"})j").find("#2") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("Already") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "Draft of the report is in docs/", "kind": "note"})j").find("#3") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "Working on the Q3 numbers", "kind": "temporary"})j").find("#4") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "x", "kind": "colour"})j").find("Unknown kind") != std::string::npos);
+    CHECK(tools.guide().find("[preference] The user wants answers in British English") != std::string::npos);
+    CHECK(call("recall", R"j({"query": "british"})j").find("1 memories") != std::string::npos);
+    CHECK(call("recall", R"j({})j").find("until ") != std::string::npos); // the note's last day
+    CHECK(call("amend_memory", R"j({"id": 1, "text": "The user wants answers in American English"})j").find("now says") != std::string::npos);
+    CHECK(call("recall", R"j({"query": "american"})j").find("#1") != std::string::npos);
+    CHECK(call("forget_memory", R"j({"id": 2})j").find("Forgot") != std::string::npos);
+    CHECK(call("forget_memory", R"j({"id": 2})j").find("no memory #2") != std::string::npos);
+    CHECK(call("rewrite_memories", R"j({"kind": "preference", "lines": "- American English\n- Short answers\n"})j").find("1 became 2") != std::string::npos);
+    CHECK(files.read(memoryFile).value_or("").find("Short answers") != std::string::npos);
+    {
+        // Another run of the app: its temporary memories are gone, the rest stay.
+        app::LocalAgentTools later(vm, []() { return static_cast<view::MainView*>(nullptr); });
+        later.setMemoryPath(memoryFile);
+        std::string recalled;
+        later.run({"c", "recall", "{}"}, [&](viewmodel::AgentViewModel::ToolOutput out) { recalled = out.text; });
+        CHECK(recalled.find("Q3 numbers") == std::string::npos && recalled.find("Short answers") != std::string::npos);
+    }
+    // An expired note goes when the memories are read.
+    files.write(memoryFile, R"([{"id":9,"kind":"note","text":"old note","date":"2020-01-01","expires":"2020-01-08"}])", nullptr);
+    CHECK(call("recall", "{}").find("old note") == std::string::npos);
+
+    // The binary view: what the library exports, with readable names; and its bytes.
+    if (dll) {
+        const std::string overview = call("inspect_binary", R"j({"path": "fixture.dll"})j");
+        CHECK(overview.find("PE32+ DLL") != std::string::npos && overview.find("KERNEL32.dll") != std::string::npos &&
+              overview.find("sample::Widget::area(int, int) const") != std::string::npos);
+        CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "exports,imports"})j").find("Imports:") != std::string::npos);
+        const std::string exports = call("inspect_binary", R"j({"path": "fixture.dll", "list": "exports"})j");
+        CHECK(exports.find("sample::Widget::area(int, int) const") != std::string::npos);
+        CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "libraries"})j").find("KERNEL32.dll") != std::string::npos);
+        CHECK(call("read_bytes", R"j({"path": "fixture.dll", "length": 16})j").find("00000000  4d 5a") != std::string::npos);
+    }
+    CHECK(call("inspect_binary", R"j({"path": "data/sales.csv"})j").find("not a program") != std::string::npos);
+
+    // Forgiving calls: single quotes, a trailing comma, a code fence; wrong ones answered with an example.
+    CHECK(call("calculate", "{'expression': '2+2'}").find("= 4") != std::string::npos);
+    CHECK(call("calculate", "{\"expression\": \"3*3\",}").find("= 9") != std::string::npos);
+    CHECK(call("calculate", "```json\n{\"expression\": \"5-1\"}\n```").find("= 4") != std::string::npos);
+    const std::string missing = call("read_file", "{}");
+    CHECK(missing.find("needs `path`") != std::string::npos && missing.find("read_file {\"path\":\"...\"}") != std::string::npos);
+    CHECK(call("read_file", "not json at all").find("Call it like this") != std::string::npos);
+    CHECK(call("teleport", "{}").find("Tools: list_files") != std::string::npos);
+    CHECK(call("transcribe", R"j({"path": "data/sales.csv"})j").find("not a recording") != std::string::npos);
+}
+
+TEST(local_agent_runs_a_tool_call_written_as_text)
+{
+    FakeEngine engine;
+    viewmodel::AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            viewmodel::AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/m.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(viewmodel::AgentViewModel::Choice::Local));
+    std::vector<interfaces::LocalToolCall> ran;
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}}; },
+                        [&](const interfaces::LocalToolCall& c, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
+                            ran.push_back(c);
+                            done({"2+2 = 4", {}, {}});
+                        },
+                        []() { return std::string(); });
+    // The fake answers its scripted text once: a call in a code fence, not in the chat format.
+    engine.textAnswers = {"Let me work it out.\n```json\n{\"name\": \"calculate\", \"arguments\": {\"expression\": \"2+2\"}}\n```",
+                          "calculate {\"expression\": \"3+3\"}"};
+    agent.submitPrompt("What is 2+2?");
+    CHECK_EQ(ran.size(), size_t(2));
+    CHECK(!ran.empty() && ran[0].name == "calculate" && ran[0].arguments.find("2+2") != std::string::npos);
+    CHECK(ran.size() > 1 && ran[1].arguments.find("3+3") != std::string::npos);
+    bool kept = false;
+    for (const model::ChatMessage& m : agent.messages())
+        kept = kept || (m.role == model::ChatRole::Agent && m.text == "Let me work it out.");
+    CHECK(kept);
+    CHECK(agent.messages().back().text == "Local answer." && !agent.busy.get());
+
+    // Python-style calls, two in one answer, as bullets: both run, the bullets go.
+    ran.clear();
+    engine.textAnswers = {"*   `calculate(expression=\"2*3\")`\n*   calculate(expression='4+4')\nThat is all."};
+    agent.submitPrompt("Two sums");
+    CHECK_EQ(ran.size(), size_t(2));
+    CHECK(ran.size() == 2 && ran[0].arguments == R"({"expression":"2*3"})" && ran[1].arguments == R"({"expression":"4+4"})");
+
+    // It announces a call and stops: told to go on (twice at most), it makes it.
+    const size_t before = engine.chats.size();
+    engine.textAnswers = {"I will now call the calculate tool to add them.", "I will use calculate next.", "I will now call calculate."};
+    agent.submitPrompt("Add 2 and 2");
+    CHECK_EQ(engine.chats.size() - before, size_t(3)); // the question, then two nudges; the third announcement ends it
+    CHECK(engine.chats.back().messages.back().text.find("Go on") != std::string::npos);
+    CHECK(!agent.busy.get());
 }
 
 TEST(opening_another_folder_forgets_the_previous_one)
