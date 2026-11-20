@@ -26,6 +26,14 @@ const EngineLabViewModel::CatalogFile kDrafter{
     "92b9c2ad5766eee7ed32eacdb73d0f04307438b4/gemma4-e2b-qat-mtp_Q4_0.gguf",
     "17e0a45021dc3a429fa2bab3e4b4aa0b7769278dbbf0a7e993fa177c052bbcb7", 76537376ull,
     "community conversion (StartaBafras) of google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant"};
+// The model's eyes and ears: its vision and audio encoders with their projectors (mtmd), from the
+// model's own repository at the same commit.
+const EngineLabViewModel::CatalogFile kProjector{
+    "Eyes and ears (Google, vision and audio)", "gemma-4-E2B-it-mmproj.gguf",
+    "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/675cff42a74c774d6cb76f76d8eacb49b48c9b93/"
+    "gemma-4-E2B-it-mmproj.gguf",
+    "021059cce659fe7f9170d5599761d7bbaf644b798dab9503aca30dc43e6beb14", 986833664ull,
+    "google/gemma-4-E2B-it-qat-q4_0-gguf"};
 
 // Room kept free beyond the download itself.
 constexpr uint64_t kSpareBytes = 512ull << 20;
@@ -77,11 +85,21 @@ model::Json resultJson(const EngineRunResult& r)
 
 const EngineLabViewModel::CatalogFile& EngineLabViewModel::modelFile() { return kModel; }
 const EngineLabViewModel::CatalogFile& EngineLabViewModel::drafterFile() { return kDrafter; }
+const EngineLabViewModel::CatalogFile& EngineLabViewModel::projectorFile() { return kProjector; }
+const EngineLabViewModel::CatalogFile& EngineLabViewModel::catalogFile(Which which)
+{
+    return which == Which::Model ? kModel : which == Which::Drafter ? kDrafter : kProjector;
+}
+
+Property<std::string>& EngineLabViewModel::customPath(Which which)
+{
+    return which == Which::Model ? customModelPath : which == Which::Drafter ? customDrafterPath : customProjectorPath;
+}
 
 EngineLabViewModel::EngineLabViewModel(interfaces::ILocalEngineService* engine) : engine_(engine)
 {
     // The choices are remembered.
-    for (Property<std::string>* p : {&customModelPath, &customDrafterPath})
+    for (Property<std::string>* p : {&customModelPath, &customDrafterPath, &customProjectorPath})
         subscriptions_.push_back(p->subscribe([this](const std::string&) { changed.emit(); }));
     for (Property<bool>* p : {&useGpu, &allowMobileData})
         subscriptions_.push_back(p->subscribe([this](const bool&) { changed.emit(); }));
@@ -115,19 +133,19 @@ const interfaces::EngineInfo& EngineLabViewModel::info()
 
 std::string EngineLabViewModel::pathFor(Which which) const
 {
-    const std::string& custom = which == Which::Model ? customModelPath.get() : customDrafterPath.get();
+    const std::string& custom = const_cast<EngineLabViewModel*>(this)->customPath(which).get();
     if (!custom.empty())
         return custom;
     if (!engine_)
         return {};
     const std::string dir = engine_->modelsDirectory();
-    return dir.empty() ? std::string() : dir + "/" + (which == Which::Model ? kModel : kDrafter).fileName;
+    return dir.empty() ? std::string() : dir + "/" + catalogFile(which).fileName;
 }
 
 EngineLabViewModel::FileStatus EngineLabViewModel::fileStatus(Which which) const
 {
     FileStatus s;
-    const CatalogFile& file = which == Which::Model ? kModel : kDrafter;
+    const CatalogFile& file = catalogFile(which);
     s.path = pathFor(which);
     s.total = file.size;
     if (!engine_ || s.path.empty())
@@ -146,7 +164,7 @@ EngineLabViewModel::FileStatus EngineLabViewModel::fileStatus(Which which) const
         return s;
     }
     s.have = engine_->fileSize(s.path);
-    const bool custom = !(which == Which::Model ? customModelPath.get() : customDrafterPath.get()).empty();
+    const bool custom = !(const_cast<EngineLabViewModel*>(this)->customPath(which).get()).empty();
     if (s.have == 0) {
         s.state = FileState::Missing;
     } else if (custom) {
@@ -195,7 +213,7 @@ void EngineLabViewModel::importFile(Which which)
 {
     if (!engine_ || downloading_ >= 0)
         return;
-    const CatalogFile& file = which == Which::Model ? kModel : kDrafter;
+    const CatalogFile& file = catalogFile(which);
     const std::string dir = engine_->modelsDirectory();
     if (dir.empty()) {
         say("No folder to keep models in on this device.", true);
@@ -213,10 +231,7 @@ void EngineLabViewModel::importFile(Which which)
         downloadErrors_[int(which)] = "could not import: " + error;
         return;
     }
-    if (which == Which::Model)
-        customModelPath.set({});
-    else
-        customDrafterPath.set({});
+    customPath(which).set({});
     mismatched_.erase(std::remove(mismatched_.begin(), mismatched_.end(), path), mismatched_.end());
     downloadErrors_[int(which)].clear();
     downloading_ = int(which);
@@ -241,7 +256,7 @@ void EngineLabViewModel::startDownload(Which which, bool mobileData)
 {
     if (!engine_ || downloading_ >= 0)
         return;
-    const CatalogFile& file = which == Which::Model ? kModel : kDrafter;
+    const CatalogFile& file = catalogFile(which);
     // Always into the models folder: a custom path is the user's own file.
     const std::string dir = engine_->modelsDirectory();
     if (dir.empty()) {
@@ -258,10 +273,7 @@ void EngineLabViewModel::startDownload(Which which, bool mobileData)
         downloadErrors_[int(which)] = "not enough space: " + gigabytes(free) + " free";
         return;
     }
-    if (which == Which::Model)
-        customModelPath.set({});
-    else
-        customDrafterPath.set({});
+    customPath(which).set({});
     mismatched_.erase(std::remove(mismatched_.begin(), mismatched_.end(), path), mismatched_.end());
     std::string error;
     if (!engine_->startDownload(file.url, path, mobileData, &error)) {
@@ -301,7 +313,7 @@ void EngineLabViewModel::verify(Which which)
     if (!engine_ || verifying_ >= 0)
         return;
     const std::string path = pathFor(which);
-    const CatalogFile& file = which == Which::Model ? kModel : kDrafter;
+    const CatalogFile& file = catalogFile(which);
     verifying_ = int(which);
     verifyFraction_ = 0;
     engine_->hashFile(
@@ -461,6 +473,7 @@ model::Json EngineLabViewModel::save() const
     return model::Json::object()
         .set("customModel", customModelPath.get())
         .set("customDrafter", customDrafterPath.get())
+        .set("customProjector", customProjectorPath.get())
         .set("threads", threads.get())
         .set("gpu", useGpu.get())
         .set("mobileData", allowMobileData.get())
@@ -474,6 +487,7 @@ void EngineLabViewModel::load(const model::Json& j)
         return;
     customModelPath.set(j.getString("customModel"));
     customDrafterPath.set(j.getString("customDrafter"));
+    customProjectorPath.set(j.getString("customProjector"));
     if (const model::Json* t = j.find("threads"); t && t->isNumber()) {
         threads.set(std::max(1, int(t->asNumber())));
         threadsChosen_ = true;

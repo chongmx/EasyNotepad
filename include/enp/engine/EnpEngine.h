@@ -10,7 +10,9 @@
 #ifndef ENP_ENGINE_H
 #define ENP_ENGINE_H
 
-#define ENP_ENGINE_ABI 1
+/* 2: chat messages carry pictures, sounds and tool calls, and a request tools (an older library
+ * would drop them silently, so it is not loaded). */
+#define ENP_ENGINE_ABI 2
 
 #if defined(_WIN32)
 #define ENP_ENGINE_EXPORT __declspec(dllexport)

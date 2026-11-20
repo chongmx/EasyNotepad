@@ -64,25 +64,62 @@ struct EngineRunResult {
 };
 
 // A conversation for the local agent: the system prompt first, then the turns, oldest first.
+// A picture or a sound that goes with a message. The model sees and hears them when its projector
+// (LocalChatRequest::projectorPath) is given; without it they are left out.
+struct LocalMedia {
+    enum class Kind { Image, Audio };
+    Kind kind = Kind::Image;
+    std::string name;          // what the conversation calls it: "photo.png", "page 3 of report.pdf"
+    int width = 0, height = 0; // Image: its size in pixels
+    std::string data;          // Image: RGB, three bytes a pixel, row by row; Audio: the file (WAV, MP3 or FLAC)
+};
+
+// A tool the model may call (it answers with calls instead of text when it wants one), and a call.
+struct LocalTool {
+    std::string name;
+    std::string description;
+    std::string parameters; // JSON Schema of its arguments, as text
+};
+
+struct LocalToolCall {
+    std::string id;
+    std::string name;
+    std::string arguments; // a JSON object, as text
+};
+
 struct LocalChatMessage {
-    std::string role; // "system", "user" or "assistant"
+    std::string role; // "system", "user", "assistant" or "tool"
     std::string text;
+    std::vector<LocalMedia> media;        // shown to the model before the text
+    std::vector<LocalToolCall> toolCalls; // assistant: the calls it made
+    std::string toolCallId;               // tool: the call this answers
+    std::string toolName;
 };
 
 struct LocalChatRequest {
     std::vector<LocalChatMessage> messages;
     std::string modelPath;
-    std::string drafterPath; // empty: no speculative decoding
+    std::string drafterPath;   // empty: no speculative decoding
+    std::string projectorPath; // the model's eyes and ears (mmproj); loaded when a message has media
+    std::vector<LocalTool> tools;
     int threads = 4;
     bool useGpu = false;
-    int maxTokens = 768;
-    int contextTokens = 8192;
+    int maxTokens = 768;      // 0: as many as the context has room for
+    int contextTokens = 8192; // 0: the largest the model takes that fits the memory free
+    // Write down the speech of the recordings in the last message (its text, if any, is the
+    // instruction), in windows of this many seconds; the result's text is the transcript.
+    bool transcribe = false;
+    int audioWindowSeconds = 30;
 };
 
 struct LocalChatResult {
     bool ok = false;
     std::string error;
+    std::string text;                     // the answer, without the markup of any tool calls
+    std::vector<LocalToolCall> toolCalls; // the tools it wants run before it goes on
     int promptTokens = 0;
+    int mediaTokens = 0; // of promptTokens, those the pictures and sounds took
+    int contextTokens = 0; // the context the model has (with LocalChatRequest::contextTokens 0, what fitted)
     int generatedTokens = 0;
     double firstTokenSeconds = 0;
     double tokensPerSecond = 0;

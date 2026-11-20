@@ -43,11 +43,27 @@ public:
         bool ready = false;
         std::string why; // when not ready
         std::string modelPath, drafterPath;
+        std::string projectorPath; // its eyes and ears (pictures and sounds); empty when not downloaded
         int threads = 4;
         bool gpu = false;
     };
     void setLocal(interfaces::ILocalEngineService* engine, std::function<LocalSetup()> setup,
                   std::function<std::string()> contextText);
+    // The local model's tools (the app's: src/app/LocalAgentTools.cpp): those it may call (no edit
+    // tools in Plan only), who runs a call (the result may come later: a look at a page waits for
+    // the page to be drawn), and the guide it gets with every question (what it can do, its skills).
+    struct ToolOutput {
+        std::string text;
+        std::vector<interfaces::LocalMedia> media; // pictures or sounds for the model to take in
+    };
+    using ToolRunner = std::function<void(const interfaces::LocalToolCall& call, std::function<void(ToolOutput)> done)>;
+    void setLocalTools(std::function<std::vector<interfaces::LocalTool>(bool canEdit)> tools, ToolRunner run,
+                       std::function<std::string()> guide);
+    bool hasLocalTools() const { return runTool_ != nullptr; }
+    // An edit the local model proposes (its edit tools): listed for review, applied when accepted.
+    void proposeChange(const std::string& path, const std::string& before, const std::string& after);
+    // Tool calls the local model may make for one question before it must answer.
+    static constexpr int kMaxToolRounds = 16;
     bool localReady() const;
     bool claudeReady() const; // Claude Code can answer here now
     // A local answer: send the question it answered to Claude Code instead.
@@ -81,6 +97,9 @@ public:
     // `context` names what the prompt refers to, e.g. "src/main.cpp:12-20".
     void submitPrompt(const std::string& prompt, const std::string& context = {});
     void newChat();
+    // The folder closed or another opened: work about the old one stops (its late answers are dropped), and
+    // the local exchange's pictures and sounds go.
+    void workspaceChanged();
     void stop();
     void acceptChange(int index);
     void rejectChange(int index);
@@ -113,6 +132,18 @@ private:
     void route(const std::string& prompt, const std::string& context);
     void askClaude(const std::string& prompt, const std::string& context);
     void askLocal(const std::string& prompt, const std::string& context, const std::string& note);
+    // The local exchange in progress: the request grows with the model's tool calls and their results.
+    std::function<std::vector<interfaces::LocalTool>(bool)> localTools_;
+    ToolRunner runTool_;
+    std::function<std::string()> localGuide_;
+    interfaces::LocalChatRequest localRequest_;
+    int localRounds_ = 0;
+    std::string localPrompt_;
+    void sendLocal(int generation);
+    void localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r);
+    void runLocalTools(int generation, std::vector<interfaces::LocalToolCall> calls, size_t next,
+                       std::vector<interfaces::LocalMedia> seen);
+    void endLocal();
     bool fallBackToLocal(const std::string& prompt, const std::string& why);
     void tagClaude();
     std::string lastAnswerBy() const;

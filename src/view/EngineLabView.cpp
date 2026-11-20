@@ -58,8 +58,11 @@ void EngineLabView::renderSummary()
         return;
     }
     if (l.downloading()) {
-        const auto st = l.fileStatus(l.fileStatus(Which::Model).state == viewmodel::EngineLabViewModel::FileState::Downloading
-                                         ? Which::Model : Which::Drafter);
+        Which busy = Which::Model;
+        for (Which w : {Which::Model, Which::Drafter, Which::Projector})
+            if (l.fileStatus(w).state == viewmodel::EngineLabViewModel::FileState::Downloading)
+                busy = w;
+        const auto st = l.fileStatus(busy);
         ImGui::TextColored(col(palette_.accent), ICON_FA_DOWNLOAD "  Downloading: %s of %s", gigabytes(st.have).c_str(),
                            gigabytes(st.total).c_str());
         return;
@@ -141,6 +144,8 @@ void EngineLabView::render(bool fullScreen, ImVec2 areaMin, ImVec2 areaMax)
             renderFile(Which::Model);
             ImGui::Spacing();
             renderFile(Which::Drafter);
+            ImGui::Spacing();
+            renderFile(Which::Projector);
         }
         renderRun();
         renderLatest();
@@ -166,8 +171,7 @@ void EngineLabView::renderMobileDataPrompt()
     fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
-    const auto& file = l.pendingDownload() == Which::Model ? viewmodel::EngineLabViewModel::modelFile()
-                                                           : viewmodel::EngineLabViewModel::drafterFile();
+    const auto& file = viewmodel::EngineLabViewModel::catalogFile(l.pendingDownload());
     const uint64_t have = lab().fileStatus(l.pendingDownload()).have;
     const uint64_t left = file.size > have ? file.size - have : 0;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(380.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 60.0f * s_));
@@ -230,10 +234,9 @@ void EngineLabView::renderDevice()
 
 void EngineLabView::renderFile(Which which)
 {
-    const auto& file = which == Which::Model ? viewmodel::EngineLabViewModel::modelFile()
-                                             : viewmodel::EngineLabViewModel::drafterFile();
+    const auto& file = viewmodel::EngineLabViewModel::catalogFile(which);
     const viewmodel::EngineLabViewModel::FileStatus st = lab().fileStatus(which);
-    const char* id = which == Which::Model ? "model" : "drafter";
+    const char* id = which == Which::Model ? "model" : which == Which::Drafter ? "drafter" : "projector";
     ImGui::PushID(id);
 
     ImGui::TextUnformatted(file.label);
@@ -344,6 +347,7 @@ void EngineLabView::renderRun()
     ImGui::BeginDisabled(!hasGpu);
     if (ImGui::Checkbox("Use the GPU", &gpu))
         l.useGpu.set(gpu);
+    registerLastItem("engine-lab:use-gpu", "toggle", "Use the GPU", [&l]() { l.useGpu.set(!l.useGpu.get()); }, hasGpu);
     ImGui::EndDisabled();
     if (!hasGpu && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ui::tooltip("No GPU here: put enp-engine-cuda next to EasyNotepad for an NVIDIA GPU.");

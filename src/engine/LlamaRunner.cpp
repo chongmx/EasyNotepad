@@ -14,6 +14,8 @@
 #include "ggml-backend.h"
 #include "llama.h"
 #include "log.h"
+#include "mtmd-helper.h"
+#include "mtmd.h"
 #include "sampling.h"
 #include "speculative.h"
 #if defined(__GNUC__)
@@ -101,6 +103,10 @@ struct Model {
     common_speculative_init_result_ptr specInit;
     common_chat_templates_ptr templates; // the agent's chat format (loaded when first needed)
     llama_context* ctxDraft = nullptr;
+    // The projector (the model's eyes and ears), loaded with the first picture or sound: about 1 GB
+    // a chat without them does not need.
+    mtmd::context_ptr media;
+    std::string mediaPath;
     llama_model* model() const { return init ? init->model() : nullptr; }
     llama_context* ctx() const { return init ? init->context() : nullptr; }
     bool drafter() const { return ctxDraft != nullptr; }
@@ -132,6 +138,14 @@ std::unique_ptr<Model> loadModel(common_params params, std::string& error)
     return m;
 }
 
+// What the model reads before it answers: tokens, or, with pictures and sounds, mtmd's chunks
+// (text tokens and the projector's embeddings in turn).
+struct Prompt {
+    std::vector<llama_token> tokens;
+    mtmd::input_chunks_ptr chunks;
+    size_t size() const { return chunks ? mtmd_helper_get_n_tokens(chunks.get()) : tokens.size(); }
+};
+
 struct Generated {
     int produced = 0;
     int drafted = 0;
@@ -143,8 +157,10 @@ struct Generated {
 // Generates up to `maxTokens` after the prompt `inp`, from an empty context, as llama.cpp's
 // speculative example does: the drafter (when loaded) proposes tokens, the model checks them in
 // one batch and keeps those it agrees with. Each piece of text goes to `onPiece` (this thread).
-Generated generate(Model& m, const std::vector<llama_token>& inp, int maxTokens, const Cancelled& cancelled,
-                   const std::function<void(const std::string&)>& onPiece)
+// A prompt with pictures or sounds is read by mtmd, and the drafter sits out (it cannot follow the
+// projector's embeddings); the first token is then sampled from mtmd's last logits.
+Generated generate(Model& m, const Prompt& prompt, int maxTokens, common_params_sampling sampling,
+                   const Cancelled& cancelled, const std::function<void(const std::string&, llama_token)>& onPiece)
 {
     Generated g;
     llama_context* ctx = m.ctx();
@@ -153,11 +169,13 @@ Generated generate(Model& m, const std::vector<llama_token>& inp, int maxTokens,
     llama_memory_clear(llama_get_memory(ctx), true);
     if (ctxDraft)
         llama_memory_clear(llama_get_memory(ctxDraft), true);
-    if (inp.empty())
+    if (prompt.size() == 0)
         return g;
+    const std::vector<llama_token>& inp = prompt.tokens;
+    const bool media = prompt.chunks != nullptr;
 
     common_speculative* spec = nullptr;
-    if (m.drafter()) {
+    if (m.drafter() && !media) {
         spec = common_speculative_init(m.params.speculative, 1);
         if (!spec)
             throw std::runtime_error("the drafter could not be used with this model");
@@ -174,26 +192,48 @@ Generated generate(Model& m, const std::vector<llama_token>& inp, int maxTokens,
     const bool ckptDraft = ctxDraft && common_context_can_seq_rm(ctxDraft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
     const auto tFirst = Clock::now();
-    common_sampler_ptr sampler(common_sampler_init(m.model(), m.params.sampling));
+    common_sampler_ptr sampler(common_sampler_init(m.model(), sampling));
     const llama_seq_id seq = 0;
-    {
+    llama_token last = LLAMA_TOKEN_NULL;
+    llama_tokens context;
+    int past = 0;
+    bool first = true;
+    Clock::time_point tDecode = Clock::now();
+    if (media) {
+        llama_pos newPast = 0;
+        if (mtmd_helper_eval_chunks(m.media.get(), ctx, prompt.chunks.get(), 0, seq, int32_t(llama_n_batch(ctx)), true,
+                                    &newPast) != 0)
+            throw std::runtime_error("the pictures or sounds could not be read");
+        if (cancelled())
+            return g;
+        last = common_sampler_sample(sampler.get(), ctx, -1);
+        common_sampler_accept(sampler.get(), last, true);
+        g.firstTokenSeconds = secondsBetween(tFirst, Clock::now());
+        tDecode = Clock::now();
+        first = false;
+        g.produced = 1;
+        past = int(newPast);
+        if (llama_vocab_is_eog(vocab, last)) {
+            g.decodeSeconds = 0;
+            return g;
+        }
+        onPiece(common_token_to_piece(ctx, last), last);
+    } else {
         common_batch batch(ctx);
         for (size_t i = 0; i + 1 < inp.size(); ++i)
             batch.add(inp[i], llama_pos(i), seq, false);
         llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (spec && !common_speculative_process(spec, batch))
             throw std::runtime_error("the drafter failed on the prompt");
+        last = inp.back();
+        context.assign(inp.begin(), inp.end() - 1);
+        past = int(inp.size()) - 1;
     }
-    llama_token last = inp.back();
-    llama_tokens context(inp.begin(), inp.end() - 1);
-    int past = int(inp.size()) - 1;
     if (spec)
         common_speculative_begin(spec, seq, context);
     common_batch batch(ctx);
     llama_tokens draft;
     common_prompt_checkpoint ckpt;
-    bool first = true;
-    Clock::time_point tDecode = Clock::now();
     while (g.produced < maxTokens && !cancelled()) {
         if (spec && draft.empty()) {
             ckpt.update_pos(context.size(), llama_memory_seq_pos_min(llama_get_memory(ctx), seq),
@@ -259,7 +299,7 @@ Generated generate(Model& m, const std::vector<llama_token>& inp, int maxTokens,
                 end = true;
                 break;
             }
-            onPiece(common_token_to_piece(ctx, id));
+            onPiece(common_token_to_piece(ctx, id), id);
         }
         draft.clear();
         llama_memory_seq_rm(llama_get_memory(ctx), seq, past, -1);
@@ -272,29 +312,206 @@ Generated generate(Model& m, const std::vector<llama_token>& inp, int maxTokens,
     return g;
 }
 
-// A chat prompt as tokens: template text may hold special tokens, the user's text may not.
-std::vector<llama_token> chatTokens(Model& m, const std::vector<interfaces::LocalChatMessage>& messages)
+// Where a message's picture or sound goes in its text (the projector's tokens replace it). Not a
+// token of the model's, and not text anyone types.
+const char* const kMediaMarker = "<\x01enp-media\x01>";
+
+bool hasMedia(const std::vector<interfaces::LocalChatMessage>& messages)
 {
-    if (!m.templates)
-        m.templates = common_chat_templates_init(m.model(), "");
+    return std::any_of(messages.begin(), messages.end(), [](const interfaces::LocalChatMessage& m) { return !m.media.empty(); });
+}
+
+// The conversation in the template's terms: each picture or sound is a marker before the text.
+common_chat_templates_inputs chatInputs(const interfaces::LocalChatRequest& request)
+{
     common_chat_templates_inputs inputs;
-    for (const interfaces::LocalChatMessage& message : messages) {
+    for (const interfaces::LocalChatMessage& message : request.messages) {
         common_chat_msg msg;
         msg.role = message.role;
-        msg.content = message.text;
+        for (size_t i = 0; i < message.media.size(); ++i)
+            msg.content += kMediaMarker;
+        msg.content += message.text;
+        for (const interfaces::LocalToolCall& call : message.toolCalls)
+            msg.tool_calls.push_back({call.name, call.arguments, call.id});
+        msg.tool_name = message.toolName;
+        msg.tool_call_id = message.toolCallId;
         inputs.messages.push_back(std::move(msg));
     }
+    for (const interfaces::LocalTool& tool : request.tools)
+        inputs.tools.push_back({tool.name, tool.description, tool.parameters});
+    inputs.parallel_tool_calls = !request.tools.empty();
     inputs.add_generation_prompt = true;
     inputs.enable_thinking = false; // quick answers; thinking used the whole budget in the trial
-    const common_chat_params formatted = common_chat_templates_apply(m.templates.get(), inputs);
-    const llama_vocab* vocab = llama_model_get_vocab(m.model());
-    std::vector<llama_token> tokens;
-    for (const common_chat_prompt_part& part : formatted.prompt.parts) {
-        const std::vector<llama_token> t = common_tokenize(vocab, part.text, false, !part.is_input);
-        tokens.insert(tokens.end(), t.begin(), t.end());
-    }
-    return tokens;
+    return inputs;
 }
+
+// The messages' pictures and sounds as mtmd's bitmaps, in order (a sound decoded to the encoder's
+// samples: WAV, MP3, FLAC).
+std::vector<mtmd::bitmap_ptr> mediaBitmaps(Model& m, const std::vector<interfaces::LocalChatMessage>& messages)
+{
+    std::vector<mtmd::bitmap_ptr> bitmaps;
+    for (const interfaces::LocalChatMessage& message : messages)
+        for (const interfaces::LocalMedia& media : message.media) {
+            mtmd_bitmap* b = nullptr;
+            if (media.kind == interfaces::LocalMedia::Kind::Image) {
+                if (!mtmd_support_vision(m.media.get()))
+                    throw std::runtime_error("this model's projector cannot see pictures");
+                if (media.width <= 0 || media.height <= 0 || media.data.size() != size_t(media.width) * size_t(media.height) * 3)
+                    throw std::runtime_error("the picture " + media.name + " is not whole");
+                b = mtmd_bitmap_init(uint32_t(media.width), uint32_t(media.height),
+                                     reinterpret_cast<const unsigned char*>(media.data.data()));
+            } else {
+                if (!mtmd_support_audio(m.media.get()))
+                    throw std::runtime_error("this model's projector cannot hear sounds");
+                b = mtmd_helper_bitmap_init_from_buf(m.media.get(), reinterpret_cast<const unsigned char*>(media.data.data()),
+                                                     media.data.size(), false, mtmd_helper_init_opt_default())
+                        .bitmap;
+                if (!b)
+                    throw std::runtime_error("the sound " + media.name + " could not be read (WAV, MP3 and FLAC can)");
+            }
+            bitmaps.emplace_back(b);
+        }
+    return bitmaps;
+}
+
+// The prompt the template made, as tokens (template text may hold special tokens, the user's text
+// may not), or with `bitmaps` at the media markers as mtmd chunks.
+Prompt chatPrompt(Model& m, const common_chat_prompt& formatted, const std::vector<mtmd::bitmap_ptr>& bitmaps, int& mediaTokens)
+{
+    Prompt p;
+    const llama_vocab* vocab = llama_model_get_vocab(m.model());
+    if (bitmaps.empty()) {
+        for (const common_chat_prompt_part& part : formatted.parts) {
+            const std::vector<llama_token> t = common_tokenize(vocab, part.text, false, !part.is_input);
+            p.tokens.insert(p.tokens.end(), t.begin(), t.end());
+        }
+        return p;
+    }
+
+    // Text and media in order: the strings first, so the parts can point into them.
+    struct Segment {
+        std::string text;
+        bool special = false;
+        int bitmap = -1;
+    };
+    std::vector<Segment> segments;
+    int next = 0;
+    const std::string marker = kMediaMarker;
+    for (const common_chat_prompt_part& part : formatted.parts) {
+        size_t from = 0;
+        for (size_t at = part.text.find(marker); at != std::string::npos; at = part.text.find(marker, from)) {
+            if (at > from)
+                segments.push_back({part.text.substr(from, at - from), !part.is_input, -1});
+            if (next >= int(bitmaps.size()))
+                throw std::runtime_error("the conversation has more media markers than pictures and sounds");
+            segments.push_back({std::string(), false, next++});
+            from = at + marker.size();
+        }
+        if (from < part.text.size())
+            segments.push_back({part.text.substr(from), !part.is_input, -1});
+    }
+    if (next != int(bitmaps.size()))
+        throw std::runtime_error("a picture or sound was left out of the conversation");
+    std::vector<mtmd_input_text> texts(segments.size());
+    std::vector<mtmd_input_part> parts(segments.size());
+    std::vector<const mtmd_input_part*> partPointers(segments.size());
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (segments[i].bitmap >= 0) {
+            parts[i] = {nullptr, bitmaps[size_t(segments[i].bitmap)].get()};
+        } else {
+            texts[i] = {segments[i].text.c_str(), segments[i].text.size(), false, segments[i].special};
+            parts[i] = {&texts[i], nullptr};
+        }
+        partPointers[i] = &parts[i];
+    }
+    p.chunks.reset(mtmd_input_chunks_init());
+    if (mtmd_tokenize_from_parts(m.media.get(), p.chunks.get(), partPointers.data(), partPointers.size(), false) != 0)
+        throw std::runtime_error("the pictures or sounds could not be prepared for the model");
+    mediaTokens = 0;
+    for (size_t i = 0; i < mtmd_input_chunks_size(p.chunks.get()); ++i) {
+        const mtmd_input_chunk* chunk = mtmd_input_chunks_get(p.chunks.get(), i);
+        if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_TEXT)
+            mediaTokens += int(mtmd_input_chunk_get_n_tokens(chunk));
+    }
+    return p;
+}
+// "[01:30]" for 90 seconds.
+std::string clockText(int seconds)
+{
+    char buf[16];
+    if (seconds >= 3600)
+        std::snprintf(buf, sizeof(buf), "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    else
+        std::snprintf(buf, sizeof(buf), "%02d:%02d", seconds / 60, seconds % 60);
+    return buf;
+}
+
+// The words of each recording in the last message, written down window by window (the audio encoder
+// takes up to 30 seconds at a time): each window a fresh context, greedy, its text streamed with the
+// time it starts at ("[01:30] ..."). The whole transcript is the result's text.
+void transcribeAudio(Model& m, const interfaces::LocalChatRequest& request, const Report& stage, const Report& text,
+                     const Cancelled& cancelled, interfaces::LocalChatResult& r)
+{
+    if (request.messages.empty())
+        throw std::runtime_error("nothing to transcribe");
+    const interfaces::LocalChatMessage& last = request.messages.back();
+    const std::string instruction =
+        last.text.empty() ? std::string("Transcribe the speech in this audio exactly as spoken, in the language spoken. Write "
+                                        "only the words, in sentences with capital letters and punctuation. If there is no speech, write [no speech].")
+                          : last.text;
+    const int sampleRate = std::max(1, mtmd_get_audio_sample_rate(m.media.get()));
+    const int window = std::clamp(request.audioWindowSeconds, 5, 30);
+    common_params_sampling sampling = m.params.sampling;
+    sampling.temp = 0.0f; // the same words every time
+    // One message with one marker: the window's samples go there.
+    interfaces::LocalChatRequest one;
+    one.messages.push_back({"user", instruction});
+    one.messages.back().media.push_back({interfaces::LocalMedia::Kind::Audio, "window", 0, 0, {}});
+    for (const interfaces::LocalMedia& media : last.media) {
+        if (media.kind != interfaces::LocalMedia::Kind::Audio)
+            continue;
+        mtmd::bitmap_ptr sound(mtmd_helper_bitmap_init_from_buf(m.media.get(), reinterpret_cast<const unsigned char*>(media.data.data()),
+                                                                media.data.size(), false, mtmd_helper_init_opt_default())
+                                   .bitmap);
+        if (!sound || !mtmd_bitmap_is_audio(sound.get()))
+            throw std::runtime_error("the sound " + media.name + " could not be read (WAV, MP3 and FLAC can)");
+        const float* samples = reinterpret_cast<const float*>(mtmd_bitmap_get_data(sound.get()));
+        const size_t count = mtmd_bitmap_get_n_bytes(sound.get()) / sizeof(float);
+        const size_t step = size_t(window) * size_t(sampleRate);
+        const int total = int(count / size_t(sampleRate));
+        for (size_t from = 0; from < count && !cancelled(); from += step) {
+            const size_t n = std::min(step, count - from);
+            if (n < size_t(sampleRate) / 2)
+                break; // half a second left: nothing to say
+            const int at = int(from / size_t(sampleRate));
+            stage("Transcribing " + media.name + ": " + clockText(at) + " of " + clockText(total));
+            std::vector<mtmd::bitmap_ptr> bitmaps;
+            bitmaps.emplace_back(mtmd_bitmap_init_from_audio(n, samples + from));
+            common_chat_session session(m.templates.get(), llama_model_get_vocab(m.model()), chatInputs(one));
+            int mediaTokens = 0;
+            const Prompt prompt = chatPrompt(m, session.prompt(), bitmaps, mediaTokens);
+            r.mediaTokens += mediaTokens;
+            r.promptTokens += int(prompt.size());
+            const std::string head = (r.text.empty() ? "" : "\n\n") + std::string("[") + clockText(at) + "] ";
+            r.text += head;
+            text(head);
+            const Generated g = generate(m, prompt, 512, sampling, cancelled, [&](const std::string& piece, llama_token) {
+                r.text += piece;
+                text(piece);
+            });
+            r.generatedTokens += g.produced;
+            if (r.firstTokenSeconds == 0)
+                r.firstTokenSeconds = g.firstTokenSeconds;
+            r.tokensPerSecond = g.decodeSeconds > 0 && g.produced > 1 ? (g.produced - 1) / g.decodeSeconds : r.tokensPerSecond;
+        }
+    }
+    if (cancelled()) {
+        r.error = "stopped";
+        return;
+    }
+    r.ok = true;
+}
+
 } // namespace
 
 void initBackend()
@@ -302,6 +519,8 @@ void initBackend()
     static const bool once = []() {
         // The lab and the agent show what matters; nothing goes to stdout or stderr.
         llama_log_set([](ggml_log_level, const char*, void*) {}, nullptr);
+        mtmd_log_set([](ggml_log_level, const char*, void*) {}, nullptr);
+        mtmd_helper_log_set([](ggml_log_level, const char*, void*) {}, nullptr);
         common_log_set_stdo(common_log_main(), false);
         llama_backend_init();
         return true;
@@ -377,25 +596,75 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
             r.loaded = true;
         }
         Model& m = *loaded_->model;
-        const std::vector<llama_token> prompt = chatTokens(m, request.messages);
-        r.promptTokens = int(prompt.size());
-        if (int(prompt.size()) + request.maxTokens > int(llama_n_ctx(m.ctx()))) {
-            r.error = "the conversation is too long for the local model: start a new chat";
+        if (hasMedia(request.messages) && (!m.media || m.mediaPath != request.projectorPath)) {
+            if (request.projectorPath.empty()) {
+                r.error = "the local model cannot see or hear yet: download its eyes and ears in Local Model";
+                return r;
+            }
+            m.media.reset();
+            stage("Loading the model's eyes and ears");
+            mtmd_context_params mp = mtmd_context_params_default();
+            mp.use_gpu = request.useGpu;
+            mp.n_threads = request.threads;
+            mp.print_timings = false;
+            mp.warmup = false;
+            m.media.reset(mtmd_init_from_file(request.projectorPath.c_str(), m.model(), mp));
+            if (!m.media) {
+                r.error = "the model's eyes and ears could not be loaded (file or memory)";
+                return r;
+            }
+            m.mediaPath = request.projectorPath;
+        }
+        if (!m.templates)
+            m.templates = common_chat_templates_init(m.model(), "");
+        r.contextTokens = int(llama_n_ctx(m.ctx()));
+        if (request.transcribe) {
+            transcribeAudio(m, request, stage, text, cancelled, r);
+            lastUse_ = std::chrono::steady_clock::now();
             return r;
         }
-        stage("Reading " + std::to_string(prompt.size()) + " tokens");
+        const llama_vocab* vocab = llama_model_get_vocab(m.model());
+        common_chat_session session(m.templates.get(), vocab, chatInputs(request));
+        common_params_sampling sampling = m.params.sampling;
+        session.apply_sampling(sampling); // the tool calls' grammar, when there are tools
+        const Prompt prompt = chatPrompt(m, session.prompt(), mediaBitmaps(m, request.messages), r.mediaTokens);
+        r.promptTokens = int(prompt.size());
+        // maxTokens 0: as much as the context has room for.
+        const int room = r.contextTokens - int(prompt.size()) - 1;
+        const int maxTokens = request.maxTokens > 0 ? request.maxTokens : room;
+        if (room < std::min(maxTokens, 256)) {
+            r.error = "the conversation is too long for the local model (" + std::to_string(prompt.size()) + " of " +
+                      std::to_string(r.contextTokens) + " tokens): start a new chat";
+            return r;
+        }
+        stage(r.mediaTokens > 0 ? "Looking and listening (" + std::to_string(prompt.size()) + " tokens)"
+                                : "Reading " + std::to_string(prompt.size()) + " tokens");
         bool started = false;
-        const Generated g = generate(m, prompt, request.maxTokens, cancelled, [&](const std::string& piece) {
-            if (!started) {
-                started = true;
-                stage("Writing");
+        size_t sent = 0; // of the answer's text, what went out already
+        const Generated g = generate(m, prompt, std::min(maxTokens, room), sampling, cancelled, [&](const std::string& piece, llama_token token) {
+            common_chat_input chunk;
+            chunk.append(piece, token);
+            const common_chat_msg& msg = session.feed(chunk);
+            // Only the answer's text streams; a tool call's markup is parsed, not shown.
+            if (msg.content.size() > sent && msg.content.compare(0, sent, msg.content, 0, sent) == 0) {
+                if (!started) {
+                    started = true;
+                    stage("Writing");
+                }
+                text(msg.content.substr(sent));
+                sent = msg.content.size();
             }
-            text(piece);
         });
         lastUse_ = std::chrono::steady_clock::now();
         if (cancelled()) {
             r.error = "stopped";
             return r;
+        }
+        const common_chat_msg& answer = session.finish();
+        r.text = answer.content;
+        for (size_t i = 0; i < answer.tool_calls.size(); ++i) {
+            const common_chat_tool_call& call = answer.tool_calls[i];
+            r.toolCalls.push_back({call.id.empty() ? "call_" + std::to_string(i + 1) : call.id, call.name, call.arguments});
         }
         r.generatedTokens = g.produced;
         r.firstTokenSeconds = g.firstTokenSeconds;
@@ -465,8 +734,10 @@ EngineRunResult Runner::run(const EngineRunSettings& settings, const Report& sta
         // 2. Generation, continuing a piece of code.
         stage(r.drafter ? "Generating with the drafter" : "Generating");
         std::string sample;
-        const Generated g = generate(*m, common_tokenize(ctx, kGeneratePrompt, true, true), settings.generateTokens, cancelled,
-                                     [&sample](const std::string& piece) {
+        Prompt code;
+        code.tokens = common_tokenize(ctx, kGeneratePrompt, true, true);
+        const Generated g = generate(*m, code, settings.generateTokens, m->params.sampling, cancelled,
+                                     [&sample](const std::string& piece, llama_token) {
                                          if (sample.size() < 400)
                                              sample += piece;
                                      });

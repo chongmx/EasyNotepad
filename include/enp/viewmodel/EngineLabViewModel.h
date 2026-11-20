@@ -25,6 +25,9 @@ public:
     };
     static const CatalogFile& modelFile();
     static const CatalogFile& drafterFile();
+    static const CatalogFile& projectorFile(); // the eyes and ears: pictures and sounds for the agent
+    enum class Which;
+    static const CatalogFile& catalogFile(Which which);
 
     enum class FileState { Missing, Partial, Downloading, Verifying, Unverified, Ready, Mismatch, Custom };
     struct FileStatus {
@@ -35,7 +38,7 @@ public:
         double verifyFraction = 0;
         std::string note; // e.g. "waiting for Wi-Fi"
     };
-    enum class Which { Model, Drafter };
+    enum class Which { Model, Drafter, Projector };
 
     struct Record {
         std::string when; // local time, "2026-11-01 14:05"
@@ -74,6 +77,7 @@ public:
     // Optional: run a file that is already on the device instead of the catalogue's.
     Property<std::string> customModelPath;
     Property<std::string> customDrafterPath;
+    Property<std::string> customProjectorPath;
 
     Property<int> threads{4};
     Property<bool> useGpu{false};
@@ -114,7 +118,8 @@ private:
     void say(const std::string& text, bool error = false);
     std::string notice_;
     bool noticeError_ = false;
-    std::string downloadErrors_[2];
+    std::string downloadErrors_[3];
+    Property<std::string>& customPath(Which which);
     std::string deviceLabel();
 
     interfaces::ILocalEngineService* engine_ = nullptr;

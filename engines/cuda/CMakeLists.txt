@@ -26,7 +26,7 @@ endif()
 # The same patched llama.cpp as the app's CPU engine (patches/llama.cpp).
 include(${ENP_ROOT}/cmake/PatchedSource.cmake)
 enp_patched_source(llama.cpp SOURCE ${ENP_ROOT}/3rdparty/llama.cpp PATCHES ${ENP_ROOT}/patches/llama.cpp
-                   OUT ENP_LLAMA_DIR PATHS CMakeLists.txt LICENSE cmake common ggml include licenses src vendor)
+                   OUT ENP_LLAMA_DIR PATHS CMakeLists.txt LICENSE cmake common ggml include licenses src tools/mtmd vendor)
 string(REGEX REPLACE "^b" "" LLAMA_BUILD_NUMBER "${ENP_LLAMA_DIR_TAG}")
 set(LLAMA_BUILD_COMMIT ${ENP_LLAMA_DIR_COMMIT})
 
@@ -36,6 +36,7 @@ foreach(_opt LLAMA_BUILD_TESTS LLAMA_BUILD_TOOLS LLAMA_BUILD_EXAMPLES LLAMA_BUIL
     set(${_opt} OFF CACHE BOOL "" FORCE)
 endforeach()
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE) # speculative decoding lives there
+set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE) # images and sound for the model (tools/mtmd, without its video)
 set(GGML_CUDA ON CACHE BOOL "" FORCE)
 # The CUDA runtime linked in; on Linux cuBLAS too, so the library needs only the NVIDIA driver.
 # Windows has no static cuBLAS: cublas64_*.dll and cublasLt64_*.dll go next to the library.
@@ -45,14 +46,16 @@ foreach(_opt GGML_AVX GGML_AVX2 GGML_FMA GGML_F16C GGML_BMI2)
     set(${_opt} ON CACHE BOOL "" FORCE)
 endforeach()
 add_subdirectory(${ENP_LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
+target_compile_definitions(mtmd PRIVATE _USE_MATH_DEFINES) # M_PI in strict C++17 (MinGW, MSVC)
 
 add_library(enp_engine_cuda SHARED
     EngineCuda.cpp
     ${ENP_ROOT}/src/engine/LlamaRunner.cpp
     ${ENP_ROOT}/src/engine/EngineJson.cpp
+    ${ENP_ROOT}/src/model/Base64.cpp
     ${ENP_ROOT}/src/model/Json.cpp)
 target_include_directories(enp_engine_cuda PRIVATE ${ENP_ROOT}/include)
-target_link_libraries(enp_engine_cuda PRIVATE llama-common llama)
+target_link_libraries(enp_engine_cuda PRIVATE mtmd llama-common llama)
 set_target_properties(enp_engine_cuda PROPERTIES
     OUTPUT_NAME enp-engine-cuda PREFIX ""
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON

@@ -65,6 +65,19 @@ public:
         const auto it = entries_.find(documentId);
         return it == entries_.end() ? -1 : it->second.currentPage;
     }
+    // The agent looks at a page: page `page` (from 0) of a paged document, at `zoom` (0 fits the width; below
+    // 0 leaves it as it is), from the next frame. False when this view does not show the document.
+    bool showPage(int documentId, int page, float zoom)
+    {
+        const auto it = entries_.find(documentId);
+        if (it == entries_.end())
+            return false;
+        if (page >= 0)
+            it->second.goToPage = page;
+        if (zoom >= 0.0f)
+            it->second.zoom = zoom;
+        return true;
+    }
     std::size_t entryCount() const { return entries_.size(); }
     std::size_t heldImageCount() const; // for the tests: pictures decoded for open documents
     // For the tests: the pictures of page `page` it holds that could not be shown, with why.

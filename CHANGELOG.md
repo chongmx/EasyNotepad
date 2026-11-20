@@ -23,6 +23,18 @@ its release notes on GitHub.
   unless "Aa" is on, ligatures match their letters, and a line break matches a space, so a phrase
   is found across lines. In two columns, the column with the keyboard goes to each match; the
   other, when it shows the same document, keeps its place and shows the highlights.
+- The local agent works in the open folder with the app's own tools, and reads, looks and listens.
+  It calls them by itself (each step shows in the chat): it lists the folder, finds text, reads
+  files by line range, reads PDF, Word, Excel and PowerPoint text a few pages at a time, looks at a
+  page in the viewer as a picture (zoomed, a region of it) for tables and charts, looks at pictures,
+  listens to recordings (WAV, MP3, FLAC), and opens files to show you. Its edits are proposals,
+  listed under the conversation to review side by side, accept or reject; with *Plan only* it has
+  none. It cannot leave the open folder. Pictures and sound need its eyes and ears, Gemma 4's
+  vision and audio encoders from Google (987 MB, *Let it see and hear* in the agent set-up),
+  loaded only for a question that needs them. Skills in `resources/skills/` teach it each kind of
+  task. Tested with Gemma 4 E2B on the CPU: it read a datasheet's numbers, described a chart on a
+  slide and took down a voicemail. The engine library's interface is version 2: an
+  `enp-engine-cuda` built before this is not loaded (the CPU answers) until it is replaced.
 - The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
   a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
   RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a
@@ -51,6 +63,11 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
+  put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
+  straight into memory, and the web build has a 1 MB stack, a Windows main thread's.
+- Open on the web shows the browser's file picker, so files on the user's computer can be opened;
+  it showed the in-app browser, which sees only the page's own files.
 - A pinch (or Ctrl+wheel) on Word, Excel, Markdown and pictures made the content jitter and slide
   away from the fingers; only PDF and slides zoomed about the point under them. Word and Excel
   laid out at the old size while scrolling for the new one, and none of them grows in proportion

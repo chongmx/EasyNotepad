@@ -180,7 +180,7 @@ if(ENP_LOCAL_ENGINE)
     # The submodule stays as checked out; the build uses a patched copy (patches/llama.cpp).
     include(cmake/PatchedSource.cmake)
     enp_patched_source(llama.cpp SOURCE ${ENP_THIRD_PARTY}/llama.cpp PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/patches/llama.cpp
-                       OUT ENP_LLAMA_DIR PATHS CMakeLists.txt LICENSE cmake common ggml include licenses src vendor)
+                       OUT ENP_LLAMA_DIR PATHS CMakeLists.txt LICENSE cmake common ggml include licenses src tools/mtmd vendor)
     string(REGEX REPLACE "^b" "" LLAMA_BUILD_NUMBER "${ENP_LLAMA_DIR_TAG}")
     set(LLAMA_BUILD_COMMIT ${ENP_LLAMA_DIR_COMMIT})
     # Static libraries linked into the app; only the library and its common helpers are built.
@@ -190,6 +190,7 @@ if(ENP_LOCAL_ENGINE)
         set(${_opt} OFF CACHE BOOL "" FORCE)
     endforeach()
     set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE) # speculative decoding lives there
+    set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE) # images and sound for the model (tools/mtmd, without its video)
     # Without the downloader (cpp-httplib needs Windows 10): the app fetches models itself.
     set(LLAMA_COMMON_DOWNLOAD OFF CACHE BOOL "" FORCE)
     # One fixed CPU level, not the run-time variants (those need dynamically loaded backends, which
@@ -202,10 +203,11 @@ if(ENP_LOCAL_ENGINE)
         set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
     endif()
     add_subdirectory(${ENP_LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
+    target_compile_definitions(mtmd PRIVATE _USE_MATH_DEFINES) # M_PI in strict C++17 (MinGW, MSVC)
     # The engine is always optimized, also in Debug builds of the app (the Android debug APK is
     # what gets installed for testing; unoptimized inference is many times slower).
     if(NOT MSVC)
-        foreach(_t ggml-base ggml-cpu ggml llama llama-common llama-common-base)
+        foreach(_t ggml-base ggml-cpu ggml llama llama-common llama-common-base mtmd)
             if(TARGET ${_t})
                 target_compile_options(${_t} PRIVATE $<$<CONFIG:Debug>:-O2>)
             endif()
@@ -361,6 +363,7 @@ add_library(enp_model STATIC
     src/model/Highlighter.cpp
     src/model/Indent.cpp
     src/model/Search.cpp
+    src/model/Base64.cpp
     src/model/Hash.cpp
     src/model/Crypto.cpp
     src/model/Json.cpp
@@ -423,7 +426,7 @@ endif()
 if(ENP_LOCAL_ENGINE)
     # The model code shared with the engine libraries (engines/cuda) runs the built-in CPU engine.
     target_sources(enp_services PRIVATE src/engine/LlamaRunner.cpp)
-    target_link_libraries(enp_services PRIVATE llama-common llama)
+    target_link_libraries(enp_services PRIVATE mtmd llama-common llama)
     target_compile_definitions(enp_services PRIVATE ENP_HAS_LOCAL_ENGINE=1)
     if(WIN32)
         target_link_libraries(enp_services PRIVATE psapi)
@@ -515,6 +518,7 @@ target_include_directories(enp_view PRIVATE ${ENP_GENERATED_DIR})
 # automation: the MCP connector (agent access to the running app) and its command handlers
 add_library(enp_automation STATIC
     src/app/AutomationController.cpp
+    src/app/LocalAgentTools.cpp
     src/app/McpBridge.cpp
 )
 target_include_directories(enp_automation PUBLIC src/app)
@@ -576,6 +580,7 @@ else()
         target_link_options(EasyNotepad PRIVATE
             ${ENP_WEB_GLFW_FLAG}
             -sALLOW_MEMORY_GROWTH=1
+            -sSTACK_SIZE=1048576 # a Windows main thread's: the default 64 KB is far too small for the app
             -sMIN_WEBGL_VERSION=2
             -sMAX_WEBGL_VERSION=2
             -sEXPORTED_RUNTIME_METHODS=ccall

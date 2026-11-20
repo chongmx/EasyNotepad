@@ -51,6 +51,9 @@
 #include "enp/viewmodel/ViewerViewModel.h"
 
 #include "AutomationController.h"
+#include "LocalAgentTools.h"
+#include "enp/engine/EngineJson.h"
+#include "enp/model/Base64.h"
 #include "McpBridge.h"
 
 #include <array>
@@ -4069,6 +4072,8 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     // The local agent: answers at once, in two pieces (or fails when told to).
     std::vector<interfaces::LocalChatRequest> chats;
     bool chatFails = false;
+    std::vector<std::vector<interfaces::LocalToolCall>> toolRounds;
+    bool alwaysTools = false;
     void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
               std::function<void(const std::string&)> text, std::function<void(const interfaces::LocalChatResult&)> done) override
     {
@@ -4076,6 +4081,18 @@ struct FakeEngine final : interfaces::ILocalEngineService {
         interfaces::LocalChatResult r;
         if (chatFails) {
             r.error = "out of memory";
+            done(r);
+            return;
+        }
+        // The model wants tools: each chat takes the next round of calls (or always, when set).
+        if (!toolRounds.empty() || alwaysTools) {
+            r.ok = true;
+            if (alwaysTools) {
+                r.toolCalls = {{"call_x", "list_files", "{}"}};
+            } else {
+                r.toolCalls = toolRounds.front();
+                toolRounds.erase(toolRounds.begin());
+            }
             done(r);
             return;
         }
@@ -4477,6 +4494,248 @@ TEST(agent_chooses_local_or_claude_and_falls_back)
     CHECK(engine.chats.size() == chats && !agent.busy.get());
 }
 
+
+TEST(local_agent_calls_tools_until_it_answers)
+{
+    using interfaces::LocalToolCall;
+    FakeEngine engine;
+    viewmodel::AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            viewmodel::AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            s.projectorPath = "/models/mmproj.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(viewmodel::AgentViewModel::Choice::Local));
+    std::vector<LocalToolCall> ran;
+    std::function<void(viewmodel::AgentViewModel::ToolOutput)> later; // a tool that answers a frame later
+    agent.setLocalTools(
+        [](bool canEdit) {
+            std::vector<interfaces::LocalTool> t = {{"read_file", "Reads a file", "{}"}, {"look_at_image", "Looks", "{}"}};
+            if (canEdit)
+                t.push_back({"edit_file", "Proposes an edit", "{}"});
+            return t;
+        },
+        [&](const LocalToolCall& call, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
+            ran.push_back(call);
+            viewmodel::AgentViewModel::ToolOutput out;
+            if (call.name == "look_at_image") {
+                interfaces::LocalMedia m;
+                m.name = "cat.png";
+                m.width = 2;
+                m.height = 1;
+                m.data = std::string(6, '\x7f');
+                out.media.push_back(std::move(m));
+                out.text = "Looked at cat.png.";
+                later = std::move(done);
+                return;
+            }
+            out.text = "1| int main() {}";
+            done(std::move(out));
+        },
+        []() { return std::string("The open folder is /work."); });
+
+    // Round 1: two calls (one answers later); round 2: the answer.
+    engine.toolRounds = {{{"c1", "read_file", R"({"path":"main.cpp"})"}, {"c2", "look_at_image", R"({"path":"cat.png"})"}}};
+    agent.submitPrompt("What is in main.cpp and cat.png?");
+    CHECK_EQ(engine.chats.size(), size_t(1));
+    CHECK_EQ(ran.size(), size_t(2));
+    CHECK(agent.busy.get() && later != nullptr); // waiting for the look
+    const interfaces::LocalChatRequest& first = engine.chats[0];
+    CHECK(first.tools.size() == 3 && first.projectorPath == "/models/mmproj.gguf" && first.contextTokens == 0);
+    CHECK(first.messages.front().role == "system" && first.messages.front().text.find("The open folder is /work.") != std::string::npos);
+    {
+        viewmodel::AgentViewModel::ToolOutput out;
+        interfaces::LocalMedia m;
+        m.name = "cat.png";
+        m.width = 2;
+        m.height = 1;
+        m.data = std::string(6, '\x7f');
+        out.media.push_back(std::move(m));
+        out.text = "Looked at cat.png.";
+        later(std::move(out));
+    }
+    CHECK_EQ(engine.chats.size(), size_t(2));
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Local answer.");
+    const std::vector<interfaces::LocalChatMessage>& sent = engine.chats[1].messages;
+    // ... the model's calls, each tool's result by its call, and the picture as the next turn.
+    bool calls = false, result1 = false, result2 = false, picture = false;
+    for (const interfaces::LocalChatMessage& m : sent) {
+        calls = calls || (m.role == "assistant" && m.toolCalls.size() == 2);
+        result1 = result1 || (m.role == "tool" && m.toolCallId == "c1" && m.toolName == "read_file" && m.text == "1| int main() {}");
+        result2 = result2 || (m.role == "tool" && m.toolCallId == "c2" && m.text == "Looked at cat.png.");
+        picture = picture || (m.role == "user" && m.media.size() == 1 && m.media[0].width == 2 && m.text.find("cat.png") != std::string::npos);
+    }
+    CHECK(calls && result1 && result2 && picture);
+    CHECK(sent.back().role == "user" && sent.back().media.size() == 1);
+    // The chat shows each tool step.
+    int steps = 0;
+    for (const model::ChatMessage& m : agent.messages())
+        steps += m.role == model::ChatRole::Tool && (m.text.find("read_file") != std::string::npos || m.text.find("look_at_image") != std::string::npos);
+    CHECK_EQ(steps, 2);
+
+    // Stopped while a tool works: its late answer is dropped, nothing more is asked.
+    engine.toolRounds = {{{"c3", "look_at_image", R"({"path":"cat.png"})"}}};
+    later = nullptr;
+    agent.submitPrompt("Look once more");
+    const size_t asked = engine.chats.size();
+    agent.stop();
+    later(viewmodel::AgentViewModel::ToolOutput{"late", {}});
+    CHECK_EQ(engine.chats.size(), asked);
+    CHECK(!agent.busy.get());
+    // The same when the folder closes meanwhile.
+    engine.toolRounds = {{{"c4", "look_at_image", R"({"path":"cat.png"})"}}};
+    later = nullptr;
+    agent.submitPrompt("And again");
+    const size_t asked2 = engine.chats.size();
+    agent.workspaceChanged();
+    CHECK(!agent.busy.get());
+    later(viewmodel::AgentViewModel::ToolOutput{"late", {}});
+    CHECK_EQ(engine.chats.size(), asked2);
+
+    // A model that never stops calling tools is stopped after the limit, and says so.
+    engine.alwaysTools = true;
+    const size_t before = engine.chats.size();
+    agent.submitPrompt("Loop");
+    CHECK_EQ(engine.chats.size() - before, size_t(viewmodel::AgentViewModel::kMaxToolRounds + 1));
+    CHECK(!agent.busy.get() && agent.messages().back().text.find("rounds of tools") != std::string::npos);
+    engine.alwaysTools = false;
+
+    // Plan only: no edit tools.
+    agent.autonomyIndex.set(1);
+    agent.submitPrompt("Plan it");
+    CHECK(engine.chats.back().tools.size() == 2);
+}
+
+TEST(agent_proposals_replace_one_waiting_for_the_same_file)
+{
+    viewmodel::AgentViewModel agent;
+    const size_t samples = agent.changes().size();
+    agent.proposeChange("src/a.cpp", "a\n", "b\n");
+    agent.proposeChange("src/b.cpp", "x\n", "y\n");
+    agent.proposeChange("src/a.cpp", "a\n", "c\n");
+    CHECK_EQ(agent.changes().size(), samples + 2);
+    CHECK(agent.changes().back().path == "src/a.cpp" && agent.changes().back().after == "c\n");
+    CHECK(agent.changes().back().stats.added == 1 && agent.changes().back().stats.removed == 1);
+}
+
+TEST(engine_json_carries_pictures_sounds_and_tool_calls)
+{
+    CHECK(model::base64Encode("") == "" && model::base64Encode("f") == "Zg==" && model::base64Encode("fo") == "Zm8=" &&
+          model::base64Encode("foo") == "Zm9v");
+    std::string all;
+    for (int i = 0; i < 256; ++i)
+        all += char(i);
+    CHECK(model::base64Decode(model::base64Encode(all)).value_or("") == all);
+    CHECK(!model::base64Decode("Zg=").has_value() && !model::base64Decode("Z!==").has_value());
+
+    interfaces::LocalChatRequest r;
+    r.projectorPath = "/m/mmproj.gguf";
+    r.tools = {{"read_file", "Reads", R"({"type":"object"})"}};
+    interfaces::LocalChatMessage user;
+    user.role = "user";
+    user.text = "what is this?";
+    interfaces::LocalMedia picture;
+    picture.name = "p.png";
+    picture.width = 1;
+    picture.height = 1;
+    picture.data = std::string("\x00\xff\x10", 3);
+    interfaces::LocalMedia sound;
+    sound.kind = interfaces::LocalMedia::Kind::Audio;
+    sound.name = "s.wav";
+    sound.data = "RIFF....WAVE";
+    user.media = {picture, sound};
+    interfaces::LocalChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.toolCalls = {{"c1", "read_file", R"({"path":"a"})"}};
+    interfaces::LocalChatMessage tool;
+    tool.role = "tool";
+    tool.toolCallId = "c1";
+    tool.toolName = "read_file";
+    tool.text = "1| a";
+    r.messages = {user, assistant, tool};
+    const std::optional<model::Json> parsed = model::Json::parse(engine::toJson(r).dump());
+    CHECK(parsed.has_value());
+    const interfaces::LocalChatRequest back = engine::chatRequestFrom(*parsed);
+    CHECK(back.projectorPath == r.projectorPath && back.tools.size() == 1 && back.tools[0].parameters == r.tools[0].parameters);
+    CHECK(back.messages.size() == 3 && back.messages[0].media.size() == 2);
+    CHECK(back.messages[0].media[0].data == picture.data && back.messages[0].media[0].width == 1);
+    CHECK(back.messages[0].media[1].kind == interfaces::LocalMedia::Kind::Audio && back.messages[0].media[1].data == sound.data);
+    CHECK(back.messages[1].toolCalls.size() == 1 && back.messages[1].toolCalls[0].arguments == R"({"path":"a"})");
+    CHECK(back.messages[2].toolCallId == "c1" && back.messages[2].toolName == "read_file" && back.messages[2].text == "1| a");
+
+    interfaces::LocalChatResult result;
+    result.ok = true;
+    result.text = "Reading.";
+    result.toolCalls = {{"c9", "list_files", "{}"}};
+    result.mediaTokens = 256;
+    const interfaces::LocalChatResult got = engine::chatResultFrom(*model::Json::parse(engine::toJson(result).dump()));
+    CHECK(got.ok && got.text == "Reading." && got.toolCalls.size() == 1 && got.toolCalls[0].name == "list_files" && got.mediaTokens == 256);
+}
+
+TEST(local_agent_tools_read_the_folder_and_propose_careful_edits)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-tools";
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/a.cpp", "int a;   \r\nint b;\r\nint c;\r\n", nullptr);
+    files.write(root + "/notes.md", "# Notes\nline two\n", nullptr);
+    files.write(root + "/blob.bin", std::string("\x01\x00\x02", 3), nullptr);
+    files.write(root + "/report.pdf", "%PDF-1.4\n", nullptr);
+    FakeAgentCli cli;
+    FakeProcesses processes;
+    viewmodel::NotepadViewModel vm(nullptr, &files, &cli, &processes);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); });
+    auto call = [&](const char* name, const model::Json& args) {
+        std::string text;
+        tools.run({"c", name, args.dump()}, [&](viewmodel::AgentViewModel::ToolOutput out) { text = out.text; });
+        return text;
+    };
+    // The folder, by any name the model gives it.
+    for (const char* name : {"", ".", "enp-test-agent-tools"}) {
+        const std::string listed = call("list_files", model::Json::object().set("path", name));
+        CHECK(listed.find("src/") != std::string::npos && listed.find("notes.md") != std::string::npos);
+    }
+    // Lines by range, numbered; not outside the folder.
+    const std::string read = call("read_file", model::Json::object().set("path", "notes.md").set("start_line", "2"));
+    CHECK(read.find("2| line two") != std::string::npos && read.find("1| # Notes") == std::string::npos);
+    CHECK(call("read_file", model::Json::object().set("path", "../outside.txt")).find("outside the open folder") != std::string::npos);
+    CHECK(call("read_file", model::Json::object().set("path", "blob.bin")).find("binary") != std::string::npos);
+    CHECK(call("read_file", model::Json::object().set("path", "report.pdf")).find("read_document") != std::string::npos);
+    CHECK(call("no_such_tool", model::Json::object()).find("no tool") != std::string::npos);
+
+    // An edit: copied with read_file's numbers, without the trailing spaces, in \n - the file's
+    // \r\n and spaces are matched all the same, and the change is proposed, not made.
+    const size_t before = vm.agent().changes().size();
+    const std::string edited = call("edit_file", model::Json::object()
+                                                     .set("path", "src/a.cpp")
+                                                     .set("old_text", "1| int a;\n2| int b;")
+                                                     .set("new_text", "int a = 1;\nint b = 2;"));
+    CHECK(edited.find("Proposed") != std::string::npos);
+    CHECK_EQ(vm.agent().changes().size(), before + 1);
+    CHECK(vm.agent().changes().back().after == "int a = 1;\r\nint b = 2;\r\nint c;\r\n");
+    CHECK(files.read(root + "/src/a.cpp").value_or("") == "int a;   \r\nint b;\r\nint c;\r\n"); // untouched
+    CHECK(call("edit_file", model::Json::object().set("path", "src/a.cpp").set("old_text", "int z;").set("new_text", "x"))
+              .find("not in") != std::string::npos);
+    // A new file; Plan only refuses.
+    CHECK(call("write_file", model::Json::object().set("path", "docs/new.md").set("content", "# New\n")).find("new file") != std::string::npos);
+    vm.agent().autonomyIndex.set(1);
+    CHECK(call("write_file", model::Json::object().set("path", "x.md").set("content", "x")).find("Plan only") != std::string::npos);
+    CHECK(tools.tools(false).size() + 2 == tools.tools(true).size());
+    // The guide names the folder and the skills (resources/skills next to the tests).
+    const std::string guide = tools.guide();
+    CHECK(guide.find(root) != std::string::npos && guide.find("Which tool for which file") != std::string::npos);
+    if (os::fs::readAsset("skills/index.json")) {
+        CHECK(guide.find("- documents:") != std::string::npos);
+        CHECK(call("read_skill", model::Json::object().set("name", "editing")).find("old_text") != std::string::npos);
+    }
+    CHECK(call("read_skill", model::Json::object().set("name", "../../secrets")).find("no skill") != std::string::npos);
+}
 
 TEST(opening_another_folder_forgets_the_previous_one)
 {

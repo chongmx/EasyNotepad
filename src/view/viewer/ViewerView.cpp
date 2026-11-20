@@ -274,6 +274,11 @@ const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage
 void ViewerView::render(model::Document& doc, ImVec2 size, bool active)
 {
     active_ = active;
+    if (active) {
+        // Where the document is drawn: the local agent's look at a page is cut from the window there.
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        UiAutomation::instance().add({"viewer:document", "region", doc.title, at, ImVec2(at.x + size.x, at.y + size.y), true, {}});
+    }
     viewmodel::ViewerViewModel& viewer = vm_.viewer();
     const viewmodel::ViewerViewModel::Entry* model = viewer.find(doc.id);
     if (!model) { // not asked for yet (a document restored with the session): the view-model reads it

@@ -238,6 +238,26 @@ void AgentPanel::renderMessages(float height)
         ui::itemTooltip("Send the same question to Claude Code");
         ImGui::Spacing();
     }
+    // Changes the agent proposed, waiting for the user: review them side by side, or decide at once.
+    if (const int pending = agent.live() ? agent.pendingChangeCount() : 0; pending > 0 && !agent.busy.get()) {
+        ImGui::TextColored(col(palette_.iconOrange), ICON_FA_PEN);
+        ImGui::SameLine();
+        ImGui::Text(pending == 1 ? "%d change to review" : "%d changes to review", pending);
+        if (ImGui::SmallButton(ICON_FA_CODE_BRANCH "  Review"))
+            vm_.execute(viewmodel::CommandId::SwitchToAgentMode);
+        registerLastItem("agent-review-changes", "button", "Review the proposed changes",
+                         [this]() { vm_.execute(viewmodel::CommandId::SwitchToAgentMode); });
+        ui::itemTooltip("Opens the Agent workspace: each change side by side, to accept or reject");
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_CHECK "  Accept all"))
+            vm_.execute(viewmodel::CommandId::AcceptAllChanges);
+        registerLastItem("agent-accept-all", "button", "Accept all changes", [this]() { vm_.execute(viewmodel::CommandId::AcceptAllChanges); });
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_BAN "  Reject all"))
+            vm_.execute(viewmodel::CommandId::RejectAllChanges);
+        registerLastItem("agent-reject-all", "button", "Reject all changes", [this]() { vm_.execute(viewmodel::CommandId::RejectAllChanges); });
+        ImGui::Spacing();
+    }
     if (agent.busy.get()) {
         static const char* const dots[] = {".", "..", "..."};
         const std::string& activity = agent.activity();
@@ -405,11 +425,12 @@ void AgentPanel::renderLocalSetup(float inner)
     }
     const Lab::FileStatus model = lab.fileStatus(Lab::Which::Model);
     const Lab::FileStatus drafter = lab.fileStatus(Lab::Which::Drafter);
+    const Lab::FileStatus projector = lab.fileStatus(Lab::Which::Projector);
     const bool ready = lab.fileUsable(Lab::Which::Model);
     char size[32];
     std::snprintf(size, sizeof(size), "%.2f GB", double(Lab::modelFile().size) / 1e9);
-    if (model.state == State::Downloading || drafter.state == State::Downloading) {
-        const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter;
+    if (model.state == State::Downloading || drafter.state == State::Downloading || projector.state == State::Downloading) {
+        const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter.state == State::Downloading ? drafter : projector;
         const float fraction = d.total ? float(double(d.have) / double(d.total)) : 0.0f;
         ImGui::TextUnformatted(lab.importing() ? "Copying the file in..." : "Downloading...");
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, col(palette_.accent));
@@ -419,7 +440,7 @@ void AgentPanel::renderLocalSetup(float inner)
             ImGui::TextColored(col(palette_.iconOrange), "%s", d.note.c_str());
         if (ImGui::Button(ICON_FA_STOP " Stop"))
             lab.cancelDownload();
-    } else if (model.state == State::Verifying || drafter.state == State::Verifying) {
+    } else if (model.state == State::Verifying || drafter.state == State::Verifying || projector.state == State::Verifying) {
         ImGui::TextDisabled("Checking the download...");
     } else if (ready) {
         ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
@@ -431,9 +452,21 @@ void AgentPanel::renderLocalSetup(float inner)
                 lab.download(Lab::Which::Drafter);
             registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
         }
+        if (lab.fileUsable(Lab::Which::Projector)) {
+            ImGui::TextColored(col(palette_.iconGreen), ICON_FA_EYE);
+            ImGui::SameLine();
+            ImGui::TextUnformatted("It can look at pictures and pages, and listen to recordings.");
+        } else {
+            if (ImGui::Button(ICON_FA_DOWNLOAD " Let it see and hear (987 MB)"))
+                lab.download(Lab::Which::Projector);
+            ui::itemTooltip("Its eyes and ears: it can then look at pictures and at the pages of documents, and listen to "
+                            "recordings (WAV, MP3, FLAC).");
+            registerLastItem("agent-local-projector", "button", "Download the eyes and ears",
+                             [&lab]() { lab.download(Lab::Which::Projector); });
+        }
     } else {
         ImGui::TextWrapped("Gemma 4 E2B (%s) answers quick questions about your code on this device, without a network "
-                           "or an account. It reads what you are looking at; it cannot edit files.", size);
+                           "or an account. It works in the open folder: it reads files and documents and proposes edits for you to accept.", size);
         if (ImGui::Button(ICON_FA_DOWNLOAD " Download"))
             lab.download(Lab::Which::Model);
         registerLastItem("agent-local-download", "button", "Download the local model", [&lab]() { lab.download(Lab::Which::Model); });

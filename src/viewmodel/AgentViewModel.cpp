@@ -1,7 +1,9 @@
 #include "enp/viewmodel/AgentViewModel.h"
 
 #include "enp/model/AgentRoute.h"
+#include "enp/model/Diff.h"
 #include "enp/model/Json.h"
+#include "enp/os/Memory.h"
 #include "enp/viewmodel/DummyData.h"
 
 #include <algorithm>
@@ -22,6 +24,32 @@ constexpr const char* kLocalSystemPrompt =
     "You are the assistant inside the EasyNotepad code editor, running offline on this device. Answer briefly and "
     "precisely, in Markdown. You see only the code the user shows you: you cannot open other files, edit files or "
     "run commands. If a request needs that, say so in one sentence and suggest asking Claude Code.";
+
+// Told to the local model when it has the app's tools (the app's guide and skills follow it).
+constexpr const char* kLocalAgentPrompt =
+    "You are the assistant inside EasyNotepad, a code editor and document reader, running offline on this device. "
+    "You work in the user's open folder through the tools you are given. Look before you answer: read the files, "
+    "documents, pictures and recordings a question is about with your tools, and never guess what they contain. "
+    "Call one or more tools when you need them; when you have what you need, answer briefly and precisely in "
+    "Markdown, naming the files and pages you used. If a tool fails, say so or try another way.";
+
+constexpr size_t kToolTextChars = 12000; // of one tool result sent to the model (about 3,000 tokens)
+
+// A tool step as the chat shows it: "read_file  src/main.cpp", with the arguments' values.
+std::string describeCall(const interfaces::LocalToolCall& call)
+{
+    std::string args;
+    if (std::optional<model::Json> j = model::Json::parse(call.arguments); j && j->isObject())
+        for (const auto& [key, value] : j->members()) {
+            const std::string v = value.isString() ? value.asString() : value.dump();
+            if (key == "content" || key == "new_text" || key == "old_text")
+                continue; // edits show as changes to review
+            args += (args.empty() ? "" : ", ") + v;
+        }
+    if (args.size() > 100)
+        args = args.substr(0, 97) + "...";
+    return "\xe2\x9a\x99 " + call.name + (args.empty() ? std::string() : "  " + args);
+}
 
 } // namespace
 
@@ -149,6 +177,37 @@ bool AgentViewModel::fallBackToLocal(const std::string& prompt, const std::strin
     return true;
 }
 
+void AgentViewModel::setLocalTools(std::function<std::vector<interfaces::LocalTool>(bool canEdit)> tools, ToolRunner run,
+                                   std::function<std::string()> guide)
+{
+    localTools_ = std::move(tools);
+    runTool_ = std::move(run);
+    localGuide_ = std::move(guide);
+}
+
+void AgentViewModel::proposeChange(const std::string& path, const std::string& before, const std::string& after)
+{
+    model::FileChange c;
+    c.path = path;
+    c.before = before;
+    c.after = after;
+    c.diff = model::diffLines(model::splitLines(before), model::splitLines(after));
+    c.stats = model::diffStats(c.diff);
+    // A newer proposal for the same file replaces one still waiting: one version to review.
+    changes_.erase(std::remove_if(changes_.begin(), changes_.end(),
+                                  [&](const model::FileChange& o) { return o.path == path && o.state == model::ChangeState::Proposed; }),
+                   changes_.end());
+    changes_.push_back(std::move(c));
+    selectedChange.set(int(changes_.size()) - 1);
+}
+
+void AgentViewModel::endLocal()
+{
+    os::mem::release(localRequest_.messages); // pictures and sounds can be megabytes
+    os::mem::release(localRequest_.tools);
+    localRounds_ = 0;
+}
+
 void AgentViewModel::askLocal(const std::string& prompt, const std::string& context, const std::string& note)
 {
     const LocalSetup setup = localSetup_ ? localSetup_() : LocalSetup{};
@@ -164,12 +223,27 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     if (!note.empty())
         messages_.push_back({model::ChatRole::Tool, note});
 
-    interfaces::LocalChatRequest request;
+    endLocal();
+    interfaces::LocalChatRequest& request = localRequest_;
     request.modelPath = setup.modelPath;
     request.drafterPath = setup.drafterPath;
+    request.projectorPath = setup.projectorPath;
     request.threads = setup.threads;
     request.useGpu = setup.gpu;
-    request.messages.push_back({"system", kLocalSystemPrompt});
+    const bool tools = runTool_ && localTools_;
+    if (tools) {
+        request.tools = localTools_(autonomyIndex.get() == 0);
+        request.contextTokens = 0; // the largest that fits: documents, pictures and tool results take room
+        request.maxTokens = 8192;  // a file written whole, a long summary
+        std::string system = kLocalAgentPrompt;
+        if (localGuide_)
+            system += "\n\n" + localGuide_();
+        request.messages.push_back({"system", std::move(system)});
+    } else {
+        request.contextTokens = 8192;
+        request.maxTokens = 768;
+        request.messages.push_back({"system", kLocalSystemPrompt});
+    }
     // Earlier turns, the newest kept, within a budget (the local model reads about 100 tokens a
     // second on a phone). This question itself is sent last, with the code it is about.
     size_t end = messages_.size();
@@ -189,7 +263,10 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
         if (chars + text.size() > kLocalHistoryChars)
             break;
         chars += text.size();
-        history.push_back({m.role == model::ChatRole::User ? "user" : "assistant", std::move(text)});
+        interfaces::LocalChatMessage turn;
+        turn.role = m.role == model::ChatRole::User ? "user" : "assistant";
+        turn.text = std::move(text);
+        history.push_back(std::move(turn));
     }
     std::reverse(history.begin(), history.end());
     // The chat format wants the turns to alternate, starting with the user.
@@ -204,14 +281,24 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     const std::string code = localContext_ ? localContext_() : std::string();
     if (!code.empty())
         question = "I am looking at " + (context.empty() ? std::string("this code") : context) + ":\n\n" + code + "\n\n" + prompt;
-    request.messages.push_back({"user", std::move(question)});
+    else if (!context.empty())
+        question = "I am looking at " + context + ".\n\n" + prompt;
+    interfaces::LocalChatMessage asked;
+    asked.role = "user";
+    asked.text = std::move(question);
+    request.messages.push_back(std::move(asked));
 
-    const int generation = ++generation_;
+    localPrompt_ = prompt;
+    sendLocal(++generation_);
+}
+
+void AgentViewModel::sendLocal(int generation)
+{
     messages_.push_back({model::ChatRole::Agent, std::string(), "Local"});
     const size_t at = messages_.size() - 1;
     activity_ = "Local model";
     local_->chat(
-        request,
+        localRequest_,
         [this, generation](const std::string& stage) {
             if (generation == generation_)
                 activity_ = "Local model: " + stage;
@@ -220,23 +307,87 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
             if (generation == generation_ && at < messages_.size())
                 messages_[at].text += piece;
         },
-        [this, generation, at, prompt](const interfaces::LocalChatResult& r) {
-            if (generation != generation_)
-                return; // stopped or replaced
-            activity_.clear();
-            if (!r.ok) {
-                if (at < messages_.size() && messages_[at].text.empty())
-                    messages_.erase(messages_.begin() + long(at));
-                messages_.push_back({model::ChatRole::Tool, "The local model failed: " + r.error});
-            } else {
-                char line[128];
-                std::snprintf(line, sizeof(line), "Local model: %d tokens, %.1f tokens/s, first token after %.1f s%s",
-                              r.generatedTokens, r.tokensPerSecond, r.firstTokenSeconds, r.loaded ? " (loaded the model)" : "");
-                statusMessage.emit(line);
-            }
-            busy.set(false);
-            replied.emit(prompt);
-        });
+        [this, generation, at](const interfaces::LocalChatResult& r) { localAnswered(generation, at, r); });
+}
+
+void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r)
+{
+    if (generation != generation_)
+        return; // stopped or replaced
+    const bool empty = at < messages_.size() && messages_[at].text.empty() && r.text.empty();
+    if (!r.ok) {
+        if (empty)
+            messages_.erase(messages_.begin() + long(at));
+        messages_.push_back({model::ChatRole::Tool, "The local model failed: " + r.error});
+    } else {
+        if (at < messages_.size() && !r.text.empty())
+            messages_[at].text = r.text; // the streamed text, exactly (a tool call's markup left out)
+        if (!r.toolCalls.empty() && runTool_ && localRounds_ < kMaxToolRounds) {
+            ++localRounds_;
+            if (empty)
+                messages_.erase(messages_.begin() + long(at));
+            interfaces::LocalChatMessage turn;
+            turn.role = "assistant";
+            turn.text = r.text;
+            turn.toolCalls = r.toolCalls;
+            localRequest_.messages.push_back(std::move(turn));
+            runLocalTools(generation, r.toolCalls, 0, {});
+            return;
+        }
+        if (!r.toolCalls.empty())
+            messages_.push_back({model::ChatRole::Tool, "The local model stopped after " + std::to_string(kMaxToolRounds) +
+                                                            " rounds of tools without an answer."});
+        else if (empty)
+            messages_.erase(messages_.begin() + long(at));
+        char line[160];
+        std::snprintf(line, sizeof(line), "Local model (%s): %d tokens, %.1f tokens/s, first token after %.1f s%s",
+                      r.backend.empty() ? "CPU" : r.backend.c_str(), r.generatedTokens, r.tokensPerSecond,
+                      r.firstTokenSeconds, r.loaded ? " (loaded the model)" : "");
+        statusMessage.emit(line);
+    }
+    endLocal();
+    activity_.clear();
+    busy.set(false);
+    replied.emit(localPrompt_);
+}
+
+void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::LocalToolCall> calls, size_t next,
+                                   std::vector<interfaces::LocalMedia> seen)
+{
+    if (generation != generation_)
+        return;
+    if (next >= calls.size()) {
+        if (!seen.empty()) {
+            // Pictures and sounds a tool brought: the model takes them in as the next turn.
+            interfaces::LocalChatMessage shown;
+            shown.role = "user";
+            for (const interfaces::LocalMedia& m : seen)
+                shown.text += (shown.text.empty() ? "Here " : ", ") + std::string("is ") + m.name;
+            shown.text += ", from your tools.";
+            shown.media = std::move(seen);
+            localRequest_.messages.push_back(std::move(shown));
+        }
+        sendLocal(generation);
+        return;
+    }
+    const interfaces::LocalToolCall call = calls[next];
+    messages_.push_back({model::ChatRole::Tool, describeCall(call)});
+    activity_ = "Local model: " + call.name;
+    runTool_(call, [this, generation, calls = std::move(calls), next, seen = std::move(seen)](ToolOutput out) mutable {
+        if (generation != generation_)
+            return;
+        interfaces::LocalChatMessage result;
+        result.role = "tool";
+        result.toolCallId = calls[next].id;
+        result.toolName = calls[next].name;
+        result.text = std::move(out.text);
+        if (result.text.size() > kToolTextChars)
+            result.text = result.text.substr(0, kToolTextChars) + "\n[cut: ask for a smaller part]";
+        localRequest_.messages.push_back(std::move(result));
+        for (interfaces::LocalMedia& m : out.media)
+            seen.push_back(std::move(m));
+        runLocalTools(generation, std::move(calls), next + 1, std::move(seen));
+    });
 }
 
 void AgentViewModel::askClaudeInstead(int answerIndex)
@@ -274,6 +425,21 @@ void AgentViewModel::newChat()
     statusMessage.emit("Started a new agent conversation");
 }
 
+void AgentViewModel::workspaceChanged()
+{
+    if (busy.get()) {
+        ++generation_;
+        replyAt_ = -1.0;
+        if (cli_)
+            cli_->cancel();
+        if (local_ && local_->chatting())
+            local_->cancel();
+        activity_.clear();
+        busy.set(false);
+    }
+    endLocal();
+}
+
 void AgentViewModel::stop()
 {
     if (!busy.get())
@@ -284,6 +450,7 @@ void AgentViewModel::stop()
         cli_->cancel();
     if (local_ && local_->chatting())
         local_->cancel();
+    endLocal();
     activity_.clear();
     messages_.push_back({model::ChatRole::Tool, "Stopped by user."});
     busy.set(false);

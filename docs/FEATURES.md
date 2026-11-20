@@ -330,10 +330,27 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
 - **Answers say who gave them** (*Agent · Local* or *Agent · Claude*). Under a local answer, **Ask
   Claude instead** sends the same question to Claude Code.
 - **What the local model sees:**
-  - the selection, or the 40 lines around the caret, with the question (it cannot open files
-    itself);
-  - the recent conversation.
-  It cannot edit files or use the app, and says so when asked.
+  - the selection, or the 40 lines around the caret, with the question;
+  - the recent conversation;
+  - whatever its tools bring it (below).
+- **It works in the open folder with the app's tools**, calling them by itself, up to 16 rounds a
+  question, each step shown in the chat (`⚙ read_file  src/main.cpp`):
+  - the folder: list it, find text in it, read files by line range (open files as you have them,
+    unsaved edits included). It cannot leave the open folder.
+  - documents: the text of PDF, Word, Excel and PowerPoint files, a few pages at a time;
+    **look at a page** in the viewer as a picture, at a zoom and region (top, bottom-left, ...)
+    for tables, charts, drawings and small print. The page is shown to you as it looks.
+  - **pictures** (PNG, JPEG, GIF, WebP, TIFF, ...) and **recordings** (WAV, MP3, FLAC: speech,
+    music, sounds), with its eyes and ears: a 987 MB download in the agent set-up (*Let it see and
+    hear*), loaded only when a question needs them.
+  - **edits**: it proposes changes (a replacement in a file, or a whole new file). They wait under
+    the conversation (*N changes to review*: **Review** side by side, **Accept all**, **Reject
+    all**); an accepted change opens in the editor, unsaved. With *Plan only* it has no edit tools.
+  - **open a file** at a line, to show you what it means.
+- **Skills** (`resources/skills/`): short guides it reads before a kind of task (the folder,
+  documents, pictures and sound, editing, the app). Its guide lists them with every question,
+  with which tool reads which kind of file.
+- It cannot run programs, build, use Git or save files, and says so.
 - **Speed:**
   - it streams as it writes, using the drafter when it is downloaded;
   - the model loads on the first question (a few seconds) and is unloaded after 5 idle minutes,

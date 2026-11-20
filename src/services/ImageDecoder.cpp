@@ -14,6 +14,7 @@
 // "images" scope the callers set; these are the only raw allocation calls outside src/os, and
 // they exist to feed a C library.
 #define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC // its own copy: llama.cpp's mtmd links another (with its own allocator and options)
 #define STBI_NO_STDIO
 #define STBI_NO_PIC
 #define STBI_MAX_DIMENSIONS (1 << 14)

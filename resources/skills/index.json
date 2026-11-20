@@ -1,0 +1,7 @@
+[
+  {"name": "workspace", "description": "find your way in the open folder: list folders, find text, read code and notes"},
+  {"name": "documents", "description": "read PDF, Word, Excel and PowerPoint files: their text by page, and their pages as pictures"},
+  {"name": "pictures-and-sound", "description": "look at pictures and pages closely (zoom, regions), and listen to recordings"},
+  {"name": "editing", "description": "change files safely: edits the user reviews, new files, what to do in Plan only"},
+  {"name": "easynotepad", "description": "the app around you: what the user sees, showing them things, what to suggest they do"}
+]
