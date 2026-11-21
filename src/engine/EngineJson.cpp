@@ -73,6 +73,7 @@ Json toJson(const interfaces::LocalChatRequest& r)
         .set("useGpu", r.useGpu)
         .set("maxTokens", r.maxTokens)
         .set("contextTokens", r.contextTokens)
+        .set("temperature", double(r.temperature))
         .set("transcribe", r.transcribe)
         .set("audioWindowSeconds", r.audioWindowSeconds);
 }
@@ -111,6 +112,8 @@ interfaces::LocalChatRequest chatRequestFrom(const Json& j)
     r.useGpu = j.getBool("useGpu", r.useGpu);
     r.maxTokens = integer(j, "maxTokens", r.maxTokens);
     r.contextTokens = integer(j, "contextTokens", r.contextTokens);
+    if (const Json* t = j.find("temperature"); t && t->isNumber())
+        r.temperature = float(t->asNumber());
     r.transcribe = j.getBool("transcribe");
     r.audioWindowSeconds = integer(j, "audioWindowSeconds", r.audioWindowSeconds);
     return r;

@@ -64,6 +64,9 @@ public:
                        std::function<std::string()> guide);
     // Added to each question (the end of the prompt, where a small model looks): the user's preferences.
     void setLocalReminder(std::function<std::string()> reminder) { localReminder_ = std::move(reminder); }
+    // Added to each question too: the files it names that the open folder holds, with the tool for
+    // each (a file in a subfolder is not in the top folder's listing, and the model gave up on it).
+    void setLocalNamedFiles(std::function<std::string(const std::string& question)> named) { localNamedFiles_ = std::move(named); }
     // Questions taken in steps: before the work, the model splits the question into steps with these
     // instructions (the planning skill); the app then gives it one step at a time, and asks for the
     // answer from what the steps found. No instructions, or a one-step plan: the question as it is.
@@ -164,6 +167,7 @@ private:
     ToolRunner runTool_;
     std::function<std::string()> localGuide_;
     std::function<std::string()> localReminder_;
+    std::function<std::string(const std::string&)> localNamedFiles_;
     interfaces::LocalChatRequest localRequest_;
     int localRounds_ = 0;
     int localNudges_ = 0; // times it was told to make the call it announced
@@ -175,6 +179,7 @@ private:
     void planLocal(int generation, std::string question);
     bool nextLocalStep(int generation, const std::string& answer);
     std::string localPrompt_;
+    std::string localNamed_; // the files the question names (as told to the model): read before answering
     void sendLocal(int generation);
     void localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r);
     void runLocalTools(int generation, std::vector<interfaces::LocalToolCall> calls, size_t next,

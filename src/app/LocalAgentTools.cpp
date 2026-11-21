@@ -496,6 +496,7 @@ void LocalAgentTools::attach()
             out += "- " + n[i] + "\n";
         return out;
     });
+    vm_.agent().setLocalNamedFiles([this](const std::string& question) { return namedFiles(question); });
     // Questions split into steps first, with the planning skill (resources/skills/planning).
     // The plan is made with what the open folder holds (each folder with how many files of which
     // kinds): a plan built on guessed file names fails at its first step.
@@ -552,7 +553,9 @@ void LocalAgentTools::attach()
             if (const size_t at = listed.find("Columns: "); at != std::string::npos)
                 columns += "- " + f + " (a table: query_table) columns: " + listed.substr(at + 9, listed.find('\n', at) - at - 9) + "\n";
         }
+        const std::string named = namedFiles(question);
         return text + "\n\nThe open folder holds (plan with these names; never invent a file):\n" + summary +
+               (named.empty() ? std::string() : "\n" + named + "\n") +
                (columns.empty() ? std::string() : "\nTables in the question, with their exact column names:\n" + columns);
     });
 }
@@ -660,7 +663,8 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
         {"calculate", "Calculates exactly: + - * / % ^ ( ), and sqrt abs round floor ceil min max sum avg pow log ln exp "
                       "sin cos tan, pi, e. Use it for EVERY number you work out - sums, differences, totals, "
                       "averages, percentages, shares, conversions, rounding - never in your head. Several at once, "
-                      "separated by ';', each may be named and used by the next.",
+                      "separated by ';', each may be named and used by the next. Compares too: "
+                      "'9.50 + 4 = 13.50' gives true or false (also != < > <= >=).",
          schema({{"expression", "string",
                   "e.g. 15% of 2340 + 7.5% of 980; or several: total = 42.50 * 1.08; each = total / 4; round(each, 2)"}},
                 {"expression"})},
@@ -971,6 +975,78 @@ void LocalAgentTools::listFiles(const Json& args, Done done)
     reply(done, out);
 }
 
+std::string LocalAgentTools::namedFiles(const std::string& question)
+{
+    std::string error;
+    const std::string root = resolve("", error);
+    if (root.empty() || question.empty())
+        return {};
+    std::string q = lower(question);
+    std::replace(q.begin(), q.end(), '\\', '/');
+    auto word = [&](size_t i) { return i < q.size() && (std::isalnum(static_cast<unsigned char>(q[i])) || q[i] == '_'); };
+    // At `at` in the question as a whole name: not inside a longer word or path ("a.wav" in "data.wav",
+    // "meeting.wav" in "meeting.wav.transcript").
+    auto whole = [&](size_t at, size_t length) {
+        const size_t end = at + length;
+        return !word(at - 1) && (at == 0 || q[at - 1] != '/') && !word(end) && !(end < q.size() && q[end] == '.' && word(end + 1));
+    };
+    auto mentions = [&](const std::string& name) {
+        for (size_t at = q.find(name); at != std::string::npos; at = q.find(name, at + 1))
+            if (whole(at, name.size()))
+                return true;
+        return false;
+    };
+    std::vector<std::string> byPath, byName;
+    std::vector<std::string> todo{root};
+    size_t seen = 0;
+    while (!todo.empty() && seen < 5000) {
+        const std::string dir = todo.back();
+        todo.pop_back();
+        for (const os::fs::DirEntry& e : os::fs::listDirectory(dir)) {
+            if (e.hidden || e.name == "node_modules" || e.name == "build" || e.name == "bin" || e.name == "obj" || ++seen > 5000)
+                continue;
+            const std::string full = dir + "/" + e.name;
+            if (e.isDirectory) {
+                if (todo.size() < 2000)
+                    todo.push_back(full);
+                continue;
+            }
+            const std::string rel = full.substr(root.size() + 1);
+            const std::string name = lower(e.name);
+            if (rel.find('/') != std::string::npos && mentions(lower(rel)))
+                byPath.push_back(rel);
+            else if (name.size() >= 5 && name.find('.') != std::string::npos && mentions(name))
+                byName.push_back(rel);
+        }
+    }
+    // By name only when no path was given for it and the name is not ambiguous.
+    std::vector<std::string> files = byPath;
+    for (const std::string& f : byName) {
+        const std::string name = lower(fileName(f));
+        const bool pathed = std::any_of(byPath.begin(), byPath.end(), [&](const std::string& p) { return lower(fileName(p)) == name; });
+        const long same = std::count_if(byName.begin(), byName.end(), [&](const std::string& o) { return lower(fileName(o)) == name; });
+        if (!pathed && same == 1)
+            files.push_back(f);
+    }
+    if (files.empty())
+        return {};
+    std::sort(files.begin(), files.end());
+    std::string out = "In the open folder, the files my question names:";
+    for (size_t i = 0; i < files.size() && i < 8; ++i) {
+        const std::string& f = files[i];
+        const std::string ext = extension(f);
+        const char* use = ext == "csv" || ext == "tsv" || ext == "xlsx" || ext == "xlsm" ? "a table: query_table"
+                          : ext == "exe" || ext == "dll" || ext == "so" || ext == "o" || ext == "a" || ext == "lib"
+                              ? "a program: inspect_binary"
+                          : kindOf(f) == FileKind::Document ? "a document: read_document"
+                          : kindOf(f) == FileKind::Picture  ? "a picture: look_at_image"
+                          : kindOf(f) == FileKind::Sound    ? "a recording: transcribe, or listen_to if short"
+                                                            : "text: read_file";
+        out += std::string(i ? ";" : "") + " " + f + " (" + use + ")";
+    }
+    return out + ".";
+}
+
 void LocalAgentTools::readFile(const Json& args, Done done)
 {
     std::string error;
@@ -1140,6 +1216,7 @@ namespace {
 constexpr size_t kDocumentFiles = 300;     // documents a search or a catalogue reads
 constexpr size_t kExtractFiles = 30;       // documents one extract_from_documents call reads
 constexpr size_t kPassChars = 9000;        // of a document in one pass (about 2,500 tokens)
+constexpr size_t kShortTextChars = 6000;   // a text file extract_from_documents hands back whole
 constexpr size_t kPassesPerDocument = 10;  // parts of a long document read for one question
 constexpr size_t kSearchChars = 4u << 20;  // of one document searched
 
@@ -1544,6 +1621,14 @@ void LocalAgentTools::extractFromDocuments(const Json& args, Done done)
         }))
         return reply(done, files.front() + " is a table, not a document: call query_table {\"path\": \"" + files.front() +
                                "\"} to filter, count, total, average or group its rows (it lists the columns).");
+    // One short text file: the whole of it, not answers to a question about it (a narrower question
+    // than the user's lost what it needed: "the total budget", without what was spent).
+    if (files.size() == 1 && kindOf(files.front()) == FileKind::Text) {
+        bool open = false;
+        const std::string text = fileText(root + "/" + files.front(), open);
+        if (!text.empty() && text.size() <= kShortTextChars && !looksBinary(text))
+            return reply(done, files.front() + " is short, so here it is whole; answer from it:\n\n" + text);
+    }
     std::string left;
     if (files.size() > kExtractFiles) {
         left = std::to_string(files.size() - kExtractFiles) + " more documents were not read (ask again with a narrower folder or pattern).";
@@ -2672,10 +2757,17 @@ void LocalAgentTools::calculate(const Json& args, Done done)
             split(e.isString() ? e.asString() : e.dump());
     else
         split(args.getString("expressions"));
+    // An expression written without quotes reaches the tool as a number (its sums lost): say how to
+    // write it, or the model calls again the same way.
+    if (const Json* e = args.find("expression"); parts.empty() && e && e->isNumber())
+        return reply(done, "Your expression reached calculate as a bare number (" + e->dump() +
+                               "), not as text: write the whole expression in quotes, as a string - calculate "
+                               "{\"expression\": \"12.50 + 8 + 3.25\"}.");
     if (parts.empty())
         return reply(done, "calculate needs an expression. " + usage("calculate"));
     std::vector<std::pair<std::string, double>> named; // longest names first when substituted
     std::string out;
+    bool tiny = false; // a result below 0.001: a unit (millions) likely missed
     for (const std::string& part : parts) {
         std::string label, expression = part;
         // "name = expression": a name is letters, digits, spaces and _ starting with a letter.
@@ -2688,31 +2780,69 @@ void LocalAgentTools::calculate(const Json& args, Done done)
                 expression = trimmed(part.substr(eq + 1));
             }
         }
-        // Earlier names, as their values.
-        std::string text = expression;
-        for (const auto& [name, value] : named)
-            for (size_t at = lower(text).find(lower(name)); at != std::string::npos; at = lower(text).find(lower(name), at)) {
-                const bool before = at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '_');
-                const size_t end = at + name.size();
-                const bool after = end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_');
-                if (before || after) {
-                    at = end;
-                    continue;
+        auto evaluate = [&named](const std::string& expr, std::string& error) {
+            // Earlier names, as their values.
+            std::string text = expr;
+            for (const auto& [name, value] : named)
+                for (size_t at = lower(text).find(lower(name)); at != std::string::npos; at = lower(text).find(lower(name), at)) {
+                    const bool before = at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '_');
+                    const size_t end = at + name.size();
+                    const bool after = end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_');
+                    if (before || after) {
+                        at = end;
+                        continue;
+                    }
+                    const std::string v = "(" + numberText(value) + ")";
+                    text.replace(at, name.size(), v);
+                    at += v.size();
                 }
-                const std::string v = "(" + numberText(value) + ")";
-                text.replace(at, name.size(), v);
-                at += v.size();
+            const std::string cleaned = plainNumbers(text); // kept: the calculator views it (string_view)
+            Calculator calc;
+            calc.s = cleaned;
+            const double v = calc.sum();
+            calc.space();
+            if (calc.error.empty() && calc.i < calc.s.size())
+                calc.error = std::string("unexpected '") + calc.s[calc.i] + "'";
+            error = calc.error;
+            return v;
+        };
+        // A comparison ("9 + 5 + 22 = 36", "a >= b"): both sides worked out, then true or false.
+        std::string op;
+        size_t opAt = std::string::npos;
+        if (label.empty()) {
+            int depth = 0;
+            for (size_t k = 0; k < expression.size() && op.empty(); ++k) {
+                const char c = expression[k];
+                depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+                if (depth != 0)
+                    continue;
+                for (const char* o : {"==", "!=", "<=", ">=", "=", "<", ">"})
+                    if (expression.compare(k, std::strlen(o), o) == 0) {
+                        op = o;
+                        opAt = k;
+                        break;
+                    }
             }
-        const std::string cleaned = plainNumbers(text); // kept: the calculator views it (string_view)
-        Calculator calc;
-        calc.s = cleaned;
-        const double v = calc.sum();
-        calc.space();
-        if (calc.error.empty() && calc.i < calc.s.size())
-            calc.error = std::string("unexpected '") + calc.s[calc.i] + "'";
-        if (!calc.error.empty())
-            return reply(done, out + "Cannot calculate '" + expression + "': " + calc.error + ". " + usage("calculate"));
+        }
+        std::string error;
+        if (!op.empty()) {
+            std::string leftError, rightError;
+            const double a = evaluate(expression.substr(0, opAt), leftError);
+            const double b = evaluate(expression.substr(opAt + op.size()), rightError);
+            error = leftError.empty() ? rightError : leftError;
+            if (error.empty()) {
+                const bool same = std::abs(a - b) <= 1e-9 * std::max({1.0, std::abs(a), std::abs(b)});
+                const bool holds = op == "=" || op == "==" ? same : op == "!=" ? !same : op == "<" ? a < b && !same
+                                   : op == ">" ? a > b && !same : op == "<=" ? a < b || same : a > b || same;
+                out += expression + ": " + (holds ? "true" : "false") + " (" + numberText(a) + " " + op + " " + numberText(b) + ")\n";
+                continue;
+            }
+        }
+        const double v = op.empty() ? evaluate(expression, error) : 0.0;
+        if (!error.empty())
+            return reply(done, out + "Cannot calculate '" + expression + "': " + error + ". " + usage("calculate"));
         out += (label.empty() ? expression : label + " = " + expression) + " = " + numberText(v) + "\n";
+        tiny = tiny || (v != 0 && std::abs(v) < 0.001);
         if (!label.empty()) {
             named.emplace_back(label, v);
             std::stable_sort(named.begin(), named.end(), [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
@@ -2720,6 +2850,9 @@ void LocalAgentTools::calculate(const Json& args, Done done)
     }
     if (!out.empty())
         out.pop_back();
+    if (tiny)
+        out += "\n(A result this small often means a figure was given in millions or thousands, as a table's "
+               "heading says: write it out - 5.5 million is 5.5 * 1000000 - and calculate again.)";
     reply(done, out);
 }
 
@@ -2799,12 +2932,22 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
         if (doc.book.sheets.empty())
             return reply(done, path + " has no sheets this can read" + (doc.error.empty() ? "." : ": " + doc.error));
         const model::viewer::Sheet* sheet = &doc.book.sheets.front();
+        const std::string wanted = trimmed(args.getString("sheet"));
+        bool found = wanted.empty();
         std::string names;
         for (const model::viewer::Sheet& s : doc.book.sheets) {
             names += (names.empty() ? "" : ", ") + s.name;
-            if (!args.getString("sheet").empty() && lower(s.name) == lower(args.getString("sheet")))
+            if (!wanted.empty() && lower(s.name) == lower(wanted)) {
                 sheet = &s;
+                found = true;
+            }
         }
+        // A sheet it does not have: often a value meant as a filter ("2014"). Totals over the first
+        // sheet instead would answer another question.
+        if (!found)
+            return reply(done, "There is no sheet '" + wanted + "' in " + path + ". Its sheets: " + names +
+                                   ". Leave sheet out for the first; to pick rows by a value, use where with the column "
+                                   "that holds it (column = " + wanted + ").");
         bool first = true;
         for (const model::viewer::Row& row : sheet->rows) {
             if (row.cells.empty())

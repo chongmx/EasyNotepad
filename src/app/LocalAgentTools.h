@@ -52,6 +52,9 @@ public:
     void run(const interfaces::LocalToolCall& call, Done done);
     // Told to the model with every question: where it works, what it can do, its skills.
     std::string guide() const;
+    // The files of the open folder a question names (by path, or by a name only one file has), each
+    // with the tool that reads it; empty when it names none.
+    std::string namedFiles(const std::string& question);
 
     // Once a frame: a look at a page waits some frames for the page to be read and drawn.
     void tick();

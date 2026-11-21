@@ -18,10 +18,16 @@ answer the question now and you call no tools now: you only write the steps.
   minimums and maximums itself, in one call - never a step that reads rows and another that
   averages them. Use the exact column names you are given.
 - Documents (.pdf .docx .pptx .md .txt): the same question of several of them is ONE step with
-  extract_from_documents; one long document: scan_document to find where something is.
+  extract_from_documents; one long document: scan_document to find where something is. One short
+  file (notes, a transcript) is read whole: read_file, or read_document for .pdf .docx .pptx.
+- A picture or page: everything to read from it is ONE step (one careful look reads every line);
+  the sums and comparisons of what it shows are one calculate step after it.
 - calculate only combines figures that earlier steps found (a difference, a share, a sum of
   totals from several files). Every such number is a calculate step: never plan to work one out
   without it.
+- Name what each step finds in the question's own words: "how much of the budget is left" stays
+  "how much is left", never "the total budget". A question asking three things has a step (or a
+  part of one) for each.
 - Keep the user's words about how to do it in the step: "look carefully" becomes "(look_at_image,
   detail high)". A figure printed in a document or picture is read, never worked out.
 - At most 6 steps. Do not add a step for writing the answer: the app asks for that at the end.
@@ -41,6 +47,10 @@ Question: "Which region sold the most in sales.csv, and what share of all sales 
 1. Sales per region, largest first (query_table, group_by region, aggregate sum(amount), sort desc).
 2. The total of all sales (query_table, aggregate sum(amount)).
 3. The top region's share of the total as a percentage (calculate).
+
+Question: "In scans/order-slip.png, how many cups were sold altogether, and is the bill's total right?"
+1. Read every line of scans/order-slip.png - its quantity, item and amount - and the printed total (look_at_image, detail high).
+2. Add up the quantities (a line "3x" is three), add up the amounts, and compare that with the printed total (calculate).
 
 Question: "What do the receipts in the expenses folder add up to, and which shop was the most?"
 (that folder holds .pdf and .txt files: documents, not tables)

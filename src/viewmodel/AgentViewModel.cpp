@@ -36,14 +36,16 @@ constexpr const char* kLocalAgentPrompt =
     "Markdown, naming the files and pages you used. If a tool fails, say so or try another way. "
     "Never work out a number yourself - not a sum, difference, total, average, percentage, share, "
     "conversion or rounding, however small: call calculate (several sums at once, separated by ';') "
-    "and give the figures it returns. Only counting a few things you can see is yours to do. Write "
-    "figures as digits.";
+    "and give the figures it returns. Only counting a few things you can see one by one is yours to do: "
+    "a total of quantities (2 x tea, 1 x cake) is a sum for calculate. Write figures as digits. Answer "
+    "what was asked, in the question's words: \"how much is left\" is not the total.";
 
 // Said with each step of a question taken in steps.
 constexpr const char* kStepAsk = "Use your tools, then tell me what you found. If a tool finds nothing or says the call is "
                                   "wrong, fix the call from what it tells you and try again before you report.";
 
 constexpr size_t kToolTextChars = 12000; // of one tool result sent to the model (about 3,000 tokens)
+constexpr float kLoopTemperature = 0.3f;  // once it repeats a call: some variety, out of the loop
 
 std::optional<interfaces::LocalToolCall> callInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools,
                                                     std::string& rest);
@@ -200,7 +202,7 @@ bool toolAsksToRetry(const std::vector<interfaces::LocalChatMessage>& messages)
             continue;
         for (const char* cue : {"no rows match", "There is no column", "Call it like this", "There is no tool called",
                                 "It is a document: call", "It is a picture: call", "It is a recording: call",
-                                "cannot read the region", "does not exist. ", "is a table, not a document",
+                                "cannot read the region", "does not exist. ", "is a table, not a document", "There is no sheet", "as a bare number",
                                 "} for its text."})
             if (m.text.find(cue) != std::string::npos)
                 return true;
@@ -274,6 +276,65 @@ std::vector<Figure> figuresIn(const std::string& text)
     return out;
 }
 
+// Numbers written in words ("forty two thousand", "nine hundred and five"): a transcript says them so,
+// and an answer giving them as digits did not make them up.
+std::vector<Figure> spelledFigures(const std::string& text)
+{
+    static const char* const units[] = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                                        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+                                        "nineteen"};
+    static const char* const tens[] = {"twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"};
+    std::vector<Figure> out;
+    double total = 0, current = 0;
+    bool active = false;
+    auto flush = [&]() {
+        if (active) {
+            Figure f;
+            f.value = total + current;
+            f.text = std::to_string(static_cast<long long>(f.value));
+            out.push_back(std::move(f));
+        }
+        total = current = 0;
+        active = false;
+    };
+    std::string word;
+    for (size_t i = 0; i <= text.size(); ++i) {
+        const char c = i < text.size() ? char(std::tolower(static_cast<unsigned char>(text[i]))) : ' ';
+        if (std::isalpha(static_cast<unsigned char>(c))) {
+            word += c;
+            continue;
+        }
+        if (word.empty()) {
+            if (c != ' ' && c != '-')
+                flush(); // punctuation ends a number
+            continue;
+        }
+        double value = -1;
+        for (size_t k = 0; k < std::size(units); ++k)
+            if (word == units[k])
+                value = double(k);
+        for (size_t k = 0; k < std::size(tens); ++k)
+            if (word == tens[k])
+                value = double(20 + 10 * k);
+        if (value >= 0) {
+            current += value;
+            active = true;
+        } else if (word == "hundred" && active) {
+            current = (current == 0 ? 1 : current) * 100;
+        } else if ((word == "thousand" || word == "million" || word == "billion") && active) {
+            total += (current == 0 ? 1 : current) * (word == "thousand" ? 1e3 : word == "million" ? 1e6 : 1e9);
+            current = 0;
+        } else if (!(word == "and" && active)) {
+            flush();
+        }
+        word.clear();
+        if (c != ' ' && c != '-')
+            flush();
+    }
+    flush();
+    return out;
+}
+
 // The answer's figures that no tool result or user message holds (as given, or rounded, or as a
 // percentage of it). Small whole numbers (counting) and years are left alone. When the model was
 // given pictures or sounds, figures read from them cannot be checked: only lines that work
@@ -287,6 +348,8 @@ std::vector<std::string> unsourcedFigures(const std::string& answer, const std::
             continue;
         media = media || !m.media.empty();
         for (Figure& f : figuresIn(m.text))
+            known.push_back(std::move(f));
+        for (Figure& f : spelledFigures(m.text))
             known.push_back(std::move(f));
     }
     auto sourced = [&](const Figure& a) {
@@ -602,6 +665,7 @@ void AgentViewModel::endLocal()
     localNudges_ = 0;
     os::mem::release(localSteps_);
     localStep_ = 0;
+    os::mem::release(localNamed_);
 }
 
 std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
@@ -660,6 +724,7 @@ void AgentViewModel::planLocal(int generation, std::string question)
     plan.useGpu = localRequest_.useGpu;
     plan.contextTokens = localRequest_.contextTokens;
     plan.maxTokens = 512;
+    plan.temperature = 0.0f; // the same plan for the same question
     std::string tools;
     for (const interfaces::LocalTool& t : localRequest_.tools)
         tools += "- " + t.name + ": " + t.description.substr(0, t.description.find(". ")) + "\n";
@@ -702,7 +767,8 @@ bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
     } else {
         messages_.push_back({model::ChatRole::Tool, "All steps done: the answer"});
         next = "All the steps are done. Now answer my question in full, from what the steps found, with the figures exactly "
-               "as the tools gave them: " + localPrompt_;
+               "as the tools gave them. Answer each thing it asks, one by one, in its words, with the figures each "
+               "rests on: " + localPrompt_;
         if (const std::string reminder = localReminder_ ? localReminder_() : std::string(); !reminder.empty())
             next += "\n\n(" + reminder + ")";
     }
@@ -794,15 +860,27 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     const size_t colon = context.rfind(':');
     const bool selected = colon != std::string::npos && context.find('-', colon) != std::string::npos;
     const std::string code = localContext_ && (!tools || selected) ? localContext_() : std::string();
-    if (tools && code.empty() && !context.empty())
-        question = prompt + "\n\n(For reference only: the editor shows " + context.substr(0, colon) +
-                   ". Read it with your tools only if my question is about it.)";
+    // The files the question names; when it names some, the editor's file is not mentioned (the
+    // model read a transcript left open by an earlier question instead of the one asked about).
+    const std::string named = tools && localNamedFiles_ ? localNamedFiles_(prompt) : std::string();
+    if (tools && code.empty() && !context.empty()) {
+        if (named.empty())
+            question = prompt + "\n\n(For reference only: the editor shows " + context.substr(0, colon) +
+                       ". Read it with your tools only if my question is about it.)";
+    }
     else if (!code.empty())
         question = "I am looking at " + (context.empty() ? std::string("this code") : context) + ":\n\n" + code + "\n\n" + prompt;
     else if (!context.empty())
         question = "I am looking at " + context + ".\n\n" + prompt;
     interfaces::LocalChatMessage asked;
     asked.role = "user";
+    if (!named.empty())
+        question += "\n\n(" + named + ")";
+    localNamed_ = named;
+    // With tools, the likeliest words every time: the same question gets the same calls and answer
+    // (at 0.3 a small model took another plan or left out a condition now and then). Back to 0.3
+    // when it repeats a call (greedy loops).
+    request.temperature = tools ? 0.0f : -1.0f;
     if (const std::string reminder = tools && localReminder_ ? localReminder_() : std::string(); !reminder.empty())
         question += "\n\n(" + reminder + ")";
     asked.text = std::move(question);
@@ -860,6 +938,20 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                 return;
             }
         }
+        // The question names files and it answered without reading anything ("there is no such file"):
+        // back to it, to read them first.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && !localNamed_.empty() &&
+            std::none_of(localRequest_.messages.begin(), localRequest_.messages.end(),
+                         [](const interfaces::LocalChatMessage& m) { return m.role == "tool"; })) {
+            ++localNudges_;
+            if (empty)
+                messages_.erase(messages_.begin() + long(at));
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back("user", "You have not read anything yet. " + localNamed_ +
+                                                            " Read them with those tools now, then answer from what they hold.");
+            sendLocal(generation);
+            return;
+        }
         // The user asked it to remember something and it only said it would: tell it to save it.
         if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && asksToRemember(localPrompt_) &&
             hasTool(localRequest_.tools, "remember") && !calledTool(localRequest_.messages, "remember")) {
@@ -900,6 +992,18 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                 return;
             }
         }
+        // Nothing at all after its tools (a small model stops so now and then): ask for the answer.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 &&
+            std::all_of(r.text.begin(), r.text.end(), [](unsigned char c) { return std::isspace(c) != 0; }) &&
+            localRequest_.messages.back().role == "tool") {
+            ++localNudges_;
+            if (empty)
+                messages_.erase(messages_.begin() + long(at));
+            localRequest_.messages.emplace_back("assistant", std::string());
+            localRequest_.messages.emplace_back("user", "You have what the tools found: now answer my question from it, in full.");
+            sendLocal(generation);
+            return;
+        }
         // It says what it will call and stops (a small model does): tell it to go on, twice at most.
         if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds && announcesCall(r.text, localRequest_.tools)) {
             ++localNudges_;
@@ -911,6 +1015,12 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
         }
         if (!r.toolCalls.empty() && runTool_ && localRounds_ < kMaxToolRounds) {
             ++localRounds_;
+            // A call it made before, the same: greedy choice loops; some variety from here on.
+            for (const interfaces::LocalToolCall& c : r.toolCalls)
+                for (const interfaces::LocalChatMessage& m : localRequest_.messages)
+                    for (const interfaces::LocalToolCall& earlier : m.toolCalls)
+                        if (earlier.name == c.name && earlier.arguments == c.arguments && localRequest_.temperature == 0.0f)
+                            localRequest_.temperature = kLoopTemperature;
             if (empty)
                 messages_.erase(messages_.begin() + long(at));
             interfaces::LocalChatMessage turn;

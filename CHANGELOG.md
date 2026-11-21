@@ -139,6 +139,42 @@ its release notes on GitHub.
   tokens for 12B), and a picture that still does not fit is refused with a message.
 - A question asked just after stopping the local agent was refused ("the local agent is still
   answering") while the stopped answer wound down. It now waits for it and then starts.
+- The local agent got four of the benchmark's questions wrong on Gemma 4 E4B; it now answers them:
+  - A file the question named in a subfolder was not in the folder's top listing, and the agent
+    asked the user for it. The question now says which of the files it names the open folder holds,
+    and the tool for each (to the plan too).
+  - `query_table` with a sheet the workbook does not have (a year, "2014") totalled the first
+    sheet and answered another question. It is refused, with the sheets and how to filter by the
+    value instead.
+  - A plan turned "how much of the budget is left" into "the total budget", and the answer gave
+    the total. Plans keep the question's words, and the answer is asked for each thing the question
+    asks.
+  - Items on a receipt were counted in the agent's head (2 + 1 + 1 + 1 gave 6). A total of
+    quantities goes to `calculate`, and everything read from one picture is one step of a plan (it
+    looked at the receipt three times, at 1,120 tokens each).
+  - `extract_from_documents` given one short text file asked the model a narrower question of it
+    than the user's, and the answer lost what it needed. One short text file (up to 6,000
+    characters) is handed back whole instead.
+  - `calculate` compares: `9.50 + 4 = 13.50` gives true or false (also `== != < > <= >=`), for
+    checking that lines add up to a total.
+  - The check that sends back figures no tool gave did not know numbers written in words, as a
+    transcript has them ("that leaves eighteen thousand"): it sent a right 18,000 back as made up,
+    and the agent replaced it with a wrong sum. Numbers in words now count as given.
+  - A population in millions divided by an area gave 0.00 people per km². `calculate` now says,
+    under a result below 0.001, that a figure in millions or thousands should be written out.
+  - After its tools the agent sometimes said nothing, and the question ended without an answer. It
+    is now asked for the answer (twice at most).
+  - A transcript left open in the editor by an earlier question was read instead of the one the
+    question named. When a question names files, the editor's file is no longer mentioned to it.
+  - The same question took another plan, or left out a condition, from one run to the next: the
+    agent picked its words with some chance (temperature 0.3). Its plan and its steps now take the
+    likeliest words (temperature 0), so a question gets the same calls and answer each time; after
+    a call it already made, it goes back to 0.3 so it does not loop. The engine takes the
+    temperature with each request (`enp-engine-cuda` built before this keeps 0.3).
+  - A question naming a file was answered without reading anything ("there is no such file"). It
+    is sent back to read the files it names first.
+  - An expression written without quotes reached `calculate` as a number, and its reply ("needs an
+    expression") made the agent call it the same way again, eleven times. It now says to quote it.
 - The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
   put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
   straight into memory, and the web build has a 1 MB stack, a Windows main thread's.

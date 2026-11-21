@@ -109,6 +109,9 @@ struct LocalChatRequest {
     bool useGpu = false;
     int maxTokens = 768;      // 0: as many as the context has room for
     int contextTokens = 8192; // 0: the largest the model takes that fits the memory free
+    // How freely it picks its words: 0 the likeliest every time (the same answer to the same
+    // conversation), more for variety; below 0 the engine's own (0.3).
+    float temperature = -1.0f;
     // Write down the speech of the recordings in the last message (its text, if any, is the
     // instruction), in windows of this many seconds; the result's text is the transcript.
     bool transcribe = false;

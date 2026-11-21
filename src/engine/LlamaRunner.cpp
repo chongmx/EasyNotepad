@@ -736,6 +736,8 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
         const llama_vocab* vocab = llama_model_get_vocab(m.model());
         common_chat_session session(m.templates.get(), vocab, chatInputs(request));
         common_params_sampling sampling = m.params.sampling;
+        if (request.temperature >= 0.0f)
+            sampling.temp = request.temperature; // 0: greedy, the same answer to the same conversation
         session.apply_sampling(sampling); // the tool calls' grammar, when there are tools
         const Prompt prompt = chatPrompt(m, session.prompt(), mediaBitmaps(m, request.messages), r.mediaTokens);
         r.promptTokens = int(prompt.size());

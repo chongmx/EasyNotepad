@@ -4734,57 +4734,69 @@ TEST(local_agent_takes_a_question_in_steps)
                         },
                         []() { return std::string("Guide."); });
     agent.setLocalPlanner([](const std::string&) { return std::string("---\nname: planning\n---\nWrite the steps."); });
+    agent.setLocalNamedFiles([](const std::string& q) {
+        return q.find("profit") != std::string::npos ? std::string("In the open folder, the files my question names: x.csv") : std::string();
+    });
 
     const std::string question = "Which country made the most profit, and what share of the total is it?";
     engine.textAnswers = {"1. Find the profit of each country.\n2. Find the total profit.\n3. Work out the share.",
-                          "Canada: 100.", "Total: 400.", "25 %.", "Canada, 25 % of the total."};
-    agent.submitPrompt(question);
-    CHECK_EQ(engine.chats.size(), size_t(5));
+                          R"j({"name": "query_table", "arguments": {"path": "x.csv"}})j", "Canada: 100.", "Total: 400.", "25 %.",
+                          "Canada, 25 % of the total."};
+    agent.submitPrompt(question, "audio/other.md:1"); // the editor shows another file
+    CHECK_EQ(engine.chats.size(), size_t(6));
     CHECK(!agent.busy.get() && agent.messages().back().text == "Canada, 25 % of the total.");
-    // The plan: its own request, without tools, the skill without its front matter, the tools named.
+    // The plan: its own request, without tools, the skill without its front matter, the tools named;
+    // the likeliest words (temperature 0), as each step is.
     const interfaces::LocalChatRequest& plan = engine.chats[0];
     CHECK(plan.tools.empty() && plan.messages.size() == 2 && plan.messages[0].text.rfind("Write the steps.", 0) == 0);
     CHECK(plan.messages[0].text.find("- query_table: Filters a table\n") != std::string::npos);
     CHECK(plan.messages[1].text.find(question) != std::string::npos);
+    CHECK(plan.temperature == 0.0f && engine.chats[1].temperature == 0.0f && engine.chats[5].temperature == 0.0f);
     // Then one step at a time, each after the last one's answer, and the answer asked for at the end.
     CHECK(engine.chats[1].tools.size() == 1 && engine.chats[1].messages.back().text.find("Do step 1 only now: Find the profit") != std::string::npos);
-    CHECK(engine.chats[2].messages.back().text.find("Now step 2: Find the total profit.") != std::string::npos);
-    CHECK(engine.chats[2].messages[engine.chats[2].messages.size() - 2].text == "Canada: 100.");
-    CHECK(engine.chats[3].messages.back().text.find("Now step 3") != std::string::npos);
-    CHECK(engine.chats[4].messages.back().text.find("All the steps are done") != std::string::npos &&
-          engine.chats[4].messages.back().text.find(question) != std::string::npos);
+    CHECK(engine.chats[1].messages.back().text.find("(In the open folder, the files my question names: x.csv)") != std::string::npos);
+    CHECK(engine.chats[1].messages.back().text.find("the editor shows") == std::string::npos); // named files: the editor's not mentioned
+    CHECK(engine.chats[2].messages.back().role == "tool");
+    CHECK(engine.chats[3].messages.back().text.find("Now step 2: Find the total profit.") != std::string::npos);
+    CHECK(engine.chats[3].messages[engine.chats[3].messages.size() - 2].text == "Canada: 100.");
+    CHECK(engine.chats[4].messages.back().text.find("Now step 3") != std::string::npos);
+    CHECK(engine.chats[5].messages.back().text.find("All the steps are done") != std::string::npos &&
+          engine.chats[5].messages.back().text.find(question) != std::string::npos &&
+          engine.chats[5].messages.back().text.find("Answer each thing it asks") != std::string::npos &&
+          engine.chats[5].messages.back().text.find("with the figures each rests on") != std::string::npos);
     // The chat shows the plan and each step.
     int shown = 0;
     for (const model::ChatMessage& m : agent.messages())
         shown += m.role == model::ChatRole::Tool && (m.text.rfind("Plan", 0) == 0 || m.text.rfind("Step ", 0) == 0);
     CHECK_EQ(shown, 4);
+    agent.setLocalNamedFiles({}); // the questions below name no files
 
     // A one-step plan: the question as it is. A short one: no plan at all.
     engine.textAnswers = {"1. Read the readme.", "It says hello."};
     agent.submitPrompt("What does the readme say about it?");
-    CHECK_EQ(engine.chats.size(), size_t(7));
-    CHECK(engine.chats[6].messages.back().text.find("step") == std::string::npos);
+    CHECK_EQ(engine.chats.size(), size_t(8));
+    CHECK(engine.chats[7].messages.back().text.find("step") == std::string::npos);
     // The next question's history has the last answer of the steps, not the first.
     bool last = false, first = false;
-    for (const interfaces::LocalChatMessage& m : engine.chats[6].messages) {
+    for (const interfaces::LocalChatMessage& m : engine.chats[7].messages) {
         last = last || m.text == "Canada, 25 % of the total.";
         first = first || m.text == "Canada: 100.";
     }
     CHECK(last && !first);
     agent.submitPrompt("Hi");
-    CHECK_EQ(engine.chats.size(), size_t(8));
+    CHECK_EQ(engine.chats.size(), size_t(9));
     // Turned off: the question as it is.
     agent.localInSteps.set(false);
     agent.submitPrompt("Which country made the most profit this year?");
-    CHECK_EQ(engine.chats.size(), size_t(9));
-    CHECK(engine.chats[8].messages.back().text.find("step") == std::string::npos);
+    CHECK_EQ(engine.chats.size(), size_t(10));
+    CHECK(engine.chats[9].messages.back().text.find("step") == std::string::npos);
 
     // A tool says how to fix the call and the model only reports it: it is told to call again.
     engine.textAnswers = {R"j({"name": "query_table", "arguments": {"where": "Day = Sunday"}})j", "No rows for Sunday.",
                           R"j({"name": "query_table", "arguments": {"where": "Day = Sun"}})j", "Sunday: 3.26."};
     agent.submitPrompt("What is the average tip on Sundays?");
-    CHECK_EQ(engine.chats.size(), size_t(13));
-    CHECK(engine.chats[11].messages.back().text.find("Make the corrected call now") != std::string::npos);
+    CHECK_EQ(engine.chats.size(), size_t(14));
+    CHECK(engine.chats[12].messages.back().text.find("Make the corrected call now") != std::string::npos);
     CHECK(!agent.busy.get() && agent.messages().back().text == "Sunday: 3.26.");
 }
 
@@ -4854,6 +4866,11 @@ TEST(local_agent_works_across_many_documents_with_notes)
     CHECK(annual.find("| reports/annual.txt | Revenue grew 12 percent. |") != std::string::npos);
     CHECK(call("extract_from_documents", Json::object().set("files", "nothing/*.pdf").set("question", "x")).find("No documents match") !=
           std::string::npos);
+    // One short text file: handed back whole, without a pass of the model.
+    const size_t passes = engine.chats.size();
+    const std::string whole = call("extract_from_documents", Json::object().set("files", "invoices/march.md").set("question", "the total"));
+    CHECK(whole.find("invoices/march.md is short, so here it is whole") != std::string::npos &&
+          whole.find("Customer: Acme\nTotal: 120.50 EUR") != std::string::npos && engine.chats.size() == passes);
 
     // Scanning a long document: overlapping windows, one at a time; where it was found, quoted.
     {
@@ -5005,6 +5022,14 @@ TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
     engine.textAnswers = {"In 2024 the 86.40 bill with 18% (0.18 of it) gives 4 lines."};
     agent.submitPrompt("A dinner costs 86.40 with an 18% tip: how much each?");
     CHECK_EQ(engine.chats.size(), size_t(4)); // no second request: nothing to check
+    // Figures said in words (a transcript): the answer's digits for them are not sent back.
+    engine.textAnswers = {"Left: 18,000. Spent: 42,000.00 of 60000; 905 chairs; 2,500,000 visitors."};
+    agent.submitPrompt("We spent forty-two thousand of the sixty thousand budget, that leaves eighteen thousand; nine hundred "
+                       "and five chairs; two and a half... no: two million five hundred thousand visitors. Summarise.");
+    CHECK_EQ(engine.chats.size(), size_t(5));
+    engine.textAnswers = {"Left: 19,000."}; // said nowhere: checked
+    agent.submitPrompt("We spent forty-two thousand of the sixty thousand budget.");
+    CHECK(engine.chats.size() == 7 && engine.chats.back().messages.back().text.find("No tool gave you these figures: 19,000") != std::string::npos);
     // The file open in the editor is named, not pasted, when the model has tools.
     engine.textAnswers = {"Fine."};
     agent.submitPrompt("What is in the readme?", "src/x.cpp:3");
@@ -5013,6 +5038,37 @@ TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
     engine.textAnswers = {"Fine."};
     agent.submitPrompt("Explain these lines", "src/x.cpp:3-9"); // lines the user selected still go in
     CHECK(engine.chats.back().messages.back().text.find("int x = 7;") != std::string::npos);
+    // Nothing said after its tools: asked for the answer, which then shows.
+    const size_t before = engine.chats.size();
+    engine.textAnswers = {R"j({"name": "calculate", "arguments": {"expression": "1 + 1"}})j", " \n", "It is 2."};
+    agent.submitPrompt("What is one plus one?");
+    CHECK_EQ(engine.chats.size(), before + 3);
+    CHECK(engine.chats.back().messages.back().text.find("now answer my question") != std::string::npos);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "It is 2.");
+    // The same call again: greedy choice loops, so some variety from then on.
+    const size_t sent = engine.chats.size();
+    engine.textAnswers = {R"j({"name": "calculate", "arguments": {"expression": "2 + 2"}})j",
+                          R"j({"name": "calculate", "arguments": {"expression": "2 + 2"}})j", "It is 4."};
+    agent.submitPrompt("What is two plus two?");
+    CHECK_EQ(engine.chats.size(), sent + 3);
+    CHECK(engine.chats[sent].temperature == 0.0f && engine.chats[sent + 1].temperature == 0.0f &&
+          engine.chats[sent + 2].temperature > 0.0f);
+    // The question names a file and it answers without reading anything: sent back to read it.
+    agent.setLocalNamedFiles([](const std::string& q) {
+        return q.find("notes.md") != std::string::npos ? std::string("In the open folder, the files my question names: notes.md (text: read_file).")
+                                                       : std::string();
+    });
+    const size_t asked = engine.chats.size();
+    engine.textAnswers = {"There is no notes.md here.", R"j({"name": "calculate", "arguments": {"expression": "1"}})j", "It says 1."};
+    agent.submitPrompt("What does notes.md say?");
+    CHECK_EQ(engine.chats.size(), asked + 3);
+    CHECK(engine.chats[asked + 1].messages.back().text.find("You have not read anything yet. In the open folder, the files my question "
+                                                            "names: notes.md (text: read_file).") != std::string::npos);
+    CHECK(agent.messages().back().text == "It says 1.");
+    engine.textAnswers = {"Hello."}; // no files named: an answer without tools is fine
+    agent.submitPrompt("Say hello to me, please.");
+    CHECK_EQ(engine.chats.size(), asked + 4);
+    agent.setLocalNamedFiles({});
 }
 
 TEST(agent_proposals_replace_one_waiting_for_the_same_file)
@@ -5066,6 +5122,9 @@ TEST(engine_json_carries_pictures_sounds_and_tool_calls)
     CHECK(parsed.has_value());
     const interfaces::LocalChatRequest back = engine::chatRequestFrom(*parsed);
     CHECK(back.projectorPath == r.projectorPath && back.tools.size() == 1 && back.tools[0].parameters == r.tools[0].parameters);
+    CHECK(back.temperature < 0.0f); // the engine's own
+    r.temperature = 0.0f;
+    CHECK(engine::chatRequestFrom(*model::Json::parse(engine::toJson(r).dump())).temperature == 0.0f);
     CHECK(back.messages.size() == 3 && back.messages[0].media.size() == 2);
     CHECK(back.messages[0].media[0].data == picture.data && back.messages[0].media[0].width == 1);
     CHECK(back.messages[0].media[1].kind == interfaces::LocalMedia::Kind::Audio && back.messages[0].media[1].data == sound.data);
@@ -5263,6 +5322,17 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(several.find("total = 86.40 * 1.18 = 101.952") != std::string::npos && several.find("each = total / 3 = 33.984") != std::string::npos &&
           several.find("round(each, 2) = 33.98") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "a = 2\nb = a * 21"})j").find("b = a * 21 = 42") != std::string::npos);
+    // Comparisons: both sides worked out, true or false; names from earlier parts; an error says how.
+    CHECK(call("calculate", R"j({"expression": "9.00 + 5.00 + 22.00 + 18.50 = 54.50"})j") == "9.00 + 5.00 + 22.00 + 18.50 = 54.50: true (54.5 = 54.5)");
+    const std::string compared = call("calculate", R"j({"expression": "lines = 7.5 + 12; lines == 20; lines != 20; (2 + 3) >= 5; 1 > 2; 0.1 + 0.2 <= 0.3"})j");
+    CHECK(compared.find("lines == 20: false (19.5 == 20)") != std::string::npos && compared.find("lines != 20: true") != std::string::npos &&
+          compared.find("(2 + 3) >= 5: true") != std::string::npos && compared.find("1 > 2: false") != std::string::npos &&
+          compared.find("0.1 + 0.2 <= 0.3: true") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2 + = 3"})j").find("Cannot calculate '2 + = 3'") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": 1390.0079844})j").find("reached calculate as a bare number (") != std::string::npos);
+    // A tiny result: a unit (millions) likely missed, said once; a normal one says nothing.
+    CHECK(call("calculate", R"j({"expression": "5.5 / 338434"})j").find("given in millions or thousands") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "5.5 * 1000000 / 338434"})j").find("millions") == std::string::npos);
     CHECK(call("calculate", R"j({"expression": "1+1", "expressions": ["2*3"]})j").find("2*3 = 6") != std::string::npos);
 
     // Tables: filter, sort, columns, groups and totals; currency and (negative) cells as numbers.
@@ -5293,6 +5363,30 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     const std::string none = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = North"})j");
     CHECK(none.find("no rows match") != std::string::npos && none.find("Region holds: ") != std::string::npos &&
           none.find("East") != std::string::npos && none.find("West") != std::string::npos);
+    // A sheet the workbook does not have (a year meant as a filter): refused, not the first sheet's totals.
+    if (std::optional<std::string> book = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/viewer/challenge.xlsx")) {
+        files.write(root + "/data/book.xlsx", *book, nullptr);
+        const std::string year = call("query_table", R"j({"path": "data/book.xlsx", "sheet": "2014"})j");
+        CHECK(year.find("There is no sheet '2014' in data/book.xlsx. Its sheets: Formats & cells, Data") != std::string::npos &&
+              year.find("(column = 2014)") != std::string::npos && year.find("rows match") == std::string::npos);
+        CHECK(call("query_table", R"j({"path": "data/book.xlsx", "sheet": "data", "limit": 1})j").find("(this is Data)") != std::string::npos);
+    } else {
+        CHECK(false);
+    }
+
+    // The files a question names: by path (a subfolder's too), or by a name only one file has.
+    os::fs::createDirectories(root + "/audio/old");
+    files.write(root + "/audio/meeting.transcript.md", "# Transcript\n", nullptr);
+    files.write(root + "/audio/old/notes.md", "a\n", nullptr);
+    files.write(root + "/notes.md", "b\n", nullptr);
+    const std::string named = tools.namedFiles("List the action items in audio/meeting.transcript.md and total data\\sales.csv.");
+    CHECK(named.find("audio/meeting.transcript.md (text: read_file)") != std::string::npos &&
+          named.find("data/sales.csv (a table: query_table)") != std::string::npos);
+    CHECK(tools.namedFiles("What is in meeting.transcript.md?").find("audio/meeting.transcript.md") != std::string::npos);
+    CHECK(tools.namedFiles("Summarise notes.md").empty());        // two files of that name: which one is not known
+    CHECK(tools.namedFiles("Summarise old/notes.md").empty());    // not a whole path of the folder
+    CHECK(tools.namedFiles("What is in meeting.transcript.md.bak?").empty());
+    CHECK(tools.namedFiles("How are you?").empty());
 
     // Memory: kept in its file, recalled, corrected, forgotten, compacted; temporary ones end with the run.
     CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("#1") != std::string::npos);
