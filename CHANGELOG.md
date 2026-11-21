@@ -78,6 +78,12 @@ its release notes on GitHub.
   The `multiple-documents` skill teaches the way: find, extract per document, note, calculate,
   answer with sources. The planner sees what the folder holds (documents or tables) and plans with
   real names. Four invoices in different layouts: total and largest supplier right in 17 s.
+- Three local models to choose from in the agent set-up: Gemma 4 E2B (4.3 GB, fastest), E4B
+  (6.1 GB, better at questions with several parts) and 12B (7.2 GB, the most careful), each with
+  its own eyes and ears and its own MTP drafter (speculative decoding), all pinned by commit and
+  SHA-256. Google publishes the drafters (its "assistant" checkpoints) only as unquantized weights:
+  E2B's, E4B's and 12B's are community GGUF conversions of them. On an RTX 5060 laptop GPU, E4B
+  generates 65 tokens/s alone and 112 with its drafter (56% of drafted tokens accepted).
 - Scanning with the local model: `scan_document` shows a long document (or several) to the model
   in overlapping windows (small, normal or large; overlap in percent), one at a time with what is
   looked for, and returns the pages and quotes where it is; `scan_image` shows a picture in a grid

@@ -31,20 +31,25 @@ public:
     static const CatalogFile& catalogFile(Which which);
 
     // The models to choose from (saved): each with its own eyes and ears. Bigger ones reason better
-    // and need more memory; the drafter is E2B's and speeds up only E2B.
+    // and need more memory. Each has its own drafter (its MTP assistant), which speeds only it.
     struct ModelChoice {
         const char* name;     // "Gemma 4 E4B"
         const char* summary;  // what it is good for, and what it needs
         const CatalogFile* model;
         const CatalogFile* projector;
-        bool drafter;         // the catalogue's drafter goes with it
+        const CatalogFile* drafter; // its MTP assistant (speculative decoding), or none
         uint64_t memoryNeeded; // about, to run with its eyes and ears and a working context
     };
     static constexpr int kModelChoices = 3;
     static const ModelChoice& modelChoiceInfo(int index);
     Property<int> modelChoice{0};
+    // The drafter (saved, on by default): fetched with the model and used by the agent; off, neither.
+    Property<bool> useDrafter{true};
+    // Downloads the chosen model's drafter when it is wanted, missing, and nothing else downloads
+    // (after the model's download; when the drafter is turned on again).
+    void fetchDrafter();
     const ModelChoice& chosenModel() const { return modelChoiceInfo(modelChoice.get()); }
-    // The chosen model's file of each kind (the drafter is E2B's whatever is chosen).
+    // The chosen model's file of each kind.
     const CatalogFile& file(Which which) const;
 
     enum class FileState { Missing, Partial, Downloading, Verifying, Unverified, Ready, Mismatch, Custom };

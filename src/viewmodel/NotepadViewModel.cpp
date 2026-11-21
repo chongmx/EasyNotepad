@@ -1795,8 +1795,8 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
     }
     s.ready = true;
     s.modelPath = lab.pathFor(Which::Model);
-    // The drafter is E2B's: it speeds up only that model (a custom model is the user's to pair).
-    if (lab.fileUsable(Which::Drafter) && (lab.chosenModel().drafter || !lab.customModelPath.get().empty()))
+    // The chosen model's own drafter (its MTP assistant), when it is downloaded and not turned off.
+    if (lab.useDrafter.get() && lab.fileUsable(Which::Drafter))
         s.drafterPath = lab.pathFor(Which::Drafter);
     if (lab.fileUsable(Which::Projector))
         s.projectorPath = lab.pathFor(Which::Projector);

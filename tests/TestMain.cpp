@@ -4339,6 +4339,7 @@ TEST(engine_lab_downloads_checks_and_compares)
     using State = Lab::FileState;
     FakeEngine engine;
     Lab lab(&engine);
+    lab.useDrafter.set(false); // the drafter is fetched by hand below (its automatic fetch: the next test)
     std::string status;
     auto sub = lab.statusMessage.subscribe([&](const std::string& s) { status = s; });
     lab.info();
@@ -4877,7 +4878,9 @@ TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
     CHECK(lab.pathFor(Lab::Which::Model) == "/models/gemma-4-E4B_q4_0-it.gguf" &&
           lab.pathFor(Lab::Which::Projector) == "/models/gemma-4-E4B-it-mmproj.gguf");
     CHECK(lab.file(Lab::Which::Model).size == 5154941280ull && std::string(lab.file(Lab::Which::Model).sha256).size() == 64);
-    CHECK(!lab.chosenModel().drafter && &lab.file(Lab::Which::Drafter) == &Lab::drafterFile());
+    // Each its own drafter (MTP assistant): E4B's is not E2B's.
+    CHECK(lab.chosenModel().drafter && &lab.file(Lab::Which::Drafter) != &Lab::drafterFile() &&
+          lab.pathFor(Lab::Which::Drafter) == "/models/gemma-4-E4B-it-qat-assistant-q4_0.gguf");
     lab.modelChoice.set(2);
     CHECK(std::string(lab.file(Lab::Which::Projector).fileName) == "mmproj-gemma-4-12b-it-qat-q4_0.gguf");
     for (int i = 0; i < Lab::kModelChoices; ++i) {
@@ -4893,6 +4896,27 @@ TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
     CHECK_EQ(again.modelChoice.get(), 2);
     again.load(model::Json::object().set("model", 9)); // out of range: the last one
     CHECK_EQ(again.modelChoice.get(), Lab::kModelChoices - 1);
+
+    // The drafter is on by default: it comes with the model once the model's checksum matches;
+    // turned off, it does not (and the setting is saved).
+    for (const bool use : {true, false}) {
+        FakeEngine e;
+        Lab fresh(&e);
+        fresh.modelChoice.set(1);
+        fresh.useDrafter.set(use);
+        const std::string modelPath = fresh.pathFor(Lab::Which::Model);
+        fresh.download(Lab::Which::Model);
+        CHECK(e.downloadPath == modelPath);
+        e.files[modelPath] = fresh.file(Lab::Which::Model).size;
+        e.hashAnswer = fresh.file(Lab::Which::Model).sha256;
+        e.download.state = interfaces::DownloadStatus::State::Done;
+        fresh.refresh(); // the download ends; its checksum is checked
+        CHECK(fresh.fileUsable(Lab::Which::Model));
+        CHECK_EQ(e.downloadPath == fresh.pathFor(Lab::Which::Drafter), use);
+        Lab reloaded(&e);
+        reloaded.load(fresh.save());
+        CHECK_EQ(reloaded.useDrafter.get(), use);
+    }
 }
 
 TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)

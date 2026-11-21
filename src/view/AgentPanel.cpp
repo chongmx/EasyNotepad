@@ -492,7 +492,9 @@ void AgentPanel::renderLocalSetup(float inner)
     const Lab::FileStatus drafter = lab.fileStatus(Lab::Which::Drafter);
     const Lab::FileStatus projector = lab.fileStatus(Lab::Which::Projector);
     const bool ready = lab.fileUsable(Lab::Which::Model);
-    const bool withDrafter = lab.chosenModel().drafter;
+    const bool withDrafter = lab.chosenModel().drafter != nullptr;
+    char drafterSize[32];
+    std::snprintf(drafterSize, sizeof(drafterSize), "%.0f MB", double(lab.file(Lab::Which::Drafter).size) / 1e6);
     const char* name = lab.chosenModel().name;
     char size[32];
     std::snprintf(size, sizeof(size), "%.2f GB", double(lab.file(Lab::Which::Model).size) / 1e9);
@@ -514,11 +516,30 @@ void AgentPanel::renderLocalSetup(float inner)
     } else if (ready) {
         ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
         ImGui::SameLine();
-        ImGui::Text(withDrafter && lab.fileUsable(Lab::Which::Drafter) ? "%s is here, with its drafter (faster)." : "%s is here.", name);
-        if (withDrafter && !lab.fileUsable(Lab::Which::Drafter)) {
-            if (ImGui::Button(ICON_FA_DOWNLOAD " Get the drafter (77 MB, faster answers)"))
-                lab.download(Lab::Which::Drafter);
-            registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
+        lab.fetchDrafter(); // on by default: a model that is here gets its drafter (once; a failure waits for the button)
+        const bool drafting = withDrafter && lab.useDrafter.get() && lab.fileUsable(Lab::Which::Drafter);
+        ImGui::Text(drafting ? "%s is here, with its drafter (faster)." : "%s is here.", name);
+        if (withDrafter) {
+            // On by default: the drafter guesses a few words ahead and the model checks them at once.
+            bool use = lab.useDrafter.get();
+            if (ImGui::Checkbox("Use the drafter (faster answers)", &use)) {
+                lab.useDrafter.set(use);
+                lab.fetchDrafter(); // turned on again: fetched if it is not here
+            }
+            ui::itemTooltip("A small helper model guesses the next few words and the model checks them all at once: the "
+                            "same answers, about 1.5 to 2 times faster on a graphics card. Turn it off to save its memory, "
+                            "or to compare.");
+            registerLastItem("agent-local-use-drafter", "checkbox", "Use the drafter", [&lab]() {
+                lab.useDrafter.set(!lab.useDrafter.get());
+                lab.fetchDrafter();
+            });
+            // Wanted but not here (its download failed or was stopped): get it by hand.
+            if (lab.useDrafter.get() && !lab.fileUsable(Lab::Which::Drafter) && !lab.downloading()) {
+                const std::string getDrafter = std::string(ICON_FA_DOWNLOAD " Get the drafter (") + drafterSize + ")";
+                if (ImGui::Button(getDrafter.c_str()))
+                    lab.download(Lab::Which::Drafter);
+                registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
+            }
         }
         if (lab.fileUsable(Lab::Which::Projector)) {
             ImGui::TextColored(col(palette_.iconGreen), ICON_FA_EYE);

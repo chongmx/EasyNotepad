@@ -61,13 +61,28 @@ const EngineLabViewModel::CatalogFile kProjector12B{
     "cb018338a7538a9814d994bfe54644c71eb7ed54e31eae2f721e45fd3c260da7", 175115616ull,
     "google/gemma-4-12B-it-qat-q4_0-gguf"};
 
+// Their MTP assistants: Google publishes them as unquantized QAT weights only, so these are GGUF
+// conversions of Google's own checkpoints (as E2B's drafter is), pinned the same way.
+const EngineLabViewModel::CatalogFile kDrafterE4B{
+    "MTP drafter for E4B (Google QAT assistant, Q4_0)", "gemma-4-E4B-it-qat-assistant-q4_0.gguf",
+    "https://huggingface.co/cascade-tech/gemma-4-E4B-it-qat-q4_0-unquantized-assistant-gguf/resolve/"
+    "3fd2bebe459bbbfc4161c32e91cf4cef4b568b93/gemma-4-E4B-it-qat-assistant-q4_0.gguf",
+    "866800a8c56e77cc788340e47d79c03e4368451467d757985666dcdbf8c06e90", 76978624ull,
+    "community conversion (cascade-tech) of google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant"};
+const EngineLabViewModel::CatalogFile kDrafter12B{
+    "MTP drafter for 12B (Google QAT assistant, Q4_0)", "gemma-4-12B-it-qat-q4_0-unquantized-assistant-q4_0.gguf",
+    "https://huggingface.co/Disya/gemma-4-12B-it-qat-q4_0-unquantized-assistant-gguf/resolve/"
+    "f9a535af9adbb8a2d8ab9c94ca683696c346595e/gemma-4-12B-it-qat-q4_0-unquantized-assistant-q4_0.gguf",
+    "b0e6a56d3078fb76e7ad950e85e478091a8ae1925fae8489ba4e58908068f0f3", 253707904ull,
+    "community conversion (Disya) of google/gemma-4-12B-it-qat-q4_0-unquantized-assistant"};
+
 const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices] = {
-    {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, true,
+    {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, &kDrafter,
      5ull << 30},
     {"Gemma 4 E4B", "better at questions with several parts; about half as fast; best with a graphics card of 8 GB",
-     &kModelE4B, &kProjectorE4B, false, 7ull << 30},
+     &kModelE4B, &kProjectorE4B, &kDrafterE4B, 7ull << 30},
     {"Gemma 4 12B", "the most careful; slow, and needs a graphics card of 12 GB or more to be quick", &kModel12B,
-     &kProjector12B, false, 9ull << 30},
+     &kProjector12B, &kDrafter12B, 9ull << 30},
 };
 
 // Room kept free beyond the download itself.
@@ -134,7 +149,7 @@ const EngineLabViewModel::ModelChoice& EngineLabViewModel::modelChoiceInfo(int i
 const EngineLabViewModel::CatalogFile& EngineLabViewModel::file(Which which) const
 {
     const ModelChoice& c = chosenModel();
-    return which == Which::Model ? *c.model : which == Which::Projector ? *c.projector : kDrafter;
+    return which == Which::Model ? *c.model : which == Which::Projector ? *c.projector : *c.drafter;
 }
 
 Property<std::string>& EngineLabViewModel::customPath(Which which)
@@ -147,7 +162,7 @@ EngineLabViewModel::EngineLabViewModel(interfaces::ILocalEngineService* engine) 
     // The choices are remembered.
     for (Property<std::string>* p : {&customModelPath, &customDrafterPath, &customProjectorPath})
         subscriptions_.push_back(p->subscribe([this](const std::string&) { changed.emit(); }));
-    for (Property<bool>* p : {&useGpu, &allowMobileData})
+    for (Property<bool>* p : {&useGpu, &allowMobileData, &useDrafter})
         subscriptions_.push_back(p->subscribe([this](const bool&) { changed.emit(); }));
     subscriptions_.push_back(threads.subscribe([this](const int&) { changed.emit(); }));
     subscriptions_.push_back(modelChoice.subscribe([this](const int&) { changed.emit(); }));
@@ -374,6 +389,9 @@ void EngineLabViewModel::verify(Which which)
                 verified_.emplace_back(path, sha);
                 downloadErrors_[int(which)].clear();
                 say("Checksum matches.");
+                // The drafter comes with the model, unless it is turned off (or already here).
+                if (which == Which::Model && path == pathFor(Which::Model))
+                    fetchDrafter();
             } else {
                 mismatched_.push_back(path);
                 say(sha.empty() ? "The file could not be read." : "Checksum does not match: download it again.", true);
@@ -381,6 +399,14 @@ void EngineLabViewModel::verify(Which which)
             }
             changed.emit();
         });
+}
+
+void EngineLabViewModel::fetchDrafter()
+{
+    if (useDrafter.get() && chosenModel().drafter && customDrafterPath.get().empty() && fileUsable(Which::Model) &&
+        downloadErrors_[int(Which::Drafter)].empty() && // a failed one waits for the button, not a retry each frame
+        fileStatus(Which::Drafter).state == FileState::Missing && downloading_ < 0 && verifying_ < 0 && confirm_ < 0)
+        download(Which::Drafter);
 }
 
 void EngineLabViewModel::refresh()
@@ -519,6 +545,7 @@ model::Json EngineLabViewModel::save() const
                          .set("result", resultJson(r.result)));
     return model::Json::object()
         .set("model", modelChoice.get())
+        .set("useDrafter", useDrafter.get())
         .set("customModel", customModelPath.get())
         .set("customDrafter", customDrafterPath.get())
         .set("customProjector", customProjectorPath.get())
@@ -535,6 +562,8 @@ void EngineLabViewModel::load(const model::Json& j)
         return;
     if (const model::Json* m = j.find("model"); m && m->isNumber())
         modelChoice.set(std::clamp(int(m->asNumber()), 0, kModelChoices - 1));
+    if (const model::Json* d = j.find("useDrafter"); d && d->isBool())
+        useDrafter.set(d->asBool());
     customModelPath.set(j.getString("customModel"));
     customDrafterPath.set(j.getString("customDrafter"));
     customProjectorPath.set(j.getString("customProjector"));
