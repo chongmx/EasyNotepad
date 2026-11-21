@@ -351,6 +351,20 @@ void EngineLabView::renderRun()
     ImGui::EndDisabled();
     if (!hasGpu && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ui::tooltip("No GPU here: put enp-engine-cuda next to EasyNotepad for an NVIDIA GPU.");
+    // For power users: the agent uses the drafter (and fetches it) unless this is off.
+    bool drafter = l.useDrafter.get();
+    if (ImGui::Checkbox("Agent uses the drafter", &drafter)) {
+        l.useDrafter.set(drafter);
+        l.fetchDrafter(); // on again: fetched if it is not here
+    }
+    registerLastItem("engine-lab:use-drafter", "toggle", "Agent uses the drafter", [&l]() {
+        l.useDrafter.set(!l.useDrafter.get());
+        l.fetchDrafter();
+    });
+    ui::itemTooltip("On by default: the agent's model gets a small helper that guesses the next few words, checked all "
+                    "at once - the same answers, faster (E4B: 65 to 112 tokens/s on a laptop RTX 5060). Off: the "
+                    "drafter is neither downloaded nor used, which saves its memory; use Compare both to see the "
+                    "difference on this device.");
     int tokens = l.generateTokens.get();
     ImGui::SetNextItemWidth(fit::itemWidth(220.0f * s_, 120.0f * s_));
     if (ImGui::SliderInt("Tokens to generate", &tokens, 32, 512))

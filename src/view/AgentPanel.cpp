@@ -519,20 +519,8 @@ void AgentPanel::renderLocalSetup(float inner)
         lab.fetchDrafter(); // on by default: a model that is here gets its drafter (once; a failure waits for the button)
         const bool drafting = withDrafter && lab.useDrafter.get() && lab.fileUsable(Lab::Which::Drafter);
         ImGui::Text(drafting ? "%s is here, with its drafter (faster)." : "%s is here.", name);
+        // Everyone gets the drafter (fetched by itself, above); turning it off is in the Engine Lab.
         if (withDrafter) {
-            // On by default: the drafter guesses a few words ahead and the model checks them at once.
-            bool use = lab.useDrafter.get();
-            if (ImGui::Checkbox("Use the drafter (faster answers)", &use)) {
-                lab.useDrafter.set(use);
-                lab.fetchDrafter(); // turned on again: fetched if it is not here
-            }
-            ui::itemTooltip("A small helper model guesses the next few words and the model checks them all at once: the "
-                            "same answers, about 1.5 to 2 times faster on a graphics card. Turn it off to save its memory, "
-                            "or to compare.");
-            registerLastItem("agent-local-use-drafter", "checkbox", "Use the drafter", [&lab]() {
-                lab.useDrafter.set(!lab.useDrafter.get());
-                lab.fetchDrafter();
-            });
             // Wanted but not here (its download failed or was stopped): get it by hand.
             if (lab.useDrafter.get() && !lab.fileUsable(Lab::Which::Drafter) && !lab.downloading()) {
                 const std::string getDrafter = std::string(ICON_FA_DOWNLOAD " Get the drafter (") + drafterSize + ")";
