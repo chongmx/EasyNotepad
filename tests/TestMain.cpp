@@ -4339,7 +4339,7 @@ TEST(engine_lab_downloads_checks_and_compares)
     using State = Lab::FileState;
     FakeEngine engine;
     Lab lab(&engine);
-    lab.useDrafter.set(false); // the drafter is fetched by hand below (its automatic fetch: the next test)
+    lab.setDrafterOn(false); // the drafter is fetched by hand below (its automatic fetch: the next test)
     std::string status;
     auto sub = lab.statusMessage.subscribe([&](const std::string& s) { status = s; });
     lab.info();
@@ -4897,13 +4897,37 @@ TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
     again.load(model::Json::object().set("model", 9)); // out of range: the last one
     CHECK_EQ(again.modelChoice.get(), Lab::kModelChoices - 1);
 
-    // The drafter is on by default: it comes with the model once the model's checksum matches;
-    // turned off, it does not (and the setting is saved).
+    // Each model its drafter default: on for E2B and E4B, off for 12B (too big for an 8 GB card with
+    // it); turned on or off per model, and back to following the default.
+    {
+        Lab d(&engine);
+        CHECK(d.drafterOn());
+        d.modelChoice.set(1);
+        CHECK(d.drafterOn());
+        d.modelChoice.set(2);
+        CHECK(!d.drafterOn());
+        d.setDrafterOn(true);
+        CHECK(d.drafterOn());
+        d.modelChoice.set(1);
+        d.setDrafterOn(false);
+        CHECK(!d.drafterOn());
+        d.modelChoice.set(2);
+        CHECK(d.drafterOn()); // its own setting, not E4B's
+        Lab r(&engine);
+        r.load(d.save());
+        CHECK(r.drafterOn() && r.modelChoice.get() == 2);
+        r.modelChoice.set(1);
+        CHECK(!r.drafterOn());
+        r.modelChoice.set(0);
+        CHECK(r.drafterOn());
+    }
+    // A drafter that is on comes with the model once the model's checksum matches; turned off, it
+    // does not (and the setting is saved).
     for (const bool use : {true, false}) {
         FakeEngine e;
         Lab fresh(&e);
         fresh.modelChoice.set(1);
-        fresh.useDrafter.set(use);
+        fresh.setDrafterOn(use);
         const std::string modelPath = fresh.pathFor(Lab::Which::Model);
         fresh.download(Lab::Which::Model);
         CHECK(e.downloadPath == modelPath);
@@ -4915,7 +4939,7 @@ TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
         CHECK_EQ(e.downloadPath == fresh.pathFor(Lab::Which::Drafter), use);
         Lab reloaded(&e);
         reloaded.load(fresh.save());
-        CHECK_EQ(reloaded.useDrafter.get(), use);
+        CHECK_EQ(reloaded.drafterOn(), use);
     }
 }
 

@@ -517,12 +517,12 @@ void AgentPanel::renderLocalSetup(float inner)
         ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
         ImGui::SameLine();
         lab.fetchDrafter(); // on by default: a model that is here gets its drafter (once; a failure waits for the button)
-        const bool drafting = withDrafter && lab.useDrafter.get() && lab.fileUsable(Lab::Which::Drafter);
+        const bool drafting = withDrafter && lab.drafterOn() && lab.fileUsable(Lab::Which::Drafter);
         ImGui::Text(drafting ? "%s is here, with its drafter (faster)." : "%s is here.", name);
         // Everyone gets the drafter (fetched by itself, above); turning it off is in the Engine Lab.
         if (withDrafter) {
             // Wanted but not here (its download failed or was stopped): get it by hand.
-            if (lab.useDrafter.get() && !lab.fileUsable(Lab::Which::Drafter) && !lab.downloading()) {
+            if (lab.drafterOn() && !lab.fileUsable(Lab::Which::Drafter) && !lab.downloading()) {
                 const std::string getDrafter = std::string(ICON_FA_DOWNLOAD " Get the drafter (") + drafterSize + ")";
                 if (ImGui::Button(getDrafter.c_str()))
                     lab.download(Lab::Which::Drafter);

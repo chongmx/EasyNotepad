@@ -1796,7 +1796,7 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
     s.ready = true;
     s.modelPath = lab.pathFor(Which::Model);
     // The chosen model's own drafter (its MTP assistant), when it is downloaded and not turned off.
-    if (lab.useDrafter.get() && lab.fileUsable(Which::Drafter))
+    if (lab.drafterOn() && lab.fileUsable(Which::Drafter))
         s.drafterPath = lab.pathFor(Which::Drafter);
     if (lab.fileUsable(Which::Projector))
         s.projectorPath = lab.pathFor(Which::Projector);

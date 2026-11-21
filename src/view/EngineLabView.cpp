@@ -351,18 +351,14 @@ void EngineLabView::renderRun()
     ImGui::EndDisabled();
     if (!hasGpu && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ui::tooltip("No GPU here: put enp-engine-cuda next to EasyNotepad for an NVIDIA GPU.");
-    // For power users: the agent uses the drafter (and fetches it) unless this is off.
-    bool drafter = l.useDrafter.get();
-    if (ImGui::Checkbox("Agent uses the drafter", &drafter)) {
-        l.useDrafter.set(drafter);
-        l.fetchDrafter(); // on again: fetched if it is not here
-    }
-    registerLastItem("engine-lab:use-drafter", "toggle", "Agent uses the drafter", [&l]() {
-        l.useDrafter.set(!l.useDrafter.get());
-        l.fetchDrafter();
-    });
-    ui::itemTooltip("On by default: the agent's model gets a small helper that guesses the next few words, checked all "
-                    "at once - the same answers, faster (E4B: 65 to 112 tokens/s on a laptop RTX 5060). Off: the "
+    // For power users: whether the agent uses the chosen model's drafter (each model its own default).
+    bool drafter = l.drafterOn();
+    if (ImGui::Checkbox("Agent uses the drafter", &drafter))
+        l.setDrafterOn(drafter);
+    registerLastItem("engine-lab:use-drafter", "toggle", "Agent uses the drafter", [&l]() { l.setDrafterOn(!l.drafterOn()); });
+    ui::itemTooltip("For the model chosen. A small helper guesses the next few words and the model checks them all at "
+                    "once - the same answers, faster (E4B: 65 to 112 tokens/s on a laptop RTX 5060). On by default for "
+                    "E2B and E4B; off for 12B, which with it no longer fits an 8 GB card and gets slower. Off: the "
                     "drafter is neither downloaded nor used, which saves its memory; use Compare both to see the "
                     "difference on this device.");
     int tokens = l.generateTokens.get();

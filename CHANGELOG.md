@@ -83,7 +83,10 @@ its release notes on GitHub.
   its own eyes and ears and its own MTP drafter (speculative decoding), all pinned by commit and
   SHA-256. Google publishes the drafters (its "assistant" checkpoints) only as unquantized weights:
   E2B's, E4B's and 12B's are community GGUF conversions of them. On an RTX 5060 laptop GPU, E4B
-  generates 65 tokens/s alone and 112 with its drafter (56% of drafted tokens accepted).
+  generates 65 tokens/s alone and 112 with its drafter (56% of drafted tokens accepted). The
+  drafter is fetched with the model by itself and used: on for E2B and E4B; off for 12B, which
+  with it no longer fits an 8 GB card and slows from 33 to 20 tokens/s. Power users turn it on or
+  off per model in the Engine Lab (Agent uses the drafter).
 - Scanning with the local model: `scan_document` shows a long document (or several) to the model
   in overlapping windows (small, normal or large; overlap in percent), one at a time with what is
   looked for, and returns the pages and quotes where it is; `scan_image` shows a picture in a grid

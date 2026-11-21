@@ -77,12 +77,12 @@ const EngineLabViewModel::CatalogFile kDrafter12B{
     "community conversion (Disya) of google/gemma-4-12B-it-qat-q4_0-unquantized-assistant"};
 
 const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices] = {
-    {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, &kDrafter,
+    {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, &kDrafter, true,
      5ull << 30},
     {"Gemma 4 E4B", "better at questions with several parts; about half as fast; best with a graphics card of 8 GB",
-     &kModelE4B, &kProjectorE4B, &kDrafterE4B, 7ull << 30},
+     &kModelE4B, &kProjectorE4B, &kDrafterE4B, true, 7ull << 30},
     {"Gemma 4 12B", "the most careful; slow, and needs a graphics card of 12 GB or more to be quick", &kModel12B,
-     &kProjector12B, &kDrafter12B, 9ull << 30},
+     &kProjector12B, &kDrafter12B, false, 9ull << 30},
 };
 
 // Room kept free beyond the download itself.
@@ -162,7 +162,7 @@ EngineLabViewModel::EngineLabViewModel(interfaces::ILocalEngineService* engine) 
     // The choices are remembered.
     for (Property<std::string>* p : {&customModelPath, &customDrafterPath, &customProjectorPath})
         subscriptions_.push_back(p->subscribe([this](const std::string&) { changed.emit(); }));
-    for (Property<bool>* p : {&useGpu, &allowMobileData, &useDrafter})
+    for (Property<bool>* p : {&useGpu, &allowMobileData})
         subscriptions_.push_back(p->subscribe([this](const bool&) { changed.emit(); }));
     subscriptions_.push_back(threads.subscribe([this](const int&) { changed.emit(); }));
     subscriptions_.push_back(modelChoice.subscribe([this](const int&) { changed.emit(); }));
@@ -401,9 +401,23 @@ void EngineLabViewModel::verify(Which which)
         });
 }
 
+bool EngineLabViewModel::drafterOn() const
+{
+    const int setting = drafterSetting_[std::clamp(modelChoice.get(), 0, kModelChoices - 1)];
+    return setting < 0 ? chosenModel().drafterByDefault : setting == 1;
+}
+
+void EngineLabViewModel::setDrafterOn(bool on)
+{
+    int& setting = drafterSetting_[std::clamp(modelChoice.get(), 0, kModelChoices - 1)];
+    setting = on == chosenModel().drafterByDefault ? -1 : int(on); // back to the default: follows it
+    changed.emit();
+    fetchDrafter(); // on: fetched if it is not here
+}
+
 void EngineLabViewModel::fetchDrafter()
 {
-    if (useDrafter.get() && chosenModel().drafter && customDrafterPath.get().empty() && fileUsable(Which::Model) &&
+    if (drafterOn() && chosenModel().drafter && customDrafterPath.get().empty() && fileUsable(Which::Model) &&
         downloadErrors_[int(Which::Drafter)].empty() && // a failed one waits for the button, not a retry each frame
         fileStatus(Which::Drafter).state == FileState::Missing && downloading_ < 0 && verifying_ < 0 && confirm_ < 0)
         download(Which::Drafter);
@@ -545,7 +559,7 @@ model::Json EngineLabViewModel::save() const
                          .set("result", resultJson(r.result)));
     return model::Json::object()
         .set("model", modelChoice.get())
-        .set("useDrafter", useDrafter.get())
+        .set("drafters", model::Json::array().push(drafterSetting_[0]).push(drafterSetting_[1]).push(drafterSetting_[2]))
         .set("customModel", customModelPath.get())
         .set("customDrafter", customDrafterPath.get())
         .set("customProjector", customProjectorPath.get())
@@ -562,8 +576,9 @@ void EngineLabViewModel::load(const model::Json& j)
         return;
     if (const model::Json* m = j.find("model"); m && m->isNumber())
         modelChoice.set(std::clamp(int(m->asNumber()), 0, kModelChoices - 1));
-    if (const model::Json* d = j.find("useDrafter"); d && d->isBool())
-        useDrafter.set(d->asBool());
+    if (const model::Json* d = j.find("drafters"); d && d->isArray())
+        for (size_t i = 0; i < d->items().size() && i < size_t(kModelChoices); ++i)
+            drafterSetting_[i] = std::clamp(int(d->items()[i].asNumber(-1)), -1, 1);
     customModelPath.set(j.getString("customModel"));
     customDrafterPath.set(j.getString("customDrafter"));
     customProjectorPath.set(j.getString("customProjector"));

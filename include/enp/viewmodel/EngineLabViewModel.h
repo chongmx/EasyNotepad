@@ -38,13 +38,17 @@ public:
         const CatalogFile* model;
         const CatalogFile* projector;
         const CatalogFile* drafter; // its MTP assistant (speculative decoding), or none
+        bool drafterByDefault;      // used unless turned off (else only when turned on)
         uint64_t memoryNeeded; // about, to run with its eyes and ears and a working context
     };
     static constexpr int kModelChoices = 3;
     static const ModelChoice& modelChoiceInfo(int index);
     Property<int> modelChoice{0};
-    // The drafter (saved, on by default): fetched with the model and used by the agent; off, neither.
-    Property<bool> useDrafter{true};
+    // The chosen model's drafter: fetched with the model and used by the agent; off, neither. Each
+    // model has its default (on for E2B and E4B; off for 12B, which with it no longer fits an 8 GB
+    // card and gets slower); the Engine Lab turns it on or off per model (saved).
+    bool drafterOn() const;
+    void setDrafterOn(bool on);
     // Downloads the chosen model's drafter when it is wanted, missing, and nothing else downloads
     // (after the model's download; when the drafter is turned on again).
     void fetchDrafter();
@@ -150,6 +154,7 @@ private:
     bool infoLoaded_ = false;
     bool acceleratorStale_ = false; // a run ended: the engine library's status may have changed
     int downloading_ = -1; // Which, while a catalogue download runs
+    int drafterSetting_[3] = {-1, -1, -1}; // per model: -1 its default, 0 off, 1 on
     interfaces::DownloadStatus lastDownload_;
     int verifying_ = -1;
     double verifyFraction_ = 0;
