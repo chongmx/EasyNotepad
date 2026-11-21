@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <optional>
 
@@ -31,7 +33,11 @@ constexpr const char* kLocalAgentPrompt =
     "You work in the user's open folder through the tools you are given. Look before you answer: read the files, "
     "documents, pictures and recordings a question is about with your tools, and never guess what they contain. "
     "Call one or more tools when you need them; when you have what you need, answer briefly and precisely in "
-    "Markdown, naming the files and pages you used. If a tool fails, say so or try another way.";
+    "Markdown, naming the files and pages you used. If a tool fails, say so or try another way. "
+    "Never work out a number yourself - not a sum, difference, total, average, percentage, share, "
+    "conversion or rounding, however small: call calculate (several sums at once, separated by ';') "
+    "and give the figures it returns. Only counting a few things you can see is yours to do. Write "
+    "figures as digits.";
 
 // Said with each step of a question taken in steps.
 constexpr const char* kStepAsk = "Use your tools, then tell me what you found. If a tool finds nothing or says the call is "
@@ -194,12 +200,133 @@ bool toolAsksToRetry(const std::vector<interfaces::LocalChatMessage>& messages)
             continue;
         for (const char* cue : {"no rows match", "There is no column", "Call it like this", "There is no tool called",
                                 "It is a document: call", "It is a picture: call", "It is a recording: call",
-                                "cannot read the region"})
+                                "cannot read the region", "does not exist. ", "is a table, not a document",
+                                "} for its text."})
             if (m.text.find(cue) != std::string::npos)
                 return true;
         return false;
     }
     return false;
+}
+
+// ---- Figures no tool gave ----------------------------------------------------------------------
+// The local model is fine at counting a few things and poor at anything else with numbers: a figure
+// in its answer that no tool returned and the user did not give was worked out in its head (or
+// made up). Such an answer goes back to it, to be done with calculate.
+
+struct Figure {
+    double value = 0;
+    int decimals = 0;
+    bool scaled = false; // "3.78 million": compared loosely
+    std::string text;
+};
+
+std::vector<Figure> figuresIn(const std::string& text)
+{
+    std::vector<Figure> out;
+    auto digit = [&](size_t i) { return i < text.size() && std::isdigit(static_cast<unsigned char>(text[i])); };
+    auto letter = [&](size_t i) { return i < text.size() && (std::isalpha(static_cast<unsigned char>(text[i])) || text[i] == '_'); };
+    for (size_t i = 0; i < text.size();) {
+        if (!digit(i) || (i > 0 && (letter(i - 1) || digit(i - 1) || text[i - 1] == '#' || text[i - 1] == '.'))) {
+            ++i;
+            continue;
+        }
+        const size_t start = i;
+        std::string n;
+        int decimals = 0;
+        bool point = false;
+        while (i < text.size()) {
+            if (digit(i)) {
+                n += text[i];
+                decimals += point;
+                ++i;
+            } else if (text[i] == ',' && digit(i + 1) && digit(i + 2) && digit(i + 3) && !digit(i + 4) && !point) {
+                ++i; // a thousands separator
+            } else if (text[i] == '.' && !point && digit(i + 1)) {
+                n += '.';
+                point = true;
+                ++i;
+            } else {
+                break;
+            }
+        }
+        // Not a quantity: part of a word or name (x64, v1.2), a date or time, a range's ends.
+        const bool joined = letter(i) || (i < text.size() && (text[i] == ':' || (text[i] == '-' && digit(i + 1)))) ||
+                            (start > 0 && (text[start - 1] == ':' || (text[start - 1] == '-' && start > 1 && digit(start - 2))));
+        if (joined)
+            continue;
+        Figure f;
+        f.value = std::atof(n.c_str());
+        f.decimals = decimals;
+        f.text = text.substr(start, i - start);
+        std::string next;
+        for (size_t k = i; k < text.size() && next.size() < 9; ++k)
+            next += char(std::tolower(static_cast<unsigned char>(text[k])));
+        for (const auto& [word, factor] : {std::pair<const char*, double>{" million", 1e6}, {" billion", 1e9}, {" thousand", 1e3},
+                                           {"m ", 1e6}, {"k ", 1e3}, {"bn", 1e9}})
+            if (next.rfind(word, 0) == 0) {
+                f.value *= factor;
+                f.scaled = true;
+                break;
+            }
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
+// The answer's figures that no tool result or user message holds (as given, or rounded, or as a
+// percentage of it). Small whole numbers (counting) and years are left alone. When the model was
+// given pictures or sounds, figures read from them cannot be checked: only lines that work
+// something out ("=", an operator between numbers) are.
+std::vector<std::string> unsourcedFigures(const std::string& answer, const std::vector<interfaces::LocalChatMessage>& messages)
+{
+    std::vector<Figure> known;
+    bool media = false;
+    for (const interfaces::LocalChatMessage& m : messages) {
+        if (m.role != "tool" && m.role != "user")
+            continue;
+        media = media || !m.media.empty();
+        for (Figure& f : figuresIn(m.text))
+            known.push_back(std::move(f));
+    }
+    auto sourced = [&](const Figure& a) {
+        for (const Figure& k : known)
+            for (const double v : {k.value, k.value * 100.0, k.value / 100.0}) {
+                if (a.scaled || k.scaled) {
+                    if (std::abs(a.value - v) <= 0.01 * std::max(std::abs(a.value), std::abs(v)))
+                        return true;
+                } else if (std::abs(a.value - v) <= 0.5 * std::pow(10.0, -a.decimals) + 1e-9 * std::max(1.0, std::abs(v))) {
+                    return true;
+                }
+            }
+        return false;
+    };
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (at < answer.size()) {
+        size_t end = answer.find('\n', at);
+        if (end == std::string::npos)
+            end = answer.size();
+        const std::string line = answer.substr(at, end - at);
+        at = end + 1;
+        bool works = line.find('=') != std::string::npos;
+        for (size_t i = 1; i + 1 < line.size() && !works; ++i)
+            if (std::strchr("+*/x", line[i]) && (std::isdigit(static_cast<unsigned char>(line[i - 1])) || line[i - 1] == ' ') &&
+                (std::isdigit(static_cast<unsigned char>(line[i + 1])) || line[i + 1] == ' ')) {
+                const size_t l = line.find_last_not_of(' ', i - 1), r = line.find_first_not_of(' ', i + 1);
+                works = l != std::string::npos && r != std::string::npos && std::isdigit(static_cast<unsigned char>(line[l])) &&
+                        std::isdigit(static_cast<unsigned char>(line[r]));
+            }
+        if (media && !works)
+            continue;
+        for (const Figure& f : figuresIn(line)) {
+            const bool small = f.decimals == 0 && !f.scaled && std::abs(f.value) <= 12;
+            const bool year = f.decimals == 0 && f.value >= 1900 && f.value <= 2100 && f.text.find(',') == std::string::npos;
+            if (!small && !year && !sourced(f) && std::find(out.begin(), out.end(), f.text) == out.end())
+                out.push_back(f.text);
+        }
+    }
+    return out;
 }
 
 // The answer only says it will call one of the tools ("I will now call inspect_binary with ..."),
@@ -513,7 +640,7 @@ std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
 
 void AgentViewModel::planLocal(int generation, std::string question)
 {
-    std::string instructions = localPlanner_ ? localPlanner_() : std::string();
+    std::string instructions = localPlanner_ ? localPlanner_(question) : std::string();
     if (instructions.rfind("---", 0) == 0) // the skill's front matter
         if (const size_t end = instructions.find("\n---", 3); end != std::string::npos) {
             const size_t body = instructions.find('\n', end + 4);
@@ -579,6 +706,9 @@ bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
         if (const std::string reminder = localReminder_ ? localReminder_() : std::string(); !reminder.empty())
             next += "\n\n(" + reminder + ")";
     }
+    // Its working notes: what earlier steps found, kept outside the conversation.
+    if (const std::string notes = localNotes_ ? localNotes_() : std::string(); !notes.empty())
+        next += "\n\nYour notes so far:\n" + notes;
     ++localStep_;
     localRounds_ = 0; // each step has its own rounds of tools
     localNudges_ = 0;
@@ -659,8 +789,15 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     if (request.messages.back().role == "user")
         request.messages.pop_back();
     std::string question = prompt;
-    const std::string code = localContext_ ? localContext_() : std::string();
-    if (!code.empty())
+    // With tools, the file open in the editor is only named (its text, pasted in, took over
+    // questions about other files: it reads what it needs); lines the user selected still go in.
+    const size_t colon = context.rfind(':');
+    const bool selected = colon != std::string::npos && context.find('-', colon) != std::string::npos;
+    const std::string code = localContext_ && (!tools || selected) ? localContext_() : std::string();
+    if (tools && code.empty() && !context.empty())
+        question = prompt + "\n\n(For reference only: the editor shows " + context.substr(0, colon) +
+                   ". Read it with your tools only if my question is about it.)";
+    else if (!code.empty())
         question = "I am looking at " + (context.empty() ? std::string("this code") : context) + ":\n\n" + code + "\n\n" + prompt;
     else if (!context.empty())
         question = "I am looking at " + context + ".\n\n" + prompt;
@@ -675,7 +812,7 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     const int generation = ++generation_;
     // A question of some length is split into steps first (one word or a greeting is not worth it).
     if (tools && localInSteps.get() && localPlanner_ && prompt.size() >= 20)
-        planLocal(generation, context.empty() ? prompt : "I am looking at " + context + ".\n\n" + prompt);
+        planLocal(generation, prompt); // the question alone: the file open in the editor misled plans
     else
         sendLocal(generation);
 }
@@ -742,6 +879,26 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                                                         "corrected call now, with the values it listed.");
             sendLocal(generation);
             return;
+        }
+        // Figures no tool gave: worked out in its head, or made up. Back to it, to use calculate.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds &&
+            hasTool(localRequest_.tools, "calculate")) {
+            if (const std::vector<std::string> figures = unsourcedFigures(r.text, localRequest_.messages); !figures.empty()) {
+                ++localNudges_;
+                std::string list;
+                for (const std::string& f : figures)
+                    list += (list.empty() ? "" : ", ") + f;
+                localRequest_.messages.emplace_back("assistant", r.text);
+                localRequest_.messages.emplace_back(
+                    "user", "No tool gave you these figures: " + list +
+                                ". Do not work numbers out yourself. Put each calculation into calculate now (several at "
+                                "once, separated by ';', from the figures the tools gave), then answer with what it "
+                                "returns. A figure you read in a file or picture: read it again with the tool instead.");
+                if (at < messages_.size())
+                    messages_.push_back({model::ChatRole::Tool, "Checking the figures " + list + " with the calculator"});
+                sendLocal(generation);
+                return;
+            }
         }
         // It says what it will call and stops (a small model does): tell it to go on, twice at most.
         if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds && announcesCall(r.text, localRequest_.tools)) {
@@ -814,6 +971,21 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
     runTool_(call, [this, generation, step, calls = std::move(calls), next, seen = std::move(seen)](ToolOutput out) mutable {
         if (generation != generation_)
             return;
+        // What the tool answered, in short, under its step: the user sees what the answer rests on.
+        if (step < messages_.size() && !out.text.empty()) {
+            std::string gist;
+            size_t at = 0;
+            for (int lines = 0; at < out.text.size() && lines < (calls[next].name == "calculate" ? 4 : 1); ++lines) {
+                size_t end = out.text.find('\n', at);
+                if (end == std::string::npos)
+                    end = out.text.size();
+                gist += (gist.empty() ? "" : "; ") + out.text.substr(at, std::min<size_t>(end - at, 160));
+                at = end + 1;
+            }
+            if (at < out.text.size())
+                gist += " ...";
+            messages_[step].text += "\n\xE2\x86\x92 " + gist; // →
+        }
         // The pictures the tool shows the user, under its step.
         for (const std::string& picture : out.shown) {
             std::string link; // a space would end a Markdown link
@@ -865,6 +1037,7 @@ void AgentViewModel::newChat()
 {
     stop();
     sessionId_.clear(); // the next prompt starts a new conversation
+    ++conversation_;   // ... and the local model's working notes go
     messages_.clear();
     tasks_.clear();
     replyCount_ = 0;
@@ -873,6 +1046,7 @@ void AgentViewModel::newChat()
 
 void AgentViewModel::workspaceChanged()
 {
+    ++conversation_; // notes about the old folder go
     if (busy.get()) {
         ++generation_;
         replyAt_ = -1.0;

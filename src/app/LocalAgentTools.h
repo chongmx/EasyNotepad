@@ -80,6 +80,8 @@ private:
     std::vector<Look> looks_;
     interfaces::ILocalEngineService* engine_ = nullptr;
     std::string memoryPath_;
+    std::vector<std::string> notes_; // working notes, of conversation notesConversation_
+    int notesConversation_ = -1;
     std::string session_; // this run of the app: temporary memories belong to it
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true); // background reads answer only while it lives
 
@@ -92,6 +94,23 @@ private:
     void readFile(const model::Json& args, Done done);
     void searchFiles(const model::Json& args, Done done);
     void readDocument(const model::Json& args, Done done);
+    // Many documents: search inside them all, ask one question of each (a fresh pass per document,
+    // long ones part by part), and working notes that outlast the conversation's length.
+    void searchDocuments(const model::Json& args, Done done);
+    void extractFromDocuments(const model::Json& args, Done done);
+    void note(const model::Json& args, Done done);
+    void readNotes(const model::Json& args, Done done);
+    std::vector<std::string>& notes(); // this conversation's (a new chat or folder starts them again)
+    struct ExtractJob;
+    void extractPass(std::shared_ptr<ExtractJob> job, Done done); // one part of one document, then the next
+    bool documentFiles(const model::Json& args, const std::string& root, std::vector<std::string>& files, std::string& why) const;
+    // Looking for something with the local model: a long document in overlapping windows, a picture
+    // in overlapping tiles that are cut finer where something was seen (coarse to fine).
+    void scanDocument(const model::Json& args, Done done);
+    void scanImage(const model::Json& args, Done done);
+    struct ScanJob;
+    void scanPass(std::shared_ptr<ScanJob> job, Done done);
+    interfaces::LocalChatRequest passRequest(int maxTokens) const; // the exchange's model, for one short pass
     void lookAtPage(const model::Json& args, Done done);
     void lookAtImage(const model::Json& args, Done done);
     void listenTo(const model::Json& args, Done done);

@@ -104,6 +104,7 @@ foreach ($round in 1..$Repeat) {
             id = $q.id; kind = $q.kind; round = $round; ok = $ok; seconds = $seconds; timedOut = [bool]$chat.busy
             tools = $tools; steps = [math]::Max(0, @($messages | Where-Object { $_.role -eq "tool" -and $_.text -like "Step *" }).Count)
             failed = $failed; answer = $answer; plan = ($plan -join "`n"); status = $status
+            steps_seen = @($messages | Where-Object { $_.role -eq "tool" } | ForEach-Object { $_.text })
         }
         "{0,-26} {1,-5} {2,4}s  {3}" -f $q.id, $(if ($ok) { "ok" } else { "FAIL" }), $seconds, ($failed -join "; ")
     }

@@ -73,6 +73,12 @@
     {"id": "dll-imports", "kind": "binary", "steps": 1,
      "question": "Which DLLs does binaries/fixture.dll import from?",
      "checks": [{"text": ["KERNEL32"]}]},
+    {"id": "invoices-total", "kind": "documents", "steps": 3,
+     "question": "What do all the invoices in the invoices folder add up to, and which supplier billed the most?",
+     "checks": [{"number": 3470.40, "tol": 0.005}, {"text": ["Fabrikam"]}, {"tool": "calculate"}]},
+    {"id": "invoices-due", "kind": "documents", "steps": 2,
+     "question": "Which invoice in the invoices folder is due last, and on what date?",
+     "checks": [{"text": ["Litware", "LW-0412"]}, {"text": ["2024-05-02", "2 May 2024", "May 2, 2024", "02/05/2024", "May 2"]}]},
     {"id": "folder-wav", "kind": "workspace", "steps": 2,
      "question": "How many .wav files are in the audio folder, and which one is the largest?",
      "checks": [{"number": 3, "tol": 0}, {"text": ["meeting.wav"]}]}

@@ -9,6 +9,7 @@ app's tools (`src/app/LocalAgentTools.cpp`). Its guide lists these skills by nam
 | [workspace](workspace/SKILL.md) | the open folder: listing, finding, reading text files |
 | [documents](documents/SKILL.md) | PDF, Word, Excel and PowerPoint: text by page, pages as pictures |
 | [office-work](office-work/SKILL.md) | summaries, spreadsheet figures, letters, minutes, checking numbers |
+| [multiple-documents](multiple-documents/SKILL.md) | many documents: search inside them, one question of each, notes, totals |
 | [data-and-calculations](data-and-calculations/SKILL.md) | query_table and calculate: filters, groups, totals, exact sums |
 | [pictures-and-sound](pictures-and-sound/SKILL.md) | how carefully to look (detail and token cost), pages, listening |
 | [meetings](meetings/SKILL.md) | transcribing recordings into a text file, minutes, action items |

@@ -67,11 +67,21 @@ public:
     // Questions taken in steps: before the work, the model splits the question into steps with these
     // instructions (the planning skill); the app then gives it one step at a time, and asks for the
     // answer from what the steps found. No instructions, or a one-step plan: the question as it is.
-    void setLocalPlanner(std::function<std::string()> instructions) { localPlanner_ = std::move(instructions); }
+    // The instructions are made for the question (it may name tables whose columns the plan needs).
+    void setLocalPlanner(std::function<std::string(const std::string& question)> instructions) { localPlanner_ = std::move(instructions); }
     Property<bool> localInSteps{true};
     // The fewest tokens the local model spends on any picture it looks at (saved): 0 lets it choose
     // per look (70 for a glance to 1120 for small print); 280, 560 or 1120 for at least that.
     Property<int> localPictureTokens{0};
+    // For tools that ask the local model themselves (one document at a time): the model, device and
+    // context of the exchange in progress; what to show as its activity meanwhile.
+    const interfaces::LocalChatRequest& localRequestNow() const { return localRequest_; }
+    void setLocalActivity(const std::string& what) { activity_ = what.empty() ? std::string() : "Local model: " + what; }
+    // Counts conversations: a new chat or another folder starts the next (working notes go with it).
+    int conversation() const { return conversation_; }
+    // The local model's working notes (its tools keep them), repeated with each step of a question
+    // taken in steps: what it found stays in front of it however long the exchange grows.
+    void setLocalNotes(std::function<std::string()> notes) { localNotes_ = std::move(notes); }
     static constexpr int kPictureTokenChoices[] = {0, 280, 560, 1120};
     // The steps in a plan the model wrote ("1. ...", "2) ...", "Step 3: ..."), at most kMaxPlanSteps.
     static std::vector<std::string> planSteps(const std::string& plan);
@@ -157,7 +167,9 @@ private:
     interfaces::LocalChatRequest localRequest_;
     int localRounds_ = 0;
     int localNudges_ = 0; // times it was told to make the call it announced
-    std::function<std::string()> localPlanner_;
+    std::function<std::string(const std::string&)> localPlanner_;
+    std::function<std::string()> localNotes_;
+    int conversation_ = 0;
     std::vector<std::string> localSteps_; // the plan of the question in progress
     size_t localStep_ = 0;                // steps given so far (steps + 1: the answer was asked for)
     void planLocal(int generation, std::string question);

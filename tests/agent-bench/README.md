@@ -1,10 +1,10 @@
 # Local agent questions
 
-25 questions with known answers for the local agent (the offline model in the agent panel), over
+27 questions with known answers for the local agent (the offline model in the agent panel), over
 the small sample set in `C:\cpp\agent-samples` (outside the repository: licences and sources in its
 `SOURCES.md`). They cover what the agent is for: tables (CSV and Excel), sums, PDF documents,
-photographed receipts (OCR), speech, a meeting transcript, a DLL's exports and imports, and the
-folder itself. Most need several tool calls, and a third need several steps (a lookup, another
+photographed receipts (OCR), speech, a meeting transcript, a DLL's exports and imports, the
+folder itself, and four invoices to work across (`invoices/`). Most need several tool calls, and a third need several steps (a lookup, another
 lookup, then `calculate`).
 
 | File | What |

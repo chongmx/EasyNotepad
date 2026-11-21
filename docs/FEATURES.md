@@ -361,6 +361,15 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
   - **memory** between conversations (`agent-memory/memories.json` in the app's data folder):
     preferences, lessons from mistakes, facts, notes for a week, temporary notes for the session;
     it corrects, forgets and compacts them, and follows your preferences in every answer.
+- **Many documents**: `search_documents` finds which documents in the folder (PDF, Word, Excel,
+  PowerPoint, text) mention something, with page and snippet, or lists them all; `extract_from_documents`
+  asks one question of up to 30 documents, one fresh pass each (long ones part by part), and
+  returns a table; working notes (`note`, `read_notes`) keep what it found for the next steps.
+- **Scanning**: `scan_document` (overlapping windows over long documents: where something is, with
+  pages and quotes) and `scan_image` (overlapping tiles over a picture, cut finer where something
+  was seen: which region to look at).
+- **Numbers by the calculator only**: a figure in an answer that no tool gave goes back to the
+  model to be worked out with `calculate` (several named sums in one call).
 - **Zooming and picture tokens**: `look_at_image` and `look_at_page` take a `region` (top,
   bottom-right, "top third", "middle-left quarter", or "left,top,right,bottom" in percent), a
   `zoom` (percent) and `at` (the point to zoom around). Pages are zoomed in the viewer, pictures

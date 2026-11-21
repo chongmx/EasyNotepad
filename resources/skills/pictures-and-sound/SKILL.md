@@ -34,6 +34,15 @@ that part at high detail. Example - the VAT line near the bottom of a receipt:
 1. `look_at_image {"path": "receipt.jpg"}` (the layout: the totals are 55-70% down)
 2. `look_at_image {"path": "receipt.jpg", "region": "0,55,100,70", "detail": "high"}`
 
+## Finding a small thing: scan_image
+When you do not know where in a picture something is (a stamp, a signature, a serial number, one
+label on a big drawing), scan it: it shows you the picture in overlapping tiles, one at a time,
+looks again finer where you saw it, and returns the regions.
+- `scan_image {"path": "site-photo.jpg", "find": "the serial number plate"}`
+- `"grid": 3` for a busy picture (3 x 3 tiles first), `"levels": 3` to go finer, `"detail": "high"`
+  for small print in each tile.
+Then read it: `look_at_image {"path": "site-photo.jpg", "region": "<the region it gave>", "detail": "high"}`.
+
 ## Pages of documents
 `look_at_page {"path": "q3.pdf", "page": 7}` shows the page in the viewer as the user sees it, whole,
 and gives you that picture. The numbers in a chart at the bottom of page 7:

@@ -4703,7 +4703,7 @@ TEST(local_agent_takes_a_question_in_steps)
                             done(AgentViewModel::ToolOutput{"ok", {}, {}});
                         },
                         []() { return std::string("Guide."); });
-    agent.setLocalPlanner([]() { return std::string("---\nname: planning\n---\nWrite the steps."); });
+    agent.setLocalPlanner([](const std::string&) { return std::string("---\nname: planning\n---\nWrite the steps."); });
 
     const std::string question = "Which country made the most profit, and what share of the total is it?";
     engine.textAnswers = {"1. Find the profit of each country.\n2. Find the total profit.\n3. Work out the share.",
@@ -4756,6 +4756,156 @@ TEST(local_agent_takes_a_question_in_steps)
     CHECK_EQ(engine.chats.size(), size_t(13));
     CHECK(engine.chats[11].messages.back().text.find("Make the corrected call now") != std::string::npos);
     CHECK(!agent.busy.get() && agent.messages().back().text == "Sunday: 3.26.");
+}
+
+TEST(local_agent_works_across_many_documents_with_notes)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-documents";
+    os::fs::createDirectories(root + "/invoices");
+    os::fs::createDirectories(root + "/reports");
+    files.write(root + "/invoices/march.md", "# Invoice 101\nCustomer: Acme\nTotal: 120.50 EUR\n", nullptr);
+    files.write(root + "/invoices/april.txt", "Invoice 102\nCustomer: Brix\nTotal: 80.00 EUR\n", nullptr);
+    std::string longReport = "Annual report\n";
+    for (int i = 0; i < 400; ++i)
+        longReport += "Line " + std::to_string(i) + " of the yearly review, about nothing in particular at all.\n";
+    longReport += "Conclusion: revenue grew by 12 percent.\n";
+    files.write(root + "/reports/annual.txt", longReport, nullptr);
+    files.write(root + "/photo.png", std::string("\x89PNG\r\n\x1a\n", 8), nullptr); // not a document
+    FakeEngine engine;
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); }, &engine);
+    auto call = [&](const char* name, const model::Json& args) {
+        std::string text;
+        bool answered = false;
+        tools.run({"c", name, args.dump()}, [&](viewmodel::AgentViewModel::ToolOutput out) {
+            text = out.text;
+            answered = true;
+        });
+        for (int i = 0; i < 500 && !answered; ++i) {
+            os::dispatch::pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return text;
+    };
+    using model::Json;
+    // The catalogue: every document, its kind and title; not the picture.
+    const std::string listed = call("search_documents", Json::object());
+    CHECK(listed.find("3 documents") != std::string::npos && listed.find("invoices/march.md") != std::string::npos &&
+          listed.find("\"# Invoice 101\"") != std::string::npos && listed.find("photo.png") == std::string::npos);
+    // Inside them: which mention it, best first, with a snippet.
+    const std::string found = call("search_documents", Json::object().set("query", "revenue conclusion"));
+    CHECK(found.find("1 of 3 documents") != std::string::npos && found.find("reports/annual.txt") != std::string::npos &&
+          found.find("revenue grew by 12 percent") != std::string::npos);
+    CHECK(call("search_documents", Json::object().set("query", "zeppelin")).find("No document") != std::string::npos);
+    // A guessed name: what is there instead.
+    CHECK(call("query_table", Json::object().set("path", "invoices/invoices.csv")).find("invoices/invoices.csv does not exist. invoices/ holds: april.txt, march.md") !=
+          std::string::npos);
+    CHECK(call("search_documents", Json::object().set("folder", "invoices").set("query", "Brix")).find("invoices/april.txt") != std::string::npos);
+
+    // One question of each: a pass per document (the long one in parts, what it found carried on).
+    engine.textAnswers = {"Invoice 102, total 80.00 EUR (page 1)", "Invoice 101, total 120.50 EUR"};
+    const std::string table = call("extract_from_documents", Json::object().set("files", "invoices").set("question", "number and total"));
+    CHECK(table.find("| invoices/april.txt | Invoice 102, total 80.00 EUR (page 1) |") != std::string::npos &&
+          table.find("| invoices/march.md | Invoice 101, total 120.50 EUR |") != std::string::npos);
+    CHECK(engine.chats.size() == 2 && engine.chats[0].tools.empty() &&
+          engine.chats[0].messages.back().text.find("Customer: Brix") != std::string::npos &&
+          engine.chats[0].messages.back().text.find("Customer: Acme") == std::string::npos); // one document a pass
+    const size_t parts = (longReport.size() + 8999) / 9000; // 9,000 characters a pass
+    CHECK(parts >= 3);
+    engine.textAnswers.assign(parts - 1, "not in this document");
+    engine.textAnswers.push_back("Revenue grew 12 percent.");
+    const std::string annual = call("extract_from_documents", Json::object().set("files", "reports/*.txt").set("question", "revenue growth"));
+    CHECK_EQ(engine.chats.size(), 2 + parts);
+    const std::string last = "part " + std::to_string(parts) + " of " + std::to_string(parts);
+    CHECK(engine.chats.back().messages.back().text.find(last) != std::string::npos &&
+          engine.chats.back().messages.back().text.find("What you found in its earlier parts:\nnot in this document") != std::string::npos);
+    CHECK(annual.find("| reports/annual.txt | Revenue grew 12 percent. |") != std::string::npos);
+    CHECK(call("extract_from_documents", Json::object().set("files", "nothing/*.pdf").set("question", "x")).find("No documents match") !=
+          std::string::npos);
+
+    // Scanning a long document: overlapping windows, one at a time; where it was found, quoted.
+    {
+        const size_t length = longReport.size() + 1, window = 3000, step = 2400; // 20% overlap
+        const size_t windows = length <= window ? 1 : (length - window + step - 1) / step + 1;
+        engine.textAnswers.assign(windows - 1, "nothing");
+        engine.textAnswers.push_back("Conclusion: revenue grew by 12 percent.");
+        const size_t before = engine.chats.size();
+        const std::string scanned = call("scan_document", Json::object().set("path", "reports/annual.txt").set("find", "revenue growth")
+                                                              .set("window", "3000").set("overlap", 20));
+        CHECK_EQ(engine.chats.size() - before, windows);
+        CHECK(scanned.find(std::to_string(windows) + " windows of 3000 characters overlapping by 20%") != std::string::npos &&
+              scanned.find("Found in 1 place(s)") != std::string::npos && scanned.find("revenue grew by 12 percent") != std::string::npos);
+        // Each window starts inside the one before (the overlap): a sentence at an edge is whole in one of them.
+        const std::string first = engine.chats[before].messages.back().text, second = engine.chats[before + 1].messages.back().text;
+        const size_t a = first.find("----- this part -----\n") + 22, b = second.find("----- this part -----\n") + 22;
+        CHECK(first.compare(a + step, 200, second, b, 200) == 0);
+    }
+    // Scanning a picture: a grid of tiles, then finer tiles where something was seen.
+    {
+        const std::optional<std::string> fax = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/images/fax-g4.tif");
+        files.write(root + "/fax.tif", fax.value_or(std::string()), nullptr);
+        engine.textAnswers = {"nothing", "A black bar across this part.", "nothing", "nothing", // the 2 x 2 grid
+                              "nothing", "The bar is here, at the top.", "nothing", "nothing"}; // the seen tile, finer
+        const size_t before = engine.chats.size();
+        const std::string seen = call("scan_image", Json::object().set("path", "fax.tif").set("find", "the black bar"));
+        CHECK_EQ(engine.chats.size() - before, size_t(8));
+        CHECK(engine.chats[before].messages.back().media.size() == 1 && engine.chats[before + 4].messages.back().media.size() == 1);
+        CHECK(seen.find("Found in 2 place(s)") != std::string::npos && seen.find("closer") != std::string::npos &&
+              seen.find("The bar is here") != std::string::npos && seen.find("region \"") != std::string::npos);
+    }
+
+    // Notes: what the passes found, and what it notes itself; a new conversation starts them again.
+    CHECK(call("note", Json::object().set("text", "Check the April invoice date")).find("Noted") != std::string::npos);
+    const std::string notes = call("read_notes", Json::object());
+    CHECK(notes.find("invoices/march.md (number and total): Invoice 101, total 120.50 EUR") != std::string::npos &&
+          notes.find("Check the April invoice date") != std::string::npos);
+    vm.agent().newChat();
+    CHECK(call("read_notes", Json::object()).find("No notes yet") != std::string::npos);
+}
+
+TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
+{
+    using viewmodel::AgentViewModel;
+    FakeEngine engine;
+    AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            return s;
+        },
+        []() { return std::string("int x = 7;"); });
+    agent.agentChoice.set(int(AgentViewModel::Choice::Local));
+    agent.localInSteps.set(false);
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}}; },
+                        [](const interfaces::LocalToolCall&, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            done(AgentViewModel::ToolOutput{"each = 86.40 * 1.18 / 3 = 33.984", {}, {}});
+                        },
+                        []() { return std::string("Guide."); });
+    // In its head (34.10): sent back; with the calculator (33.98, its result rounded): kept.
+    engine.textAnswers = {"Each of the 3 people pays 34.10 (102.30 in all).",
+                          R"j({"name": "calculate", "arguments": {"expression": "each = 86.40 * 1.18 / 3"}})j",
+                          "Each of the 3 people pays 33.98."};
+    agent.submitPrompt("A dinner costs 86.40 with an 18% tip, split among 3 people: how much each?");
+    CHECK_EQ(engine.chats.size(), size_t(3));
+    CHECK(engine.chats[1].messages.back().text.find("No tool gave you these figures: 34.10, 102.30") != std::string::npos);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Each of the 3 people pays 33.98.");
+    // Figures from the question, counting, years, and rounded or percentage forms pass.
+    engine.textAnswers = {"In 2024 the 86.40 bill with 18% (0.18 of it) gives 4 lines."};
+    agent.submitPrompt("A dinner costs 86.40 with an 18% tip: how much each?");
+    CHECK_EQ(engine.chats.size(), size_t(4)); // no second request: nothing to check
+    // The file open in the editor is named, not pasted, when the model has tools.
+    engine.textAnswers = {"Fine."};
+    agent.submitPrompt("What is in the readme?", "src/x.cpp:3");
+    CHECK(engine.chats.back().messages.back().text.find("int x = 7;") == std::string::npos &&
+          engine.chats.back().messages.back().text.find("the editor shows src/x.cpp") != std::string::npos);
+    engine.textAnswers = {"Fine."};
+    agent.submitPrompt("Explain these lines", "src/x.cpp:3-9"); // lines the user selected still go in
+    CHECK(engine.chats.back().messages.back().text.find("int x = 7;") != std::string::npos);
 }
 
 TEST(agent_proposals_replace_one_waiting_for_the_same_file)
@@ -5001,6 +5151,12 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(call("calculate", R"j({"expression": "7 % 3"})j").find("= 1") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "1 / 0"})j").find("division by zero") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "2 +"})j").find("Cannot calculate") != std::string::npos);
+    // Several at once, named, later ones using the names.
+    const std::string several = call("calculate", R"j({"expression": "total = 86.40 * 1.18; each = total / 3; round(each, 2)"})j");
+    CHECK(several.find("total = 86.40 * 1.18 = 101.952") != std::string::npos && several.find("each = total / 3 = 33.984") != std::string::npos &&
+          several.find("round(each, 2) = 33.98") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "a = 2\nb = a * 21"})j").find("b = a * 21 = 42") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "1+1", "expressions": ["2*3"]})j").find("2*3 = 6") != std::string::npos);
 
     // Tables: filter, sort, columns, groups and totals; currency and (negative) cells as numbers.
     const std::string east = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = east and Units > 50"})j");
@@ -5014,6 +5170,14 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units)", "sort": "Units asc", "limit": 1})j").find("West | 85") != std::string::npos);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Colour = red"})j").find("The columns are: Region, Product") != std::string::npos);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product contains pa"})j").find("1 of 4") != std::string::npos);
+    // Conditions joined by a comma, &&, ==; a quoted value; "sum" of the one column named.
+    for (const char* where : {"Region = East, Units > 50", "Region == 'East' && Units > 50", "region = east; units > 50"})
+        CHECK(call("query_table", model::Json::object().set("path", "data/sales.csv").set("where", where).dump()).find("1 of 4 rows match") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Region = East", "columns": "Units", "aggregate": "sum"})j")
+              .find("all rows | 150") != std::string::npos);
+    // A run-on condition is never read as an abbreviation of a value ("East, Units > 50" is not "East").
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Region = East, Product = Ink"})j").find("no rows match") !=
+          std::string::npos);
     // A word written out where the file abbreviates it ("Eastern", the file says "East"): read as it.
     const std::string eastern = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = Eastern"})j");
     CHECK(eastern.find("2 of 4 rows match ('Eastern' read as 'East')") != std::string::npos);
@@ -5059,7 +5223,7 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
         CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "exports,imports"})j").find("Imports:") != std::string::npos);
         const std::string exports = call("inspect_binary", R"j({"path": "fixture.dll", "list": "exports"})j");
         CHECK(exports.find("sample::Widget::area(int, int) const") != std::string::npos);
-        CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "libraries"})j").find("KERNEL32.dll") != std::string::npos);
+        CHECK(exports.find("-> forwarded to NTDLL.RtlGetVersion") != std::string::npos);        CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "libraries"})j").find("KERNEL32.dll") != std::string::npos);
         CHECK(call("read_bytes", R"j({"path": "fixture.dll", "length": 16})j").find("00000000  4d 5a") != std::string::npos);
     }
     CHECK(call("inspect_binary", R"j({"path": "data/sales.csv"})j").find("not a program") != std::string::npos);

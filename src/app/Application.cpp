@@ -66,6 +66,7 @@ Application::~Application()
     viewModel_->agent().setLocalTools({}, {}, {}); // looks waiting for a frame are dropped with the tools
     viewModel_->agent().setLocalReminder({});
     viewModel_->agent().setLocalPlanner({});
+    viewModel_->agent().setLocalNotes({});
     agentTools_.reset();
     automation_.reset(); // no requests may reach the view-model while it is destroyed
     detachUi();

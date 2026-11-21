@@ -68,8 +68,33 @@ its release notes on GitHub.
 - Retries: a call to the wrong tool for a file, a region it cannot read, or a filter that matches
   no rows (the reply now lists the values the column holds, and "Sunday" finds "Sun") is followed
   by "make the corrected call now" instead of a report of the failure.
-- `tests/agent-bench`: 25 questions with known answers over the sample files, and a runner that
+- `tests/agent-bench`: 27 questions with known answers over the sample files, and a runner that
   asks them in the running app and grades the answers.
+- The local agent works across the folder's documents: `search_documents` searches inside every
+  PDF, Word, Excel, PowerPoint and text file (or lists them with kind, pages and title);
+  `extract_from_documents` asks one question of many documents, each in a pass of its own (a long
+  one part by part, what it found carried along), and returns a table; working notes (`note`,
+  `read_notes`) hold what it found, are repeated at each step, and start again with a new chat.
+  The `multiple-documents` skill teaches the way: find, extract per document, note, calculate,
+  answer with sources. The planner sees what the folder holds (documents or tables) and plans with
+  real names. Four invoices in different layouts: total and largest supplier right in 17 s.
+- Scanning with the local model: `scan_document` shows a long document (or several) to the model
+  in overlapping windows (small, normal or large; overlap in percent), one at a time with what is
+  looked for, and returns the pages and quotes where it is; `scan_image` shows a picture in a grid
+  of overlapping tiles and cuts again, finer, the tiles where it was seen (coarse to fine, up to 3
+  levels), and returns the regions to look at closely. The planner is given the real columns of
+  the tables a question names, and plans counts, totals and averages as one query_table step.
+- Numbers: the local model no longer works figures out itself. An answer with a figure no tool
+  gave and the user did not write goes back to it, to be done with `calculate`; `calculate` takes
+  several sums at once, named ("total = 86.40 * 1.18; each = total / 3"). Counting stays its own.
+- Tools: the file open in the editor is named, not pasted, into a question (it had taken over
+  questions about other files); `read_document` lists a document's tables and figures with their
+  pages and says which pages it left out; `query_table` reads conditions joined by commas, `&&`
+  or `==`, "sum" of the one column named, and gives totals unsorted rather than failing on a sort
+  it cannot do; a guessed file name gets "does not exist" with what the folder holds;
+  `inspect_binary` shows where a forwarded export goes; each tool step in the chat shows the
+  first line of what the tool answered. Benchmark: 16 of 25 before, 20 of 25 after the number and
+  tool fixes.
 - The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
   a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
   RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a
