@@ -478,12 +478,12 @@ void AgentPanel::renderLocalSetup(float inner)
                 ImGui::PushID(i);
                 if (ImGui::Selectable(label(i).c_str(), i == choice))
                     lab.modelChoice.set(i);
-                ui::itemTooltip(Lab::modelChoiceInfo(i).summary);
+                ui::itemTooltip("%s", Lab::modelChoiceInfo(i).summary);
                 ImGui::PopID();
             }
             ImGui::EndCombo();
         }
-        ui::itemTooltip(lab.chosenModel().summary);
+        ui::itemTooltip("%s", lab.chosenModel().summary);
         registerLastItem("agent-local-model", "combo", "Which local model",
                          [&lab]() { lab.modelChoice.set((lab.modelChoice.get() + 1) % Lab::kModelChoices); });
         ImGui::TextDisabled("%s.", lab.chosenModel().summary);

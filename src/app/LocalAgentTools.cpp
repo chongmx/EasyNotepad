@@ -2703,8 +2703,9 @@ void LocalAgentTools::calculate(const Json& args, Done done)
                 text.replace(at, name.size(), v);
                 at += v.size();
             }
+        const std::string cleaned = plainNumbers(text); // kept: the calculator views it (string_view)
         Calculator calc;
-        calc.s = plainNumbers(text);
+        calc.s = cleaned;
         const double v = calc.sum();
         calc.space();
         if (calc.error.empty() && calc.i < calc.s.size())
