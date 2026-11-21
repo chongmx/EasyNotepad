@@ -738,7 +738,9 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
                 if (model->helper->request(engine::toJson(request), toStage, toText, cancelled, answer, reason)) {
                     model->helperLastUse = std::chrono::steady_clock::now();
                     interfaces::LocalChatResult r = engine::chatResultFrom(answer);
-                    if (r.ok || wrote || cancel->load()) {
+                    // A question too long for the context it has is not the GPU failing: said as it is
+                    // (the GPU stays in use; the CPU would take many minutes for the same).
+                    if (r.ok || wrote || cancel->load() || r.error.find("too long for the local model") != std::string::npos) {
                         finish(r);
                         return;
                     }

@@ -71,6 +71,8 @@ bool loadProgress(float progress, void* user)
 }
 
 // Parameters shared by the lab's runs and the agent's chats.
+constexpr int kMinFitContext = 16384; // the least context a GPU fit keeps: the agent's prompt, documents, answers
+
 common_params engineParams(const std::string& modelPath, const std::string& drafterPath, int threads, bool gpu,
                            int contextTokens, int batchTokens, LoadWatch* watch)
 {
@@ -81,13 +83,18 @@ common_params engineParams(const std::string& modelPath, const std::string& draf
     params.n_ubatch = 512;
     params.cpuparams.n_threads = threads;
     params.cpuparams_batch.n_threads = threads;
-    params.n_gpu_layers = gpu ? 999 : 0;
+    // On the GPU, llama.cpp fits the layers and the context to free memory (both left to it: -1). The
+    // context comes first, down to kMinFitContext: the agent's opening prompt alone is about 5,000
+    // tokens, so a model that fills the card (Gemma 4 12B on 8 GB) keeps some layers on the CPU
+    // rather than a context too short to answer in (it had got 4,096 and fell back to the CPU).
+    params.n_gpu_layers = gpu ? -1 : 0;
+    params.fit_params_min_ctx = kMinFitContext;
     params.load_progress_callback = loadProgress;
     params.load_progress_callback_user_data = watch;
     if (!drafterPath.empty()) {
         params.speculative.types = {COMMON_SPECULATIVE_TYPE_DRAFT_MTP};
         params.speculative.draft.mparams.path = drafterPath;
-        params.speculative.draft.n_gpu_layers = gpu ? 999 : 0;
+        params.speculative.draft.n_gpu_layers = gpu ? -1 : 0; // fitted with the model
         const auto limits = common_speculative_get_output_limits(params.n_batch, params.n_parallel,
                                                                  common_speculative_n_max(&params.speculative));
         params.n_outputs_max = limits.total;
