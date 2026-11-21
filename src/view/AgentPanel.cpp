@@ -463,12 +463,41 @@ void AgentPanel::renderLocalSetup(float inner)
         ImGui::TextDisabled("%s", lab.hasEngine() ? lab.info().unavailableReason.c_str() : "This build has no local model.");
         return;
     }
+    // Which model: each a download of its own; the one chosen answers (the others stay on disk).
+    {
+        auto label = [](int i) {
+            const Lab::ModelChoice& c = Lab::modelChoiceInfo(i);
+            char text[96];
+            std::snprintf(text, sizeof(text), "%s (%.1f GB)", c.name, double(c.model->size + c.projector->size) / 1e9);
+            return std::string(text);
+        };
+        int choice = lab.modelChoice.get();
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 330.0f * s_));
+        if (ImGui::BeginCombo("Model", label(choice).c_str())) {
+            for (int i = 0; i < Lab::kModelChoices; ++i) {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(label(i).c_str(), i == choice))
+                    lab.modelChoice.set(i);
+                ui::itemTooltip(Lab::modelChoiceInfo(i).summary);
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ui::itemTooltip(lab.chosenModel().summary);
+        registerLastItem("agent-local-model", "combo", "Which local model",
+                         [&lab]() { lab.modelChoice.set((lab.modelChoice.get() + 1) % Lab::kModelChoices); });
+        ImGui::TextDisabled("%s.", lab.chosenModel().summary);
+    }
     const Lab::FileStatus model = lab.fileStatus(Lab::Which::Model);
     const Lab::FileStatus drafter = lab.fileStatus(Lab::Which::Drafter);
     const Lab::FileStatus projector = lab.fileStatus(Lab::Which::Projector);
     const bool ready = lab.fileUsable(Lab::Which::Model);
+    const bool withDrafter = lab.chosenModel().drafter;
+    const char* name = lab.chosenModel().name;
     char size[32];
-    std::snprintf(size, sizeof(size), "%.2f GB", double(Lab::modelFile().size) / 1e9);
+    std::snprintf(size, sizeof(size), "%.2f GB", double(lab.file(Lab::Which::Model).size) / 1e9);
+    char eyes[32];
+    std::snprintf(eyes, sizeof(eyes), "%.0f MB", double(lab.file(Lab::Which::Projector).size) / 1e6);
     if (model.state == State::Downloading || drafter.state == State::Downloading || projector.state == State::Downloading) {
         const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter.state == State::Downloading ? drafter : projector;
         const float fraction = d.total ? float(double(d.have) / double(d.total)) : 0.0f;
@@ -485,9 +514,8 @@ void AgentPanel::renderLocalSetup(float inner)
     } else if (ready) {
         ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
         ImGui::SameLine();
-        ImGui::TextUnformatted(lab.fileUsable(Lab::Which::Drafter) ? "Gemma 4 E2B is here, with its drafter (faster)."
-                                                                   : "Gemma 4 E2B is here.");
-        if (!lab.fileUsable(Lab::Which::Drafter)) {
+        ImGui::Text(withDrafter && lab.fileUsable(Lab::Which::Drafter) ? "%s is here, with its drafter (faster)." : "%s is here.", name);
+        if (withDrafter && !lab.fileUsable(Lab::Which::Drafter)) {
             if (ImGui::Button(ICON_FA_DOWNLOAD " Get the drafter (77 MB, faster answers)"))
                 lab.download(Lab::Which::Drafter);
             registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
@@ -513,7 +541,8 @@ void AgentPanel::renderLocalSetup(float inner)
                 agent.localPictureTokens.set(agent.localPictureTokens.get() == 1120 ? 0 : 1120);
             });
         } else {
-            if (ImGui::Button(ICON_FA_DOWNLOAD " Let it see and hear (987 MB)"))
+            const std::string seeHear = std::string(ICON_FA_DOWNLOAD " Let it see and hear (") + eyes + ")";
+            if (ImGui::Button(seeHear.c_str()))
                 lab.download(Lab::Which::Projector);
             ui::itemTooltip("Its eyes and ears: it can then look at pictures and at the pages of documents, and listen to "
                             "recordings (WAV, MP3, FLAC).");
@@ -521,8 +550,8 @@ void AgentPanel::renderLocalSetup(float inner)
                              [&lab]() { lab.download(Lab::Which::Projector); });
         }
     } else {
-        ImGui::TextWrapped("Gemma 4 E2B (%s) answers quick questions about your code on this device, without a network "
-                           "or an account. It works in the open folder: it reads files and documents and proposes edits for you to accept.", size);
+        ImGui::TextWrapped("%s (%s) answers questions on this device, without a network or an account. It works in the "
+                           "open folder: it reads files and documents and proposes edits for you to accept.", name, size);
         if (ImGui::Button(ICON_FA_DOWNLOAD " Download"))
             lab.download(Lab::Which::Model);
         registerLastItem("agent-local-download", "button", "Download the local model", [&lab]() { lab.download(Lab::Which::Model); });

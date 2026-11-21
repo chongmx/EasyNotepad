@@ -35,6 +35,41 @@ const EngineLabViewModel::CatalogFile kProjector{
     "021059cce659fe7f9170d5599761d7bbaf644b798dab9503aca30dc43e6beb14", 986833664ull,
     "google/gemma-4-E2B-it-qat-q4_0-gguf"};
 
+// The bigger models, from the same Google series (QAT, Q4_0), pinned the same way.
+const EngineLabViewModel::CatalogFile kModelE4B{
+    "Gemma 4 E4B (Google QAT, Q4_0)", "gemma-4-E4B_q4_0-it.gguf",
+    "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/"
+    "gemma-4-E4B_q4_0-it.gguf",
+    "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee", 5154941280ull,
+    "google/gemma-4-E4B-it-qat-q4_0-gguf"};
+const EngineLabViewModel::CatalogFile kProjectorE4B{
+    "Eyes and ears for E4B (Google, vision and audio)", "gemma-4-E4B-it-mmproj.gguf",
+    "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/"
+    "gemma-4-E4B-it-mmproj.gguf",
+    "7498a37cb619e55f2fcf87eb931f56e99389ed6d432e4c5c66110694c0d65578", 991552256ull,
+    "google/gemma-4-E4B-it-qat-q4_0-gguf"};
+const EngineLabViewModel::CatalogFile kModel12B{
+    "Gemma 4 12B (Google QAT, Q4_0)", "gemma-4-12b-it-qat-q4_0.gguf",
+    "https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/resolve/29d097773436b69ff9feafd636ab4cf873786537/"
+    "gemma-4-12b-it-qat-q4_0.gguf",
+    "93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b", 6975879296ull,
+    "google/gemma-4-12B-it-qat-q4_0-gguf"};
+const EngineLabViewModel::CatalogFile kProjector12B{
+    "Eyes for 12B (Google)", "mmproj-gemma-4-12b-it-qat-q4_0.gguf",
+    "https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-gguf/resolve/29d097773436b69ff9feafd636ab4cf873786537/"
+    "mmproj-gemma-4-12b-it-qat-q4_0.gguf",
+    "cb018338a7538a9814d994bfe54644c71eb7ed54e31eae2f721e45fd3c260da7", 175115616ull,
+    "google/gemma-4-12B-it-qat-q4_0-gguf"};
+
+const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices] = {
+    {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, true,
+     5ull << 30},
+    {"Gemma 4 E4B", "better at questions with several parts; about half as fast; best with a graphics card of 8 GB",
+     &kModelE4B, &kProjectorE4B, false, 7ull << 30},
+    {"Gemma 4 12B", "the most careful; slow, and needs a graphics card of 12 GB or more to be quick", &kModel12B,
+     &kProjector12B, false, 9ull << 30},
+};
+
 // Room kept free beyond the download itself.
 constexpr uint64_t kSpareBytes = 512ull << 20;
 
@@ -91,6 +126,17 @@ const EngineLabViewModel::CatalogFile& EngineLabViewModel::catalogFile(Which whi
     return which == Which::Model ? kModel : which == Which::Drafter ? kDrafter : kProjector;
 }
 
+const EngineLabViewModel::ModelChoice& EngineLabViewModel::modelChoiceInfo(int index)
+{
+    return kChoices[std::clamp(index, 0, kModelChoices - 1)];
+}
+
+const EngineLabViewModel::CatalogFile& EngineLabViewModel::file(Which which) const
+{
+    const ModelChoice& c = chosenModel();
+    return which == Which::Model ? *c.model : which == Which::Projector ? *c.projector : kDrafter;
+}
+
 Property<std::string>& EngineLabViewModel::customPath(Which which)
 {
     return which == Which::Model ? customModelPath : which == Which::Drafter ? customDrafterPath : customProjectorPath;
@@ -104,6 +150,7 @@ EngineLabViewModel::EngineLabViewModel(interfaces::ILocalEngineService* engine) 
     for (Property<bool>* p : {&useGpu, &allowMobileData})
         subscriptions_.push_back(p->subscribe([this](const bool&) { changed.emit(); }));
     subscriptions_.push_back(threads.subscribe([this](const int&) { changed.emit(); }));
+    subscriptions_.push_back(modelChoice.subscribe([this](const int&) { changed.emit(); }));
 }
 
 const interfaces::EngineInfo& EngineLabViewModel::info()
@@ -139,13 +186,13 @@ std::string EngineLabViewModel::pathFor(Which which) const
     if (!engine_)
         return {};
     const std::string dir = engine_->modelsDirectory();
-    return dir.empty() ? std::string() : dir + "/" + catalogFile(which).fileName;
+    return dir.empty() ? std::string() : dir + "/" + file(which).fileName;
 }
 
 EngineLabViewModel::FileStatus EngineLabViewModel::fileStatus(Which which) const
 {
     FileStatus s;
-    const CatalogFile& file = catalogFile(which);
+    const CatalogFile& file = this->file(which);
     s.path = pathFor(which);
     s.total = file.size;
     if (!engine_ || s.path.empty())
@@ -213,7 +260,7 @@ void EngineLabViewModel::importFile(Which which)
 {
     if (!engine_ || downloading_ >= 0)
         return;
-    const CatalogFile& file = catalogFile(which);
+    const CatalogFile& file = this->file(which);
     const std::string dir = engine_->modelsDirectory();
     if (dir.empty()) {
         say("No folder to keep models in on this device.", true);
@@ -256,7 +303,7 @@ void EngineLabViewModel::startDownload(Which which, bool mobileData)
 {
     if (!engine_ || downloading_ >= 0)
         return;
-    const CatalogFile& file = catalogFile(which);
+    const CatalogFile& file = this->file(which);
     // Always into the models folder: a custom path is the user's own file.
     const std::string dir = engine_->modelsDirectory();
     if (dir.empty()) {
@@ -313,7 +360,7 @@ void EngineLabViewModel::verify(Which which)
     if (!engine_ || verifying_ >= 0)
         return;
     const std::string path = pathFor(which);
-    const CatalogFile& file = catalogFile(which);
+    const CatalogFile& file = this->file(which);
     verifying_ = int(which);
     verifyFraction_ = 0;
     engine_->hashFile(
@@ -471,6 +518,7 @@ model::Json EngineLabViewModel::save() const
                          .set("settings", settingsJson(r.settings))
                          .set("result", resultJson(r.result)));
     return model::Json::object()
+        .set("model", modelChoice.get())
         .set("customModel", customModelPath.get())
         .set("customDrafter", customDrafterPath.get())
         .set("customProjector", customProjectorPath.get())
@@ -485,6 +533,8 @@ void EngineLabViewModel::load(const model::Json& j)
 {
     if (!j.isObject())
         return;
+    if (const model::Json* m = j.find("model"); m && m->isNumber())
+        modelChoice.set(std::clamp(int(m->asNumber()), 0, kModelChoices - 1));
     customModelPath.set(j.getString("customModel"));
     customDrafterPath.set(j.getString("customDrafter"));
     customProjectorPath.set(j.getString("customProjector"));

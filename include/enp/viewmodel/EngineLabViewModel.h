@@ -23,11 +23,29 @@ public:
         uint64_t size;
         const char* origin;
     };
+    // Gemma 4 E2B's files (the first choice): the model, its drafter, its eyes and ears.
     static const CatalogFile& modelFile();
     static const CatalogFile& drafterFile();
     static const CatalogFile& projectorFile(); // the eyes and ears: pictures and sounds for the agent
     enum class Which;
     static const CatalogFile& catalogFile(Which which);
+
+    // The models to choose from (saved): each with its own eyes and ears. Bigger ones reason better
+    // and need more memory; the drafter is E2B's and speeds up only E2B.
+    struct ModelChoice {
+        const char* name;     // "Gemma 4 E4B"
+        const char* summary;  // what it is good for, and what it needs
+        const CatalogFile* model;
+        const CatalogFile* projector;
+        bool drafter;         // the catalogue's drafter goes with it
+        uint64_t memoryNeeded; // about, to run with its eyes and ears and a working context
+    };
+    static constexpr int kModelChoices = 3;
+    static const ModelChoice& modelChoiceInfo(int index);
+    Property<int> modelChoice{0};
+    const ModelChoice& chosenModel() const { return modelChoiceInfo(modelChoice.get()); }
+    // The chosen model's file of each kind (the drafter is E2B's whatever is chosen).
+    const CatalogFile& file(Which which) const;
 
     enum class FileState { Missing, Partial, Downloading, Verifying, Unverified, Ready, Mismatch, Custom };
     struct FileStatus {

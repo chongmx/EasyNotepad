@@ -171,7 +171,7 @@ void EngineLabView::renderMobileDataPrompt()
     fit::constrainNextWindow();
     if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
-    const auto& file = viewmodel::EngineLabViewModel::catalogFile(l.pendingDownload());
+    const auto& file = l.file(l.pendingDownload());
     const uint64_t have = lab().fileStatus(l.pendingDownload()).have;
     const uint64_t left = file.size > have ? file.size - have : 0;
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(380.0f * s_, ImGui::GetMainViewport()->WorkSize.x - 60.0f * s_));
@@ -234,7 +234,7 @@ void EngineLabView::renderDevice()
 
 void EngineLabView::renderFile(Which which)
 {
-    const auto& file = viewmodel::EngineLabViewModel::catalogFile(which);
+    const auto& file = lab().file(which);
     const viewmodel::EngineLabViewModel::FileStatus st = lab().fileStatus(which);
     const char* id = which == Which::Model ? "model" : which == Which::Drafter ? "drafter" : "projector";
     ImGui::PushID(id);

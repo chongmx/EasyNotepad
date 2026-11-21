@@ -4865,6 +4865,36 @@ TEST(local_agent_works_across_many_documents_with_notes)
     CHECK(call("read_notes", Json::object()).find("No notes yet") != std::string::npos);
 }
 
+TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
+{
+    using Lab = viewmodel::EngineLabViewModel;
+    FakeEngine engine;
+    Lab lab(&engine);
+    // E2B by default, as before; E4B and 12B pinned and checked the same way.
+    CHECK(std::string(lab.chosenModel().name) == "Gemma 4 E2B" && &lab.file(Lab::Which::Model) == &Lab::modelFile());
+    CHECK(lab.pathFor(Lab::Which::Model) == "/models/gemma-4-E2B_q4_0-it.gguf");
+    lab.modelChoice.set(1);
+    CHECK(lab.pathFor(Lab::Which::Model) == "/models/gemma-4-E4B_q4_0-it.gguf" &&
+          lab.pathFor(Lab::Which::Projector) == "/models/gemma-4-E4B-it-mmproj.gguf");
+    CHECK(lab.file(Lab::Which::Model).size == 5154941280ull && std::string(lab.file(Lab::Which::Model).sha256).size() == 64);
+    CHECK(!lab.chosenModel().drafter && &lab.file(Lab::Which::Drafter) == &Lab::drafterFile());
+    lab.modelChoice.set(2);
+    CHECK(std::string(lab.file(Lab::Which::Projector).fileName) == "mmproj-gemma-4-12b-it-qat-q4_0.gguf");
+    for (int i = 0; i < Lab::kModelChoices; ++i) {
+        const Lab::ModelChoice& c = Lab::modelChoiceInfo(i);
+        CHECK(std::string(c.model->url).find("/resolve/") != std::string::npos && std::string(c.projector->sha256).size() == 64);
+    }
+    // A download is the chosen model's; the choice is saved with the other settings.
+    lab.download(Lab::Which::Model);
+    CHECK(engine.downloadPath == "/models/gemma-4-12b-it-qat-q4_0.gguf");
+    lab.cancelDownload();
+    Lab again(&engine);
+    again.load(lab.save());
+    CHECK_EQ(again.modelChoice.get(), 2);
+    again.load(model::Json::object().set("model", 9)); // out of range: the last one
+    CHECK_EQ(again.modelChoice.get(), Lab::kModelChoices - 1);
+}
+
 TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
 {
     using viewmodel::AgentViewModel;

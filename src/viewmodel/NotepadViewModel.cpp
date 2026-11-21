@@ -1790,12 +1790,13 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
         return s;
     }
     if (!lab.fileUsable(Which::Model)) {
-        s.why = "the model is not downloaded yet (Tools \u203a Local Model).";
+        s.why = std::string(lab.chosenModel().name) + " is not downloaded yet (the agent set-up, or Tools \u203a Local Model).";
         return s;
     }
     s.ready = true;
     s.modelPath = lab.pathFor(Which::Model);
-    if (lab.fileUsable(Which::Drafter))
+    // The drafter is E2B's: it speeds up only that model (a custom model is the user's to pair).
+    if (lab.fileUsable(Which::Drafter) && (lab.chosenModel().drafter || !lab.customModelPath.get().empty()))
         s.drafterPath = lab.pathFor(Which::Drafter);
     if (lab.fileUsable(Which::Projector))
         s.projectorPath = lab.pathFor(Which::Projector);
