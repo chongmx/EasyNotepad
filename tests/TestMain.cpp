@@ -4271,6 +4271,35 @@ TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
         });
         CHECK(stopped.done && !stopped.result.ok && !stopped.text.empty());
         CHECK(answeredOnFake(askLocal(s, "fake:answer")));
+        // Asked while the stopped one still winds down: it waits for it (it was refused), then is answered.
+        {
+            auto second = std::make_shared<ChatRun>();
+            bool askedAgain = false;
+            const ChatRun first = askLocal(s, "fake:slow", [&]() {
+                if (askedAgain)
+                    return;
+                askedAgain = true;
+                s.cancel();
+                interfaces::LocalChatRequest q;
+                q.modelPath = "fake:answer";
+                q.messages = {{"user", "Hi"}};
+                q.threads = 1;
+                q.maxTokens = 8;
+                q.contextTokens = 256;
+                s.chat(
+                    q, [](const std::string&) {}, [second](const std::string& t) { second->text += t; },
+                    [second](const interfaces::LocalChatResult& r) {
+                        second->result = r;
+                        second->done = true;
+                    });
+            });
+            for (int i = 0; i < 3000 && !second->done; ++i) {
+                os::dispatch::pump();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            CHECK(first.done && !first.result.ok);
+            CHECK(answeredOnFake(*second));
+        }
         // A lab run on the GPU goes to it too.
         bool ran = false;
         interfaces::EngineRunResult run;

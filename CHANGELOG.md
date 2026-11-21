@@ -132,6 +132,13 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- The local agent on Gemma 4 12B closed the app when it looked at a large picture or page. 12B
+  reads a picture all at once, and a picture of more than 512 tokens did not fit the engine's
+  batch: llama.cpp ended the GPU helper, the CPU took the question over, and ended the app the same
+  way. The batch now holds the largest picture of a model that reads them all at once (1,120
+  tokens for 12B), and a picture that still does not fit is refused with a message.
+- A question asked just after stopping the local agent was refused ("the local agent is still
+  answering") while the stopped answer wound down. It now waits for it and then starts.
 - The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
   put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
   straight into memory, and the web build has a 1 MB stack, a Windows main thread's.

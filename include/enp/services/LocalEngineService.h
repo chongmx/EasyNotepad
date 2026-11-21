@@ -63,6 +63,17 @@ private:
     std::shared_ptr<std::atomic<bool>> chatting_ = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> running_ = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> cancel_ = std::make_shared<std::atomic<bool>>(false);
+    // A question asked while a stopped one still winds down (a long prompt is stopped between
+    // batches): started when that one ends. Main thread only.
+    struct WaitingChat {
+        interfaces::LocalChatRequest request;
+        std::function<void(const std::string& stage)> stage;
+        std::function<void(const std::string& text)> text;
+        std::function<void(const interfaces::LocalChatResult& result)> done;
+    };
+    std::unique_ptr<WaitingChat> waiting_;
+    void startWaiting();
+    void dropWaiting();
     // Cleared on destruction: results of work still running are then dropped, not posted.
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 };

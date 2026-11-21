@@ -686,11 +686,14 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
 {
     auto alive = alive_;
     auto chatting = chatting_;
-    auto finish = [alive, chatting, done](interfaces::LocalChatResult result) {
-        os::dispatch::postToMain([alive, chatting, done, result = std::move(result)]() {
+    auto finish = [this, alive, chatting, done](interfaces::LocalChatResult result) {
+        os::dispatch::postToMain([this, alive, chatting, done, result = std::move(result)]() {
             chatting->store(false);
-            if (alive->load() && done)
+            if (!alive->load()) // the service is gone (cleared on the main thread, as this runs)
+                return;
+            if (done)
                 done(result);
+            startWaiting();
         });
     };
 #if !ENP_HAS_LOCAL_ENGINE
@@ -702,6 +705,12 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
     r.error = info().unavailableReason;
     finish(r);
 #else
+    // Asked while a stopped question still winds down: waits for it (the latest question only).
+    if (info().available && !running_->load() && chatting_->load() && cancel_->load()) {
+        dropWaiting();
+        waiting_ = std::make_unique<WaitingChat>(WaitingChat{request, std::move(stage), std::move(text), std::move(done)});
+        return;
+    }
     // Refused at once (done is called before returning): no engine, a lab run, or still answering.
     if (!info().available || running_->load() || chatting_->exchange(true)) {
         interfaces::LocalChatResult r;
@@ -779,7 +788,37 @@ void LocalEngineService::unloadIfIdle(double idleSeconds)
         chat_->helper->stop();
 }
 
-void LocalEngineService::cancel() { cancel_->store(true); }
+void LocalEngineService::cancel()
+{
+    cancel_->store(true);
+    dropWaiting();
+}
+
+void LocalEngineService::startWaiting()
+{
+    if (!waiting_ || chatting_->load())
+        return;
+    std::unique_ptr<WaitingChat> w = std::move(waiting_);
+    chat(w->request, std::move(w->stage), std::move(w->text), std::move(w->done));
+}
+
+void LocalEngineService::dropWaiting()
+{
+    if (!waiting_)
+        return;
+    std::unique_ptr<WaitingChat> w = std::move(waiting_);
+    if (!w->done)
+        return;
+    // Said on a later frame, as an answer would be (the caller may be in the middle of stopping it).
+    auto alive = alive_;
+    os::dispatch::postToMain([alive, done = std::move(w->done)]() {
+        if (alive->load()) {
+            interfaces::LocalChatResult r;
+            r.error = "cancelled";
+            done(r);
+        }
+    });
+}
 
 std::string LocalEngineService::modelsDirectory() { return os::download::directory(); }
 

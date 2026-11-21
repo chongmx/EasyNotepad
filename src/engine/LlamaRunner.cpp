@@ -103,6 +103,23 @@ common_params engineParams(const std::string& modelPath, const std::string& draf
     return params;
 }
 
+// The tokens one batch must hold for the projector's pictures: its largest picture when it reads a
+// picture all at once (non-causal attention), 0 when it reads them in any number of batches. Read from
+// the projector file alone (nothing loaded).
+int wholePictureTokens(const std::string& projectorPath)
+{
+    if (projectorPath.empty())
+        return 0;
+    mtmd_context_params mp = mtmd_context_params_default();
+    mp.use_gpu = false;
+    mp.warmup = false;
+    mp.print_timings = false;
+    const mtmd_memory_usage usage = mtmd_get_memory_usage(projectorPath.c_str(), mp);
+    if (!usage.use_non_causal)
+        return 0;
+    return usage.image_max_tokens > 0 ? usage.image_max_tokens : 2048;
+}
+
 // A model in memory, with its drafter when there is one.
 struct Model {
     common_params params;
@@ -207,6 +224,15 @@ Generated generate(Model& m, const Prompt& prompt, int maxTokens, common_params_
     bool first = true;
     Clock::time_point tDecode = Clock::now();
     if (media) {
+        // A picture read all at once must fit one batch: refused here, where llama.cpp would abort.
+        for (size_t i = 0, n = mtmd_input_chunks_size(prompt.chunks.get()); i < n; ++i) {
+            const mtmd_input_chunk* chunk = mtmd_input_chunks_get(prompt.chunks.get(), i);
+            if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_TEXT &&
+                mtmd_decode_use_non_causal(m.media.get(), chunk) &&
+                mtmd_input_chunk_get_n_tokens(chunk) > size_t(llama_n_ubatch(ctx)))
+                throw std::runtime_error("a picture is larger than the model reads at once (" +
+                                         std::to_string(mtmd_input_chunk_get_n_tokens(chunk)) + " tokens)");
+        }
         llama_pos newPast = 0;
         if (mtmd_helper_eval_chunks(m.media.get(), ctx, prompt.chunks.get(), 0, seq, int32_t(llama_n_batch(ctx)), true,
                                     &newPast) != 0)
@@ -651,14 +677,21 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
         // only ends the helper). On the CPU, in the app's own process, a fixed size: fitting 128k tokens
         // into the RAM that happens to be free aborted the app.
         const int contextTokens = request.contextTokens > 0 ? request.contextTokens : request.useGpu ? 0 : kCpuContextTokens;
-        const std::string key = request.modelPath + "|" + request.drafterPath + "|" + std::to_string(request.threads) + "|" +
-                                (request.useGpu ? "gpu" : "cpu") + "|" + std::to_string(contextTokens);
+        const std::string key = request.modelPath + "|" + request.drafterPath + "|" + request.projectorPath + "|" +
+                                std::to_string(request.threads) + "|" + (request.useGpu ? "gpu" : "cpu") + "|" +
+                                std::to_string(contextTokens);
         if (!loaded_ || key_ != key) {
             unload();
             stage("Loading the local model");
             LoadWatch watch{&cancelled, &stage, "Loading the local model"};
             common_params params = engineParams(request.modelPath, request.drafterPath, request.threads, request.useGpu,
                                                 contextTokens, 2048, &watch); // prompts read 2048 tokens a batch
+            // A projector that reads a picture all at once (non-causal: Gemma 4 12B) needs the whole
+            // picture in one batch: llama.cpp aborts the process otherwise.
+            if (const int whole = wholePictureTokens(request.projectorPath); whole > params.n_ubatch) {
+                params.n_ubatch = whole;
+                params.n_batch = std::max(params.n_batch, whole);
+            }
             params.sampling.temp = 0.3f; // a little variety; greedy answers from a small model loop easily
             params.sampling.top_p = 0.95f;
             std::string error;
