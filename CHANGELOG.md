@@ -51,6 +51,25 @@ its release notes on GitHub.
   as before. With Gemma 4 E2B, "which country made the most profit, how much, and what share of
   the total" went from an invented figure to three tool-backed steps and the right answer (19 s
   on an RTX 5060).
+- TIFF and WebP pictures open. TIFF is decoded by the app itself: strips and tiles, uncompressed,
+  PackBits, LZW, Deflate and CCITT fax (Modified Huffman, Group 3, Group 4), 1- to 16-bit grey,
+  palette, RGB(A), CMYK, the predictor; tested pixel for pixel against files from Windows' own
+  encoder. WebP comes from libwebp 1.5.0 (a new submodule, decoder only): lossy, lossless, alpha.
+  Not yet: JPEG inside TIFF, BigTIFF, animated WebP.
+- The local agent zooms: `look_at_image` and `look_at_page` take a `region` (halves, thirds,
+  quarters, corners, the centre, or a box in percent), a `zoom` and the point to zoom `at`. A
+  picture is cut from the full-size file; a page is zoomed in the viewer until the part fills it,
+  so small print is read from real pixels. Each picture is sized to the tokens it is given (70 to
+  1,120, one per 48 x 48 pixels), and the agent set-up has a minimum for every look (up to always
+  1,120). A look at an empty part says so. Page looks were also cut from the wrong place on
+  screens where the window is not at the screen's corner, and missed a document opened by the
+  same call: both fixed.
+- The agent set-up shows "Take questions in steps"; both settings are saved.
+- Retries: a call to the wrong tool for a file, a region it cannot read, or a filter that matches
+  no rows (the reply now lists the values the column holds, and "Sunday" finds "Sun") is followed
+  by "make the corrected call now" instead of a report of the failure.
+- `tests/agent-bench`: 25 questions with known answers over the sample files, and a runner that
+  asks them in the running app and grades the answers.
 - The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
   a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
   RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a

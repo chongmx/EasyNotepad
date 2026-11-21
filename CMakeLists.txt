@@ -334,11 +334,47 @@ if(NOT EXISTS ${ENP_LIBDEFLATE_DIR}/libdeflate.h)
 endif()
 add_library(libdeflate STATIC
     ${ENP_LIBDEFLATE_DIR}/lib/deflate_decompress.c
+    ${ENP_LIBDEFLATE_DIR}/lib/zlib_decompress.c
+    ${ENP_LIBDEFLATE_DIR}/lib/adler32.c
     ${ENP_LIBDEFLATE_DIR}/lib/utils.c
     ${ENP_LIBDEFLATE_DIR}/lib/x86/cpu_features.c
     ${ENP_LIBDEFLATE_DIR}/lib/arm/cpu_features.c)
 target_include_directories(libdeflate PUBLIC ${ENP_LIBDEFLATE_DIR})
 set_target_properties(libdeflate PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+
+# libwebp (pinned submodule, v1.5.0): WebP pictures, lossy and lossless, with alpha. The decoder
+# only (its src/Makefile.am "decode" lists); the SSE2 / SSE4.1 / NEON / MIPS files switch themselves
+# on by the compiler's flags, so the same list builds everywhere (no threads: WEBP_USE_THREAD unset).
+set(ENP_LIBWEBP_DIR ${ENP_THIRD_PARTY}/libwebp)
+if(NOT EXISTS ${ENP_LIBWEBP_DIR}/src/webp/decode.h)
+    message(FATAL_ERROR "Submodule 3rdparty/libwebp missing. Run: git submodule update --init --recursive")
+endif()
+set(ENP_LIBWEBP_SOURCES)
+foreach(f alpha_dec buffer_dec frame_dec idec_dec io_dec quant_dec tree_dec vp8_dec vp8l_dec webp_dec)
+    list(APPEND ENP_LIBWEBP_SOURCES ${ENP_LIBWEBP_DIR}/src/dec/${f}.c)
+endforeach()
+foreach(f bit_reader_utils color_cache_utils filters_utils huffman_utils palette quant_levels_dec_utils rescaler_utils
+          random_utils thread_utils utils)
+    list(APPEND ENP_LIBWEBP_SOURCES ${ENP_LIBWEBP_DIR}/src/utils/${f}.c)
+endforeach()
+foreach(f alpha_processing cpu dec dec_clip_tables filters lossless rescaler upsampling yuv
+          alpha_processing_sse2 dec_sse2 filters_sse2 lossless_sse2 rescaler_sse2 upsampling_sse2 yuv_sse2
+          alpha_processing_sse41 dec_sse41 lossless_sse41 upsampling_sse41 yuv_sse41
+          alpha_processing_neon dec_neon filters_neon lossless_neon rescaler_neon upsampling_neon yuv_neon
+          dec_msa filters_msa lossless_msa rescaler_msa upsampling_msa
+          dec_mips32 rescaler_mips32 yuv_mips32
+          alpha_processing_mips_dsp_r2 dec_mips_dsp_r2 filters_mips_dsp_r2 lossless_mips_dsp_r2 rescaler_mips_dsp_r2
+          upsampling_mips_dsp_r2 yuv_mips_dsp_r2)
+    if(EXISTS ${ENP_LIBWEBP_DIR}/src/dsp/${f}.c)
+        list(APPEND ENP_LIBWEBP_SOURCES ${ENP_LIBWEBP_DIR}/src/dsp/${f}.c)
+    endif()
+endforeach()
+add_library(webpdecoder STATIC ${ENP_LIBWEBP_SOURCES})
+target_include_directories(webpdecoder PUBLIC ${ENP_LIBWEBP_DIR} ${ENP_LIBWEBP_DIR}/src)
+set_target_properties(webpdecoder PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+    target_compile_options(webpdecoder PRIVATE -w) # third-party code: its warnings are not ours to fix
+endif()
 
 add_library(enp_model STATIC
     src/model/TextBuffer.cpp
@@ -413,12 +449,13 @@ add_library(enp_services STATIC
     src/services/DocumentReaderService.cpp
     src/services/ServiceContainer.cpp
     src/services/ImageDecoder.cpp
+    src/services/TiffDecoder.cpp
     src/services/ImageEncoder.cpp
     src/services/EmojiPack.cpp
     src/engine/EngineJson.cpp
 )
 target_include_directories(enp_services PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stb)
-target_link_libraries(enp_services PUBLIC enp_interfaces PRIVATE enp_os)
+target_link_libraries(enp_services PUBLIC enp_interfaces PRIVATE enp_os webpdecoder libdeflate)
 if(ENP_MEMORY_TRACE)
     target_sources(enp_services PRIVATE src/services/debug/MemoryTrace.cpp)
     target_compile_definitions(enp_services PUBLIC ENP_MEMORY_TRACE=1)

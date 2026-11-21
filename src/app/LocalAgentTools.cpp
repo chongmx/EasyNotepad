@@ -39,7 +39,8 @@ constexpr int kReadLines = 200;          // of a text file, when no range is ask
 constexpr int kListLimit = 300;          // entries of a folder
 constexpr int kDocumentPages = 3;        // pages of a document, when no range is asked for
 constexpr size_t kPartChars = 10000;     // of a document without pages (Word reflowed, Excel)
-constexpr int kLookSide = 800;           // a picture's longest side, in pixels, as the model sees it (normal detail)
+constexpr int kTokenPixels = 48 * 48;   // Gemma 4 spends one token on about 48 x 48 pixels of a picture
+constexpr int kMinPictureTokens = 70, kMaxPictureTokens = 1120; // ... and 70 to 1120 tokens on one
 constexpr size_t kSoundBytes = 25u << 20; // a recording read whole (about 2 minutes of WAV)
 constexpr int kLookMinFrames = 4;        // a page shown is drawn at least this often before it is captured
 constexpr int kLookMaxFrames = 240;      // ... and captured after this many even while pictures still load
@@ -79,6 +80,8 @@ std::string lower(std::string s)
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
     return s;
 }
+
+std::string trimmed(std::string s); // (below, with the tables)
 
 std::string extension(const std::string& path)
 {
@@ -230,62 +233,210 @@ bool looksBinary(const std::string& bytes)
     return false;
 }
 
-// The longest side a picture is given to the model at, for how carefully it looks: Gemma 4 spends 70 to
-// 1120 tokens on a picture, about one per 48 x 48 pixels.
-int sideFor(const std::string& detail)
+} // namespace
+
+// The tokens a look spends on its picture: by how carefully it looks (low, normal, high, or a
+// number), never fewer than the user's minimum (the agent set-up), within what Gemma 4 takes.
+int LocalAgentTools::pictureTokens(const std::string& detail) const
 {
-    const std::string d = lower(detail);
+    const std::string d = lower(trimmed(detail));
+    int tokens = 280;
     if (d == "low")
-        return 400;
-    if (d == "high" || d == "ocr" || d == "max")
-        return 1600;
-    return kLookSide;
+        tokens = kMinPictureTokens;
+    else if (d == "high" || d == "ocr" || d == "max" || d == "careful")
+        tokens = kMaxPictureTokens;
+    else if (!d.empty() && std::isdigit(static_cast<unsigned char>(d[0])))
+        tokens = std::atoi(d.c_str());
+    return std::clamp(std::max(tokens, vm_.agent().localPictureTokens.get()), kMinPictureTokens, kMaxPictureTokens);
 }
 
-// RGBA (as decoded or captured) to RGB, shrunk (area-averaged by an integer factor) so the longest
-// side is at most kLookSide.
-LocalMedia picture(const std::string& name, const unsigned char* rgba, int width, int height, int stride, int maxSide = kLookSide)
+namespace {
+
+// RGBA (as decoded or captured) to the RGB picture the model is given, resized so it costs about
+// `tokens` (Gemma 4: one per 48 x 48 pixels): shrunk by averaging, or enlarged smoothly (a small
+// part zoomed into keeps its detail for the model instead of being a few tokens).
+LocalMedia picture(const std::string& name, const unsigned char* rgba, int width, int height, int stride, int tokens)
 {
-    const int factor = std::max(1, int(std::ceil(double(std::max(width, height)) / maxSide)));
+    const double k = std::sqrt(double(tokens) * kTokenPixels / (double(width) * double(height)));
     LocalMedia m;
     m.kind = LocalMedia::Kind::Image;
     m.name = name;
-    m.width = std::max(1, width / factor);
-    m.height = std::max(1, height / factor);
+    m.width = std::clamp(int(std::lround(width * k)), 1, 8192);
+    m.height = std::clamp(int(std::lround(height * k)), 1, 8192);
     m.data.resize(size_t(m.width) * size_t(m.height) * 3);
+    const double sx = double(width) / m.width, sy = double(height) / m.height;
+    auto at = [&](int x, int y) { return rgba + size_t(y) * size_t(stride) + size_t(x) * 4; };
     for (int y = 0; y < m.height; ++y)
         for (int x = 0; x < m.width; ++x) {
-            unsigned sum[3] = {0, 0, 0};
-            for (int dy = 0; dy < factor; ++dy)
-                for (int dx = 0; dx < factor; ++dx) {
-                    const unsigned char* p = rgba + size_t(y * factor + dy) * size_t(stride) + size_t(x * factor + dx) * 4;
-                    sum[0] += p[0];
-                    sum[1] += p[1];
-                    sum[2] += p[2];
-                }
+            double sum[3] = {0, 0, 0};
+            if (sx > 1.0 || sy > 1.0) { // shrinking: the average of the source pixels it covers
+                const int x0 = int(x * sx), x1 = std::max(x0 + 1, std::min(width, int(std::ceil((x + 1) * sx))));
+                const int y0 = int(y * sy), y1 = std::max(y0 + 1, std::min(height, int(std::ceil((y + 1) * sy))));
+                for (int yy = y0; yy < y1; ++yy)
+                    for (int xx = x0; xx < x1; ++xx)
+                        for (int c = 0; c < 3; ++c)
+                            sum[c] += at(xx, yy)[c];
+                for (double& s : sum)
+                    s /= double((x1 - x0) * (y1 - y0));
+            } else { // enlarging: between the four nearest
+                const double fx = std::max(0.0, (x + 0.5) * sx - 0.5), fy = std::max(0.0, (y + 0.5) * sy - 0.5);
+                const int x0 = std::min(width - 1, int(fx)), y0 = std::min(height - 1, int(fy));
+                const int x1 = std::min(width - 1, x0 + 1), y1 = std::min(height - 1, y0 + 1);
+                const double ax = fx - x0, ay = fy - y0;
+                for (int c = 0; c < 3; ++c)
+                    sum[c] = (at(x0, y0)[c] * (1 - ax) + at(x1, y0)[c] * ax) * (1 - ay) + (at(x0, y1)[c] * (1 - ax) + at(x1, y1)[c] * ax) * ay;
+            }
             unsigned char* q = reinterpret_cast<unsigned char*>(&m.data[(size_t(y) * size_t(m.width) + size_t(x)) * 3]);
             for (int c = 0; c < 3; ++c)
-                q[c] = static_cast<unsigned char>(sum[c] / unsigned(factor * factor));
+                q[c] = static_cast<unsigned char>(std::clamp(sum[c] + 0.5, 0.0, 255.0));
         }
     return m;
 }
 
-// The part of a rectangle a region names ("top", "bottom-left", "center", ...): x0, y0, x1, y1 as
-// fractions. Unknown names mean all of it.
-void regionFractions(const std::string& region, float f[4])
+} // namespace
+
+// The part of a picture or page a look is about, as fractions x0, y0, x1, y1:
+//  - region: a name - all, top, bottom, left, right, top-left, ..., center, with half (the default),
+//    third or quarter ("top third", "bottom-right quarter", "middle-left third") - or a box in
+//    percent "left,top,right,bottom" ("10,40,60,70");
+//  - zoom: percent, magnifies that part: 200 its middle half, 400 a quarter of it across...
+//  - at: "x,y" in percent of the whole, the point to zoom in around (default the part's middle).
+// False with the reason when the region cannot be read.
+bool LocalAgentTools::lookBox(const Json& args, float box[4], std::string& why)
 {
-    f[0] = 0.0f, f[1] = 0.0f, f[2] = 1.0f, f[3] = 1.0f;
-    const std::string r = lower(region);
-    if (r.find("top") != std::string::npos)
-        f[3] = 0.5f;
-    if (r.find("bottom") != std::string::npos)
-        f[1] = 0.5f;
-    if (r.find("left") != std::string::npos)
-        f[2] = 0.5f;
-    if (r.find("right") != std::string::npos)
-        f[0] = 0.5f;
-    if (r == "center" || r == "middle")
-        f[0] = 0.25f, f[1] = 0.25f, f[2] = 0.75f, f[3] = 0.75f;
+    box[0] = 0.0f, box[1] = 0.0f, box[2] = 1.0f, box[3] = 1.0f;
+    // The region as text, or as a list of four numbers ([10, 40, 60, 70]), under the names a model
+    // may give it.
+    std::string region;
+    for (const char* key : {"region", "box", "area", "bbox", "part"})
+        if (const Json* v = args.find(key)) {
+            if (v->isString())
+                region = v->asString();
+            else if (v->isArray())
+                for (const Json& n : v->items())
+                    region += (region.empty() ? "" : ",") + (n.isNumber() ? std::to_string(n.asNumber()) : n.asString());
+            break;
+        }
+    // No region, but four numbers under another name ("at", "coordinates", "crop"): that is the box.
+    if (trimmed(region).empty())
+        for (const auto& [key, v] : args.members()) {
+            if (key == "path" || key == "page" || key == "zoom" || key == "detail")
+                continue;
+            std::string text = v.isString() ? v.asString() : std::string();
+            if (v.isArray())
+                for (const Json& n : v.items())
+                    text += (text.empty() ? "" : ",") + (n.isNumber() ? std::to_string(n.asNumber()) : n.asString());
+            int numbers = 0;
+            bool inNumber = false;
+            for (char c : text) {
+                const bool digit = std::isdigit(static_cast<unsigned char>(c)) || c == '.';
+                numbers += digit && !inNumber;
+                inNumber = digit;
+            }
+            if (numbers == 4) {
+                region = text;
+                break;
+            }
+        }
+    region = lower(trimmed(region));
+    std::vector<float> numbers;
+    {
+        std::string n;
+        for (size_t i = 0; i <= region.size(); ++i) {
+            const char c = i < region.size() ? region[i] : ' ';
+            if (std::isdigit(static_cast<unsigned char>(c)) || c == '.')
+                n += c;
+            else if (!n.empty()) {
+                numbers.push_back(float(std::atof(n.c_str())));
+                n.clear();
+            }
+        }
+    }
+    auto has = [&](const char* word) { return region.find(word) != std::string::npos; };
+    if (region.empty() || region == "all" || region == "whole" || region == "page" || region == "everything") {
+        // all of it
+    } else if (numbers.size() == 4) {
+        const float scale = std::max({numbers[0], numbers[1], numbers[2], numbers[3]}) <= 1.0f ? 1.0f : 100.0f;
+        for (int k = 0; k < 4; ++k)
+            box[k] = std::clamp(numbers[size_t(k)] / scale, 0.0f, 1.0f);
+        if (box[2] <= box[0] || box[3] <= box[1]) // given as left, top, width, height
+            box[2] = std::min(1.0f, box[0] + box[2]), box[3] = std::min(1.0f, box[1] + box[3]);
+        if (box[2] - box[0] < 0.01f || box[3] - box[1] < 0.01f) {
+            why = "the region '" + region + "' is empty: give left,top,right,bottom in percent, e.g. \"10,40,60,70\"";
+            return false;
+        }
+    } else {
+        const float s = has("quarter") ? 0.25f : has("third") ? 1.0f / 3.0f : 0.5f;
+        const bool top = has("top") || has("upper"), bottom = has("bottom") || has("lower");
+        const bool left = has("left"), right = has("right"), middle = has("center") || has("centre") || has("middle");
+        if (!top && !bottom && !left && !right && !middle) {
+            why = "cannot read the region '" + region + "': use all, top, bottom, left, right, top-left, top-right, "
+                  "bottom-left, bottom-right, center (with third or quarter for smaller parts, e.g. \"top third\"), or "
+                  "left,top,right,bottom in percent, e.g. \"10,40,60,70\"";
+            return false;
+        }
+        const int v = top ? 0 : bottom ? 2 : middle ? 1 : -1, h = left ? 0 : right ? 2 : middle ? 1 : -1;
+        auto span = [s](int where, float& a, float& b) {
+            if (where == 0)
+                a = 0.0f, b = s;
+            else if (where == 2)
+                a = 1.0f - s, b = 1.0f;
+            else if (where == 1)
+                a = 0.5f - s * 0.5f, b = 0.5f + s * 0.5f;
+        };
+        span(v, box[1], box[3]);
+        span(h, box[0], box[2]);
+    }
+    // Zoom in on the part: around its middle, or the point asked for.
+    const int zoom = std::clamp(argInt(args, "zoom", 100), 0, 1600);
+    if (zoom > 100) {
+        float cx = (box[0] + box[2]) * 0.5f, cy = (box[1] + box[3]) * 0.5f;
+        std::string at = args.getString("at");
+        if (const Json* v = args.find("at"); v && v->isArray())
+            for (const Json& n : v->items())
+                at += (at.empty() ? "" : ",") + (n.isNumber() ? std::to_string(n.asNumber()) : n.asString());
+        if (float x = 0, y = 0; !at.empty() && std::sscanf(at.c_str(), "%f%*[ ,;xX]%f", &x, &y) == 2) {
+            const float scale = x <= 1.0f && y <= 1.0f && at.find('.') != std::string::npos ? 1.0f : 100.0f;
+            cx = std::clamp(x / scale, 0.0f, 1.0f), cy = std::clamp(y / scale, 0.0f, 1.0f);
+        }
+        const float w = (box[2] - box[0]) * 100.0f / float(zoom), h = (box[3] - box[1]) * 100.0f / float(zoom);
+        box[0] = std::clamp(cx - w * 0.5f, 0.0f, 1.0f - w), box[1] = std::clamp(cy - h * 0.5f, 0.0f, 1.0f - h);
+        box[2] = box[0] + w, box[3] = box[1] + h;
+    }
+    return true;
+}
+
+namespace {
+
+// A look that saw one flat colour (a margin, an empty corner): said in the reply, so the model looks
+// at the whole first instead of reading something into nothing.
+std::string blankNote(const LocalMedia& m)
+{
+    if (m.data.empty())
+        return std::string();
+    double sum = 0, square = 0;
+    const size_t n = m.data.size();
+    for (char c : m.data) {
+        const double v = static_cast<unsigned char>(c);
+        sum += v;
+        square += v * v;
+    }
+    const double mean = sum / double(n), spread = std::sqrt(std::max(0.0, square / double(n) - mean * mean));
+    if (spread >= 4.0)
+        return std::string();
+    return " This part is empty: all one colour (" + std::string(mean > 200 ? "white" : mean < 55 ? "black" : "flat") +
+           "), with nothing to read. Look at the whole first (no region) to find where things are, then zoom there.";
+}
+
+// "the top-left quarter", "10-60% across, 40-70% down": what a box is, for the model's reply.
+std::string boxText(const float box[4])
+{
+    if (box[0] <= 0.0f && box[1] <= 0.0f && box[2] >= 1.0f && box[3] >= 1.0f)
+        return std::string();
+    char text[96];
+    std::snprintf(text, sizeof(text), "%d-%d%% across, %d-%d%% down", int(box[0] * 100 + 0.5f), int(box[2] * 100 + 0.5f),
+                  int(box[1] * 100 + 0.5f), int(box[3] * 100 + 0.5f));
+    return text;
 }
 
 void reply(const LocalAgentTools::Done& done, std::string text)
@@ -340,7 +491,13 @@ void LocalAgentTools::attach()
 
 std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
 {
-    const char* detail = "How carefully to look: low (fast, ~70 tokens), normal (~280), high (small print, OCR: ~1100)";
+    const char* detail = "How carefully to look: low (fast, ~70 tokens), normal (~280), high (small print, OCR: ~1100), "
+                         "or a number of tokens from 70 to 1120";
+    const char* region = "The part to look at: all (default); top, bottom, left, right, top-left, top-right, bottom-left, "
+                         "bottom-right, center - a half by default, add third or quarter for less (\"bottom-right quarter\", "
+                         "\"top third\"); or a box in percent \"left,top,right,bottom\" (\"55,60,100,80\")";
+    const char* zoom = "Percent magnification of that part (default 100): 200 its middle half, 400 a quarter of it across";
+    const char* at = "With zoom: the point to zoom in around, \"x,y\" in percent of the whole (\"70,85\")";
     std::vector<LocalTool> t = {
         // The folder.
         {"list_files", "Lists a folder of the open folder: sub-folders (ending in /) and files with their sizes.",
@@ -366,11 +523,17 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
                          "for tables, charts, drawings, layout and scanned pages.",
          schema({{"path", "string", "Document, relative to the open folder (default: the one shown)"},
                  {"page", "integer", "Page or slide, from 1 (default 1)"},
-                 {"zoom", "integer", "Percent, e.g. 100, 200, 400; 0 fits the page width (default 0)"},
-                 {"region", "string", "all, top, bottom, left, right, top-left, top-right, bottom-left, bottom-right or center"},
+                 {"region", "string", region},
+                 {"zoom", "integer", zoom},
+                 {"at", "string", at},
                  {"detail", "string", detail}})},
-        {"look_at_image", "Looks at a picture file (PNG, JPEG, GIF, BMP, WebP, TIFF and more).",
-         schema({{"path", "string", "Picture, relative to the open folder"}, {"detail", "string", detail}}, {"path"})},
+        {"look_at_image", "Looks at a picture file (PNG, JPEG, GIF, BMP, TIFF, WebP and more), whole or zoomed into a part.",
+         schema({{"path", "string", "Picture, relative to the open folder"},
+                 {"region", "string", region},
+                 {"zoom", "integer", zoom},
+                 {"at", "string", at},
+                 {"detail", "string", detail}},
+                {"path"})},
         {"listen_to", "Listens to a short recording (WAV, MP3 or FLAC): speech, music, sounds. For meetings use transcribe.",
          schema({{"path", "string", "Recording, relative to the open folder"}}, {"path"})},
         {"transcribe", "Writes down word for word what is said in a recording (WAV, MP3, FLAC), however long, with "
@@ -791,16 +954,20 @@ void LocalAgentTools::lookAtPage(const Json& args, Done done)
     if (!doc)
         return reply(done, "no document is open");
     path = doc->path.empty() ? doc->title : doc->path;
-    const int page = std::max(1, argInt(args, "page", 1));
-    const int zoomPercent = std::clamp(argInt(args, "zoom", 0), 0, 800);
-    const bool shown = view->editor().viewerView().showPage(doc->id, page - 1, zoomPercent / 100.0f);
     Look look;
+    std::string why;
+    if (!lookBox(args, look.box, why))
+        return reply(done, why + ".\n" + usage("look_at_page"));
+    const int page = std::max(1, argInt(args, "page", 1));
+    // The viewer zooms so the part fills the view (the whole page fits it), then it is captured:
+    // a small part is seen with the page's own detail, not enlarged pixels.
+    const bool shown = view->editor().viewerView().showPage(doc->id, page - 1, -1.0f, look.box);
     look.done = std::move(done);
-    look.region = args.getString("region", "all");
-    look.side = sideFor(args.getString("detail"));
-    look.what = (shown ? "page " + std::to_string(page) + " of " : std::string()) + fileName(path) +
-                (zoomPercent > 0 ? " at " + std::to_string(zoomPercent) + "%" : std::string()) +
-                (look.region == "all" || look.region.empty() ? std::string() : ", " + look.region);
+    look.page = page - 1;
+    look.documentId = doc->id;
+    look.tokens = pictureTokens(args.getString("detail"));
+    const std::string part = boxText(look.box);
+    look.what = (shown ? "page " + std::to_string(page) + " of " : std::string()) + fileName(path) + (part.empty() ? "" : ", " + part);
     looks_.push_back(std::move(look));
 }
 
@@ -833,26 +1000,38 @@ void LocalAgentTools::deliverCapture(bool ok, int width, int height, const std::
             reply(l.done, "the window could not be captured");
             continue;
         }
-        // The document's area, in the capture's pixels (it may be larger than ImGui's units).
+        // The document's area, in the capture's pixels: ImGui's positions are on the screen (with
+        // viewports, the window's own position is in them), the capture is the window's, and may
+        // have more pixels than ImGui has units.
         const view::UiElement* area = view::UiAutomation::instance().find("document-area");
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        const ImVec2 origin = vp ? vp->Pos : ImVec2(0, 0);
         const ImVec2 display = ImGui::GetIO().DisplaySize;
         const float sx = display.x > 0 ? float(width) / display.x : 1.0f;
         const float sy = display.y > 0 ? float(height) / display.y : 1.0f;
+        auto toX = [&](float x) { return (x - origin.x) * sx; };
+        auto toY = [&](float y) { return (y - origin.y) * sy; };
         float x0 = 0, y0 = 0, x1 = float(width), y1 = float(height);
         if (area) {
-            x0 = area->min.x * sx, y0 = area->min.y * sy, x1 = area->max.x * sx, y1 = area->max.y * sy;
+            x0 = toX(area->min.x), y0 = toY(area->min.y), x1 = toX(area->max.x), y1 = toY(area->max.y);
         }
-        float f[4];
-        regionFractions(l.region, f);
-        const int left = std::clamp(int(x0 + (x1 - x0) * f[0]), 0, width - 1);
-        const int top = std::clamp(int(y0 + (y1 - y0) * f[1]), 0, height - 1);
-        const int right = std::clamp(int(x0 + (x1 - x0) * f[2]), left + 1, width);
-        const int bottom = std::clamp(int(y0 + (y1 - y0) * f[3]), top + 1, height);
+        // The part of the page asked for, where the page was drawn (a paged document), within the
+        // document's area; else that part of the area (Word, Excel).
+        float p[4] = {x0, y0, x1, y1};
+        if (view::MainView* view = view_ ? view_() : nullptr; view && l.documentId >= 0)
+            if (float r[4]; view->editor().viewerView().pageOnScreen(l.documentId, l.page, r))
+                p[0] = toX(r[0]), p[1] = toY(r[1]), p[2] = toX(r[2]), p[3] = toY(r[3]);
+        const float* f = l.box;
+        const int left = std::clamp(int(std::max(x0, p[0] + (p[2] - p[0]) * f[0])), 0, width - 1);
+        const int top = std::clamp(int(std::max(y0, p[1] + (p[3] - p[1]) * f[1])), 0, height - 1);
+        const int right = std::clamp(int(std::min(x1, p[0] + (p[2] - p[0]) * f[2])), left + 1, width);
+        const int bottom = std::clamp(int(std::min(y1, p[1] + (p[3] - p[1]) * f[3])), top + 1, height);
         Output out;
         out.media.push_back(picture(l.what, rgba.data() + (size_t(top) * size_t(width) + size_t(left)) * 4, right - left,
-                                    bottom - top, width * 4, l.side));
-        out.text = area ? "Looked at " + l.what + " (as shown in the viewer)."
-                        : "The document is not shown in the viewer, so this is the whole window.";
+                                    bottom - top, width * 4, l.tokens));
+        out.text = (area ? "Looked at " + l.what + " (as shown in the viewer)."
+                         : "The document is not shown in the viewer, so this is the whole window.") +
+                   blankNote(out.media.back());
         if (const std::string saved = savePicture(out.media.back(), "page"); !saved.empty())
             out.shown.push_back(saved); // the user sees the part it looked at
         l.done(std::move(out));
@@ -869,17 +1048,34 @@ void LocalAgentTools::lookAtImage(const Json& args, Done done)
     const std::optional<std::string> bytes = os::fs::readFile(absolute);
     if (!bytes)
         return reply(done, "cannot read " + path);
+    float box[4];
+    std::string why;
+    if (!lookBox(args, box, why))
+        return reply(done, why + ".\n" + usage("look_at_image"));
     services::DecodedImage image;
     std::string note;
-    const int side = sideFor(args.getString("detail"));
-    if (!services::decodeImage(*bytes, image, note, side * 2))
+    // Whole (up to 8192 across): a part zoomed into keeps the picture's own detail.
+    if (!services::decodeImage(*bytes, image, note, 8192))
         return reply(done, kindOf(path) != FileKind::Picture ? path + " is not a picture. " + whichTool(path)
                                                              : path + " is a picture this cannot read: " + note);
+    const int left = std::clamp(int(box[0] * float(image.width)), 0, image.width - 1);
+    const int top = std::clamp(int(box[1] * float(image.height)), 0, image.height - 1);
+    const int right = std::clamp(int(std::ceil(box[2] * float(image.width))), left + 1, image.width);
+    const int bottom = std::clamp(int(std::ceil(box[3] * float(image.height))), top + 1, image.height);
+    const int tokens = pictureTokens(args.getString("detail"));
+    const std::string part = boxText(box);
     Output out;
-    out.media.push_back(picture(fileName(path), image.rgba.data(), image.width, image.height, image.width * 4, side));
-    out.text = "Looked at " + path + " (" + image.format + ", " + std::to_string(image.sourceWidth) + " x " +
-               std::to_string(image.sourceHeight) + " pixels).";
-    out.shown.push_back(absolute); // the user sees what it looked at
+    out.media.push_back(picture(fileName(path) + (part.empty() ? "" : ", " + part),
+                                image.rgba.data() + (size_t(top) * size_t(image.width) + size_t(left)) * 4, right - left,
+                                bottom - top, image.width * 4, tokens));
+    out.text = "Looked at " + path + (part.empty() ? "" : ", " + part) + " (" + image.format + ", " +
+               std::to_string(image.sourceWidth) + " x " + std::to_string(image.sourceHeight) + " pixels; about " +
+               std::to_string(tokens) + " tokens)." + blankNote(out.media.back());
+    // The user sees what it looked at: the picture, or the part it zoomed into.
+    if (part.empty())
+        out.shown.push_back(absolute);
+    else if (const std::string saved = savePicture(out.media.back(), "zoom"); !saved.empty())
+        out.shown.push_back(saved);
     done(std::move(out));
 }
 
@@ -1626,8 +1822,59 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
     for (const auto& row : rows)
         if (matches(row))
             picked.push_back(&row);
+    // Nothing matches: a word written out where the file abbreviates it ("Sunday", the file says
+    // "Sun"), or the other way round, is read as the one value it can mean.
+    std::string readAs;
+    if (picked.empty() && !rows.empty()) {
+        for (Condition& k : conditions) {
+            double n = 0;
+            if (k.op != "=" || k.value.size() < 3 || cellNumber(k.value, n))
+                continue;
+            const std::string want = lower(k.value);
+            std::string only;
+            bool several = false;
+            for (const auto& row : rows) {
+                const std::string v = cell(row, k.column), low = lower(v);
+                if (low.size() < 3 || low == lower(only) || !(want.rfind(low, 0) == 0 || low.rfind(want, 0) == 0))
+                    continue;
+                several = several || !only.empty();
+                only = v;
+            }
+            if (!only.empty() && !several) {
+                readAs += (readAs.empty() ? "" : ", ") + ("'" + k.value + "' read as '" + only + "'");
+                k.value = only;
+            }
+        }
+        if (!readAs.empty())
+            for (const auto& row : rows)
+                if (matches(row))
+                    picked.push_back(&row);
+    }
+    // Still nothing: show what the filtered columns hold, to call again with.
+    if (picked.empty() && !conditions.empty() && !rows.empty()) {
+        std::string hint = path + ": no rows match '" + where + "'.";
+        for (const Condition& k : conditions) {
+            std::vector<std::string> seen;
+            size_t more = 0;
+            for (const auto& row : rows) {
+                const std::string v = cell(row, k.column);
+                if (v.empty() || std::find(seen.begin(), seen.end(), v) != seen.end())
+                    continue;
+                if (seen.size() < 20)
+                    seen.push_back(v);
+                else
+                    ++more;
+            }
+            hint += "\n" + trimmed(header[size_t(k.column)]) + " holds: ";
+            for (size_t i = 0; i < seen.size(); ++i)
+                hint += (i ? ", " : "") + seen[i];
+            if (more)
+                hint += ", ...";
+        }
+        return reply(done, hint + "\nCall query_table again with one of these values exactly.");
+    }
     std::string out = note + path + ": " + std::to_string(picked.size()) + " of " + std::to_string(rows.size()) +
-                      " rows match. Columns: " + columns + "\n";
+                      " rows match" + (readAs.empty() ? "" : " (" + readAs + ")") + ". Columns: " + columns + "\n";
     const int limit = std::clamp(argInt(args, "limit", 30), 1, 500);
 
     // Totals, by group when asked.

@@ -496,6 +496,22 @@ void AgentPanel::renderLocalSetup(float inner)
             ImGui::TextColored(col(palette_.iconGreen), ICON_FA_EYE);
             ImGui::SameLine();
             ImGui::TextUnformatted("It can look at pictures and pages, and listen to recordings.");
+            // How many tokens a picture costs at least: more reads small print better, and takes longer.
+            static const char* const kPictureChoices[] = {"It chooses per look (70 to 1,120 tokens)", "At least 280 tokens",
+                                                          "At least 560 tokens", "Always 1,120 tokens (the most it can take)"};
+            int choice = 0;
+            for (int i = 0; i < 4; ++i)
+                if (agent.localPictureTokens.get() == viewmodel::AgentViewModel::kPictureTokenChoices[i])
+                    choice = i;
+            ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 330.0f * s_));
+            if (ImGui::Combo("Pictures", &choice, kPictureChoices, 4))
+                agent.localPictureTokens.set(viewmodel::AgentViewModel::kPictureTokenChoices[choice]);
+            ui::itemTooltip("How many tokens the local model spends on each picture or page it looks at. It chooses by "
+                            "itself (a glance, or every detail for small print); set a minimum to make every look careful, "
+                            "which reads text better and takes a little longer.");
+            registerLastItem("agent-local-picture-tokens", "combo", "Tokens for each picture", [&agent]() {
+                agent.localPictureTokens.set(agent.localPictureTokens.get() == 1120 ? 0 : 1120);
+            });
         } else {
             if (ImGui::Button(ICON_FA_DOWNLOAD " Let it see and hear (987 MB)"))
                 lab.download(Lab::Which::Projector);
@@ -523,6 +539,13 @@ void AgentPanel::renderLocalSetup(float inner)
     if (ImGui::Checkbox("Fall back to the local model", &fallback))
         agent.localFallback.set(fallback);
     ui::itemTooltip("When Claude Code is not installed, not logged in, offline or fails, the local model answers instead");
+    bool steps = agent.localInSteps.get();
+    if (ImGui::Checkbox("Take questions in steps", &steps))
+        agent.localInSteps.set(steps);
+    ui::itemTooltip("The local model first splits a question into steps, then works through them one at a time: slower, "
+                    "and much better at questions with several parts");
+    registerLastItem("agent-local-in-steps", "checkbox", "Take questions in steps",
+                     [&agent]() { agent.localInSteps.set(!agent.localInSteps.get()); });
     ImGui::TextDisabled("Who answers is chosen at the top of the panel: Auto, Claude or Local.");
 }
 

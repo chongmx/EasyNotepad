@@ -33,6 +33,10 @@ constexpr const char* kLocalAgentPrompt =
     "Call one or more tools when you need them; when you have what you need, answer briefly and precisely in "
     "Markdown, naming the files and pages you used. If a tool fails, say so or try another way.";
 
+// Said with each step of a question taken in steps.
+constexpr const char* kStepAsk = "Use your tools, then tell me what you found. If a tool finds nothing or says the call is "
+                                  "wrong, fix the call from what it tells you and try again before you report.";
+
 constexpr size_t kToolTextChars = 12000; // of one tool result sent to the model (about 3,000 tokens)
 
 std::optional<interfaces::LocalToolCall> callInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools,
@@ -174,6 +178,27 @@ bool calledTool(const std::vector<interfaces::LocalChatMessage>& messages, const
         for (const interfaces::LocalToolCall& c : m.toolCalls)
             if (c.name == name)
                 return true;
+    return false;
+}
+
+// The last tool result (since the user's last turn) says how to fix the call: no rows matched
+// (with the values to use), no such column, a missing argument, no such tool, the wrong tool for
+// the file (with the right call), a region it cannot read.
+bool toolAsksToRetry(const std::vector<interfaces::LocalChatMessage>& messages)
+{
+    for (size_t i = messages.size(); i-- > 0;) {
+        const interfaces::LocalChatMessage& m = messages[i];
+        if (m.role == "user" && m.media.empty())
+            return false;
+        if (m.role != "tool")
+            continue;
+        for (const char* cue : {"no rows match", "There is no column", "Call it like this", "There is no tool called",
+                                "It is a document: call", "It is a picture: call", "It is a recording: call",
+                                "cannot read the region"})
+            if (m.text.find(cue) != std::string::npos)
+                return true;
+        return false;
+    }
     return false;
 }
 
@@ -527,7 +552,7 @@ void AgentViewModel::planLocal(int generation, std::string question)
                 messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + list});
                 messages_.push_back({model::ChatRole::Tool, "Step 1 of " + std::to_string(steps.size()) + ": " + steps[0]});
                 localRequest_.messages.back().text += "\n\nWe will work through this in steps:\n" + list + "\nDo step 1 only now: " +
-                                                      steps[0] + "\nUse your tools, then tell me what you found.";
+                                                      steps[0] + "\n" + kStepAsk;
                 localSteps_ = std::move(steps);
                 localStep_ = 1;
             }
@@ -545,7 +570,8 @@ bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
         const std::string number = std::to_string(localStep_ + 1);
         messages_.push_back({model::ChatRole::Tool,
                              "Step " + number + " of " + std::to_string(localSteps_.size()) + ": " + localSteps_[localStep_]});
-        next = "Now step " + number + ": " + localSteps_[localStep_] + "\nUse your tools, then tell me what you found.";
+        next = "Now step " + number + ": " + localSteps_[localStep_] + "\n" + kStepAsk + "\n(My question, for reference: " +
+               localPrompt_ + ")";
     } else {
         messages_.push_back({model::ChatRole::Tool, "All steps done: the answer"});
         next = "All the steps are done. Now answer my question in full, from what the steps found, with the figures exactly "
@@ -704,6 +730,16 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
             localRequest_.messages.emplace_back("assistant", r.text);
             localRequest_.messages.emplace_back("user", "You have not saved it yet: call remember now, once for each thing to keep "
                                                         "(kind preference for how I like things).");
+            sendLocal(generation);
+            return;
+        }
+        // A tool said how to fix the call and the model reported that instead of calling again.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds &&
+            toolAsksToRetry(localRequest_.messages)) {
+            ++localNudges_;
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back("user", "Do not report that: the tool told you how to fix the call. Make the "
+                                                        "corrected call now, with the values it listed.");
             sendLocal(generation);
             return;
         }

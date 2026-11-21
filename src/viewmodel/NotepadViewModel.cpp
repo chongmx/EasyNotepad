@@ -2168,6 +2168,8 @@ void NotepadViewModel::bindSettings()
     settings_.bind("agent.appControl", agent_.appControl);
     settings_.bind("agent.choice", agent_.agentChoice);
     settings_.bind("agent.localFallback", agent_.localFallback);
+    settings_.bind("agent.localInSteps", agent_.localInSteps);
+    settings_.bind("agent.localPictureTokens", agent_.localPictureTokens);
     settings_.bind("editor.showWhitespace", showWhitespace);
     settings_.bind("editor.showLineNumbers", showLineNumbers);
     settings_.bind("editor.showIndentGuides", showIndentGuides);

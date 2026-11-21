@@ -1,5 +1,9 @@
 #include "enp/services/ImageDecoder.h"
 
+#include "TiffDecoder.h"
+
+#include <webp/decode.h>
+
 #include "enp/model/FileKind.h"
 #include "enp/model/viewer/ImagePack.h"
 #include "enp/os/Image.h"
@@ -477,8 +481,31 @@ bool decodeBytes(std::string_view bytes, DecodedImage& out, std::string& note, i
         ok = decodeQoi(data, bytes.size(), out.rgba, out.width, out.height, note);
     } else if (type.format == "ICO" || type.format == "CUR") {
         ok = decodeIco(data, bytes.size(), out.rgba, out.width, out.height, note);
-    } else if (type.format == "WebP" || type.format == "TIFF" || type.format == "SVG" || type.format == "AVIF" || type.format == "HEIC" ||
-               type.format == "JPEG 2000") {
+    } else if (type.format == "TIFF") {
+        ok = tiff::decode(bytes, out.rgba, out.width, out.height, note);
+    } else if (type.format == "WebP") {
+        // libwebp (3rdparty/libwebp): lossy, lossless and alpha, into our buffer. Its own working
+        // memory is the C heap's, freed before it returns.
+        WebPBitstreamFeatures features;
+        if (WebPGetFeatures(data, bytes.size(), &features) != VP8_STATUS_OK) {
+            note = "damaged WebP";
+            return false;
+        }
+        if (features.has_animation) {
+            note = "animated WebP is not supported yet";
+            return false;
+        }
+        if (features.width <= 0 || features.height <= 0 || features.width > (1 << 14) || features.height > (1 << 14)) {
+            note = "WebP too large (more than 16384 pixels across)";
+            return false;
+        }
+        out.width = features.width;
+        out.height = features.height;
+        out.rgba.resize(size_t(out.width) * size_t(out.height) * 4);
+        ok = WebPDecodeRGBAInto(data, bytes.size(), out.rgba.data(), out.rgba.size(), out.width * 4) != nullptr;
+        if (!ok)
+            note = "damaged WebP";
+    } else if (type.format == "SVG" || type.format == "AVIF" || type.format == "HEIC" || type.format == "JPEG 2000") {
         note = type.format + " is not supported yet";
         return false;
     } else {

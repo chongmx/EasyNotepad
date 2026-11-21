@@ -225,6 +225,8 @@ void ViewerView::release(int documentId)
 
 void ViewerView::releaseClosed()
 {
+    for (auto it = pending_.begin(); it != pending_.end();)
+        it = vm_.documentIndexById(it->first) < 0 ? pending_.erase(it) : std::next(it);
     for (auto it = entries_.begin(); it != entries_.end();) {
         const int id = it->first;
         ++it; // releaseEntry erases the entry
@@ -248,7 +250,18 @@ ViewerView::Entry& ViewerView::entryFor(const model::Document& doc, const viewmo
     e.generation = model.generation;
     e.keyPrefix = model.path + "#";
     e.flow.emoji = emoji_;
+    applyPending(e);
     return e;
+}
+
+void ViewerView::applyPending(Entry& e)
+{
+    const auto it = pending_.find(e.id);
+    if (it == pending_.end())
+        return;
+    e.goToPage = it->second.page;
+    for (int k = 0; k < 4; ++k)
+        e.focusBox[k] = it->second.part[k];
 }
 
 const MarkdownImage* ViewerView::image(Entry& e, std::map<std::string, HeldImage>& held, const std::string& media)
@@ -763,6 +776,7 @@ void ViewerView::wordPages(Entry& e, const mv::ViewerDocument& d, ImVec2 size, c
     if (e.goToPage >= 0) {
         ImGui::SetScrollY(float(e.goToPage) * (pageH + gap));
         e.goToPage = -1;
+        pending_.erase(e.id); // shown
     }
     const ImVec2 win = ImGui::GetWindowPos();
     const float scrollY = ImGui::GetScrollY(), scrollX = ImGui::GetScrollX();
@@ -1961,6 +1975,13 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
             tallest = std::max(tallest, p.height);
         fit = std::min(fit, std::max(0.05f, (ImGui::GetWindowSize().y - pad * 2.0f) / tallest));
     }
+    if (e.goToPage >= 0 && e.goToPage < n && e.focusBox[0] >= 0.0f) { // the agent's part of a page: zoomed to fill the view
+        const mv::Page& p = pd.pages[size_t(e.goToPage)];
+        const ImVec2 view = ImGui::GetWindowSize();
+        const float bw = std::max(0.01f, (e.focusBox[2] - e.focusBox[0]) * p.width * fit);
+        const float bh = std::max(0.01f, (e.focusBox[3] - e.focusBox[1]) * p.height * fit);
+        e.zoom = std::clamp(std::min((view.x - pad * 2.0f) / bw, (view.y - pad * 2.0f) / bh), 0.1f, 12.0f / fit);
+    }
     const float scale = std::min(fit * (e.zoom > 0.0f ? e.zoom : 1.0f), 12.0f);
     // Page tops (and speaker notes below slides) at this scale and width.
     const float wrap = std::max(50.0f, viewW - pad * 2.0f);
@@ -1990,9 +2011,20 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
         contentW = std::max(contentW, p.width * scale);
     ImGui::Dummy(ImVec2(contentW + pad * 2.0f, e.pageTop[size_t(n)] + pad));
     if (e.goToPage >= 0 && e.goToPage < n) { // the toolbar's arrows
-        ImGui::SetScrollY(std::max(0.0f, e.pageTop[size_t(e.goToPage)] - pad));
+        const mv::Page& p = pd.pages[size_t(e.goToPage)];
+        if (e.focusBox[0] >= 0.0f) { // the part's middle in the middle of the view (zoomed above)
+            const float left = std::max(pad, (viewW - p.width * scale) * 0.5f);
+            const ImVec2 view = ImGui::GetWindowSize();
+            const float cx = (e.focusBox[0] + e.focusBox[2]) * 0.5f, cy = (e.focusBox[1] + e.focusBox[3]) * 0.5f;
+            ImGui::SetScrollX(std::max(0.0f, left + cx * p.width * scale - view.x * 0.5f));
+            ImGui::SetScrollY(std::max(0.0f, e.pageTop[size_t(e.goToPage)] + cy * p.height * scale - view.y * 0.5f));
+        } else {
+            ImGui::SetScrollY(std::max(0.0f, e.pageTop[size_t(e.goToPage)] - pad));
+        }
         e.currentPage = e.goToPage;
         e.goToPage = -1;
+        e.focusBox[0] = -1.0f;
+        pending_.erase(e.id); // shown
     }
     const viewmodel::ViewerViewModel::Entry* model = vm_.viewer().find(e.id);
     static const viewmodel::ViewerViewModel::Entry::Search kNoSearch;
@@ -2056,12 +2088,17 @@ void ViewerView::pages(Entry& e, const mv::ViewerDocument& d, ImVec2 size)
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float scrollX = ImGui::GetScrollX();
+    e.drawnPage = -1;
     for (int i = first; i <= last && i < n; ++i) {
         const mv::Page& page = pd.pages[size_t(i)];
         const float w = page.width * scale;
         const ImVec2 at(win.x + std::max(pad, (viewW - w) * 0.5f) - scrollX, win.y + e.pageTop[size_t(i)] - scrollY);
         dl->AddRectFilled(ImVec2(at.x + 3.0f * s_, at.y + 3.0f * s_), ImVec2(at.x + w + 3.0f * s_, at.y + page.height * scale + 3.0f * s_),
                           IM_COL32(0, 0, 0, 50));
+        if (i == e.currentPage) {
+            e.drawnPage = i;
+            e.drawnRect[0] = at.x, e.drawnRect[1] = at.y, e.drawnRect[2] = at.x + w, e.drawnRect[3] = at.y + page.height * scale;
+        }
         PageImageSource source(*this, e, size_t(i));
         e.scripts |= page.scripts;
         painter_.draw(page, at, scale, fonts_, &source);

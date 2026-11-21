@@ -977,8 +977,12 @@ TEST(every_image_format_opens_from_outside_the_workspace_and_decodes)
         {"rgb.bmp", "BMP", true, false},          {"rgba.bmp", "BMP", true, false},        {"palette.bmp", "BMP", true, false},
         {"rgb.tga", "TGA", true, false},          {"rle.tga", "TGA", true, false},         {"rgb.ppm", "PNM", true, false},
         {"grey.pgm", "PNM", true, true},          {"rgb.qoi", "QOI", true, false},         {"icon.ico", "ICO", true, false},
-        {"flat.hdr", "Radiance HDR", true, false}, {"lossy.webp", "WebP", false, false},   {"rgb.tif", "TIFF", false, false},
+        {"flat.hdr", "Radiance HDR", true, false}, {"lossy.webp", "WebP", true, false},    {"rgb.tif", "TIFF", true, false},
         {"rgb.jp2", "JPEG 2000", false, false},
+        // TIFF variants (make_tiffs.ps1: Windows' encoder; make_tiff_extras.py).
+        {"grey-lzw.tif", "TIFF", true, true},     {"grey16.tif", "TIFF", true, true},       {"palette-lzw.tif", "TIFF", true, false},
+        {"rgba-zip.tif", "TIFF", true, false},    {"rgb-rle.tif", "TIFF", true, false},     {"planar.tif", "TIFF", true, false},
+        {"cmyk.tif", "TIFF", true, false},        {"grey16-predictor-be.tif", "TIFF", true, true},
     };
     auto expect = [](bool ok, const std::string& what) {
         ++g_checks;
@@ -1020,6 +1024,54 @@ TEST(every_image_format_opens_from_outside_the_workspace_and_decodes)
             expect(px(1, 1, 0) > px(1, 1, 2) + 80 && px(6, 1, 2) > px(6, 1, 0) + 80, std::string(c.name) + ": red left, blue right");
     }
     vm.closeAll();
+}
+
+TEST(tiff_fax_pages_and_tiles_decode_pixel_for_pixel)
+{
+    // make_tiffs.ps1: one black-and-white page, 300 x 40, uncompressed, PackBits, CCITT Group 3 and
+    // Group 4 (Windows' encoder); the pattern is computed here as it was there.
+    auto black = [](int x, int y) {
+        if (y < 4)
+            return false;
+        if (y < 7)
+            return x >= 10 && x < 250;
+        return (x + y / 3) % 37 < 5 + y % 11;
+    };
+    const std::string dir = std::string(ENP_SOURCE_DIR) + "/tests/data/images/";
+    for (const char* name : {"fax-none.tif", "fax-rle.tif", "fax-g3.tif", "fax-g4.tif"}) {
+        const std::optional<std::string> bytes = os::fs::readFile(dir + name);
+        services::DecodedImage img;
+        std::string note;
+        const bool ok = bytes && services::decodeImage(*bytes, img, note, 4096);
+        CHECK(ok && img.width == 300 && img.height == 40);
+        if (!ok || img.width != 300 || img.height != 40) {
+            std::printf("  %s: %s\n", name, note.c_str());
+            continue;
+        }
+        int wrong = 0;
+        for (int y = 0; y < 40; ++y)
+            for (int x = 0; x < 300; ++x)
+                wrong += (img.rgba[size_t(y * 300 + x) * 4] < 128) != black(x, y);
+        if (wrong)
+            std::printf("  %s: %d pixels wrong\n", name, wrong);
+        CHECK_EQ(wrong, 0);
+    }
+    // Tiles of 16 x 16 over 40 x 20 (the last ones cut), Deflate with the predictor.
+    const std::optional<std::string> tiled = os::fs::readFile(dir + "tiled-predictor.tif");
+    services::DecodedImage img;
+    std::string note;
+    CHECK(tiled && services::decodeImage(*tiled, img, note, 4096) && img.width == 40 && img.height == 20);
+    if (img.width == 40 && img.height == 20) {
+        int wrong = 0;
+        for (int y = 0; y < 20; ++y)
+            for (int x = 0; x < 40; ++x) {
+                const unsigned char* p = &img.rgba[size_t(y * 40 + x) * 4];
+                wrong += x < 20 ? !(p[0] == 230 && p[2] == 20) : !(p[0] == 20 && p[2] == 230);
+            }
+        CHECK_EQ(wrong, 0);
+    }
+    // What it does not read says so.
+    CHECK(!services::decodeImage(std::string("II\x2a\x00\x08\x00\x00\x00\x00\x00", 10), img, note) && !note.empty());
 }
 
 TEST(open_workspace_file_opens_its_folder)
@@ -4645,7 +4697,9 @@ TEST(local_agent_takes_a_question_in_steps)
         []() { return std::string(); });
     agent.agentChoice.set(int(AgentViewModel::Choice::Local));
     agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"query_table", "Filters a table. More text.", "{}"}}; },
-                        [](const interfaces::LocalToolCall&, std::function<void(AgentViewModel::ToolOutput)> done) {
+                        [](const interfaces::LocalToolCall& call, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            if (call.arguments.find("Sunday") != std::string::npos)
+                                return done(AgentViewModel::ToolOutput{"tips.csv: no rows match 'Day = Sunday'.\nDay holds: Sun, Sat", {}, {}});
                             done(AgentViewModel::ToolOutput{"ok", {}, {}});
                         },
                         []() { return std::string("Guide."); });
@@ -4694,6 +4748,14 @@ TEST(local_agent_takes_a_question_in_steps)
     agent.submitPrompt("Which country made the most profit this year?");
     CHECK_EQ(engine.chats.size(), size_t(9));
     CHECK(engine.chats[8].messages.back().text.find("step") == std::string::npos);
+
+    // A tool says how to fix the call and the model only reports it: it is told to call again.
+    engine.textAnswers = {R"j({"name": "query_table", "arguments": {"where": "Day = Sunday"}})j", "No rows for Sunday.",
+                          R"j({"name": "query_table", "arguments": {"where": "Day = Sun"}})j", "Sunday: 3.26."};
+    agent.submitPrompt("What is the average tip on Sundays?");
+    CHECK_EQ(engine.chats.size(), size_t(13));
+    CHECK(engine.chats[11].messages.back().text.find("Make the corrected call now") != std::string::npos);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Sunday: 3.26.");
 }
 
 TEST(agent_proposals_replace_one_waiting_for_the_same_file)
@@ -4760,6 +4822,87 @@ TEST(engine_json_carries_pictures_sounds_and_tool_calls)
     result.mediaTokens = 256;
     const interfaces::LocalChatResult got = engine::chatResultFrom(*model::Json::parse(engine::toJson(result).dump()));
     CHECK(got.ok && got.text == "Reading." && got.toolCalls.size() == 1 && got.toolCalls[0].name == "list_files" && got.mediaTokens == 256);
+}
+
+TEST(local_agent_looks_zoom_into_parts_and_spend_the_tokens_asked)
+{
+    // The parts a look can ask for.
+    auto box = [](const model::Json& args) {
+        std::array<float, 4> b{};
+        std::string why;
+        if (!app::LocalAgentTools::lookBox(args, b.data(), why))
+            b = {-1, -1, -1, -1};
+        return b;
+    };
+    auto near = [](const std::array<float, 4>& b, float x0, float y0, float x1, float y1) {
+        return std::abs(b[0] - x0) < 0.01f && std::abs(b[1] - y0) < 0.01f && std::abs(b[2] - x1) < 0.01f && std::abs(b[3] - y1) < 0.01f;
+    };
+    using model::Json;
+    CHECK(near(box(Json::object()), 0, 0, 1, 1));
+    CHECK(near(box(Json::object().set("region", "top-left")), 0, 0, 0.5f, 0.5f));
+    CHECK(near(box(Json::object().set("region", "bottom third")), 0, 2.0f / 3, 1, 1));
+    CHECK(near(box(Json::object().set("region", "middle-left quarter")), 0, 0.375f, 0.25f, 0.625f));
+    CHECK(near(box(Json::object().set("region", "center")), 0.25f, 0.25f, 0.75f, 0.75f));
+    CHECK(near(box(Json::object().set("region", "10,40,60,70")), 0.1f, 0.4f, 0.6f, 0.7f));
+    CHECK(near(box(Json::object().set("region", "10, 40, 50, 30")), 0.1f, 0.4f, 0.6f, 0.7f)); // left, top, width, height
+    CHECK(near(box(Json::object().set("region", "0.1,0.4,0.6,0.7")), 0.1f, 0.4f, 0.6f, 0.7f));
+    CHECK(near(box(Json::object().set("zoom", 400).set("at", "70,85")), 0.575f, 0.725f, 0.825f, 0.975f));
+    CHECK(near(box(Json::object().set("zoom", 400).set("at", "99,1")), 0.75f, 0, 1, 0.25f)); // kept inside
+    CHECK(near(box(Json::object().set("region", "top").set("zoom", "200")), 0.25f, 0.125f, 0.75f, 0.375f));
+    CHECK(box(Json::object().set("region", "banana"))[0] < 0);
+    // As a list of numbers, or under another name.
+    {
+        const std::optional<Json> listed = Json::parse(R"j({"region": [10, 40, 60, 70]})j");
+        const std::optional<Json> named = Json::parse(R"j({"box": "10,40,60,70"})j");
+        CHECK(listed && near(box(*listed), 0.1f, 0.4f, 0.6f, 0.7f));
+        CHECK(named && near(box(*named), 0.1f, 0.4f, 0.6f, 0.7f));
+        CHECK(near(box(Json::object().set("coordinates", "10,40,60,70")), 0.1f, 0.4f, 0.6f, 0.7f));
+    }
+
+    // Pictures: the part zoomed into, at the tokens asked for (one per 48 x 48 pixels).
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-looks";
+    os::fs::createDirectories(root);
+    const std::optional<std::string> fax = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/images/fax-g4.tif");
+    CHECK(fax.has_value());
+    files.write(root + "/fax.tif", fax.value_or(std::string()), nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); });
+    auto look = [&](const Json& args) {
+        viewmodel::AgentViewModel::ToolOutput got;
+        tools.run({"c", "look_at_image", args.dump()}, [&](viewmodel::AgentViewModel::ToolOutput out) { got = std::move(out); });
+        return got;
+    };
+    auto tokens = [](const interfaces::LocalMedia& m) { return double(m.width) * m.height / (48.0 * 48.0); };
+    auto brightness = [](const interfaces::LocalMedia& m) {
+        double sum = 0;
+        for (char c : m.data)
+            sum += static_cast<unsigned char>(c);
+        return sum / double(std::max<size_t>(1, m.data.size()));
+    };
+    const auto whole = look(Json::object().set("path", "fax.tif").set("detail", "low"));
+    CHECK(whole.media.size() == 1 && std::abs(tokens(whole.media[0]) - 70) < 8);
+    CHECK(whole.text.find("TIFF, 300 x 40") != std::string::npos);
+    const auto careful = look(Json::object().set("path", "fax.tif").set("detail", "high"));
+    CHECK(careful.media.size() == 1 && std::abs(tokens(careful.media[0]) - 1120) < 30);
+    // The white rows at the top, then the black bar under them (rows 4 to 6, x 10 to 249).
+    const auto white = look(Json::object().set("path", "fax.tif").set("region", "0,0,100,10"));
+    const auto bar = look(Json::object().set("path", "fax.tif").set("region", "4,10,82,17"));
+    CHECK(white.media.size() == 1 && brightness(white.media[0]) > 250);
+    CHECK(white.text.find("This part is empty") != std::string::npos && whole.text.find("empty") == std::string::npos &&
+          careful.text.find("empty") == std::string::npos);
+    CHECK(bar.media.size() == 1 && brightness(bar.media[0]) < 30);
+    CHECK(bar.text.find("4-82% across, 10-17% down") != std::string::npos && bar.shown.size() == 1);
+    // The user's minimum: every look at least that careful.
+    vm.agent().localPictureTokens.set(1120);
+    CHECK(tools.pictureTokens("low") == 1120 && tools.pictureTokens("300") == 1120);
+    vm.agent().localPictureTokens.set(0);
+    CHECK(tools.pictureTokens("low") == 70 && tools.pictureTokens("300") == 300 && tools.pictureTokens("5000") == 1120);
+    // A region it cannot read: why, and how to call it.
+    CHECK(look(Json::object().set("path", "fax.tif").set("region", "banana")).text.find("cannot read the region") != std::string::npos);
+    for (const std::string& shown : bar.shown)
+        std::remove(shown.c_str());
 }
 
 TEST(local_agent_tools_read_the_folder_and_propose_careful_edits)
@@ -4871,6 +5014,14 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units)", "sort": "Units asc", "limit": 1})j").find("West | 85") != std::string::npos);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Colour = red"})j").find("The columns are: Region, Product") != std::string::npos);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product contains pa"})j").find("1 of 4") != std::string::npos);
+    // A word written out where the file abbreviates it ("Eastern", the file says "East"): read as it.
+    const std::string eastern = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = Eastern"})j");
+    CHECK(eastern.find("2 of 4 rows match ('Eastern' read as 'East')") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product = P"})j").find("no rows match") != std::string::npos);
+    // Nothing matches: the values the column holds, to call again with.
+    const std::string none = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = North"})j");
+    CHECK(none.find("no rows match") != std::string::npos && none.find("Region holds: ") != std::string::npos &&
+          none.find("East") != std::string::npos && none.find("West") != std::string::npos);
 
     // Memory: kept in its file, recalled, corrected, forgotten, compacted; temporary ones end with the run.
     CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("#1") != std::string::npos);

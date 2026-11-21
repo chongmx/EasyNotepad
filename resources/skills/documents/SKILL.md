@@ -17,8 +17,8 @@ with `from_page` / `to_page`, a few pages at a time; stop as soon as you have th
 ## When the text is not enough: look at the page
 Tables, charts, drawings, diagrams, scanned pages and layout lose their meaning as text. Then
 `look_at_page {"path": "report.pdf", "page": 4}` shows the page in the viewer and gives you a
-picture of it. For small print, zoom and take a region:
-`look_at_page {"path": "report.pdf", "page": 4, "zoom": 200, "region": "top"}`.
+picture of it. For small print, zoom into a part (region, zoom, at):
+`look_at_page {"path": "report.pdf", "page": 4, "region": "top-right quarter", "detail": "high"}`.
 See the pictures-and-sound skill for zooming well.
 
 ## Locked documents

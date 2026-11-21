@@ -69,6 +69,10 @@ public:
     // answer from what the steps found. No instructions, or a one-step plan: the question as it is.
     void setLocalPlanner(std::function<std::string()> instructions) { localPlanner_ = std::move(instructions); }
     Property<bool> localInSteps{true};
+    // The fewest tokens the local model spends on any picture it looks at (saved): 0 lets it choose
+    // per look (70 for a glance to 1120 for small print); 280, 560 or 1120 for at least that.
+    Property<int> localPictureTokens{0};
+    static constexpr int kPictureTokenChoices[] = {0, 280, 560, 1120};
     // The steps in a plan the model wrote ("1. ...", "2) ...", "Step 3: ..."), at most kMaxPlanSteps.
     static std::vector<std::string> planSteps(const std::string& plan);
     static constexpr size_t kMaxPlanSteps = 6;

@@ -16,6 +16,10 @@ answer the question now and you call no tools now: you only write the steps.
   data/Financial Sample.xlsx").
 - A question with two parts gets a step for each part. A figure the answer needs gets its own
   step: never leave a number to be guessed.
+- Keep the user's words about how to do it in the step that does it: "look carefully" or "read
+  the small print" becomes "(look_at_image, detail high)".
+- A figure printed in a document or picture (a total, a tax, a date) is read from it, never worked
+  out: "read the VAT printed on the receipt".
 - Sums, differences and percentages are a step of their own (with `calculate`).
 - Put the steps in order: a step may use what the steps before it found.
 - At most 6 steps. Do not add a step for writing the answer: the app asks for that at the end.

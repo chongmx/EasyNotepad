@@ -361,6 +361,11 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
   - **memory** between conversations (`agent-memory/memories.json` in the app's data folder):
     preferences, lessons from mistakes, facts, notes for a week, temporary notes for the session;
     it corrects, forgets and compacts them, and follows your preferences in every answer.
+- **Zooming and picture tokens**: `look_at_image` and `look_at_page` take a `region` (top,
+  bottom-right, "top third", "middle-left quarter", or "left,top,right,bottom" in percent), a
+  `zoom` (percent) and `at` (the point to zoom around). Pages are zoomed in the viewer, pictures
+  cut from the full-size file. Each look costs 70 to 1,120 tokens by its `detail`; the agent
+  set-up can set a minimum for every look ("Pictures": at least 280, 560, or always 1,120).
 - **Questions in steps**: before the work, the model splits the question into at most six steps
   (the `planning` skill); the app gives it one step at a time, each with its own rounds of tools,
   then asks for the answer from what the steps found. The plan and each step show in the chat. A

@@ -59,12 +59,20 @@ public:
     bool captureWanted() const;
     void deliverCapture(bool ok, int width, int height, const std::vector<unsigned char>& rgba);
 
+    // The part of a picture or page a look asks for (its region, zoom and at), as fractions x0, y0,
+    // x1, y1; false with why when the region cannot be read.
+    static bool lookBox(const model::Json& args, float box[4], std::string& why);
+    // The tokens a look spends on its picture: its detail, at least the user's minimum.
+    int pictureTokens(const std::string& detail) const;
+
 private:
     struct Look {
         Done done;
         std::string what;   // "page 3 of report.pdf at 200%"
-        std::string region; // "all", "top", "bottom-left", ...
-        int side = 800;     // the picture's longest side for the model (its detail)
+        int page = -1;      // the page looked at (from 0), and the part of it: fractions x0, y0, x1, y1
+        float box[4] = {0, 0, 1, 1};
+        int documentId = -1;
+        int tokens = 280;   // what the picture costs the model (its detail)
         int frames = 0;
     };
     viewmodel::NotepadViewModel& vm_;
