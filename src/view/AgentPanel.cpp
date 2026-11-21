@@ -5,6 +5,8 @@
 #include "enp/view/UiAutomation.h"
 #include "enp/view/UiStyle.h"
 
+#include "enp/os/Fs.h"
+#include "enp/os/Memory.h"
 #include "enp/os/Os.h"
 
 #include "IconsFontAwesome6.h"
@@ -151,12 +153,15 @@ void AgentPanel::bubble(const model::ChatMessage& message, size_t index, float w
                        "%s", role.c_str());
     ImGui::PopFont();
     // The wrap position is window-local, not screen space.
-    if (message.role == model::ChatRole::Agent) { // the agent writes Markdown
+    // The agent writes Markdown; a tool step shows the pictures its tool brought (![name](path)).
+    if (message.role == model::ChatRole::Agent || (message.role == model::ChatRole::Tool && message.text.find("![") != std::string::npos)) {
         while (markdown_.size() <= index)
             markdown_.emplace_back();
         MarkdownView& view = markdown_[index];
         if (!view.onLink)
             view.onLink = [this](const std::string& url) { openLink(url); };
+        if (!view.onImage)
+            view.onImage = [this](const std::string& source) { return chatImage(source); };
         view.emoji = emoji_;
         view.render(message.text, bubbleW - pad * 2.0f, fonts_, palette_, Fonts::kUiSize, s_);
     } else {
@@ -225,8 +230,11 @@ void AgentPanel::renderMessages(float height)
     }
     // A new session (another folder was opened) starts with fewer messages: the rendered Markdown
     // of the old ones goes too.
-    if (markdown_.size() > agent.messages().size())
+    if (markdown_.size() > agent.messages().size()) {
         markdown_.resize(agent.messages().size());
+        releaseImages(); // another conversation: its pictures go
+    }
+    images_.collect();
     for (const model::ChatMessage& message : agent.messages())
         bubble(message, size_t(&message - agent.messages().data()), width);
     // The last answer came from the local model: Claude Code can have a go too.
@@ -236,6 +244,26 @@ void AgentPanel::renderMessages(float height)
             vm_.agent().askClaudeInstead(index);
         registerLastItem("agent-ask-claude", "button", "Ask Claude instead", [this, index]() { vm_.agent().askClaudeInstead(index); });
         ui::itemTooltip("Send the same question to Claude Code");
+        ImGui::Spacing();
+    }
+    // Changes the agent proposed, waiting for the user: review them side by side, or decide at once.
+    if (const int pending = agent.live() ? agent.pendingChangeCount() : 0; pending > 0 && !agent.busy.get()) {
+        ImGui::TextColored(col(palette_.iconOrange), ICON_FA_PEN);
+        ImGui::SameLine();
+        ImGui::Text(pending == 1 ? "%d change to review" : "%d changes to review", pending);
+        if (ImGui::SmallButton(ICON_FA_CODE_BRANCH "  Review"))
+            vm_.execute(viewmodel::CommandId::SwitchToAgentMode);
+        registerLastItem("agent-review-changes", "button", "Review the proposed changes",
+                         [this]() { vm_.execute(viewmodel::CommandId::SwitchToAgentMode); });
+        ui::itemTooltip("Opens the Agent workspace: each change side by side, to accept or reject");
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_CHECK "  Accept all"))
+            vm_.execute(viewmodel::CommandId::AcceptAllChanges);
+        registerLastItem("agent-accept-all", "button", "Accept all changes", [this]() { vm_.execute(viewmodel::CommandId::AcceptAllChanges); });
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_BAN "  Reject all"))
+            vm_.execute(viewmodel::CommandId::RejectAllChanges);
+        registerLastItem("agent-reject-all", "button", "Reject all changes", [this]() { vm_.execute(viewmodel::CommandId::RejectAllChanges); });
         ImGui::Spacing();
     }
     if (agent.busy.get()) {
@@ -251,6 +279,38 @@ void AgentPanel::renderMessages(float height)
         ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
+}
+
+// A picture in the conversation: a file in the open folder (relative or absolute) or one the
+// agent's tools made (temp/agent-images next to the app). Read and decoded once.
+const MarkdownImage* AgentPanel::chatImage(const std::string& source)
+{
+    if (const auto it = heldImages_.find(source); it != heldImages_.end())
+        return it->second;
+    std::string path = source;
+    if (path.rfind("file://", 0) == 0)
+        path = path.substr(7);
+    for (size_t at = path.find("%20"); at != std::string::npos; at = path.find("%20", at + 1))
+        path.replace(at, 3, " ");
+    const bool absolute = !path.empty() && (path[0] == '/' || (path.size() > 1 && path[1] == ':'));
+    const MarkdownImage* image = nullptr;
+    os::mem::Scope scope("images");
+    if (path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0) {
+        image = images_.acquireUnavailable(source, "remote image, not fetched");
+    } else {
+        const std::string full = absolute ? path : vm_.absolutePath(path);
+        const std::optional<std::string> bytes = os::fs::stat(full).isDirectory ? std::nullopt : os::fs::readFile(full);
+        image = bytes ? images_.acquire(source, *bytes) : images_.acquireUnavailable(source, "not found");
+    }
+    heldImages_.emplace(source, image);
+    return image;
+}
+
+void AgentPanel::releaseImages()
+{
+    for (const auto& [source, image] : heldImages_)
+        images_.release(source);
+    os::mem::release(heldImages_);
 }
 
 void AgentPanel::renderSetup(float width)
@@ -403,13 +463,45 @@ void AgentPanel::renderLocalSetup(float inner)
         ImGui::TextDisabled("%s", lab.hasEngine() ? lab.info().unavailableReason.c_str() : "This build has no local model.");
         return;
     }
+    // Which model: each a download of its own; the one chosen answers (the others stay on disk).
+    {
+        auto label = [](int i) {
+            const Lab::ModelChoice& c = Lab::modelChoiceInfo(i);
+            char text[96];
+            std::snprintf(text, sizeof(text), "%s (%.1f GB)", c.name, double(c.model->size + c.projector->size) / 1e9);
+            return std::string(text);
+        };
+        int choice = lab.modelChoice.get();
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 330.0f * s_));
+        if (ImGui::BeginCombo("Model", label(choice).c_str())) {
+            for (int i = 0; i < Lab::kModelChoices; ++i) {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(label(i).c_str(), i == choice))
+                    lab.modelChoice.set(i);
+                ui::itemTooltip("%s", Lab::modelChoiceInfo(i).summary);
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ui::itemTooltip("%s", lab.chosenModel().summary);
+        registerLastItem("agent-local-model", "combo", "Which local model",
+                         [&lab]() { lab.modelChoice.set((lab.modelChoice.get() + 1) % Lab::kModelChoices); });
+        ImGui::TextDisabled("%s.", lab.chosenModel().summary);
+    }
     const Lab::FileStatus model = lab.fileStatus(Lab::Which::Model);
     const Lab::FileStatus drafter = lab.fileStatus(Lab::Which::Drafter);
+    const Lab::FileStatus projector = lab.fileStatus(Lab::Which::Projector);
     const bool ready = lab.fileUsable(Lab::Which::Model);
+    const bool withDrafter = lab.chosenModel().drafter != nullptr;
+    char drafterSize[32];
+    std::snprintf(drafterSize, sizeof(drafterSize), "%.0f MB", double(lab.file(Lab::Which::Drafter).size) / 1e6);
+    const char* name = lab.chosenModel().name;
     char size[32];
-    std::snprintf(size, sizeof(size), "%.2f GB", double(Lab::modelFile().size) / 1e9);
-    if (model.state == State::Downloading || drafter.state == State::Downloading) {
-        const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter;
+    std::snprintf(size, sizeof(size), "%.2f GB", double(lab.file(Lab::Which::Model).size) / 1e9);
+    char eyes[32];
+    std::snprintf(eyes, sizeof(eyes), "%.0f MB", double(lab.file(Lab::Which::Projector).size) / 1e6);
+    if (model.state == State::Downloading || drafter.state == State::Downloading || projector.state == State::Downloading) {
+        const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter.state == State::Downloading ? drafter : projector;
         const float fraction = d.total ? float(double(d.have) / double(d.total)) : 0.0f;
         ImGui::TextUnformatted(lab.importing() ? "Copying the file in..." : "Downloading...");
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, col(palette_.accent));
@@ -419,21 +511,56 @@ void AgentPanel::renderLocalSetup(float inner)
             ImGui::TextColored(col(palette_.iconOrange), "%s", d.note.c_str());
         if (ImGui::Button(ICON_FA_STOP " Stop"))
             lab.cancelDownload();
-    } else if (model.state == State::Verifying || drafter.state == State::Verifying) {
+    } else if (model.state == State::Verifying || drafter.state == State::Verifying || projector.state == State::Verifying) {
         ImGui::TextDisabled("Checking the download...");
     } else if (ready) {
         ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
         ImGui::SameLine();
-        ImGui::TextUnformatted(lab.fileUsable(Lab::Which::Drafter) ? "Gemma 4 E2B is here, with its drafter (faster)."
-                                                                   : "Gemma 4 E2B is here.");
-        if (!lab.fileUsable(Lab::Which::Drafter)) {
-            if (ImGui::Button(ICON_FA_DOWNLOAD " Get the drafter (77 MB, faster answers)"))
-                lab.download(Lab::Which::Drafter);
-            registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
+        lab.fetchDrafter(); // on by default: a model that is here gets its drafter (once; a failure waits for the button)
+        const bool drafting = withDrafter && lab.drafterOn() && lab.fileUsable(Lab::Which::Drafter);
+        ImGui::Text(drafting ? "%s is here, with its drafter (faster)." : "%s is here.", name);
+        // Everyone gets the drafter (fetched by itself, above); turning it off is in the Engine Lab.
+        if (withDrafter) {
+            // Wanted but not here (its download failed or was stopped): get it by hand.
+            if (lab.drafterOn() && !lab.fileUsable(Lab::Which::Drafter) && !lab.downloading()) {
+                const std::string getDrafter = std::string(ICON_FA_DOWNLOAD " Get the drafter (") + drafterSize + ")";
+                if (ImGui::Button(getDrafter.c_str()))
+                    lab.download(Lab::Which::Drafter);
+                registerLastItem("agent-local-drafter", "button", "Download the drafter", [&lab]() { lab.download(Lab::Which::Drafter); });
+            }
+        }
+        if (lab.fileUsable(Lab::Which::Projector)) {
+            ImGui::TextColored(col(palette_.iconGreen), ICON_FA_EYE);
+            ImGui::SameLine();
+            ImGui::TextUnformatted("It can look at pictures and pages, and listen to recordings.");
+            // How many tokens a picture costs at least: more reads small print better, and takes longer.
+            static const char* const kPictureChoices[] = {"It chooses per look (70 to 1,120 tokens)", "At least 280 tokens",
+                                                          "At least 560 tokens", "Always 1,120 tokens (the most it can take)"};
+            int choice = 0;
+            for (int i = 0; i < 4; ++i)
+                if (agent.localPictureTokens.get() == viewmodel::AgentViewModel::kPictureTokenChoices[i])
+                    choice = i;
+            ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 330.0f * s_));
+            if (ImGui::Combo("Pictures", &choice, kPictureChoices, 4))
+                agent.localPictureTokens.set(viewmodel::AgentViewModel::kPictureTokenChoices[choice]);
+            ui::itemTooltip("How many tokens the local model spends on each picture or page it looks at. It chooses by "
+                            "itself (a glance, or every detail for small print); set a minimum to make every look careful, "
+                            "which reads text better and takes a little longer.");
+            registerLastItem("agent-local-picture-tokens", "combo", "Tokens for each picture", [&agent]() {
+                agent.localPictureTokens.set(agent.localPictureTokens.get() == 1120 ? 0 : 1120);
+            });
+        } else {
+            const std::string seeHear = std::string(ICON_FA_DOWNLOAD " Let it see and hear (") + eyes + ")";
+            if (ImGui::Button(seeHear.c_str()))
+                lab.download(Lab::Which::Projector);
+            ui::itemTooltip("Its eyes and ears: it can then look at pictures and at the pages of documents, and listen to "
+                            "recordings (WAV, MP3, FLAC).");
+            registerLastItem("agent-local-projector", "button", "Download the eyes and ears",
+                             [&lab]() { lab.download(Lab::Which::Projector); });
         }
     } else {
-        ImGui::TextWrapped("Gemma 4 E2B (%s) answers quick questions about your code on this device, without a network "
-                           "or an account. It reads what you are looking at; it cannot edit files.", size);
+        ImGui::TextWrapped("%s (%s) answers questions on this device, without a network or an account. It works in the "
+                           "open folder: it reads files and documents and proposes edits for you to accept.", name, size);
         if (ImGui::Button(ICON_FA_DOWNLOAD " Download"))
             lab.download(Lab::Which::Model);
         registerLastItem("agent-local-download", "button", "Download the local model", [&lab]() { lab.download(Lab::Which::Model); });
@@ -450,6 +577,13 @@ void AgentPanel::renderLocalSetup(float inner)
     if (ImGui::Checkbox("Fall back to the local model", &fallback))
         agent.localFallback.set(fallback);
     ui::itemTooltip("When Claude Code is not installed, not logged in, offline or fails, the local model answers instead");
+    bool steps = agent.localInSteps.get();
+    if (ImGui::Checkbox("Take questions in steps", &steps))
+        agent.localInSteps.set(steps);
+    ui::itemTooltip("The local model first splits a question into steps, then works through them one at a time: slower, "
+                    "and much better at questions with several parts");
+    registerLastItem("agent-local-in-steps", "checkbox", "Take questions in steps",
+                     [&agent]() { agent.localInSteps.set(!agent.localInSteps.get()); });
     ImGui::TextDisabled("Who answers is chosen at the top of the panel: Auto, Claude or Local.");
 }
 

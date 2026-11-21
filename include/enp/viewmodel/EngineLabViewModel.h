@@ -23,8 +23,38 @@ public:
         uint64_t size;
         const char* origin;
     };
+    // Gemma 4 E2B's files (the first choice): the model, its drafter, its eyes and ears.
     static const CatalogFile& modelFile();
     static const CatalogFile& drafterFile();
+    static const CatalogFile& projectorFile(); // the eyes and ears: pictures and sounds for the agent
+    enum class Which;
+    static const CatalogFile& catalogFile(Which which);
+
+    // The models to choose from (saved): each with its own eyes and ears. Bigger ones reason better
+    // and need more memory. Each has its own drafter (its MTP assistant), which speeds only it.
+    struct ModelChoice {
+        const char* name;     // "Gemma 4 E4B"
+        const char* summary;  // what it is good for, and what it needs
+        const CatalogFile* model;
+        const CatalogFile* projector;
+        const CatalogFile* drafter; // its MTP assistant (speculative decoding), or none
+        bool drafterByDefault;      // used unless turned off (else only when turned on)
+        uint64_t memoryNeeded; // about, to run with its eyes and ears and a working context
+    };
+    static constexpr int kModelChoices = 3;
+    static const ModelChoice& modelChoiceInfo(int index);
+    Property<int> modelChoice{0};
+    // The chosen model's drafter: fetched with the model and used by the agent; off, neither. Each
+    // model has its default (on for E2B and E4B; off for 12B, which with it no longer fits an 8 GB
+    // card and gets slower); the Engine Lab turns it on or off per model (saved).
+    bool drafterOn() const;
+    void setDrafterOn(bool on);
+    // Downloads the chosen model's drafter when it is wanted, missing, and nothing else downloads
+    // (after the model's download; when the drafter is turned on again).
+    void fetchDrafter();
+    const ModelChoice& chosenModel() const { return modelChoiceInfo(modelChoice.get()); }
+    // The chosen model's file of each kind.
+    const CatalogFile& file(Which which) const;
 
     enum class FileState { Missing, Partial, Downloading, Verifying, Unverified, Ready, Mismatch, Custom };
     struct FileStatus {
@@ -35,7 +65,7 @@ public:
         double verifyFraction = 0;
         std::string note; // e.g. "waiting for Wi-Fi"
     };
-    enum class Which { Model, Drafter };
+    enum class Which { Model, Drafter, Projector };
 
     struct Record {
         std::string when; // local time, "2026-11-01 14:05"
@@ -74,6 +104,7 @@ public:
     // Optional: run a file that is already on the device instead of the catalogue's.
     Property<std::string> customModelPath;
     Property<std::string> customDrafterPath;
+    Property<std::string> customProjectorPath;
 
     Property<int> threads{4};
     Property<bool> useGpu{false};
@@ -114,13 +145,16 @@ private:
     void say(const std::string& text, bool error = false);
     std::string notice_;
     bool noticeError_ = false;
-    std::string downloadErrors_[2];
+    std::string downloadErrors_[3];
+    Property<std::string>& customPath(Which which);
     std::string deviceLabel();
 
     interfaces::ILocalEngineService* engine_ = nullptr;
     interfaces::EngineInfo info_;
     bool infoLoaded_ = false;
+    bool acceleratorStale_ = false; // a run ended: the engine library's status may have changed
     int downloading_ = -1; // Which, while a catalogue download runs
+    int drafterSetting_[3] = {-1, -1, -1}; // per model: -1 its default, 0 off, 1 on
     interfaces::DownloadStatus lastDownload_;
     int verifying_ = -1;
     double verifyFraction_ = 0;

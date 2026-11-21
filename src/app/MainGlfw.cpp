@@ -11,6 +11,7 @@
 #include "enp/services/debug/MemoryTrace.h"
 #include "enp/os/Os.h"
 #include "enp/services/ImageDecoder.h"
+#include "enp/services/LocalEngineService.h"
 
 #include "FrameCapture.h"
 
@@ -295,6 +296,14 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; ++i)
         if (std::strcmp(argv[i], "--mcp") == 0) {
             const int code = enp::app::runMcpBridge(ENP_VERSION_FULL);
+            enp::os::shutdown();
+            return code;
+        }
+    // Engine helper mode: no window; loads an engine library (enp-engine-cuda) for the app that
+    // started it and serves its requests over stdio (plan 21). A fault in it ends only this process.
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], "--local-engine") == 0) {
+            const int code = enp::services::runLocalEngineHelper(argv[i + 1]);
             enp::os::shutdown();
             return code;
         }

@@ -47,9 +47,13 @@
 #include "enp/services/ImageEncoder.h"
 #include "enp/services/ProcessService.h"
 #include "enp/services/DocumentReaderService.h"
+#include "enp/services/LocalEngineService.h"
 #include "enp/viewmodel/ViewerViewModel.h"
 
 #include "AutomationController.h"
+#include "LocalAgentTools.h"
+#include "enp/engine/EngineJson.h"
+#include "enp/model/Base64.h"
 #include "McpBridge.h"
 
 #include <array>
@@ -973,8 +977,12 @@ TEST(every_image_format_opens_from_outside_the_workspace_and_decodes)
         {"rgb.bmp", "BMP", true, false},          {"rgba.bmp", "BMP", true, false},        {"palette.bmp", "BMP", true, false},
         {"rgb.tga", "TGA", true, false},          {"rle.tga", "TGA", true, false},         {"rgb.ppm", "PNM", true, false},
         {"grey.pgm", "PNM", true, true},          {"rgb.qoi", "QOI", true, false},         {"icon.ico", "ICO", true, false},
-        {"flat.hdr", "Radiance HDR", true, false}, {"lossy.webp", "WebP", false, false},   {"rgb.tif", "TIFF", false, false},
+        {"flat.hdr", "Radiance HDR", true, false}, {"lossy.webp", "WebP", true, false},    {"rgb.tif", "TIFF", true, false},
         {"rgb.jp2", "JPEG 2000", false, false},
+        // TIFF variants (make_tiffs.ps1: Windows' encoder; make_tiff_extras.py).
+        {"grey-lzw.tif", "TIFF", true, true},     {"grey16.tif", "TIFF", true, true},       {"palette-lzw.tif", "TIFF", true, false},
+        {"rgba-zip.tif", "TIFF", true, false},    {"rgb-rle.tif", "TIFF", true, false},     {"planar.tif", "TIFF", true, false},
+        {"cmyk.tif", "TIFF", true, false},        {"grey16-predictor-be.tif", "TIFF", true, true},
     };
     auto expect = [](bool ok, const std::string& what) {
         ++g_checks;
@@ -1016,6 +1024,54 @@ TEST(every_image_format_opens_from_outside_the_workspace_and_decodes)
             expect(px(1, 1, 0) > px(1, 1, 2) + 80 && px(6, 1, 2) > px(6, 1, 0) + 80, std::string(c.name) + ": red left, blue right");
     }
     vm.closeAll();
+}
+
+TEST(tiff_fax_pages_and_tiles_decode_pixel_for_pixel)
+{
+    // make_tiffs.ps1: one black-and-white page, 300 x 40, uncompressed, PackBits, CCITT Group 3 and
+    // Group 4 (Windows' encoder); the pattern is computed here as it was there.
+    auto black = [](int x, int y) {
+        if (y < 4)
+            return false;
+        if (y < 7)
+            return x >= 10 && x < 250;
+        return (x + y / 3) % 37 < 5 + y % 11;
+    };
+    const std::string dir = std::string(ENP_SOURCE_DIR) + "/tests/data/images/";
+    for (const char* name : {"fax-none.tif", "fax-rle.tif", "fax-g3.tif", "fax-g4.tif"}) {
+        const std::optional<std::string> bytes = os::fs::readFile(dir + name);
+        services::DecodedImage img;
+        std::string note;
+        const bool ok = bytes && services::decodeImage(*bytes, img, note, 4096);
+        CHECK(ok && img.width == 300 && img.height == 40);
+        if (!ok || img.width != 300 || img.height != 40) {
+            std::printf("  %s: %s\n", name, note.c_str());
+            continue;
+        }
+        int wrong = 0;
+        for (int y = 0; y < 40; ++y)
+            for (int x = 0; x < 300; ++x)
+                wrong += (img.rgba[size_t(y * 300 + x) * 4] < 128) != black(x, y);
+        if (wrong)
+            std::printf("  %s: %d pixels wrong\n", name, wrong);
+        CHECK_EQ(wrong, 0);
+    }
+    // Tiles of 16 x 16 over 40 x 20 (the last ones cut), Deflate with the predictor.
+    const std::optional<std::string> tiled = os::fs::readFile(dir + "tiled-predictor.tif");
+    services::DecodedImage img;
+    std::string note;
+    CHECK(tiled && services::decodeImage(*tiled, img, note, 4096) && img.width == 40 && img.height == 20);
+    if (img.width == 40 && img.height == 20) {
+        int wrong = 0;
+        for (int y = 0; y < 20; ++y)
+            for (int x = 0; x < 40; ++x) {
+                const unsigned char* p = &img.rgba[size_t(y * 40 + x) * 4];
+                wrong += x < 20 ? !(p[0] == 230 && p[2] == 20) : !(p[0] == 20 && p[2] == 230);
+            }
+        CHECK_EQ(wrong, 0);
+    }
+    // What it does not read says so.
+    CHECK(!services::decodeImage(std::string("II\x2a\x00\x08\x00\x00\x00\x00\x00", 10), img, note) && !note.empty());
 }
 
 TEST(open_workspace_file_opens_its_folder)
@@ -4068,6 +4124,9 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     // The local agent: answers at once, in two pieces (or fails when told to).
     std::vector<interfaces::LocalChatRequest> chats;
     bool chatFails = false;
+    std::vector<std::vector<interfaces::LocalToolCall>> toolRounds;
+    bool alwaysTools = false;
+    std::vector<std::string> textAnswers;
     void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
               std::function<void(const std::string&)> text, std::function<void(const interfaces::LocalChatResult&)> done) override
     {
@@ -4075,6 +4134,27 @@ struct FakeEngine final : interfaces::ILocalEngineService {
         interfaces::LocalChatResult r;
         if (chatFails) {
             r.error = "out of memory";
+            done(r);
+            return;
+        }
+        // Scripted answers, streamed as written (one per chat).
+        if (!textAnswers.empty()) {
+            r.ok = true;
+            r.text = textAnswers.front();
+            textAnswers.erase(textAnswers.begin());
+            text(r.text);
+            done(r);
+            return;
+        }
+        // The model wants tools: each chat takes the next round of calls (or always, when set).
+        if (!toolRounds.empty() || alwaysTools) {
+            r.ok = true;
+            if (alwaysTools) {
+                r.toolCalls = {{"call_x", "list_files", "{}"}};
+            } else {
+                r.toolCalls = toolRounds.front();
+                toolRounds.erase(toolRounds.begin());
+            }
             done(r);
             return;
         }
@@ -4092,12 +4172,203 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     }
 };
 
+#if defined(ENP_FAKE_ENGINE)
+namespace {
+
+void setFakeEngineStart(const char* mode)
+{
+#if defined(_WIN32)
+    _putenv_s("ENP_FAKE_ENGINE_START", mode);
+#else
+    setenv("ENP_FAKE_ENGINE_START", mode, 1);
+#endif
+}
+
+services::LocalEngineService::Accelerator fakeAccelerator(const std::string& library = ENP_FAKE_ENGINE, int silenceSeconds = 3)
+{
+    services::LocalEngineService::Accelerator a;
+    a.library = library;
+    a.helper = {os::fs::executablePath(), "--local-engine", library};
+    a.startSeconds = 20;
+    a.silenceSeconds = silenceSeconds;
+    return a;
+}
+
+struct ChatRun {
+    bool done = false;
+    interfaces::LocalChatResult result;
+    std::string text;
+};
+
+// One question to the local agent, waited for; `onText` runs on each piece of the answer.
+ChatRun askLocal(services::LocalEngineService& engine, const std::string& model, std::function<void()> onText = {})
+{
+    auto run = std::make_shared<ChatRun>();
+    interfaces::LocalChatRequest q;
+    q.modelPath = model;
+    q.messages = {{"user", "Hi"}};
+    q.threads = 1;
+    q.maxTokens = 8;
+    q.contextTokens = 256;
+    engine.chat(
+        q, [](const std::string&) {},
+        [run, onText](const std::string& t) {
+            run->text += t;
+            if (onText)
+                onText();
+        },
+        [run](const interfaces::LocalChatResult& r) {
+            run->result = r;
+            run->done = true;
+        });
+    for (int i = 0; i < 6000 && !run->done; ++i) {
+        os::dispatch::pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return *run;
+}
+
+// The CPU engine answered (it cannot load a "fake:" model, so it says so).
+bool answeredOnCpu(const ChatRun& c) { return c.done && !c.result.ok && c.result.error.find("could not be loaded") != std::string::npos; }
+bool answeredOnFake(const ChatRun& c) { return c.done && c.result.ok && c.text == "Hello from the GPU" && c.result.backend == "FAKE0: Fake GPU"; }
+
+} // namespace
+
+TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
+{
+    {
+        services::LocalEngineService plain(std::nullopt);
+        if (!plain.info().available)
+            return; // no CPU engine in this build (or this CPU): nothing to fall back to
+        CHECK(plain.info().accelerator.empty());
+    }
+    setFakeEngineStart("ok");
+
+    // Absent: the CPU, and the lab says it is not installed.
+    {
+        services::LocalEngineService s(fakeAccelerator(os::fs::path::join(os::fs::currentDirectory(), "no-such-engine.so")));
+        CHECK(s.info().accelerator.find("not installed") != std::string::npos);
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+    }
+
+    // Present and working: it answers, streaming; its device is listed; then a failure without any
+    // text goes to the CPU, and stays there.
+    {
+        services::LocalEngineService s(fakeAccelerator());
+        const ChatRun c = askLocal(s, "fake:answer");
+        CHECK(answeredOnFake(c));
+        const interfaces::EngineInfo info = s.info();
+        CHECK(info.acceleratorReady);
+        CHECK(info.accelerator.find("Fake GPU (8.0 GB)") != std::string::npos);
+        CHECK(std::any_of(info.devices.begin(), info.devices.end(), [](const auto& d) { return d.name == "FAKE0"; }));
+        // Stopped mid-answer: it stops, and the next question still goes to it.
+        bool asked = false;
+        const ChatRun stopped = askLocal(s, "fake:slow", [&]() {
+            if (!asked) {
+                asked = true;
+                s.cancel();
+            }
+        });
+        CHECK(stopped.done && !stopped.result.ok && !stopped.text.empty());
+        CHECK(answeredOnFake(askLocal(s, "fake:answer")));
+        // Asked while the stopped one still winds down: it waits for it (it was refused), then is answered.
+        {
+            auto second = std::make_shared<ChatRun>();
+            bool askedAgain = false;
+            const ChatRun first = askLocal(s, "fake:slow", [&]() {
+                if (askedAgain)
+                    return;
+                askedAgain = true;
+                s.cancel();
+                interfaces::LocalChatRequest q;
+                q.modelPath = "fake:answer";
+                q.messages = {{"user", "Hi"}};
+                q.threads = 1;
+                q.maxTokens = 8;
+                q.contextTokens = 256;
+                s.chat(
+                    q, [](const std::string&) {}, [second](const std::string& t) { second->text += t; },
+                    [second](const interfaces::LocalChatResult& r) {
+                        second->result = r;
+                        second->done = true;
+                    });
+            });
+            for (int i = 0; i < 3000 && !second->done; ++i) {
+                os::dispatch::pump();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            CHECK(first.done && !first.result.ok);
+            CHECK(answeredOnFake(*second));
+        }
+        // A lab run on the GPU goes to it too.
+        bool ran = false;
+        interfaces::EngineRunResult run;
+        interfaces::EngineRunSettings settings;
+        settings.modelPath = "fake:answer";
+        settings.useGpu = true;
+        s.run(settings, nullptr, [&](const interfaces::EngineRunResult& r) {
+            run = r;
+            ran = true;
+        });
+        for (int i = 0; i < 3000 && !ran; ++i) {
+            os::dispatch::pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(ran && run.ok && run.backend == "FAKE0: Fake GPU" && run.generateTokensPerSecond == 123);
+
+        CHECK(answeredOnCpu(askLocal(s, "fake:fail")));
+        CHECK(s.info().accelerator.find("not used (out of fake memory)") != std::string::npos);
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+    }
+
+    // It crashes before writing: the same question is answered on the CPU.
+    {
+        services::LocalEngineService s(fakeAccelerator());
+        CHECK(answeredOnCpu(askLocal(s, "fake:crash")));
+        const std::string crashed = s.info().accelerator;
+        CHECK(crashed.find("the helper stopped") != std::string::npos);
+        if (crashed.find("the helper stopped") == std::string::npos)
+            std::printf("    status: %s\n", crashed.c_str());
+    }
+
+    // It crashes after writing: the app says so (the half answer stays), and the CPU answers next.
+    {
+        services::LocalEngineService s(fakeAccelerator());
+        const ChatRun c = askLocal(s, "fake:crash-after-text");
+        CHECK(c.done && !c.result.ok && c.text == "Half" && c.result.error.find("the CPU answers now") != std::string::npos);
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+    }
+
+    // It hangs: ended after the silence, and the CPU answers.
+    {
+        services::LocalEngineService s(fakeAccelerator(ENP_FAKE_ENGINE, 2));
+        CHECK(answeredOnCpu(askLocal(s, "fake:hang")));
+        CHECK(s.info().accelerator.find("stopped responding") != std::string::npos);
+    }
+
+    // It cannot start: no device, another interface version, a crash while starting.
+    for (const char* mode : {"nodevice", "abi", "crash"}) {
+        setFakeEngineStart(mode);
+        services::LocalEngineService s(fakeAccelerator());
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+        const std::string status = s.info().accelerator;
+        CHECK(status.find("not used") != std::string::npos);
+        if (std::strcmp(mode, "nodevice") == 0)
+            CHECK(status.find("no fake device") != std::string::npos);
+        if (std::strcmp(mode, "abi") == 0)
+            CHECK(status.find("another version") != std::string::npos);
+    }
+    setFakeEngineStart("ok");
+}
+#endif
+
 TEST(engine_lab_downloads_checks_and_compares)
 {
     using Lab = viewmodel::EngineLabViewModel;
     using State = Lab::FileState;
     FakeEngine engine;
     Lab lab(&engine);
+    lab.setDrafterOn(false); // the drafter is fetched by hand below (its automatic fetch: the next test)
     std::string status;
     auto sub = lab.statusMessage.subscribe([&](const std::string& s) { status = s; });
     lab.info();
@@ -4315,6 +4586,815 @@ TEST(agent_chooses_local_or_claude_and_falls_back)
     CHECK(engine.chats.size() == chats && !agent.busy.get());
 }
 
+
+TEST(local_agent_calls_tools_until_it_answers)
+{
+    using interfaces::LocalToolCall;
+    FakeEngine engine;
+    viewmodel::AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            viewmodel::AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            s.projectorPath = "/models/mmproj.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(viewmodel::AgentViewModel::Choice::Local));
+    std::vector<LocalToolCall> ran;
+    std::function<void(viewmodel::AgentViewModel::ToolOutput)> later; // a tool that answers a frame later
+    agent.setLocalTools(
+        [](bool canEdit) {
+            std::vector<interfaces::LocalTool> t = {{"read_file", "Reads a file", "{}"}, {"look_at_image", "Looks", "{}"}};
+            if (canEdit)
+                t.push_back({"edit_file", "Proposes an edit", "{}"});
+            return t;
+        },
+        [&](const LocalToolCall& call, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
+            ran.push_back(call);
+            viewmodel::AgentViewModel::ToolOutput out;
+            if (call.name == "look_at_image") {
+                interfaces::LocalMedia m;
+                m.name = "cat.png";
+                m.width = 2;
+                m.height = 1;
+                m.data = std::string(6, '\x7f');
+                out.media.push_back(std::move(m));
+                out.text = "Looked at cat.png.";
+                later = std::move(done);
+                return;
+            }
+            out.text = "1| int main() {}";
+            done(std::move(out));
+        },
+        []() { return std::string("The open folder is /work."); });
+
+    // Round 1: two calls (one answers later); round 2: the answer.
+    engine.toolRounds = {{{"c1", "read_file", R"({"path":"main.cpp"})"}, {"c2", "look_at_image", R"({"path":"cat.png"})"}}};
+    agent.submitPrompt("What is in main.cpp and cat.png?");
+    CHECK_EQ(engine.chats.size(), size_t(1));
+    CHECK_EQ(ran.size(), size_t(2));
+    CHECK(agent.busy.get() && later != nullptr); // waiting for the look
+    const interfaces::LocalChatRequest& first = engine.chats[0];
+    CHECK(first.tools.size() == 3 && first.projectorPath == "/models/mmproj.gguf" && first.contextTokens == 0);
+    CHECK(first.messages.front().role == "system" && first.messages.front().text.find("The open folder is /work.") != std::string::npos);
+    {
+        viewmodel::AgentViewModel::ToolOutput out;
+        interfaces::LocalMedia m;
+        m.name = "cat.png";
+        m.width = 2;
+        m.height = 1;
+        m.data = std::string(6, '\x7f');
+        out.media.push_back(std::move(m));
+        out.text = "Looked at cat.png.";
+        later(std::move(out));
+    }
+    CHECK_EQ(engine.chats.size(), size_t(2));
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Local answer.");
+    const std::vector<interfaces::LocalChatMessage>& sent = engine.chats[1].messages;
+    // ... the model's calls, each tool's result by its call, and the picture as the next turn.
+    bool calls = false, result1 = false, result2 = false, picture = false;
+    for (const interfaces::LocalChatMessage& m : sent) {
+        calls = calls || (m.role == "assistant" && m.toolCalls.size() == 2);
+        result1 = result1 || (m.role == "tool" && m.toolCallId == "c1" && m.toolName == "read_file" && m.text == "1| int main() {}");
+        result2 = result2 || (m.role == "tool" && m.toolCallId == "c2" && m.text == "Looked at cat.png.");
+        picture = picture || (m.role == "user" && m.media.size() == 1 && m.media[0].width == 2 && m.text.find("cat.png") != std::string::npos);
+    }
+    CHECK(calls && result1 && result2 && picture);
+    CHECK(sent.back().role == "user" && sent.back().media.size() == 1);
+    // The chat shows each tool step.
+    int steps = 0;
+    for (const model::ChatMessage& m : agent.messages())
+        steps += m.role == model::ChatRole::Tool && (m.text.find("read_file") != std::string::npos || m.text.find("look_at_image") != std::string::npos);
+    CHECK_EQ(steps, 2);
+
+    // Stopped while a tool works: its late answer is dropped, nothing more is asked.
+    engine.toolRounds = {{{"c3", "look_at_image", R"({"path":"cat.png"})"}}};
+    later = nullptr;
+    agent.submitPrompt("Look once more");
+    const size_t asked = engine.chats.size();
+    agent.stop();
+    later(viewmodel::AgentViewModel::ToolOutput{"late", {}, {}});
+    CHECK_EQ(engine.chats.size(), asked);
+    CHECK(!agent.busy.get());
+    // The same when the folder closes meanwhile.
+    engine.toolRounds = {{{"c4", "look_at_image", R"({"path":"cat.png"})"}}};
+    later = nullptr;
+    agent.submitPrompt("And again");
+    const size_t asked2 = engine.chats.size();
+    agent.workspaceChanged();
+    CHECK(!agent.busy.get());
+    later(viewmodel::AgentViewModel::ToolOutput{"late", {}, {}});
+    CHECK_EQ(engine.chats.size(), asked2);
+
+    // A model that never stops calling tools is stopped after the limit, and says so.
+    engine.alwaysTools = true;
+    const size_t before = engine.chats.size();
+    agent.submitPrompt("Loop");
+    CHECK_EQ(engine.chats.size() - before, size_t(viewmodel::AgentViewModel::kMaxToolRounds + 1));
+    CHECK(!agent.busy.get() && agent.messages().back().text.find("rounds of tools") != std::string::npos);
+    engine.alwaysTools = false;
+
+    // Plan only: no edit tools.
+    agent.autonomyIndex.set(1);
+    agent.submitPrompt("Plan it");
+    CHECK(engine.chats.back().tools.size() == 2);
+}
+
+TEST(local_agent_takes_a_question_in_steps)
+{
+    using viewmodel::AgentViewModel;
+    // The plan as a small model writes it: bold, mixed numbering, a line around it.
+    const std::vector<std::string> parsed =
+        AgentViewModel::planSteps("Here are the steps:\n1. **Find** the profit by country.\n2) Find the total profit.\n"
+                                  "  - Step 3: Work out the share.\nThat is all.");
+    CHECK(parsed.size() == 3 && parsed[0] == "Find the profit by country." && parsed[2] == "Work out the share.");
+    CHECK(AgentViewModel::planSteps("1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h").size() == AgentViewModel::kMaxPlanSteps);
+    CHECK(AgentViewModel::planSteps("No list at all.").empty());
+
+    FakeEngine engine;
+    AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(AgentViewModel::Choice::Local));
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"query_table", "Filters a table. More text.", "{}"}}; },
+                        [](const interfaces::LocalToolCall& call, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            if (call.arguments.find("Sunday") != std::string::npos)
+                                return done(AgentViewModel::ToolOutput{"tips.csv: no rows match 'Day = Sunday'.\nDay holds: Sun, Sat", {}, {}});
+                            done(AgentViewModel::ToolOutput{"ok", {}, {}});
+                        },
+                        []() { return std::string("Guide."); });
+    agent.setLocalPlanner([](const std::string&) { return std::string("---\nname: planning\n---\nWrite the steps."); });
+
+    const std::string question = "Which country made the most profit, and what share of the total is it?";
+    engine.textAnswers = {"1. Find the profit of each country.\n2. Find the total profit.\n3. Work out the share.",
+                          "Canada: 100.", "Total: 400.", "25 %.", "Canada, 25 % of the total."};
+    agent.submitPrompt(question);
+    CHECK_EQ(engine.chats.size(), size_t(5));
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Canada, 25 % of the total.");
+    // The plan: its own request, without tools, the skill without its front matter, the tools named.
+    const interfaces::LocalChatRequest& plan = engine.chats[0];
+    CHECK(plan.tools.empty() && plan.messages.size() == 2 && plan.messages[0].text.rfind("Write the steps.", 0) == 0);
+    CHECK(plan.messages[0].text.find("- query_table: Filters a table\n") != std::string::npos);
+    CHECK(plan.messages[1].text.find(question) != std::string::npos);
+    // Then one step at a time, each after the last one's answer, and the answer asked for at the end.
+    CHECK(engine.chats[1].tools.size() == 1 && engine.chats[1].messages.back().text.find("Do step 1 only now: Find the profit") != std::string::npos);
+    CHECK(engine.chats[2].messages.back().text.find("Now step 2: Find the total profit.") != std::string::npos);
+    CHECK(engine.chats[2].messages[engine.chats[2].messages.size() - 2].text == "Canada: 100.");
+    CHECK(engine.chats[3].messages.back().text.find("Now step 3") != std::string::npos);
+    CHECK(engine.chats[4].messages.back().text.find("All the steps are done") != std::string::npos &&
+          engine.chats[4].messages.back().text.find(question) != std::string::npos);
+    // The chat shows the plan and each step.
+    int shown = 0;
+    for (const model::ChatMessage& m : agent.messages())
+        shown += m.role == model::ChatRole::Tool && (m.text.rfind("Plan", 0) == 0 || m.text.rfind("Step ", 0) == 0);
+    CHECK_EQ(shown, 4);
+
+    // A one-step plan: the question as it is. A short one: no plan at all.
+    engine.textAnswers = {"1. Read the readme.", "It says hello."};
+    agent.submitPrompt("What does the readme say about it?");
+    CHECK_EQ(engine.chats.size(), size_t(7));
+    CHECK(engine.chats[6].messages.back().text.find("step") == std::string::npos);
+    // The next question's history has the last answer of the steps, not the first.
+    bool last = false, first = false;
+    for (const interfaces::LocalChatMessage& m : engine.chats[6].messages) {
+        last = last || m.text == "Canada, 25 % of the total.";
+        first = first || m.text == "Canada: 100.";
+    }
+    CHECK(last && !first);
+    agent.submitPrompt("Hi");
+    CHECK_EQ(engine.chats.size(), size_t(8));
+    // Turned off: the question as it is.
+    agent.localInSteps.set(false);
+    agent.submitPrompt("Which country made the most profit this year?");
+    CHECK_EQ(engine.chats.size(), size_t(9));
+    CHECK(engine.chats[8].messages.back().text.find("step") == std::string::npos);
+
+    // A tool says how to fix the call and the model only reports it: it is told to call again.
+    engine.textAnswers = {R"j({"name": "query_table", "arguments": {"where": "Day = Sunday"}})j", "No rows for Sunday.",
+                          R"j({"name": "query_table", "arguments": {"where": "Day = Sun"}})j", "Sunday: 3.26."};
+    agent.submitPrompt("What is the average tip on Sundays?");
+    CHECK_EQ(engine.chats.size(), size_t(13));
+    CHECK(engine.chats[11].messages.back().text.find("Make the corrected call now") != std::string::npos);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Sunday: 3.26.");
+}
+
+TEST(local_agent_works_across_many_documents_with_notes)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-documents";
+    os::fs::createDirectories(root + "/invoices");
+    os::fs::createDirectories(root + "/reports");
+    files.write(root + "/invoices/march.md", "# Invoice 101\nCustomer: Acme\nTotal: 120.50 EUR\n", nullptr);
+    files.write(root + "/invoices/april.txt", "Invoice 102\nCustomer: Brix\nTotal: 80.00 EUR\n", nullptr);
+    std::string longReport = "Annual report\n";
+    for (int i = 0; i < 400; ++i)
+        longReport += "Line " + std::to_string(i) + " of the yearly review, about nothing in particular at all.\n";
+    longReport += "Conclusion: revenue grew by 12 percent.\n";
+    files.write(root + "/reports/annual.txt", longReport, nullptr);
+    files.write(root + "/photo.png", std::string("\x89PNG\r\n\x1a\n", 8), nullptr); // not a document
+    FakeEngine engine;
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); }, &engine);
+    auto call = [&](const char* name, const model::Json& args) {
+        std::string text;
+        bool answered = false;
+        tools.run({"c", name, args.dump()}, [&](viewmodel::AgentViewModel::ToolOutput out) {
+            text = out.text;
+            answered = true;
+        });
+        for (int i = 0; i < 500 && !answered; ++i) {
+            os::dispatch::pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return text;
+    };
+    using model::Json;
+    // The catalogue: every document, its kind and title; not the picture.
+    const std::string listed = call("search_documents", Json::object());
+    CHECK(listed.find("3 documents") != std::string::npos && listed.find("invoices/march.md") != std::string::npos &&
+          listed.find("\"# Invoice 101\"") != std::string::npos && listed.find("photo.png") == std::string::npos);
+    // Inside them: which mention it, best first, with a snippet.
+    const std::string found = call("search_documents", Json::object().set("query", "revenue conclusion"));
+    CHECK(found.find("1 of 3 documents") != std::string::npos && found.find("reports/annual.txt") != std::string::npos &&
+          found.find("revenue grew by 12 percent") != std::string::npos);
+    CHECK(call("search_documents", Json::object().set("query", "zeppelin")).find("No document") != std::string::npos);
+    // A guessed name: what is there instead.
+    CHECK(call("query_table", Json::object().set("path", "invoices/invoices.csv")).find("invoices/invoices.csv does not exist. invoices/ holds: april.txt, march.md") !=
+          std::string::npos);
+    CHECK(call("search_documents", Json::object().set("folder", "invoices").set("query", "Brix")).find("invoices/april.txt") != std::string::npos);
+
+    // One question of each: a pass per document (the long one in parts, what it found carried on).
+    engine.textAnswers = {"Invoice 102, total 80.00 EUR (page 1)", "Invoice 101, total 120.50 EUR"};
+    const std::string table = call("extract_from_documents", Json::object().set("files", "invoices").set("question", "number and total"));
+    CHECK(table.find("| invoices/april.txt | Invoice 102, total 80.00 EUR (page 1) |") != std::string::npos &&
+          table.find("| invoices/march.md | Invoice 101, total 120.50 EUR |") != std::string::npos);
+    CHECK(engine.chats.size() == 2 && engine.chats[0].tools.empty() &&
+          engine.chats[0].messages.back().text.find("Customer: Brix") != std::string::npos &&
+          engine.chats[0].messages.back().text.find("Customer: Acme") == std::string::npos); // one document a pass
+    const size_t parts = (longReport.size() + 8999) / 9000; // 9,000 characters a pass
+    CHECK(parts >= 3);
+    engine.textAnswers.assign(parts - 1, "not in this document");
+    engine.textAnswers.push_back("Revenue grew 12 percent.");
+    const std::string annual = call("extract_from_documents", Json::object().set("files", "reports/*.txt").set("question", "revenue growth"));
+    CHECK_EQ(engine.chats.size(), 2 + parts);
+    const std::string last = "part " + std::to_string(parts) + " of " + std::to_string(parts);
+    CHECK(engine.chats.back().messages.back().text.find(last) != std::string::npos &&
+          engine.chats.back().messages.back().text.find("What you found in its earlier parts:\nnot in this document") != std::string::npos);
+    CHECK(annual.find("| reports/annual.txt | Revenue grew 12 percent. |") != std::string::npos);
+    CHECK(call("extract_from_documents", Json::object().set("files", "nothing/*.pdf").set("question", "x")).find("No documents match") !=
+          std::string::npos);
+
+    // Scanning a long document: overlapping windows, one at a time; where it was found, quoted.
+    {
+        const size_t length = longReport.size() + 1, window = 3000, step = 2400; // 20% overlap
+        const size_t windows = length <= window ? 1 : (length - window + step - 1) / step + 1;
+        engine.textAnswers.assign(windows - 1, "nothing");
+        engine.textAnswers.push_back("Conclusion: revenue grew by 12 percent.");
+        const size_t before = engine.chats.size();
+        const std::string scanned = call("scan_document", Json::object().set("path", "reports/annual.txt").set("find", "revenue growth")
+                                                              .set("window", "3000").set("overlap", 20));
+        CHECK_EQ(engine.chats.size() - before, windows);
+        CHECK(scanned.find(std::to_string(windows) + " windows of 3000 characters overlapping by 20%") != std::string::npos &&
+              scanned.find("Found in 1 place(s)") != std::string::npos && scanned.find("revenue grew by 12 percent") != std::string::npos);
+        // Each window starts inside the one before (the overlap): a sentence at an edge is whole in one of them.
+        const std::string first = engine.chats[before].messages.back().text, second = engine.chats[before + 1].messages.back().text;
+        const size_t a = first.find("----- this part -----\n") + 22, b = second.find("----- this part -----\n") + 22;
+        CHECK(first.compare(a + step, 200, second, b, 200) == 0);
+    }
+    // Scanning a picture: a grid of tiles, then finer tiles where something was seen.
+    {
+        const std::optional<std::string> fax = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/images/fax-g4.tif");
+        files.write(root + "/fax.tif", fax.value_or(std::string()), nullptr);
+        engine.textAnswers = {"nothing", "A black bar across this part.", "nothing", "nothing", // the 2 x 2 grid
+                              "nothing", "The bar is here, at the top.", "nothing", "nothing"}; // the seen tile, finer
+        const size_t before = engine.chats.size();
+        const std::string seen = call("scan_image", Json::object().set("path", "fax.tif").set("find", "the black bar"));
+        CHECK_EQ(engine.chats.size() - before, size_t(8));
+        CHECK(engine.chats[before].messages.back().media.size() == 1 && engine.chats[before + 4].messages.back().media.size() == 1);
+        CHECK(seen.find("Found in 2 place(s)") != std::string::npos && seen.find("closer") != std::string::npos &&
+              seen.find("The bar is here") != std::string::npos && seen.find("region \"") != std::string::npos);
+    }
+
+    // Notes: what the passes found, and what it notes itself; a new conversation starts them again.
+    CHECK(call("note", Json::object().set("text", "Check the April invoice date")).find("Noted") != std::string::npos);
+    const std::string notes = call("read_notes", Json::object());
+    CHECK(notes.find("invoices/march.md (number and total): Invoice 101, total 120.50 EUR") != std::string::npos &&
+          notes.find("Check the April invoice date") != std::string::npos);
+    vm.agent().newChat();
+    CHECK(call("read_notes", Json::object()).find("No notes yet") != std::string::npos);
+}
+
+TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
+{
+    using Lab = viewmodel::EngineLabViewModel;
+    FakeEngine engine;
+    Lab lab(&engine);
+    // E2B by default, as before; E4B and 12B pinned and checked the same way.
+    CHECK(std::string(lab.chosenModel().name) == "Gemma 4 E2B" && &lab.file(Lab::Which::Model) == &Lab::modelFile());
+    CHECK(lab.pathFor(Lab::Which::Model) == "/models/gemma-4-E2B_q4_0-it.gguf");
+    lab.modelChoice.set(1);
+    CHECK(lab.pathFor(Lab::Which::Model) == "/models/gemma-4-E4B_q4_0-it.gguf" &&
+          lab.pathFor(Lab::Which::Projector) == "/models/gemma-4-E4B-it-mmproj.gguf");
+    CHECK(lab.file(Lab::Which::Model).size == 5154941280ull && std::string(lab.file(Lab::Which::Model).sha256).size() == 64);
+    // Each its own drafter (MTP assistant): E4B's is not E2B's.
+    CHECK(lab.chosenModel().drafter && &lab.file(Lab::Which::Drafter) != &Lab::drafterFile() &&
+          lab.pathFor(Lab::Which::Drafter) == "/models/gemma-4-E4B-it-qat-assistant-q4_0.gguf");
+    lab.modelChoice.set(2);
+    CHECK(std::string(lab.file(Lab::Which::Projector).fileName) == "mmproj-gemma-4-12b-it-qat-q4_0.gguf");
+    for (int i = 0; i < Lab::kModelChoices; ++i) {
+        const Lab::ModelChoice& c = Lab::modelChoiceInfo(i);
+        CHECK(std::string(c.model->url).find("/resolve/") != std::string::npos && std::string(c.projector->sha256).size() == 64);
+    }
+    // A download is the chosen model's; the choice is saved with the other settings.
+    lab.download(Lab::Which::Model);
+    CHECK(engine.downloadPath == "/models/gemma-4-12b-it-qat-q4_0.gguf");
+    lab.cancelDownload();
+    Lab again(&engine);
+    again.load(lab.save());
+    CHECK_EQ(again.modelChoice.get(), 2);
+    again.load(model::Json::object().set("model", 9)); // out of range: the last one
+    CHECK_EQ(again.modelChoice.get(), Lab::kModelChoices - 1);
+
+    // Each model its drafter default: on for E2B and E4B, off for 12B (too big for an 8 GB card with
+    // it); turned on or off per model, and back to following the default.
+    {
+        Lab d(&engine);
+        CHECK(d.drafterOn());
+        d.modelChoice.set(1);
+        CHECK(d.drafterOn());
+        d.modelChoice.set(2);
+        CHECK(!d.drafterOn());
+        d.setDrafterOn(true);
+        CHECK(d.drafterOn());
+        d.modelChoice.set(1);
+        d.setDrafterOn(false);
+        CHECK(!d.drafterOn());
+        d.modelChoice.set(2);
+        CHECK(d.drafterOn()); // its own setting, not E4B's
+        Lab r(&engine);
+        r.load(d.save());
+        CHECK(r.drafterOn() && r.modelChoice.get() == 2);
+        r.modelChoice.set(1);
+        CHECK(!r.drafterOn());
+        r.modelChoice.set(0);
+        CHECK(r.drafterOn());
+    }
+    // A drafter that is on comes with the model once the model's checksum matches; turned off, it
+    // does not (and the setting is saved).
+    for (const bool use : {true, false}) {
+        FakeEngine e;
+        Lab fresh(&e);
+        fresh.modelChoice.set(1);
+        fresh.setDrafterOn(use);
+        const std::string modelPath = fresh.pathFor(Lab::Which::Model);
+        fresh.download(Lab::Which::Model);
+        CHECK(e.downloadPath == modelPath);
+        e.files[modelPath] = fresh.file(Lab::Which::Model).size;
+        e.hashAnswer = fresh.file(Lab::Which::Model).sha256;
+        e.download.state = interfaces::DownloadStatus::State::Done;
+        fresh.refresh(); // the download ends; its checksum is checked
+        CHECK(fresh.fileUsable(Lab::Which::Model));
+        CHECK_EQ(e.downloadPath == fresh.pathFor(Lab::Which::Drafter), use);
+        Lab reloaded(&e);
+        reloaded.load(fresh.save());
+        CHECK_EQ(reloaded.drafterOn(), use);
+    }
+}
+
+TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
+{
+    using viewmodel::AgentViewModel;
+    FakeEngine engine;
+    AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            return s;
+        },
+        []() { return std::string("int x = 7;"); });
+    agent.agentChoice.set(int(AgentViewModel::Choice::Local));
+    agent.localInSteps.set(false);
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}}; },
+                        [](const interfaces::LocalToolCall&, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            done(AgentViewModel::ToolOutput{"each = 86.40 * 1.18 / 3 = 33.984", {}, {}});
+                        },
+                        []() { return std::string("Guide."); });
+    // In its head (34.10): sent back; with the calculator (33.98, its result rounded): kept.
+    engine.textAnswers = {"Each of the 3 people pays 34.10 (102.30 in all).",
+                          R"j({"name": "calculate", "arguments": {"expression": "each = 86.40 * 1.18 / 3"}})j",
+                          "Each of the 3 people pays 33.98."};
+    agent.submitPrompt("A dinner costs 86.40 with an 18% tip, split among 3 people: how much each?");
+    CHECK_EQ(engine.chats.size(), size_t(3));
+    CHECK(engine.chats[1].messages.back().text.find("No tool gave you these figures: 34.10, 102.30") != std::string::npos);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "Each of the 3 people pays 33.98.");
+    // Figures from the question, counting, years, and rounded or percentage forms pass.
+    engine.textAnswers = {"In 2024 the 86.40 bill with 18% (0.18 of it) gives 4 lines."};
+    agent.submitPrompt("A dinner costs 86.40 with an 18% tip: how much each?");
+    CHECK_EQ(engine.chats.size(), size_t(4)); // no second request: nothing to check
+    // The file open in the editor is named, not pasted, when the model has tools.
+    engine.textAnswers = {"Fine."};
+    agent.submitPrompt("What is in the readme?", "src/x.cpp:3");
+    CHECK(engine.chats.back().messages.back().text.find("int x = 7;") == std::string::npos &&
+          engine.chats.back().messages.back().text.find("the editor shows src/x.cpp") != std::string::npos);
+    engine.textAnswers = {"Fine."};
+    agent.submitPrompt("Explain these lines", "src/x.cpp:3-9"); // lines the user selected still go in
+    CHECK(engine.chats.back().messages.back().text.find("int x = 7;") != std::string::npos);
+}
+
+TEST(agent_proposals_replace_one_waiting_for_the_same_file)
+{
+    viewmodel::AgentViewModel agent;
+    const size_t samples = agent.changes().size();
+    agent.proposeChange("src/a.cpp", "a\n", "b\n");
+    agent.proposeChange("src/b.cpp", "x\n", "y\n");
+    agent.proposeChange("src/a.cpp", "a\n", "c\n");
+    CHECK_EQ(agent.changes().size(), samples + 2);
+    CHECK(agent.changes().back().path == "src/a.cpp" && agent.changes().back().after == "c\n");
+    CHECK(agent.changes().back().stats.added == 1 && agent.changes().back().stats.removed == 1);
+}
+
+TEST(engine_json_carries_pictures_sounds_and_tool_calls)
+{
+    CHECK(model::base64Encode("") == "" && model::base64Encode("f") == "Zg==" && model::base64Encode("fo") == "Zm8=" &&
+          model::base64Encode("foo") == "Zm9v");
+    std::string all;
+    for (int i = 0; i < 256; ++i)
+        all += char(i);
+    CHECK(model::base64Decode(model::base64Encode(all)).value_or("") == all);
+    CHECK(!model::base64Decode("Zg=").has_value() && !model::base64Decode("Z!==").has_value());
+
+    interfaces::LocalChatRequest r;
+    r.projectorPath = "/m/mmproj.gguf";
+    r.tools = {{"read_file", "Reads", R"({"type":"object"})"}};
+    interfaces::LocalChatMessage user;
+    user.role = "user";
+    user.text = "what is this?";
+    interfaces::LocalMedia picture;
+    picture.name = "p.png";
+    picture.width = 1;
+    picture.height = 1;
+    picture.data = std::string("\x00\xff\x10", 3);
+    interfaces::LocalMedia sound;
+    sound.kind = interfaces::LocalMedia::Kind::Audio;
+    sound.name = "s.wav";
+    sound.data = "RIFF....WAVE";
+    user.media = {picture, sound};
+    interfaces::LocalChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.toolCalls = {{"c1", "read_file", R"({"path":"a"})"}};
+    interfaces::LocalChatMessage tool;
+    tool.role = "tool";
+    tool.toolCallId = "c1";
+    tool.toolName = "read_file";
+    tool.text = "1| a";
+    r.messages = {user, assistant, tool};
+    const std::optional<model::Json> parsed = model::Json::parse(engine::toJson(r).dump());
+    CHECK(parsed.has_value());
+    const interfaces::LocalChatRequest back = engine::chatRequestFrom(*parsed);
+    CHECK(back.projectorPath == r.projectorPath && back.tools.size() == 1 && back.tools[0].parameters == r.tools[0].parameters);
+    CHECK(back.messages.size() == 3 && back.messages[0].media.size() == 2);
+    CHECK(back.messages[0].media[0].data == picture.data && back.messages[0].media[0].width == 1);
+    CHECK(back.messages[0].media[1].kind == interfaces::LocalMedia::Kind::Audio && back.messages[0].media[1].data == sound.data);
+    CHECK(back.messages[1].toolCalls.size() == 1 && back.messages[1].toolCalls[0].arguments == R"({"path":"a"})");
+    CHECK(back.messages[2].toolCallId == "c1" && back.messages[2].toolName == "read_file" && back.messages[2].text == "1| a");
+
+    interfaces::LocalChatResult result;
+    result.ok = true;
+    result.text = "Reading.";
+    result.toolCalls = {{"c9", "list_files", "{}"}};
+    result.mediaTokens = 256;
+    const interfaces::LocalChatResult got = engine::chatResultFrom(*model::Json::parse(engine::toJson(result).dump()));
+    CHECK(got.ok && got.text == "Reading." && got.toolCalls.size() == 1 && got.toolCalls[0].name == "list_files" && got.mediaTokens == 256);
+}
+
+TEST(local_agent_looks_zoom_into_parts_and_spend_the_tokens_asked)
+{
+    // The parts a look can ask for.
+    auto box = [](const model::Json& args) {
+        std::array<float, 4> b{};
+        std::string why;
+        if (!app::LocalAgentTools::lookBox(args, b.data(), why))
+            b = {-1, -1, -1, -1};
+        return b;
+    };
+    auto near = [](const std::array<float, 4>& b, float x0, float y0, float x1, float y1) {
+        return std::abs(b[0] - x0) < 0.01f && std::abs(b[1] - y0) < 0.01f && std::abs(b[2] - x1) < 0.01f && std::abs(b[3] - y1) < 0.01f;
+    };
+    using model::Json;
+    CHECK(near(box(Json::object()), 0, 0, 1, 1));
+    CHECK(near(box(Json::object().set("region", "top-left")), 0, 0, 0.5f, 0.5f));
+    CHECK(near(box(Json::object().set("region", "bottom third")), 0, 2.0f / 3, 1, 1));
+    CHECK(near(box(Json::object().set("region", "middle-left quarter")), 0, 0.375f, 0.25f, 0.625f));
+    CHECK(near(box(Json::object().set("region", "center")), 0.25f, 0.25f, 0.75f, 0.75f));
+    CHECK(near(box(Json::object().set("region", "10,40,60,70")), 0.1f, 0.4f, 0.6f, 0.7f));
+    CHECK(near(box(Json::object().set("region", "10, 40, 50, 30")), 0.1f, 0.4f, 0.6f, 0.7f)); // left, top, width, height
+    CHECK(near(box(Json::object().set("region", "0.1,0.4,0.6,0.7")), 0.1f, 0.4f, 0.6f, 0.7f));
+    CHECK(near(box(Json::object().set("zoom", 400).set("at", "70,85")), 0.575f, 0.725f, 0.825f, 0.975f));
+    CHECK(near(box(Json::object().set("zoom", 400).set("at", "99,1")), 0.75f, 0, 1, 0.25f)); // kept inside
+    CHECK(near(box(Json::object().set("region", "top").set("zoom", "200")), 0.25f, 0.125f, 0.75f, 0.375f));
+    CHECK(box(Json::object().set("region", "banana"))[0] < 0);
+    // As a list of numbers, or under another name.
+    {
+        const std::optional<Json> listed = Json::parse(R"j({"region": [10, 40, 60, 70]})j");
+        const std::optional<Json> named = Json::parse(R"j({"box": "10,40,60,70"})j");
+        CHECK(listed && near(box(*listed), 0.1f, 0.4f, 0.6f, 0.7f));
+        CHECK(named && near(box(*named), 0.1f, 0.4f, 0.6f, 0.7f));
+        CHECK(near(box(Json::object().set("coordinates", "10,40,60,70")), 0.1f, 0.4f, 0.6f, 0.7f));
+    }
+
+    // Pictures: the part zoomed into, at the tokens asked for (one per 48 x 48 pixels).
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-looks";
+    os::fs::createDirectories(root);
+    const std::optional<std::string> fax = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/images/fax-g4.tif");
+    CHECK(fax.has_value());
+    files.write(root + "/fax.tif", fax.value_or(std::string()), nullptr);
+    viewmodel::NotepadViewModel vm(nullptr, &files);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); });
+    auto look = [&](const Json& args) {
+        viewmodel::AgentViewModel::ToolOutput got;
+        tools.run({"c", "look_at_image", args.dump()}, [&](viewmodel::AgentViewModel::ToolOutput out) { got = std::move(out); });
+        return got;
+    };
+    auto tokens = [](const interfaces::LocalMedia& m) { return double(m.width) * m.height / (48.0 * 48.0); };
+    auto brightness = [](const interfaces::LocalMedia& m) {
+        double sum = 0;
+        for (char c : m.data)
+            sum += static_cast<unsigned char>(c);
+        return sum / double(std::max<size_t>(1, m.data.size()));
+    };
+    const auto whole = look(Json::object().set("path", "fax.tif").set("detail", "low"));
+    CHECK(whole.media.size() == 1 && std::abs(tokens(whole.media[0]) - 70) < 8);
+    CHECK(whole.text.find("TIFF, 300 x 40") != std::string::npos);
+    const auto careful = look(Json::object().set("path", "fax.tif").set("detail", "high"));
+    CHECK(careful.media.size() == 1 && std::abs(tokens(careful.media[0]) - 1120) < 30);
+    // The white rows at the top, then the black bar under them (rows 4 to 6, x 10 to 249).
+    const auto white = look(Json::object().set("path", "fax.tif").set("region", "0,0,100,10"));
+    const auto bar = look(Json::object().set("path", "fax.tif").set("region", "4,10,82,17"));
+    CHECK(white.media.size() == 1 && brightness(white.media[0]) > 250);
+    CHECK(white.text.find("This part is empty") != std::string::npos && whole.text.find("empty") == std::string::npos &&
+          careful.text.find("empty") == std::string::npos);
+    CHECK(bar.media.size() == 1 && brightness(bar.media[0]) < 30);
+    CHECK(bar.text.find("4-82% across, 10-17% down") != std::string::npos && bar.shown.size() == 1);
+    // The user's minimum: every look at least that careful.
+    vm.agent().localPictureTokens.set(1120);
+    CHECK(tools.pictureTokens("low") == 1120 && tools.pictureTokens("300") == 1120);
+    vm.agent().localPictureTokens.set(0);
+    CHECK(tools.pictureTokens("low") == 70 && tools.pictureTokens("300") == 300 && tools.pictureTokens("5000") == 1120);
+    // A region it cannot read: why, and how to call it.
+    CHECK(look(Json::object().set("path", "fax.tif").set("region", "banana")).text.find("cannot read the region") != std::string::npos);
+    for (const std::string& shown : bar.shown)
+        std::remove(shown.c_str());
+}
+
+TEST(local_agent_tools_read_the_folder_and_propose_careful_edits)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-tools";
+    os::fs::createDirectories(root + "/src");
+    files.write(root + "/src/a.cpp", "int a;   \r\nint b;\r\nint c;\r\n", nullptr);
+    files.write(root + "/notes.md", "# Notes\nline two\n", nullptr);
+    files.write(root + "/blob.bin", std::string("\x01\x00\x02", 3), nullptr);
+    files.write(root + "/report.pdf", "%PDF-1.4\n", nullptr);
+    FakeAgentCli cli;
+    FakeProcesses processes;
+    viewmodel::NotepadViewModel vm(nullptr, &files, &cli, &processes);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); });
+    auto call = [&](const char* name, const model::Json& args) {
+        std::string text;
+        tools.run({"c", name, args.dump()}, [&](viewmodel::AgentViewModel::ToolOutput out) { text = out.text; });
+        return text;
+    };
+    // The folder, by any name the model gives it.
+    for (const char* name : {"", ".", "enp-test-agent-tools"}) {
+        const std::string listed = call("list_files", model::Json::object().set("path", name));
+        CHECK(listed.find("src/") != std::string::npos && listed.find("notes.md") != std::string::npos);
+    }
+    // Lines by range, numbered; not outside the folder.
+    const std::string read = call("read_file", model::Json::object().set("path", "notes.md").set("start_line", "2"));
+    CHECK(read.find("2| line two") != std::string::npos && read.find("1| # Notes") == std::string::npos);
+    CHECK(call("read_file", model::Json::object().set("path", "../outside.txt")).find("outside the open folder") != std::string::npos);
+    CHECK(call("read_file", model::Json::object().set("path", "blob.bin")).find("binary") != std::string::npos);
+    CHECK(call("read_file", model::Json::object().set("path", "report.pdf")).find("read_document") != std::string::npos);
+    CHECK(call("no_such_tool", model::Json::object()).find("no tool") != std::string::npos);
+
+    // An edit: copied with read_file's numbers, without the trailing spaces, in \n - the file's
+    // \r\n and spaces are matched all the same, and the change is proposed, not made.
+    const size_t before = vm.agent().changes().size();
+    const std::string edited = call("edit_file", model::Json::object()
+                                                     .set("path", "src/a.cpp")
+                                                     .set("old_text", "1| int a;\n2| int b;")
+                                                     .set("new_text", "int a = 1;\nint b = 2;"));
+    CHECK(edited.find("Proposed") != std::string::npos);
+    CHECK_EQ(vm.agent().changes().size(), before + 1);
+    CHECK(vm.agent().changes().back().after == "int a = 1;\r\nint b = 2;\r\nint c;\r\n");
+    CHECK(files.read(root + "/src/a.cpp").value_or("") == "int a;   \r\nint b;\r\nint c;\r\n"); // untouched
+    CHECK(call("edit_file", model::Json::object().set("path", "src/a.cpp").set("old_text", "int z;").set("new_text", "x"))
+              .find("not in") != std::string::npos);
+    // A new file; Plan only refuses.
+    CHECK(call("write_file", model::Json::object().set("path", "docs/new.md").set("content", "# New\n")).find("new file") != std::string::npos);
+    vm.agent().autonomyIndex.set(1);
+    CHECK(call("write_file", model::Json::object().set("path", "x.md").set("content", "x")).find("Plan only") != std::string::npos);
+    CHECK(tools.tools(false).size() + 2 == tools.tools(true).size());
+    // The guide names the folder and the skills (resources/skills next to the tests).
+    const std::string guide = tools.guide();
+    CHECK(guide.find(root) != std::string::npos && guide.find("Which tool for which file") != std::string::npos);
+    if (os::fs::readAsset("skills/index.json")) {
+        CHECK(guide.find("- documents:") != std::string::npos);
+        CHECK(call("read_skill", model::Json::object().set("name", "editing")).find("old_text") != std::string::npos);
+    }
+    CHECK(call("read_skill", model::Json::object().set("name", "../../secrets")).find("no skill") != std::string::npos);
+}
+
+TEST(local_agent_work_tools_memory_and_forgiving_calls)
+{
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-work";
+    os::fs::createDirectories(root + "/data");
+    files.write(root + "/data/sales.csv",
+                "Region,Product,Units,Price\nEast,Pens,120,\"$1,200.50\"\nWest,Pens,80,800\nEast,Paper,30,90\nWest,Ink,5,(50)\n", nullptr);
+    std::optional<std::string> dll = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/binary/fixture.dll");
+    if (dll)
+        files.write(root + "/fixture.dll", *dll, nullptr);
+    FakeAgentCli cli;
+    FakeProcesses processes;
+    viewmodel::NotepadViewModel vm(nullptr, &files, &cli, &processes);
+    CHECK(vm.openFolder(root));
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); });
+    const std::string memoryFile = root + "/memory/memories.json";
+    os::fs::createDirectories(root + "/memory");
+    files.write(memoryFile, "[]", nullptr); // a fresh start each run
+    tools.setMemoryPath(memoryFile);
+    auto call = [&](const char* name, const std::string& args) {
+        std::string text;
+        tools.run({"c", name, args}, [&](viewmodel::AgentViewModel::ToolOutput out) { text = out.text; });
+        return text;
+    };
+
+    // Calculator: precedence, functions, thousands separators; errors say how.
+    CHECK(call("calculate", R"j({"expression": "(1200 * 1.08) - 50"})j").find("= 1246") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2^3^2"})j").find("= 512") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "round(17.5 / 3, 2) + sqrt(16)"})j").find("= 9.83") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "sum(1,2,3) * avg(2, 4) + max(1, 9)"})j").find("= 27") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "$1,234.50 + 0.5"})j").find("= 1235") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "15% of 2340 + 7.5% of 980"})j").find("= 424.5") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "200 * 15%"})j").find("= 30") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "7 % 3"})j").find("= 1") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "1 / 0"})j").find("division by zero") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2 +"})j").find("Cannot calculate") != std::string::npos);
+    // Several at once, named, later ones using the names.
+    const std::string several = call("calculate", R"j({"expression": "total = 86.40 * 1.18; each = total / 3; round(each, 2)"})j");
+    CHECK(several.find("total = 86.40 * 1.18 = 101.952") != std::string::npos && several.find("each = total / 3 = 33.984") != std::string::npos &&
+          several.find("round(each, 2) = 33.98") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "a = 2\nb = a * 21"})j").find("b = a * 21 = 42") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "1+1", "expressions": ["2*3"]})j").find("2*3 = 6") != std::string::npos);
+
+    // Tables: filter, sort, columns, groups and totals; currency and (negative) cells as numbers.
+    const std::string east = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = east and Units > 50"})j");
+    CHECK(east.find("1 of 4 rows match") != std::string::npos && east.find("East | Pens | 120") != std::string::npos);
+    const std::string sorted = call("query_table", R"j({"path": "data/sales.csv", "sort": "Units desc", "columns": "Product, Units", "limit": 2})j");
+    CHECK(sorted.find("Product | Units\nPens | 120\nPens | 80\n") != std::string::npos && sorted.find("2 more rows") != std::string::npos);
+    const std::string totals = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units), sum(Price), count"})j");
+    CHECK(totals.find("East | 150 | 1290.5 | 2") != std::string::npos && totals.find("West | 85 | 750 | 2") != std::string::npos);
+    const std::string top = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units)", "sort": "sum(Units) desc", "limit": 1})j");
+    CHECK(top.find("East | 150") != std::string::npos && top.find("West") == std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region", "aggregate": "sum(Units)", "sort": "Units asc", "limit": 1})j").find("West | 85") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Colour = red"})j").find("The columns are: Region, Product") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product contains pa"})j").find("1 of 4") != std::string::npos);
+    // Conditions joined by a comma, &&, ==; a quoted value; "sum" of the one column named.
+    for (const char* where : {"Region = East, Units > 50", "Region == 'East' && Units > 50", "region = east; units > 50"})
+        CHECK(call("query_table", model::Json::object().set("path", "data/sales.csv").set("where", where).dump()).find("1 of 4 rows match") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Region = East", "columns": "Units", "aggregate": "sum"})j")
+              .find("all rows | 150") != std::string::npos);
+    // A run-on condition is never read as an abbreviation of a value ("East, Units > 50" is not "East").
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Region = East, Product = Ink"})j").find("no rows match") !=
+          std::string::npos);
+    // A word written out where the file abbreviates it ("Eastern", the file says "East"): read as it.
+    const std::string eastern = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = Eastern"})j");
+    CHECK(eastern.find("2 of 4 rows match ('Eastern' read as 'East')") != std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Product = P"})j").find("no rows match") != std::string::npos);
+    // Nothing matches: the values the column holds, to call again with.
+    const std::string none = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = North"})j");
+    CHECK(none.find("no rows match") != std::string::npos && none.find("Region holds: ") != std::string::npos &&
+          none.find("East") != std::string::npos && none.find("West") != std::string::npos);
+
+    // Memory: kept in its file, recalled, corrected, forgotten, compacted; temporary ones end with the run.
+    CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("#1") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "query_table needs the column names exactly", "kind": "lesson"})j").find("#2") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("Already") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "Draft of the report is in docs/", "kind": "note"})j").find("#3") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "Working on the Q3 numbers", "kind": "temporary"})j").find("#4") != std::string::npos);
+    CHECK(call("remember", R"j({"text": "x", "kind": "colour"})j").find("Unknown kind") != std::string::npos);
+    CHECK(tools.guide().find("[preference] The user wants answers in British English") != std::string::npos);
+    CHECK(call("recall", R"j({"query": "british"})j").find("1 memories") != std::string::npos);
+    CHECK(call("recall", R"j({})j").find("until ") != std::string::npos); // the note's last day
+    CHECK(call("amend_memory", R"j({"id": 1, "text": "The user wants answers in American English"})j").find("now says") != std::string::npos);
+    CHECK(call("recall", R"j({"query": "american"})j").find("#1") != std::string::npos);
+    CHECK(call("forget_memory", R"j({"id": 2})j").find("Forgot") != std::string::npos);
+    CHECK(call("forget_memory", R"j({"id": 2})j").find("no memory #2") != std::string::npos);
+    CHECK(call("rewrite_memories", R"j({"kind": "preference", "lines": "- American English\n- Short answers\n"})j").find("1 became 2") != std::string::npos);
+    CHECK(files.read(memoryFile).value_or("").find("Short answers") != std::string::npos);
+    {
+        // Another run of the app: its temporary memories are gone, the rest stay.
+        app::LocalAgentTools later(vm, []() { return static_cast<view::MainView*>(nullptr); });
+        later.setMemoryPath(memoryFile);
+        std::string recalled;
+        later.run({"c", "recall", "{}"}, [&](viewmodel::AgentViewModel::ToolOutput out) { recalled = out.text; });
+        CHECK(recalled.find("Q3 numbers") == std::string::npos && recalled.find("Short answers") != std::string::npos);
+    }
+    // An expired note goes when the memories are read.
+    files.write(memoryFile, R"([{"id":9,"kind":"note","text":"old note","date":"2020-01-01","expires":"2020-01-08"}])", nullptr);
+    CHECK(call("recall", "{}").find("old note") == std::string::npos);
+
+    // The binary view: what the library exports, with readable names; and its bytes.
+    if (dll) {
+        const std::string overview = call("inspect_binary", R"j({"path": "fixture.dll"})j");
+        CHECK(overview.find("PE32+ DLL") != std::string::npos && overview.find("KERNEL32.dll") != std::string::npos &&
+              overview.find("sample::Widget::area(int, int) const") != std::string::npos);
+        CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "exports,imports"})j").find("Imports:") != std::string::npos);
+        const std::string exports = call("inspect_binary", R"j({"path": "fixture.dll", "list": "exports"})j");
+        CHECK(exports.find("sample::Widget::area(int, int) const") != std::string::npos);
+        CHECK(exports.find("-> forwarded to NTDLL.RtlGetVersion") != std::string::npos);        CHECK(call("inspect_binary", R"j({"path": "fixture.dll", "list": "libraries"})j").find("KERNEL32.dll") != std::string::npos);
+        CHECK(call("read_bytes", R"j({"path": "fixture.dll", "length": 16})j").find("00000000  4d 5a") != std::string::npos);
+    }
+    CHECK(call("inspect_binary", R"j({"path": "data/sales.csv"})j").find("not a program") != std::string::npos);
+
+    // Forgiving calls: single quotes, a trailing comma, a code fence; wrong ones answered with an example.
+    CHECK(call("calculate", "{'expression': '2+2'}").find("= 4") != std::string::npos);
+    CHECK(call("calculate", "{\"expression\": \"3*3\",}").find("= 9") != std::string::npos);
+    CHECK(call("calculate", "```json\n{\"expression\": \"5-1\"}\n```").find("= 4") != std::string::npos);
+    const std::string missing = call("read_file", "{}");
+    CHECK(missing.find("needs `path`") != std::string::npos && missing.find("read_file {\"path\":\"...\"}") != std::string::npos);
+    CHECK(call("read_file", "not json at all").find("Call it like this") != std::string::npos);
+    CHECK(call("teleport", "{}").find("Tools: list_files") != std::string::npos);
+    CHECK(call("transcribe", R"j({"path": "data/sales.csv"})j").find("not a recording") != std::string::npos);
+}
+
+TEST(local_agent_runs_a_tool_call_written_as_text)
+{
+    FakeEngine engine;
+    viewmodel::AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            viewmodel::AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/m.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(viewmodel::AgentViewModel::Choice::Local));
+    std::vector<interfaces::LocalToolCall> ran;
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}}; },
+                        [&](const interfaces::LocalToolCall& c, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
+                            ran.push_back(c);
+                            done({"2+2 = 4", {}, {}});
+                        },
+                        []() { return std::string(); });
+    // The fake answers its scripted text once: a call in a code fence, not in the chat format.
+    engine.textAnswers = {"Let me work it out.\n```json\n{\"name\": \"calculate\", \"arguments\": {\"expression\": \"2+2\"}}\n```",
+                          "calculate {\"expression\": \"3+3\"}"};
+    agent.submitPrompt("What is 2+2?");
+    CHECK_EQ(ran.size(), size_t(2));
+    CHECK(!ran.empty() && ran[0].name == "calculate" && ran[0].arguments.find("2+2") != std::string::npos);
+    CHECK(ran.size() > 1 && ran[1].arguments.find("3+3") != std::string::npos);
+    bool kept = false;
+    for (const model::ChatMessage& m : agent.messages())
+        kept = kept || (m.role == model::ChatRole::Agent && m.text == "Let me work it out.");
+    CHECK(kept);
+    CHECK(agent.messages().back().text == "Local answer." && !agent.busy.get());
+
+    // Python-style calls, two in one answer, as bullets: both run, the bullets go.
+    ran.clear();
+    engine.textAnswers = {"*   `calculate(expression=\"2*3\")`\n*   calculate(expression='4+4')\nThat is all."};
+    agent.submitPrompt("Two sums");
+    CHECK_EQ(ran.size(), size_t(2));
+    CHECK(ran.size() == 2 && ran[0].arguments == R"({"expression":"2*3"})" && ran[1].arguments == R"({"expression":"4+4"})");
+
+    // It announces a call and stops: told to go on (twice at most), it makes it.
+    const size_t before = engine.chats.size();
+    engine.textAnswers = {"I will now call the calculate tool to add them.", "I will use calculate next.", "I will now call calculate."};
+    agent.submitPrompt("Add 2 and 2");
+    CHECK_EQ(engine.chats.size() - before, size_t(3)); // the question, then two nudges; the third announcement ends it
+    CHECK(engine.chats.back().messages.back().text.find("Go on") != std::string::npos);
+    CHECK(!agent.busy.get());
+}
 
 TEST(opening_another_folder_forgets_the_previous_one)
 {
@@ -6181,6 +7261,9 @@ int main(int argc, char** argv)
     params.argc = argc;
     params.argv = argv;
     os::init(params);
+    // The engine tests start this program as the helper of an engine library (FakeEngine.cpp).
+    if (argc >= 3 && std::strcmp(argv[1], "--local-engine") == 0)
+        return services::runLocalEngineHelper(argv[2]);
     // ENP_TEST_FILTER=text runs only the tests whose name contains it.
     const char* filter = std::getenv("ENP_TEST_FILTER");
     for (auto& [name, fn] : registry()) {

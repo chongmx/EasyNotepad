@@ -23,6 +23,95 @@ its release notes on GitHub.
   unless "Aa" is on, ligatures match their letters, and a line break matches a space, so a phrase
   is found across lines. In two columns, the column with the keyboard goes to each match; the
   other, when it shows the same document, keeps its place and shows the highlights.
+- The local agent works in the open folder with the app's own tools, and reads, looks and listens.
+  It calls them by itself (each step shows in the chat): it lists the folder, finds text, reads
+  files by line range, reads PDF, Word, Excel and PowerPoint text a few pages at a time, looks at a
+  page in the viewer as a picture (zoomed, a region of it) for tables and charts, looks at pictures,
+  listens to recordings (WAV, MP3, FLAC), and opens files to show you. Its edits are proposals,
+  listed under the conversation to review side by side, accept or reject; with *Plan only* it has
+  none. It cannot leave the open folder. Pictures and sound need its eyes and ears, Gemma 4's
+  vision and audio encoders from Google (987 MB, *Let it see and hear* in the agent set-up),
+  loaded only for a question that needs them. Skills in `resources/skills/` teach it each kind of
+  task. Tested with Gemma 4 E2B on the CPU: it read a datasheet's numbers, described a chart on a
+  slide and took down a voicemail. The engine library's interface is version 2: an
+  `enp-engine-cuda` built before this is not loaded (the CPU answers) until it is replaced.
+- The local agent does office work and remembers: `query_table` (filter, sort, group and total CSV
+  and Excel sheets) and `calculate` (exact sums, percentages); `transcribe` writes a meeting down
+  word for word into a text file next to it, with times, for minutes; `inspect_binary` and
+  `read_bytes` read programs and libraries as the binary view does; how carefully it looks at a
+  picture is chosen per look (low, normal, high for OCR); pictures show in the chat; a memory
+  between conversations keeps your preferences, its lessons and notes, and is corrected and
+  compacted by the agent. Small-model slips are caught: loose JSON, calls written as text, calls
+  announced but not made, a preference said but not saved. Tested with Gemma 4 E2B on Microsoft's
+  Financial Sample workbook, a photographed receipt, a mock meeting and a test DLL
+  (`C:\cpp\agent-samples`, a small downloaded set, outside the repository).
+- The local agent takes a question in steps: it first splits it into steps (the `planning` skill,
+  at most six), then the app gives it one step at a time and asks for the answer from what the
+  steps found. The plan and each step show in the chat; a simple question is one step and goes
+  as before. With Gemma 4 E2B, "which country made the most profit, how much, and what share of
+  the total" went from an invented figure to three tool-backed steps and the right answer (19 s
+  on an RTX 5060).
+- TIFF and WebP pictures open. TIFF is decoded by the app itself: strips and tiles, uncompressed,
+  PackBits, LZW, Deflate and CCITT fax (Modified Huffman, Group 3, Group 4), 1- to 16-bit grey,
+  palette, RGB(A), CMYK, the predictor; tested pixel for pixel against files from Windows' own
+  encoder. WebP comes from libwebp 1.5.0 (a new submodule, decoder only): lossy, lossless, alpha.
+  Not yet: JPEG inside TIFF, BigTIFF, animated WebP.
+- The local agent zooms: `look_at_image` and `look_at_page` take a `region` (halves, thirds,
+  quarters, corners, the centre, or a box in percent), a `zoom` and the point to zoom `at`. A
+  picture is cut from the full-size file; a page is zoomed in the viewer until the part fills it,
+  so small print is read from real pixels. Each picture is sized to the tokens it is given (70 to
+  1,120, one per 48 x 48 pixels), and the agent set-up has a minimum for every look (up to always
+  1,120). A look at an empty part says so. Page looks were also cut from the wrong place on
+  screens where the window is not at the screen's corner, and missed a document opened by the
+  same call: both fixed.
+- The agent set-up shows "Take questions in steps"; both settings are saved.
+- Retries: a call to the wrong tool for a file, a region it cannot read, or a filter that matches
+  no rows (the reply now lists the values the column holds, and "Sunday" finds "Sun") is followed
+  by "make the corrected call now" instead of a report of the failure.
+- `tests/agent-bench`: 27 questions with known answers over the sample files, and a runner that
+  asks them in the running app and grades the answers.
+- The local agent works across the folder's documents: `search_documents` searches inside every
+  PDF, Word, Excel, PowerPoint and text file (or lists them with kind, pages and title);
+  `extract_from_documents` asks one question of many documents, each in a pass of its own (a long
+  one part by part, what it found carried along), and returns a table; working notes (`note`,
+  `read_notes`) hold what it found, are repeated at each step, and start again with a new chat.
+  The `multiple-documents` skill teaches the way: find, extract per document, note, calculate,
+  answer with sources. The planner sees what the folder holds (documents or tables) and plans with
+  real names. Four invoices in different layouts: total and largest supplier right in 17 s.
+- Three local models to choose from in the agent set-up: Gemma 4 E2B (4.3 GB, fastest), E4B
+  (6.1 GB, better at questions with several parts) and 12B (7.2 GB, the most careful), each with
+  its own eyes and ears and its own MTP drafter (speculative decoding), all pinned by commit and
+  SHA-256. Google publishes the drafters (its "assistant" checkpoints) only as unquantized weights:
+  E2B's, E4B's and 12B's are community GGUF conversions of them. On an RTX 5060 laptop GPU, E4B
+  generates 65 tokens/s alone and 112 with its drafter (56% of drafted tokens accepted). The
+  drafter is fetched with the model by itself and used: on for E2B and E4B; off for 12B, which
+  with it no longer fits an 8 GB card and slows from 33 to 20 tokens/s. Power users turn it on or
+  off per model in the Engine Lab (Agent uses the drafter).
+- Scanning with the local model: `scan_document` shows a long document (or several) to the model
+  in overlapping windows (small, normal or large; overlap in percent), one at a time with what is
+  looked for, and returns the pages and quotes where it is; `scan_image` shows a picture in a grid
+  of overlapping tiles and cuts again, finer, the tiles where it was seen (coarse to fine, up to 3
+  levels), and returns the regions to look at closely. The planner is given the real columns of
+  the tables a question names, and plans counts, totals and averages as one query_table step.
+- Numbers: the local model no longer works figures out itself. An answer with a figure no tool
+  gave and the user did not write goes back to it, to be done with `calculate`; `calculate` takes
+  several sums at once, named ("total = 86.40 * 1.18; each = total / 3"). Counting stays its own.
+- Tools: the file open in the editor is named, not pasted, into a question (it had taken over
+  questions about other files); `read_document` lists a document's tables and figures with their
+  pages and says which pages it left out; `query_table` reads conditions joined by commas, `&&`
+  or `==`, "sum" of the one column named, and gives totals unsorted rather than failing on a sort
+  it cannot do; a guessed file name gets "does not exist" with what the folder holds;
+  `inspect_binary` shows where a forwarded export goes; each tool step in the chat shows the
+  first line of what the tool answered. Benchmark: 16 of 25 before, 20 of 25 after the number and
+  tool fixes.
+- The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
+  a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
+  RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a
+  prompt at about 7,400 tokens/s. It is optional: without it, or when it
+  cannot start (no NVIDIA GPU, an old driver, a missing cuBLAS DLL) or fails while answering
+  (a crash, a hang, out of memory), the CPU answers as before. It is loaded in a helper process
+  (`EasyNotepad --local-engine`), so even a crash in it or in the driver leaves the editor running.
+  The Engine Lab says whether it is used, and why not.
 
 ### Changed
 - The app has its logo as its icon everywhere, instead of each system's generic one: the Windows
@@ -43,6 +132,18 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- The local agent on Gemma 4 12B closed the app when it looked at a large picture or page. 12B
+  reads a picture all at once, and a picture of more than 512 tokens did not fit the engine's
+  batch: llama.cpp ended the GPU helper, the CPU took the question over, and ended the app the same
+  way. The batch now holds the largest picture of a model that reads them all at once (1,120
+  tokens for 12B), and a picture that still does not fit is refused with a message.
+- A question asked just after stopping the local agent was refused ("the local agent is still
+  answering") while the stopped answer wound down. It now waits for it and then starts.
+- The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
+  put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
+  straight into memory, and the web build has a 1 MB stack, a Windows main thread's.
+- Open on the web shows the browser's file picker, so files on the user's computer can be opened;
+  it showed the in-app browser, which sees only the page's own files.
 - A pinch (or Ctrl+wheel) on Word, Excel, Markdown and pictures made the content jitter and slide
   away from the fingers; only PDF and slides zoomed about the point under them. Word and Excel
   laid out at the old size while scrolling for the new one, and none of them grows in proportion

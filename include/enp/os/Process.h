@@ -2,8 +2,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,11 +32,30 @@ using CancelFlag = std::shared_ptr<std::atomic<bool>>;
 Result run(const std::string& commandLine, const std::string& input, const std::string& workingDirectory,
            int timeoutSeconds, const CancelFlag& cancel = nullptr);
 
+// Input written to a program while it runs (a helper serving one request after another), instead
+// of all at once. Thread-safe. The program sees the end of its input when the stream is closed;
+// run() closes it when the program ends, so writes after that are dropped.
+class InputStream {
+public:
+    void write(std::string data);
+    void close();
+    bool closed() const;
+    // The writing thread: waits for data; false once closed and everything is written.
+    bool next(std::string& data);
+
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::string> queue_;
+    bool closed_ = false;
+};
+
 // A program and its exact arguments, run without a shell: nothing in the arguments is interpreted.
 struct Command {
     std::vector<std::string> arguments; // [0] is the program, found on PATH unless it is a path
     std::vector<std::pair<std::string, std::string>> environment; // added to (or replacing) ours
     std::string input;                  // written to stdin
+    std::shared_ptr<InputStream> inputStream; // or this, written as it comes (then `input` is unused)
     std::string workingDirectory;
     int timeoutSeconds = 300;
     CancelFlag cancel;

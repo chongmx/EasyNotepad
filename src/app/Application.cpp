@@ -1,12 +1,15 @@
 #include "Application.h"
 
 #include "AutomationController.h"
+#include "LocalAgentTools.h"
 
+#include "enp/model/Base64.h"
 #include "enp/services/ImageEncoder.h"
 #include "enp/view/TouchScroll.h"
 #include "enp/view/UiAutomation.h"
 #include "enp/view/UiStyle.h"
 
+#include "enp/os/Dialog.h"
 #include "enp/os/Fs.h"
 #include "enp/os/Memory.h"
 #include "enp/os/Os.h"
@@ -23,6 +26,18 @@ Application::Application()
 {
     if (const std::string dir = os::fs::appDataDirectory(); !dir.empty())
         viewModel_->setSettingsPath(os::fs::path::join(dir, "settings.json"));
+    // The web page cannot list the user's files: Open uses the browser's picker, which copies the
+    // chosen file into the page's file system.
+    if (os::isWeb())
+        viewModel_->setFilePicker([](std::function<void(const std::string&)> opened) {
+            os::dialog::openFile("Open File", {}, [opened = std::move(opened)](std::optional<std::string> path) {
+                if (path)
+                    opened(*path);
+            });
+        });
+    // The local model's tools: the open folder, the document readers and the viewer (the agent panel).
+    agentTools_ = std::make_unique<LocalAgentTools>(*viewModel_, [this]() { return view_.get(); }, services_.localEngine.get());
+    agentTools_->attach();
     bool enabled = !os::isWeb();
     for (const std::string& arg : os::arguments())
         enabled = enabled && arg != "--no-automation";
@@ -48,6 +63,11 @@ Application::~Application()
     for (Capture& c : captures_)
         c.reply(model::Json::object().set("error", "the application is closing"));
     os::mem::release(captures_);
+    viewModel_->agent().setLocalTools({}, {}, {}); // looks waiting for a frame are dropped with the tools
+    viewModel_->agent().setLocalReminder({});
+    viewModel_->agent().setLocalPlanner({});
+    viewModel_->agent().setLocalNotes({});
+    agentTools_.reset();
     automation_.reset(); // no requests may reach the view-model while it is destroyed
     detachUi();
 }
@@ -159,6 +179,8 @@ void Application::frame()
 
 void Application::endFrame()
 {
+    if (agentTools_)
+        agentTools_->tick();
     const double now = os::now();
     // Between frames: the atlas takes or gives back a font for the scripts the documents need, and
     // gives back document fonts no longer drawn.
@@ -224,32 +246,13 @@ void Application::giveMemoryBack()
     os::trimMemory();
 }
 
-namespace {
-
-std::string base64(std::string_view data)
-{
-    static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((data.size() + 2) / 3 * 4);
-    for (size_t i = 0; i < data.size(); i += 3) {
-        const std::uint32_t n = std::uint32_t(static_cast<unsigned char>(data[i])) << 16 |
-                                (i + 1 < data.size() ? std::uint32_t(static_cast<unsigned char>(data[i + 1])) << 8 : 0u) |
-                                (i + 2 < data.size() ? std::uint32_t(static_cast<unsigned char>(data[i + 2])) : 0u);
-        out += digits[n >> 18 & 63];
-        out += digits[n >> 12 & 63];
-        out += i + 1 < data.size() ? digits[n >> 6 & 63] : '=';
-        out += i + 2 < data.size() ? digits[n & 63] : '=';
-    }
-    return out;
-}
-
-} // namespace
-
 void Application::deliverCapture(bool ok, int width, int height, std::vector<unsigned char>& rgba, const std::string& failure)
 {
     std::vector<Capture> captures;
     captures.swap(captures_);
-    std::string png = ok ? services::encodePng(rgba.data(), width, height) : std::string();
+    std::string png = ok && !captures.empty() ? services::encodePng(rgba.data(), width, height) : std::string();
+    if (agentTools_ && agentTools_->captureWanted())
+        agentTools_->deliverCapture(ok, width, height, rgba); // the local model's look at a page
     os::mem::release(rgba); // the pixels go before the answers are built
     for (Capture& c : captures) {
         if (png.empty()) {
@@ -265,7 +268,7 @@ void Application::deliverCapture(bool ok, int width, int height, std::vector<uns
             }
             result.set("path", c.path);
         }
-        result.set("png_base64", base64(png));
+        result.set("png_base64", model::base64Encode(png));
         c.reply(std::move(result));
     }
 }

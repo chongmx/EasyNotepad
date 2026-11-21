@@ -126,6 +126,70 @@ jobs:
           name: EasyNotepad-${{ needs.version.outputs.version }}-${{ matrix.name }}
           path: bin/
 
+  # The optional NVIDIA engine (plan 21): enp-engine-cuda, llama.cpp with its CUDA backend, built
+  # apart from the app (nvcc needs MSVC on Windows). The app runs without it; put next to the app,
+  # the local agent uses the GPU, and anything wrong with it falls back to the CPU.
+  engine-cuda:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-2022 }
+          - { name: linux-x64,   os: ubuntu-22.04, container: 'nvidia/cuda:13.4.1-devel-ubuntu22.04' }
+    name: engine-cuda-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install Linux tools
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build g++
+
+      - uses: actions/checkout@v7
+
+      - name: Check out llama.cpp
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/3rdparty/llama.cpp"
+          git submodule update --init 3rdparty/llama.cpp
+
+      - name: Install the CUDA toolkit (Windows)
+        if: runner.os == 'Windows'
+        uses: ./3rdparty/llama.cpp/.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '13.4'
+          cuda_arch: x64
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          choco install ninja -y
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S engines/cuda -B build/engine-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA_CCCL_VERSION=v3.4.3
+          cmake --build build/engine-cuda
+          rem cuBLAS has no static library on Windows: its DLLs go next to the engine (bin\ or bin\x64\).
+          for %%d in ("%CUDA_PATH%\bin" "%CUDA_PATH%\bin\x64") do if exist "%%~d\cublas64_*.dll" copy /Y "%%~d\cublas*64_*.dll" bin\engine-cuda\
+          dir bin\engine-cuda\cublas64_*.dll
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S engines/cuda -B build/engine-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA_CCCL_VERSION=v3.4.3
+          cmake --build build/engine-cuda
+
+      - name: List
+        shell: bash
+        run: ls -l bin/engine-cuda
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: EasyNotepad-${{ needs.version.outputs.version }}-engine-cuda-${{ matrix.name }}
+          path: bin/engine-cuda/
+
   web:
     needs: version
     runs-on: ubuntu-22.04
@@ -204,7 +268,7 @@ jobs:
   # platform and the version's CHANGELOG.md section as its notes (docs/RELEASING.md).
   release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [version, desktop, web, android]
+    needs: [version, desktop, engine-cuda, web, android]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -230,7 +294,7 @@ jobs:
               *)
                 # The app and its resources: not the test programs. Artifacts lose the executable
                 # bit; the zips have it back.
-                find "$dir" \( -name 'enp_tests*' -o -name 'enp_ui_tests*' \) -delete
+                find "$dir" \( -name 'enp_tests*' -o -name 'enp_ui_tests*' -o -name 'enp_fake_engine*' \) -delete
                 find "$dir" -type f -name EasyNotepad -exec chmod +x {} +
                 (cd "$dir" && zip -qr "$GITHUB_WORKSPACE/dist/$name.zip" .) ;;
             esac

@@ -13,3 +13,6 @@
 	path = 3rdparty/libdeflate
 	url = https://github.com/ebiggers/libdeflate.git
 	ignore = dirty
+[submodule "3rdparty/libwebp"]
+	path = 3rdparty/libwebp
+	url = https://github.com/webmproject/libwebp.git

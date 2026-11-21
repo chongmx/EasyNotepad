@@ -48,7 +48,12 @@ void NotepadViewModel::initCommands()
             return FileDialogViewModel::parent(absolutePath(doc->path));
         return workspaceRoot_.empty() ? homeDirectory() : workspaceRoot_;
     };
-    set(C::OpenFile, [this, startFolder]() { fileDialog_.show(FileDialogMode::Open, startFolder()); },
+    set(C::OpenFile, [this, startFolder]() {
+        if (filePicker_)
+            filePicker_([this](const std::string& path) { openFile(path); });
+        else
+            fileDialog_.show(FileDialogMode::Open, startFolder());
+    },
         [this]() { return files_ != nullptr; });
     set(C::CloseFolder, [this]() { requestCloseFolder(); }, [this]() { return !workspaceRoot_.empty(); });
     set(C::OpenWorkspace, [this]() {

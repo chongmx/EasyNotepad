@@ -1,11 +1,15 @@
 #include "enp/viewmodel/AgentViewModel.h"
 
 #include "enp/model/AgentRoute.h"
+#include "enp/model/Diff.h"
 #include "enp/model/Json.h"
+#include "enp/os/Memory.h"
 #include "enp/viewmodel/DummyData.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <optional>
 
@@ -22,6 +26,423 @@ constexpr const char* kLocalSystemPrompt =
     "You are the assistant inside the EasyNotepad code editor, running offline on this device. Answer briefly and "
     "precisely, in Markdown. You see only the code the user shows you: you cannot open other files, edit files or "
     "run commands. If a request needs that, say so in one sentence and suggest asking Claude Code.";
+
+// Told to the local model when it has the app's tools (the app's guide and skills follow it).
+constexpr const char* kLocalAgentPrompt =
+    "You are the assistant inside EasyNotepad, a code editor and document reader, running offline on this device. "
+    "You work in the user's open folder through the tools you are given. Look before you answer: read the files, "
+    "documents, pictures and recordings a question is about with your tools, and never guess what they contain. "
+    "Call one or more tools when you need them; when you have what you need, answer briefly and precisely in "
+    "Markdown, naming the files and pages you used. If a tool fails, say so or try another way. "
+    "Never work out a number yourself - not a sum, difference, total, average, percentage, share, "
+    "conversion or rounding, however small: call calculate (several sums at once, separated by ';') "
+    "and give the figures it returns. Only counting a few things you can see is yours to do. Write "
+    "figures as digits.";
+
+// Said with each step of a question taken in steps.
+constexpr const char* kStepAsk = "Use your tools, then tell me what you found. If a tool finds nothing or says the call is "
+                                  "wrong, fix the call from what it tells you and try again before you report.";
+
+constexpr size_t kToolTextChars = 12000; // of one tool result sent to the model (about 3,000 tokens)
+
+std::optional<interfaces::LocalToolCall> callInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools,
+                                                    std::string& rest);
+
+// A call written Python-style: `remember(kind="preference", text="Short answers.")`, values quoted
+// or bare (numbers, true, false). The text without it goes to `rest`.
+std::optional<interfaces::LocalToolCall> keywordCallInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools,
+                                                           std::string& rest)
+{
+    for (const interfaces::LocalTool& t : tools)
+        for (size_t at = text.find(t.name + "("); at != std::string::npos; at = text.find(t.name + "(", at + 1)) {
+            if (at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '_'))
+                continue;
+            size_t i = at + t.name.size() + 1;
+            model::Json args = model::Json::object();
+            bool ok = true;
+            auto space = [&]() {
+                while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])))
+                    ++i;
+            };
+            space();
+            while (ok && i < text.size() && text[i] != ')') {
+                std::string key;
+                while (i < text.size() && (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_'))
+                    key += text[i++];
+                space();
+                if (key.empty() || i >= text.size() || (text[i] != '=' && text[i] != ':')) {
+                    ok = false;
+                    break;
+                }
+                ++i;
+                space();
+                std::string value;
+                if (i < text.size() && (text[i] == '"' || text[i] == '\'')) {
+                    const char quote = text[i++];
+                    while (i < text.size() && text[i] != quote) {
+                        if (text[i] == '\\' && i + 1 < text.size()) {
+                            const char e = text[++i];
+                            value += e == 'n' ? '\n' : e == 't' ? '\t' : e;
+                        } else {
+                            value += text[i];
+                        }
+                        ++i;
+                    }
+                    if (i >= text.size()) {
+                        ok = false;
+                        break;
+                    }
+                    ++i;
+                    args.set(key, value);
+                } else {
+                    while (i < text.size() && text[i] != ',' && text[i] != ')')
+                        value += text[i++];
+                    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+                        value.pop_back();
+                    char* end = nullptr;
+                    const double number = std::strtod(value.c_str(), &end);
+                    if (!value.empty() && end && *end == '\0')
+                        args.set(key, number);
+                    else if (value == "true" || value == "false" || value == "True" || value == "False")
+                        args.set(key, value[0] == 't' || value[0] == 'T');
+                    else
+                        args.set(key, value);
+                }
+                space();
+                if (i < text.size() && text[i] == ',') {
+                    ++i;
+                    space();
+                }
+            }
+            if (!ok || i >= text.size() || text[i] != ')' || args.members().empty())
+                continue;
+            size_t end = i + 1;
+            size_t begin = at;
+            if (begin > 0 && text[begin - 1] == '`' && end < text.size() && text[end] == '`') { // `call(...)`
+                --begin;
+                ++end;
+            }
+            rest = text.substr(0, begin) + text.substr(end);
+            return interfaces::LocalToolCall{"text_call", t.name, args.dump()};
+        }
+    return std::nullopt;
+}
+
+// Every call written as text, in either form, in order; the text without them goes to `rest`.
+std::vector<interfaces::LocalToolCall> callsInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools, std::string& rest)
+{
+    std::vector<interfaces::LocalToolCall> calls;
+    std::string current = text;
+    for (int k = 0; k < 8; ++k) {
+        std::string left;
+        std::optional<interfaces::LocalToolCall> call = callInText(current, tools, left);
+        if (!call)
+            call = keywordCallInText(current, tools, left);
+        if (!call)
+            break;
+        call->id = "text_call_" + std::to_string(k + 1);
+        calls.push_back(std::move(*call));
+        current = std::move(left);
+    }
+    // What is left of the text: lines that held only a call (a bullet, a backtick) go too.
+    std::string kept;
+    for (size_t from = 0; from <= current.size();) {
+        size_t nl = current.find('\n', from);
+        if (nl == std::string::npos)
+            nl = current.size();
+        const std::string line = current.substr(from, nl - from);
+        from = nl + 1;
+        if (!calls.empty() && line.find_first_not_of(" \t*-`") == std::string::npos && !line.empty())
+            continue;
+        kept += (kept.empty() ? "" : "\n") + line;
+    }
+    while (!kept.empty() && std::isspace(static_cast<unsigned char>(kept.back())))
+        kept.pop_back();
+    rest = kept;
+    return calls;
+}
+
+// The user asks for something to be kept: "remember", "from now on", "always ...", "never ...".
+bool asksToRemember(const std::string& prompt)
+{
+    std::string lower = prompt;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    for (const char* cue : {"remember", "from now on", "always ", "never ", "don't forget", "do not forget", "keep in mind"})
+        if (lower.find(cue) != std::string::npos)
+            return true;
+    return false;
+}
+
+bool hasTool(const std::vector<interfaces::LocalTool>& tools, const char* name)
+{
+    return std::any_of(tools.begin(), tools.end(), [&](const interfaces::LocalTool& t) { return t.name == name; });
+}
+
+bool calledTool(const std::vector<interfaces::LocalChatMessage>& messages, const char* name)
+{
+    for (const interfaces::LocalChatMessage& m : messages)
+        for (const interfaces::LocalToolCall& c : m.toolCalls)
+            if (c.name == name)
+                return true;
+    return false;
+}
+
+// The last tool result (since the user's last turn) says how to fix the call: no rows matched
+// (with the values to use), no such column, a missing argument, no such tool, the wrong tool for
+// the file (with the right call), a region it cannot read.
+bool toolAsksToRetry(const std::vector<interfaces::LocalChatMessage>& messages)
+{
+    for (size_t i = messages.size(); i-- > 0;) {
+        const interfaces::LocalChatMessage& m = messages[i];
+        if (m.role == "user" && m.media.empty())
+            return false;
+        if (m.role != "tool")
+            continue;
+        for (const char* cue : {"no rows match", "There is no column", "Call it like this", "There is no tool called",
+                                "It is a document: call", "It is a picture: call", "It is a recording: call",
+                                "cannot read the region", "does not exist. ", "is a table, not a document",
+                                "} for its text."})
+            if (m.text.find(cue) != std::string::npos)
+                return true;
+        return false;
+    }
+    return false;
+}
+
+// ---- Figures no tool gave ----------------------------------------------------------------------
+// The local model is fine at counting a few things and poor at anything else with numbers: a figure
+// in its answer that no tool returned and the user did not give was worked out in its head (or
+// made up). Such an answer goes back to it, to be done with calculate.
+
+struct Figure {
+    double value = 0;
+    int decimals = 0;
+    bool scaled = false; // "3.78 million": compared loosely
+    std::string text;
+};
+
+std::vector<Figure> figuresIn(const std::string& text)
+{
+    std::vector<Figure> out;
+    auto digit = [&](size_t i) { return i < text.size() && std::isdigit(static_cast<unsigned char>(text[i])); };
+    auto letter = [&](size_t i) { return i < text.size() && (std::isalpha(static_cast<unsigned char>(text[i])) || text[i] == '_'); };
+    for (size_t i = 0; i < text.size();) {
+        if (!digit(i) || (i > 0 && (letter(i - 1) || digit(i - 1) || text[i - 1] == '#' || text[i - 1] == '.'))) {
+            ++i;
+            continue;
+        }
+        const size_t start = i;
+        std::string n;
+        int decimals = 0;
+        bool point = false;
+        while (i < text.size()) {
+            if (digit(i)) {
+                n += text[i];
+                decimals += point;
+                ++i;
+            } else if (text[i] == ',' && digit(i + 1) && digit(i + 2) && digit(i + 3) && !digit(i + 4) && !point) {
+                ++i; // a thousands separator
+            } else if (text[i] == '.' && !point && digit(i + 1)) {
+                n += '.';
+                point = true;
+                ++i;
+            } else {
+                break;
+            }
+        }
+        // Not a quantity: part of a word or name (x64, v1.2), a date or time, a range's ends.
+        const bool joined = letter(i) || (i < text.size() && (text[i] == ':' || (text[i] == '-' && digit(i + 1)))) ||
+                            (start > 0 && (text[start - 1] == ':' || (text[start - 1] == '-' && start > 1 && digit(start - 2))));
+        if (joined)
+            continue;
+        Figure f;
+        f.value = std::atof(n.c_str());
+        f.decimals = decimals;
+        f.text = text.substr(start, i - start);
+        std::string next;
+        for (size_t k = i; k < text.size() && next.size() < 9; ++k)
+            next += char(std::tolower(static_cast<unsigned char>(text[k])));
+        for (const auto& [word, factor] : {std::pair<const char*, double>{" million", 1e6}, {" billion", 1e9}, {" thousand", 1e3},
+                                           {"m ", 1e6}, {"k ", 1e3}, {"bn", 1e9}})
+            if (next.rfind(word, 0) == 0) {
+                f.value *= factor;
+                f.scaled = true;
+                break;
+            }
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
+// The answer's figures that no tool result or user message holds (as given, or rounded, or as a
+// percentage of it). Small whole numbers (counting) and years are left alone. When the model was
+// given pictures or sounds, figures read from them cannot be checked: only lines that work
+// something out ("=", an operator between numbers) are.
+std::vector<std::string> unsourcedFigures(const std::string& answer, const std::vector<interfaces::LocalChatMessage>& messages)
+{
+    std::vector<Figure> known;
+    bool media = false;
+    for (const interfaces::LocalChatMessage& m : messages) {
+        if (m.role != "tool" && m.role != "user")
+            continue;
+        media = media || !m.media.empty();
+        for (Figure& f : figuresIn(m.text))
+            known.push_back(std::move(f));
+    }
+    auto sourced = [&](const Figure& a) {
+        for (const Figure& k : known)
+            for (const double v : {k.value, k.value * 100.0, k.value / 100.0}) {
+                if (a.scaled || k.scaled) {
+                    if (std::abs(a.value - v) <= 0.01 * std::max(std::abs(a.value), std::abs(v)))
+                        return true;
+                } else if (std::abs(a.value - v) <= 0.5 * std::pow(10.0, -a.decimals) + 1e-9 * std::max(1.0, std::abs(v))) {
+                    return true;
+                }
+            }
+        return false;
+    };
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (at < answer.size()) {
+        size_t end = answer.find('\n', at);
+        if (end == std::string::npos)
+            end = answer.size();
+        const std::string line = answer.substr(at, end - at);
+        at = end + 1;
+        bool works = line.find('=') != std::string::npos;
+        for (size_t i = 1; i + 1 < line.size() && !works; ++i)
+            if (std::strchr("+*/x", line[i]) && (std::isdigit(static_cast<unsigned char>(line[i - 1])) || line[i - 1] == ' ') &&
+                (std::isdigit(static_cast<unsigned char>(line[i + 1])) || line[i + 1] == ' ')) {
+                const size_t l = line.find_last_not_of(' ', i - 1), r = line.find_first_not_of(' ', i + 1);
+                works = l != std::string::npos && r != std::string::npos && std::isdigit(static_cast<unsigned char>(line[l])) &&
+                        std::isdigit(static_cast<unsigned char>(line[r]));
+            }
+        if (media && !works)
+            continue;
+        for (const Figure& f : figuresIn(line)) {
+            const bool small = f.decimals == 0 && !f.scaled && std::abs(f.value) <= 12;
+            const bool year = f.decimals == 0 && f.value >= 1900 && f.value <= 2100 && f.text.find(',') == std::string::npos;
+            if (!small && !year && !sourced(f) && std::find(out.begin(), out.end(), f.text) == out.end())
+                out.push_back(f.text);
+        }
+    }
+    return out;
+}
+
+// The answer only says it will call one of the tools ("I will now call inspect_binary with ..."),
+// without calling it.
+bool announcesCall(const std::string& text, const std::vector<interfaces::LocalTool>& tools)
+{
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    static const char* const intents[] = {"i will now", "i will call", "i will use", "i will try", "i'll call", "i'll use",
+                                          "i'll try", "i will check", "let me call", "let me use", "let me check", "next, i will",
+                                          "i will first", "i need to call", "i need to use", "i'll now", "i will read", "i'll read"};
+    size_t at = std::string::npos;
+    for (const char* intent : intents)
+        at = std::min(at, lower.rfind(intent));
+    if (at == std::string::npos)
+        return false;
+    for (const interfaces::LocalTool& t : tools)
+        if (lower.find(t.name, at) != std::string::npos || lower.find("tool", at) != std::string::npos)
+            return true;
+    return false;
+}
+
+// The end of the JSON object starting at `from` ('{'), strings respected; npos when it does not close.
+size_t objectEnd(const std::string& text, size_t from)
+{
+    int depth = 0;
+    bool inString = false;
+    for (size_t i = from; i < text.size(); ++i) {
+        const char c = text[i];
+        if (inString) {
+            if (c == '\\')
+                ++i;
+            else if (c == '"')
+                inString = false;
+        } else if (c == '"') {
+            inString = true;
+        } else if (c == '{') {
+            ++depth;
+        } else if (c == '}' && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+// A tool call the model wrote as text instead of in its chat format: `read_file {"path": "a"}`,
+// `read_file({...})`, or {"name": "read_file", "arguments": {...}} (in a code fence or not). The
+// text without it goes to `rest`.
+std::optional<interfaces::LocalToolCall> callInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools,
+                                                    std::string& rest)
+{
+    for (size_t open = text.find('{'); open != std::string::npos; open = text.find('{', open + 1)) {
+        const size_t close = objectEnd(text, open);
+        if (close == std::string::npos)
+            break;
+        const std::optional<model::Json> j = model::Json::parse(std::string_view(text).substr(open, close - open + 1));
+        if (!j || !j->isObject())
+            continue;
+        size_t begin = open, end = close + 1;
+        interfaces::LocalToolCall call;
+        // {"name": ..., "arguments": {...}}
+        const std::string named = j->getString("name", j->getString("tool"));
+        for (const interfaces::LocalTool& t : tools)
+            if (t.name == named)
+                for (const char* key : {"arguments", "args", "parameters", "input"})
+                    if (const model::Json* a = j->find(key); a && a->isObject() && call.name.empty()) {
+                        call.name = named;
+                        call.arguments = a->dump();
+                    }
+        // tool_name {...} or tool_name({...})
+        if (call.name.empty()) {
+            size_t k = open;
+            while (k > 0 && (text[k - 1] == ' ' || text[k - 1] == '(' || text[k - 1] == ':'))
+                --k;
+            for (const interfaces::LocalTool& t : tools)
+                if (k >= t.name.size() && text.compare(k - t.name.size(), t.name.size(), t.name) == 0 &&
+                    (k == t.name.size() || !std::isalnum(static_cast<unsigned char>(text[k - t.name.size() - 1])))) {
+                    call.name = t.name;
+                    call.arguments = j->dump();
+                    begin = k - t.name.size();
+                    if (end < text.size() && text[end] == ')')
+                        ++end;
+                }
+        }
+        if (call.name.empty())
+            continue;
+        call.id = "text_call";
+        // Drop the call and a code fence around it.
+        size_t fenceStart = text.rfind("```", begin);
+        if (fenceStart != std::string::npos && text.find_first_not_of(" \t\r\njsonJSON`", fenceStart) >= begin)
+            begin = fenceStart;
+        if (const size_t fenceEnd = text.find("```", end); fenceEnd != std::string::npos && text.find_first_not_of(" \t\r\n", end) == fenceEnd)
+            end = fenceEnd + 3;
+        rest = text.substr(0, begin) + text.substr(end);
+        while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.back())))
+            rest.pop_back();
+        return call;
+    }
+    return std::nullopt;
+}
+
+// A tool step as the chat shows it: "read_file  src/main.cpp", with the arguments' values.
+std::string describeCall(const interfaces::LocalToolCall& call)
+{
+    std::string args;
+    if (std::optional<model::Json> j = model::Json::parse(call.arguments); j && j->isObject())
+        for (const auto& [key, value] : j->members()) {
+            const std::string v = value.isString() ? value.asString() : value.dump();
+            if (key == "content" || key == "new_text" || key == "old_text")
+                continue; // edits show as changes to review
+            args += (args.empty() ? "" : ", ") + v;
+        }
+    if (args.size() > 100)
+        args = args.substr(0, 97) + "...";
+    return "\xe2\x9a\x99 " + call.name + (args.empty() ? std::string() : "  " + args);
+}
 
 } // namespace
 
@@ -149,6 +570,153 @@ bool AgentViewModel::fallBackToLocal(const std::string& prompt, const std::strin
     return true;
 }
 
+void AgentViewModel::setLocalTools(std::function<std::vector<interfaces::LocalTool>(bool canEdit)> tools, ToolRunner run,
+                                   std::function<std::string()> guide)
+{
+    localTools_ = std::move(tools);
+    runTool_ = std::move(run);
+    localGuide_ = std::move(guide);
+}
+
+void AgentViewModel::proposeChange(const std::string& path, const std::string& before, const std::string& after)
+{
+    model::FileChange c;
+    c.path = path;
+    c.before = before;
+    c.after = after;
+    c.diff = model::diffLines(model::splitLines(before), model::splitLines(after));
+    c.stats = model::diffStats(c.diff);
+    // A newer proposal for the same file replaces one still waiting: one version to review.
+    changes_.erase(std::remove_if(changes_.begin(), changes_.end(),
+                                  [&](const model::FileChange& o) { return o.path == path && o.state == model::ChangeState::Proposed; }),
+                   changes_.end());
+    changes_.push_back(std::move(c));
+    selectedChange.set(int(changes_.size()) - 1);
+}
+
+void AgentViewModel::endLocal()
+{
+    os::mem::release(localRequest_.messages); // pictures and sounds can be megabytes
+    os::mem::release(localRequest_.tools);
+    localRounds_ = 0;
+    localNudges_ = 0;
+    os::mem::release(localSteps_);
+    localStep_ = 0;
+}
+
+std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
+{
+    std::vector<std::string> steps;
+    auto space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    for (size_t start = 0; start <= plan.size() && steps.size() < kMaxPlanSteps;) {
+        size_t end = plan.find('\n', start);
+        if (end == std::string::npos)
+            end = plan.size();
+        std::string line = plan.substr(start, end - start);
+        start = end + 1;
+        line.erase(std::remove(line.begin(), line.end(), '*'), line.end()); // **bold**
+        size_t i = 0;
+        while (i < line.size() && (space(line[i]) || line[i] == '#' || line[i] == '-'))
+            ++i;
+        if (line.size() - i > 5 && std::tolower(static_cast<unsigned char>(line[i])) == 's' &&
+            std::tolower(static_cast<unsigned char>(line[i + 1])) == 't' && line.compare(i + 2, 3, "ep ") == 0)
+            i += 5; // "Step 2: ..."
+        const size_t digits = i;
+        while (i < line.size() && std::isdigit(static_cast<unsigned char>(line[i])))
+            ++i;
+        if (i == digits || i >= line.size() || (line[i] != '.' && line[i] != ')' && line[i] != ':'))
+            continue;
+        ++i;
+        while (i < line.size() && space(line[i]))
+            ++i;
+        std::string text = line.substr(i);
+        while (!text.empty() && space(text.back()))
+            text.pop_back();
+        if (!text.empty())
+            steps.push_back(std::move(text));
+    }
+    return steps;
+}
+
+void AgentViewModel::planLocal(int generation, std::string question)
+{
+    std::string instructions = localPlanner_ ? localPlanner_(question) : std::string();
+    if (instructions.rfind("---", 0) == 0) // the skill's front matter
+        if (const size_t end = instructions.find("\n---", 3); end != std::string::npos) {
+            const size_t body = instructions.find('\n', end + 4);
+            instructions.erase(0, body == std::string::npos ? instructions.size() : body + 1);
+        }
+    if (instructions.empty()) {
+        sendLocal(generation);
+        return;
+    }
+    // A request of its own, without tools: the model only writes the steps. The model's settings are
+    // the question's, so the engine keeps what it has loaded.
+    interfaces::LocalChatRequest plan;
+    plan.modelPath = localRequest_.modelPath;
+    plan.drafterPath = localRequest_.drafterPath;
+    plan.projectorPath = localRequest_.projectorPath;
+    plan.threads = localRequest_.threads;
+    plan.useGpu = localRequest_.useGpu;
+    plan.contextTokens = localRequest_.contextTokens;
+    plan.maxTokens = 512;
+    std::string tools;
+    for (const interfaces::LocalTool& t : localRequest_.tools)
+        tools += "- " + t.name + ": " + t.description.substr(0, t.description.find(". ")) + "\n";
+    plan.messages.emplace_back("system", instructions + "\n\nThe tools you will have:\n" + tools);
+    plan.messages.emplace_back("user", "Write the steps for this question:\n\n" + question);
+    activity_ = "Local model: planning the steps";
+    local_->chat(
+        plan, [](const std::string&) {}, [](const std::string&) {}, // the plan is shown once it is read
+        [this, generation](const interfaces::LocalChatResult& r) {
+            if (generation != generation_)
+                return; // stopped or replaced
+            std::vector<std::string> steps = r.ok ? planSteps(r.text) : std::vector<std::string>();
+            if (steps.size() >= 2 && !localRequest_.messages.empty()) {
+                std::string list;
+                for (size_t i = 0; i < steps.size(); ++i)
+                    list += std::to_string(i + 1) + ". " + steps[i] + "\n";
+                messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + list});
+                messages_.push_back({model::ChatRole::Tool, "Step 1 of " + std::to_string(steps.size()) + ": " + steps[0]});
+                localRequest_.messages.back().text += "\n\nWe will work through this in steps:\n" + list + "\nDo step 1 only now: " +
+                                                      steps[0] + "\n" + kStepAsk;
+                localSteps_ = std::move(steps);
+                localStep_ = 1;
+            }
+            sendLocal(generation); // a one-step plan, or none: the question as it is
+        });
+}
+
+bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
+{
+    if (localSteps_.empty() || localStep_ > localSteps_.size())
+        return false;
+    localRequest_.messages.emplace_back("assistant", answer);
+    std::string next;
+    if (localStep_ < localSteps_.size()) {
+        const std::string number = std::to_string(localStep_ + 1);
+        messages_.push_back({model::ChatRole::Tool,
+                             "Step " + number + " of " + std::to_string(localSteps_.size()) + ": " + localSteps_[localStep_]});
+        next = "Now step " + number + ": " + localSteps_[localStep_] + "\n" + kStepAsk + "\n(My question, for reference: " +
+               localPrompt_ + ")";
+    } else {
+        messages_.push_back({model::ChatRole::Tool, "All steps done: the answer"});
+        next = "All the steps are done. Now answer my question in full, from what the steps found, with the figures exactly "
+               "as the tools gave them: " + localPrompt_;
+        if (const std::string reminder = localReminder_ ? localReminder_() : std::string(); !reminder.empty())
+            next += "\n\n(" + reminder + ")";
+    }
+    // Its working notes: what earlier steps found, kept outside the conversation.
+    if (const std::string notes = localNotes_ ? localNotes_() : std::string(); !notes.empty())
+        next += "\n\nYour notes so far:\n" + notes;
+    ++localStep_;
+    localRounds_ = 0; // each step has its own rounds of tools
+    localNudges_ = 0;
+    localRequest_.messages.emplace_back("user", std::move(next));
+    sendLocal(generation);
+    return true;
+}
+
 void AgentViewModel::askLocal(const std::string& prompt, const std::string& context, const std::string& note)
 {
     const LocalSetup setup = localSetup_ ? localSetup_() : LocalSetup{};
@@ -164,12 +732,27 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     if (!note.empty())
         messages_.push_back({model::ChatRole::Tool, note});
 
-    interfaces::LocalChatRequest request;
+    endLocal();
+    interfaces::LocalChatRequest& request = localRequest_;
     request.modelPath = setup.modelPath;
     request.drafterPath = setup.drafterPath;
+    request.projectorPath = setup.projectorPath;
     request.threads = setup.threads;
     request.useGpu = setup.gpu;
-    request.messages.push_back({"system", kLocalSystemPrompt});
+    const bool tools = runTool_ && localTools_;
+    if (tools) {
+        request.tools = localTools_(autonomyIndex.get() == 0);
+        request.contextTokens = 0; // the largest that fits: documents, pictures and tool results take room
+        request.maxTokens = 8192;  // a file written whole, a long summary
+        std::string system = kLocalAgentPrompt;
+        if (localGuide_)
+            system += "\n\n" + localGuide_();
+        request.messages.push_back({"system", std::move(system)});
+    } else {
+        request.contextTokens = 8192;
+        request.maxTokens = 768;
+        request.messages.push_back({"system", kLocalSystemPrompt});
+    }
     // Earlier turns, the newest kept, within a budget (the local model reads about 100 tokens a
     // second on a phone). This question itself is sent last, with the code it is about.
     size_t end = messages_.size();
@@ -189,7 +772,10 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
         if (chars + text.size() > kLocalHistoryChars)
             break;
         chars += text.size();
-        history.push_back({m.role == model::ChatRole::User ? "user" : "assistant", std::move(text)});
+        interfaces::LocalChatMessage turn;
+        turn.role = m.role == model::ChatRole::User ? "user" : "assistant";
+        turn.text = std::move(text);
+        history.push_back(std::move(turn));
     }
     std::reverse(history.begin(), history.end());
     // The chat format wants the turns to alternate, starting with the user.
@@ -198,20 +784,46 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     for (interfaces::LocalChatMessage& m : history)
         if (request.messages.back().role != m.role)
             request.messages.push_back(std::move(m));
+        else if (m.role == "assistant")
+            request.messages.back().text = std::move(m.text); // a question taken in steps: its last answer
     if (request.messages.back().role == "user")
         request.messages.pop_back();
     std::string question = prompt;
-    const std::string code = localContext_ ? localContext_() : std::string();
-    if (!code.empty())
+    // With tools, the file open in the editor is only named (its text, pasted in, took over
+    // questions about other files: it reads what it needs); lines the user selected still go in.
+    const size_t colon = context.rfind(':');
+    const bool selected = colon != std::string::npos && context.find('-', colon) != std::string::npos;
+    const std::string code = localContext_ && (!tools || selected) ? localContext_() : std::string();
+    if (tools && code.empty() && !context.empty())
+        question = prompt + "\n\n(For reference only: the editor shows " + context.substr(0, colon) +
+                   ". Read it with your tools only if my question is about it.)";
+    else if (!code.empty())
         question = "I am looking at " + (context.empty() ? std::string("this code") : context) + ":\n\n" + code + "\n\n" + prompt;
-    request.messages.push_back({"user", std::move(question)});
+    else if (!context.empty())
+        question = "I am looking at " + context + ".\n\n" + prompt;
+    interfaces::LocalChatMessage asked;
+    asked.role = "user";
+    if (const std::string reminder = tools && localReminder_ ? localReminder_() : std::string(); !reminder.empty())
+        question += "\n\n(" + reminder + ")";
+    asked.text = std::move(question);
+    request.messages.push_back(std::move(asked));
 
+    localPrompt_ = prompt;
     const int generation = ++generation_;
+    // A question of some length is split into steps first (one word or a greeting is not worth it).
+    if (tools && localInSteps.get() && localPlanner_ && prompt.size() >= 20)
+        planLocal(generation, prompt); // the question alone: the file open in the editor misled plans
+    else
+        sendLocal(generation);
+}
+
+void AgentViewModel::sendLocal(int generation)
+{
     messages_.push_back({model::ChatRole::Agent, std::string(), "Local"});
     const size_t at = messages_.size() - 1;
     activity_ = "Local model";
     local_->chat(
-        request,
+        localRequest_,
         [this, generation](const std::string& stage) {
             if (generation == generation_)
                 activity_ = "Local model: " + stage;
@@ -220,23 +832,180 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
             if (generation == generation_ && at < messages_.size())
                 messages_[at].text += piece;
         },
-        [this, generation, at, prompt](const interfaces::LocalChatResult& r) {
-            if (generation != generation_)
-                return; // stopped or replaced
-            activity_.clear();
-            if (!r.ok) {
-                if (at < messages_.size() && messages_[at].text.empty())
-                    messages_.erase(messages_.begin() + long(at));
-                messages_.push_back({model::ChatRole::Tool, "The local model failed: " + r.error});
-            } else {
-                char line[128];
-                std::snprintf(line, sizeof(line), "Local model: %d tokens, %.1f tokens/s, first token after %.1f s%s",
-                              r.generatedTokens, r.tokensPerSecond, r.firstTokenSeconds, r.loaded ? " (loaded the model)" : "");
-                statusMessage.emit(line);
+        [this, generation, at](const interfaces::LocalChatResult& r) { localAnswered(generation, at, r); });
+}
+
+void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r)
+{
+    if (generation != generation_)
+        return; // stopped or replaced
+    const bool empty = at < messages_.size() && messages_[at].text.empty() && r.text.empty();
+    if (!r.ok) {
+        if (empty)
+            messages_.erase(messages_.begin() + long(at));
+        messages_.push_back({model::ChatRole::Tool, "The local model failed: " + r.error});
+    } else {
+        if (at < messages_.size() && !r.text.empty())
+            messages_[at].text = r.text; // the streamed text, exactly (a tool call's markup left out)
+        // A call written as text (a small model slips out of its format now and then): run it all the same.
+        if (r.toolCalls.empty() && runTool_ && !localRequest_.tools.empty()) {
+            std::string rest;
+            if (std::vector<interfaces::LocalToolCall> calls = callsInText(r.text, localRequest_.tools, rest); !calls.empty()) {
+                interfaces::LocalChatResult fixed = r;
+                fixed.text = rest;
+                fixed.toolCalls = std::move(calls);
+                if (at < messages_.size())
+                    messages_[at].text = rest;
+                localAnswered(generation, at, fixed);
+                return;
             }
-            busy.set(false);
-            replied.emit(prompt);
-        });
+        }
+        // The user asked it to remember something and it only said it would: tell it to save it.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && asksToRemember(localPrompt_) &&
+            hasTool(localRequest_.tools, "remember") && !calledTool(localRequest_.messages, "remember")) {
+            ++localNudges_;
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back("user", "You have not saved it yet: call remember now, once for each thing to keep "
+                                                        "(kind preference for how I like things).");
+            sendLocal(generation);
+            return;
+        }
+        // A tool said how to fix the call and the model reported that instead of calling again.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds &&
+            toolAsksToRetry(localRequest_.messages)) {
+            ++localNudges_;
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back("user", "Do not report that: the tool told you how to fix the call. Make the "
+                                                        "corrected call now, with the values it listed.");
+            sendLocal(generation);
+            return;
+        }
+        // Figures no tool gave: worked out in its head, or made up. Back to it, to use calculate.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds &&
+            hasTool(localRequest_.tools, "calculate")) {
+            if (const std::vector<std::string> figures = unsourcedFigures(r.text, localRequest_.messages); !figures.empty()) {
+                ++localNudges_;
+                std::string list;
+                for (const std::string& f : figures)
+                    list += (list.empty() ? "" : ", ") + f;
+                localRequest_.messages.emplace_back("assistant", r.text);
+                localRequest_.messages.emplace_back(
+                    "user", "No tool gave you these figures: " + list +
+                                ". Do not work numbers out yourself. Put each calculation into calculate now (several at "
+                                "once, separated by ';', from the figures the tools gave), then answer with what it "
+                                "returns. A figure you read in a file or picture: read it again with the tool instead.");
+                if (at < messages_.size())
+                    messages_.push_back({model::ChatRole::Tool, "Checking the figures " + list + " with the calculator"});
+                sendLocal(generation);
+                return;
+            }
+        }
+        // It says what it will call and stops (a small model does): tell it to go on, twice at most.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds && announcesCall(r.text, localRequest_.tools)) {
+            ++localNudges_;
+            interfaces::LocalChatMessage said("assistant", r.text);
+            localRequest_.messages.push_back(std::move(said));
+            localRequest_.messages.emplace_back("user", "Go on: make that tool call now - call the tool, do not describe it.");
+            sendLocal(generation);
+            return;
+        }
+        if (!r.toolCalls.empty() && runTool_ && localRounds_ < kMaxToolRounds) {
+            ++localRounds_;
+            if (empty)
+                messages_.erase(messages_.begin() + long(at));
+            interfaces::LocalChatMessage turn;
+            turn.role = "assistant";
+            turn.text = r.text;
+            turn.toolCalls = r.toolCalls;
+            localRequest_.messages.push_back(std::move(turn));
+            runLocalTools(generation, r.toolCalls, 0, {});
+            return;
+        }
+        // A question taken in steps: this step is answered, give the next (or ask for the answer).
+        if (r.toolCalls.empty() && !localSteps_.empty() && localStep_ <= localSteps_.size()) {
+            if (empty)
+                messages_.erase(messages_.begin() + long(at));
+            nextLocalStep(generation, r.text);
+            return;
+        }
+        if (!r.toolCalls.empty())
+            messages_.push_back({model::ChatRole::Tool, "The local model stopped after " + std::to_string(kMaxToolRounds) +
+                                                            " rounds of tools without an answer."});
+        else if (empty)
+            messages_.erase(messages_.begin() + long(at));
+        char line[160];
+        std::snprintf(line, sizeof(line), "Local model (%s): %d tokens, %.1f tokens/s, first token after %.1f s%s",
+                      r.backend.empty() ? "CPU" : r.backend.c_str(), r.generatedTokens, r.tokensPerSecond,
+                      r.firstTokenSeconds, r.loaded ? " (loaded the model)" : "");
+        statusMessage.emit(line);
+    }
+    endLocal();
+    activity_.clear();
+    busy.set(false);
+    replied.emit(localPrompt_);
+}
+
+void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::LocalToolCall> calls, size_t next,
+                                   std::vector<interfaces::LocalMedia> seen)
+{
+    if (generation != generation_)
+        return;
+    if (next >= calls.size()) {
+        if (!seen.empty()) {
+            // Pictures and sounds a tool brought: the model takes them in as the next turn.
+            interfaces::LocalChatMessage shown;
+            shown.role = "user";
+            for (const interfaces::LocalMedia& m : seen)
+                shown.text += (shown.text.empty() ? "Here " : ", ") + std::string("is ") + m.name;
+            shown.text += ", from your tools.";
+            shown.media = std::move(seen);
+            localRequest_.messages.push_back(std::move(shown));
+        }
+        sendLocal(generation);
+        return;
+    }
+    const interfaces::LocalToolCall call = calls[next];
+    messages_.push_back({model::ChatRole::Tool, describeCall(call)});
+    const size_t step = messages_.size() - 1;
+    activity_ = "Local model: " + call.name;
+    runTool_(call, [this, generation, step, calls = std::move(calls), next, seen = std::move(seen)](ToolOutput out) mutable {
+        if (generation != generation_)
+            return;
+        // What the tool answered, in short, under its step: the user sees what the answer rests on.
+        if (step < messages_.size() && !out.text.empty()) {
+            std::string gist;
+            size_t at = 0;
+            for (int lines = 0; at < out.text.size() && lines < (calls[next].name == "calculate" ? 4 : 1); ++lines) {
+                size_t end = out.text.find('\n', at);
+                if (end == std::string::npos)
+                    end = out.text.size();
+                gist += (gist.empty() ? "" : "; ") + out.text.substr(at, std::min<size_t>(end - at, 160));
+                at = end + 1;
+            }
+            if (at < out.text.size())
+                gist += " ...";
+            messages_[step].text += "\n\xE2\x86\x92 " + gist; // →
+        }
+        // The pictures the tool shows the user, under its step.
+        for (const std::string& picture : out.shown) {
+            std::string link; // a space would end a Markdown link
+            for (char c : picture)
+                link += c == ' ' ? std::string("%20") : std::string(1, c);
+            if (step < messages_.size())
+                messages_[step].text += "\n\n![" + picture.substr(picture.find_last_of("/\\") + 1) + "](" + link + ")";
+        }
+        interfaces::LocalChatMessage result;
+        result.role = "tool";
+        result.toolCallId = calls[next].id;
+        result.toolName = calls[next].name;
+        result.text = std::move(out.text);
+        if (result.text.size() > kToolTextChars)
+            result.text = result.text.substr(0, kToolTextChars) + "\n[cut: ask for a smaller part]";
+        localRequest_.messages.push_back(std::move(result));
+        for (interfaces::LocalMedia& m : out.media)
+            seen.push_back(std::move(m));
+        runLocalTools(generation, std::move(calls), next + 1, std::move(seen));
+    });
 }
 
 void AgentViewModel::askClaudeInstead(int answerIndex)
@@ -268,10 +1037,27 @@ void AgentViewModel::newChat()
 {
     stop();
     sessionId_.clear(); // the next prompt starts a new conversation
+    ++conversation_;   // ... and the local model's working notes go
     messages_.clear();
     tasks_.clear();
     replyCount_ = 0;
     statusMessage.emit("Started a new agent conversation");
+}
+
+void AgentViewModel::workspaceChanged()
+{
+    ++conversation_; // notes about the old folder go
+    if (busy.get()) {
+        ++generation_;
+        replyAt_ = -1.0;
+        if (cli_)
+            cli_->cancel();
+        if (local_ && local_->chatting())
+            local_->cancel();
+        activity_.clear();
+        busy.set(false);
+    }
+    endLocal();
 }
 
 void AgentViewModel::stop()
@@ -284,6 +1070,7 @@ void AgentViewModel::stop()
         cli_->cancel();
     if (local_ && local_->chatting())
         local_->cancel();
+    endLocal();
     activity_.clear();
     messages_.push_back({model::ChatRole::Tool, "Stopped by user."});
     busy.set(false);

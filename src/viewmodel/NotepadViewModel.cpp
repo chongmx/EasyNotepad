@@ -288,6 +288,7 @@ void NotepadViewModel::closeFolder()
     logicalMap_.workspaceChanged();
     intellisense_.workspaceChanged();
     codeAssistant_.workspaceChanged();
+    agent_.workspaceChanged();
     codeAssistant_.setWorkingDirectory(files_ ? files_->homeDirectory() : std::string());
     git_.workspaceChanged();
     statusText.set(closed.empty() ? "No folder open" : "Closed the folder " + closed);
@@ -949,6 +950,7 @@ bool NotepadViewModel::openFolder(const std::string& path)
     logicalMap_.workspaceChanged();
     intellisense_.workspaceChanged();
     codeAssistant_.workspaceChanged();
+    agent_.workspaceChanged();
     codeAssistant_.setWorkingDirectory(root);
     remember(recentFolders_, root, kMaxRecentFolders);
     while (!documents_.empty())
@@ -1049,6 +1051,17 @@ void NotepadViewModel::navigateTo(const std::string& path, int line)
 
 void NotepadViewModel::applyText(const std::string& path, const std::string& text)
 {
+    // A new file the agent proposed: made empty first, so it opens like any other (the text then
+    // arrives unsaved, as every accepted change does).
+    if (files_ && !workspaceRoot_.empty()) {
+        const std::string absolute = absolutePath(path);
+        const std::optional<interfaces::FileStamp> stamp = files_->stamp(absolute);
+        if (stamp && !stamp->exists) {
+            files_->createDirectories(FileDialogViewModel::parent(absolute));
+            files_->write(absolute, {});
+            refreshExplorer();
+        }
+    }
     openFile(path);
     model::Document* doc = activeDocument();
     beginEdit(EditKind::Other);
@@ -1777,13 +1790,16 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
         return s;
     }
     if (!lab.fileUsable(Which::Model)) {
-        s.why = "the model is not downloaded yet (Tools \u203a Local Model).";
+        s.why = std::string(lab.chosenModel().name) + " is not downloaded yet (the agent set-up, or Tools \u203a Local Model).";
         return s;
     }
     s.ready = true;
     s.modelPath = lab.pathFor(Which::Model);
-    if (lab.fileUsable(Which::Drafter))
+    // The chosen model's own drafter (its MTP assistant), when it is downloaded and not turned off.
+    if (lab.drafterOn() && lab.fileUsable(Which::Drafter))
         s.drafterPath = lab.pathFor(Which::Drafter);
+    if (lab.fileUsable(Which::Projector))
+        s.projectorPath = lab.pathFor(Which::Projector);
     s.threads = lab.threads.get();
     s.gpu = lab.useGpu.get();
     return s;
@@ -2153,6 +2169,8 @@ void NotepadViewModel::bindSettings()
     settings_.bind("agent.appControl", agent_.appControl);
     settings_.bind("agent.choice", agent_.agentChoice);
     settings_.bind("agent.localFallback", agent_.localFallback);
+    settings_.bind("agent.localInSteps", agent_.localInSteps);
+    settings_.bind("agent.localPictureTokens", agent_.localPictureTokens);
     settings_.bind("editor.showWhitespace", showWhitespace);
     settings_.bind("editor.showLineNumbers", showLineNumbers);
     settings_.bind("editor.showIndentGuides", showIndentGuides);
