@@ -981,6 +981,12 @@ void LocalAgentTools::run(const interfaces::LocalToolCall& call, Done done)
     if (!parsed || !parsed->isObject())
         return reply(done, "The arguments of " + call.name + " are not a JSON object (" + call.arguments.substr(0, 120) +
                                "). Call it like this:\n" + usage(call.name));
+    // calculate with its one argument under another name ({"x": "2 + 2"}, {"2": ...}): that is the
+    // expression. A small model named it so, and was told "needs `expression`" each time.
+    if (call.name == "calculate" && !parsed->find("expression") && !parsed->find("expressions") && parsed->members().size() == 1) {
+        Json value = parsed->members().front().second; // a bare number stays one: calculate says to quote it
+        parsed = Json::object().set("expression", std::move(value));
+    }
     const Json args = std::move(*parsed);
 
     using Handler = void (LocalAgentTools::*)(const Json&, Done);
@@ -1126,7 +1132,8 @@ bool wordStarts(const std::string& text, const std::string& value)
 
 // A table's columns, for a plan: "total_bill, day [Sun, Sat, Thur, Fri], time [Dinner, Lunch]", with
 // the values of a text column that has few of them when `question` (lower case) names one ("at
-// dinner"). From the first rows only; empty when the file is not a table it can read.
+// dinner"). From every row (a file sorted by a column has its last values far down); empty when the
+// file is not a table it can read.
 std::string tableColumns(const std::string& absolute, const std::string& question)
 {
     const os::fs::FileInfo st = os::fs::stat(absolute);
@@ -1135,27 +1142,27 @@ std::string tableColumns(const std::string& absolute, const std::string& questio
     std::optional<std::string> bytes = os::fs::readFile(absolute);
     if (!bytes)
         return {};
-    std::vector<std::vector<std::string>> rows; // the header, then up to 200 rows
+    std::vector<std::vector<std::string>> rows; // the header, then the rows
     const std::string ext = extension(absolute);
     if (ext == "xlsx" || ext == "xlsm") {
         const model::viewer::ViewerDocument doc = model::viewer::readViewerDocument(absolute, std::move(*bytes));
         if (doc.book.sheets.empty())
             return {};
-        for (const model::viewer::Row& row : doc.book.sheets.front().rows) {
+        const auto& sheetRows = doc.book.sheets.front().rows;
+        const size_t stride = std::max<size_t>(1, sheetRows.size() / 4000); // spread over the sheet
+        for (size_t i = 0; i < sheetRows.size(); i = i == 0 ? 1 : i + stride) {
+            const model::viewer::Row& row = sheetRows[i];
             if (row.cells.empty())
                 continue;
             std::vector<std::string> values(row.cells.back().column + 1);
             for (const model::viewer::Cell& c : row.cells)
                 values[c.column] = c.text;
             rows.push_back(std::move(values));
-            if (rows.size() > 200)
-                break;
         }
     } else {
-        if (bytes->size() > 64 * 1024)
-            bytes->resize(bytes->rfind('\n', 64 * 1024) == std::string::npos ? 64 * 1024 : bytes->rfind('\n', 64 * 1024));
         const model::csv::Table t = model::csv::parse(*bytes, model::csv::detectDelimiter(*bytes, absolute));
-        for (size_t r = 0; r < t.rowCount() && r <= 200; ++r) {
+        const size_t stride = std::max<size_t>(1, t.rowCount() / 4000); // spread over the file, not all of a big one
+        for (size_t r = 0; r < t.rowCount(); r = r == 0 ? 1 : r + stride) {
             std::vector<std::string> values;
             for (int c = 0; c < t.columns; ++c)
                 values.emplace_back(t.cell(r, c));
@@ -1202,6 +1209,27 @@ std::string tableColumns(const std::string& absolute, const std::string& questio
             out += " [" + list + "]";
         }
     }
+    // The columns the question names by their words ("party size": size; "flipper length":
+    // flipper_length_mm), every word of 3 letters or more: a small model grouped by another.
+    std::string named;
+    for (size_t c = 0; c < rows[0].size() && c < 40; ++c) {
+        const std::string name = clean(rows[0][c]);
+        std::vector<std::string> words;
+        std::string word;
+        for (const char ch : lower(name) + " ") {
+            if (std::isalnum(static_cast<unsigned char>(ch))) {
+                word += ch;
+            } else {
+                if (word.size() >= 3)
+                    words.push_back(word);
+                word.clear();
+            }
+        }
+        if (!words.empty() && std::all_of(words.begin(), words.end(), [&](const std::string& w) { return wordStarts(question, w); }))
+            named += (named.empty() ? "" : ", ") + name;
+    }
+    if (!named.empty())
+        out += " - named in my question: " + named;
     return out;
 }
 } // namespace
@@ -3750,7 +3778,11 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
     // that this query neither picks rows by nor groups by: said first, as a small model drops one of
     // two filters. A column it filters by another value (one step for Sunday, the next for Saturday)
     // is not said.
-    if (!question_.empty()) {
+    // When it names one value of such a column, the query is also made with that value added, and its
+    // result comes first: a small model told so in a note went on without it, three calls in a row.
+    // `as_called` (set here, not by the model) is the query as made, without that.
+    std::string added; // "species = Gentoo and island = Biscoe"
+    if (!question_.empty() && !args.getBool("as_called")) {
         std::vector<std::string> grouped;
         for (const std::string& g : splitList(args.getString("group_by")))
             grouped.push_back(lower(trimmed(g)));
@@ -3776,14 +3808,34 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
             if (!text || values.size() < 2)
                 continue;
             std::string named;
+            int count = 0;
             for (const std::string& v : values)
-                if (wordStarts(question_, lower(v)))
+                if (wordStarts(question_, lower(v))) {
                     named += (named.empty() ? "" : ", ") + v;
-            if (!named.empty())
+                    ++count;
+                }
+            if (named.empty())
+                continue;
+            if (count == 1 && lower(named).find(" and ") == std::string::npos && named.find(';') == std::string::npos)
+                added += (added.empty() ? "" : " and ") + name + " = " + named;
+            else
                 note += "(My question names " + named + ", a value of the column " + name +
                         ", and this query does not pick rows by it: add it to where (" + name + " = " +
                         named.substr(0, named.find(',')) + "), or group_by " + name + " to see each.)\n";
         }
+    }
+    if (!added.empty()) {
+        Json filtered = args;
+        filtered.set("where", trimmed(where).empty() ? added : where + " and " + added);
+        Json asCalled = args;
+        asCalled.set("as_called", true);
+        return queryTable(filtered, [this, asCalled = std::move(asCalled), added, done = std::move(done)](viewmodel::AgentViewModel::ToolOutput f) mutable {
+            queryTable(asCalled, [f = std::move(f), added, done = std::move(done)](viewmodel::AgentViewModel::ToolOutput a) mutable {
+                f.text = "My question names it, so this is with " + added + " added to where:\n" + f.text +
+                         "\n\nAs called, without " + added + ":\n" + a.text;
+                done(std::move(f));
+            });
+        });
     }
     std::string out = note + path + ": " + std::to_string(picked.size()) + " of " + std::to_string(rows.size()) +
                       " rows match" + (readAs.empty() ? "" : " (" + readAs + ")") + ". Columns: " + columns + "\n";

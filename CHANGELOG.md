@@ -215,6 +215,19 @@ its release notes on GitHub.
   - A folder holding a folder of the same name (`data/data/loans.csv`) was read one level up.
   - Why the GPU was left is written to `engine.log` next to the settings, and a GPU helper that
     fails to restart counts as one of its three tries.
+  - The engine stops an answer that goes round in a loop (one block said over and over, four
+    times at least): E2B wrote "152 - 124; 28; 152 - 122; ..." into one tool call until its limit.
+    The agent then tries once more with some variety before the question fails.
+  - `calculate` with its one argument under another name takes it as the expression (a small model
+    was told "needs `expression`" each time). Gemma 4's tool-call format takes a value without
+    quotes only as a number, so an expression without quotes is cut to its first number.
+  - A value the question names once (male Gentoo penguins), of a column a `query_table` call does
+    not pick rows by, is added to that query, whose result comes first, then the query as called:
+    told so in a note, E2B went on without it three times. A plan sees the values of a column from
+    the whole table (a file sorted by species had Gentoo far down) and the columns the question
+    names by their words ("party size": size).
+  - Lines of the plan's "Keep in mind" copied word for word from the planning skill's examples
+    are left out (E2B kept "cups only" for a question about a receipt).
   - A held-out benchmark set (`tests/agent-bench/holdout`, 25 questions on 12 made-up files,
     made by `make.py`) measures the agent on files nothing was tuned on: E4B 21, E2B 15 to 19.
 - The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file

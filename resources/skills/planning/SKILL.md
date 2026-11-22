@@ -77,13 +77,13 @@ Steps:
 2. The total of all sales (query_table, aggregate sum(amount)).
 3. The top region's share of the total as a percentage (calculate).
 
-Question: "In scans/order-slip.png, how many cups were sold altogether, and is the bill's total right?"
+Question: "How many hours did Ana work in the week on scans/timesheet.png, and is her weekly total right?"
 Keep in mind:
-- cups only: the quantities of the cup lines, added up
-- whether the printed total equals the sum of the amounts
+- Ana's rows only, every day of the week
+- whether the weekly total written for her equals her days added up
 Steps:
-1. Read every line of scans/order-slip.png - its quantity, item and amount - and the printed total (look_at_image, detail high) [skills: pictures-and-sound]
-2. Add up the quantities (a line "3x" is three), add up the amounts, and compare that with the printed total (calculate).
+1. Read Ana's hours for each day and the weekly total written for her on scans/timesheet.png (look_at_image, detail high) [skills: pictures-and-sound]
+2. Add up her days and compare that with the written total (calculate).
 
 Question: "What do the receipts in the expenses folder add up to, and which shop was the most?"
 (that folder holds .pdf and .txt files: documents, not tables)

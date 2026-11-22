@@ -30,9 +30,14 @@ A part you zoom into is given to you with the picture's own detail (a page is zo
 so small text becomes readable. The reply says which part you saw ("55-100% across, 60-80% down").
 
 Coarse to fine: look at the whole at low or normal detail, find where the thing is, then zoom on
-that part at high detail. Example - the VAT line near the bottom of a receipt:
-1. `look_at_image {"path": "receipt.jpg"}` (the layout: the totals are 55-70% down)
-2. `look_at_image {"path": "receipt.jpg", "region": "0,55,100,70", "detail": "high"}`
+that part at high detail. Example - the expiry date in the small print of a parking permit:
+1. `look_at_image {"path": "permit.jpg"}` (the layout: the small print is 55-70% down)
+2. `look_at_image {"path": "permit.jpg", "region": "0,55,100,70", "detail": "high"}`
+
+## What it says, as it says it
+A figure the picture or page prints (a total, a tax, a fee, a date) is read from it as printed.
+Never work it out from a rate or from other figures in its place; calculate only checks it or
+combines it with others.
 
 ## Receipts, invoices, order lists
 Read every line at high detail: its quantity, item and amount. Then use calculate for both totals,

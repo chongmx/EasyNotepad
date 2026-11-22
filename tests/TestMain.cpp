@@ -4137,7 +4137,13 @@ struct FakeEngine final : interfaces::ILocalEngineService {
             done(r);
             return;
         }
-        // Scripted answers, streamed as written (one per chat).
+        // Scripted answers, streamed as written (one per chat); "error: ..." fails with that error.
+        if (!textAnswers.empty() && textAnswers.front().rfind("error: ", 0) == 0) {
+            r.error = textAnswers.front().substr(7);
+            textAnswers.erase(textAnswers.begin());
+            done(r);
+            return;
+        }
         if (!textAnswers.empty()) {
             r.ok = true;
             r.text = textAnswers.front();
@@ -4760,6 +4766,11 @@ TEST(local_agent_takes_a_question_in_steps)
               (std::vector<std::string>{"only male penguins", "Gentoo only", "in kilograms"}));
         CHECK(AgentViewModel::listUnder(memory, "Found") == (std::vector<std::string>{"Adelie 152 (x.csv)", "Gentoo 124 (x.csv)"}));
         CHECK(AgentViewModel::listUnder(memory, "Missing").empty());
+        // A line copied from the skill's examples, case and spacing aside; a short common phrase is not.
+        const std::string skill = "Keep in mind:\n- cups only: the quantities of the cup\n  lines, added up\n- the answer is a count\n";
+        CHECK(AgentViewModel::copiedFrom(skill, "- Cups only: the quantities of the cup lines, added up."));
+        CHECK(!AgentViewModel::copiedFrom(skill, "- the answer is a count"));
+        CHECK(!AgentViewModel::copiedFrom(skill, "- male Gentoo penguins only: their flipper lengths"));
     }
 
     FakeEngine engine;
@@ -5302,6 +5313,18 @@ TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
     CHECK_EQ(engine.chats.size(), sent + 3);
     CHECK(engine.chats[sent].temperature == 0.0f && engine.chats[sent + 1].temperature == 0.0f &&
           engine.chats[sent + 2].temperature > 0.0f);
+    // It went round in a loop (the engine stopped it): once more with some variety, then the answer;
+    // a second loop fails the question.
+    const size_t looped = engine.chats.size();
+    engine.textAnswers = {"error: the model went round in a loop, repeating itself (stopped after 900 tokens)", "It is 6."};
+    agent.submitPrompt("What is three plus three?");
+    CHECK_EQ(engine.chats.size(), looped + 2);
+    CHECK(engine.chats[looped].temperature == 0.0f && engine.chats[looped + 1].temperature > 0.0f);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "It is 6.");
+    engine.textAnswers = {"error: the model went round in a loop, repeating itself", "error: the model went round in a loop, repeating itself"};
+    agent.submitPrompt("What is four plus four?");
+    CHECK_EQ(engine.chats.size(), looped + 4);
+    CHECK(!agent.busy.get() && agent.messages().back().text.rfind("The local model failed: the model went round", 0) == 0);
     // The question names a file and it answers without reading anything: sent back to read it.
     agent.setLocalNamedFiles([](const std::string& q) {
         return q.find("notes.md") != std::string::npos ? std::string("In the open folder, the files my question names: notes.md (text: read_file).")
@@ -5583,6 +5606,9 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     // Calculator: precedence, functions, thousands separators; errors say how.
     CHECK(call("calculate", R"j({"expression": "(1200 * 1.08) - 50"})j").find("= 1246") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "2^3^2"})j").find("= 512") != std::string::npos);
+    // Its one argument under another name is the expression; a bare number there is said to need quotes.
+    CHECK(call("calculate", R"j({"x": "2 + 3"})j").find("= 5") != std::string::npos);
+    CHECK(call("calculate", R"j({"value": 2})j").find("reached calculate as a bare number (2)") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "round(17.5 / 3, 2) + sqrt(16)"})j").find("= 9.83") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "sum(1,2,3) * avg(2, 4) + max(1, 9)"})j").find("= 27") != std::string::npos);
     CHECK(call("calculate", R"j({"expression": "$1,234.50 + 0.5"})j").find("= 1235") != std::string::npos);
@@ -5665,12 +5691,24 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(named.find("data/sales.csv (a table: query_table), its columns: Region, Product, Units, Price.") != std::string::npos);
     CHECK(tools.namedFiles("Units sold in the Eastern stores, data/sales.csv?").find("its columns: Region [East, West], Product, Units") !=
           std::string::npos);
-    // A value the question names, of a column the query does not pick rows by: said first.
+    // A column the question names by its words: said.
+    CHECK(tools.namedFiles("Units sold in the Eastern stores, data/sales.csv?").find(", Price - named in my question: Units.") !=
+          std::string::npos);
+    CHECK(tools.namedFiles("What did they pay for pens? data/sales.csv").find("named in my question") == std::string::npos);
+    // One value the question names, of a column the query does not pick rows by: the query with it
+    // added comes first, then the query as called.
     CHECK(!tools.namedFiles("How many Pens were sold in the East? data/sales.csv").empty());
     const std::string pens = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = East", "aggregate": "sum(Units)"})j");
-    CHECK(pens.find("(My question names Pens, a value of the column Product, and this query does not pick rows by it: add it to "
-                    "where (Product = Pens), or group_by Product to see each.)") == 0);
+    CHECK(pens.rfind("My question names it, so this is with Product = Pens added to where:\ndata/sales.csv: 1 of 4 rows match", 0) == 0);
+    CHECK(pens.find("all rows | 120\n") != std::string::npos);
+    CHECK(pens.find("\n\nAs called, without Product = Pens:\ndata/sales.csv: 2 of 4 rows match") != std::string::npos &&
+          pens.find("all rows | 150\n") != std::string::npos);
     CHECK(pens.find("column Region") == std::string::npos); // picked by it
+    // Two values of one column named: a note only, to pick by one or group by it.
+    CHECK(!tools.namedFiles("Pens or Paper: which sold more? data/sales.csv").empty());
+    CHECK(call("query_table", R"j({"path": "data/sales.csv", "aggregate": "sum(Units)"})j")
+              .rfind("(My question names Pens, Paper, a value of the column Product, and this query does not pick rows by it: add it to "
+                     "where (Product = Pens), or group_by Product to see each.)", 0) == 0);
     CHECK(call("query_table", R"j({"path": "data/sales.csv", "where": "Region = West", "group_by": "Product", "aggregate": "sum(Units)"})j")
               .find("My question names") == std::string::npos); // grouped by it; Region picked by another value
     // An expression of each row's columns inside an aggregate; two aggregates multiplied are refused.

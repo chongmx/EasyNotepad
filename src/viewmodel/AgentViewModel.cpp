@@ -777,6 +777,32 @@ int& AgentViewModel::callCount(const interfaces::LocalToolCall& call)
     return localCallCounts_.back().second;
 }
 
+bool AgentViewModel::copiedFrom(const std::string& source, const std::string& line)
+{
+    // Lower case, one space for any run of spaces and new lines, no bullets or quotes around.
+    auto plain = [](const std::string& s) {
+        std::string out;
+        for (const char c : s) {
+            const char l = char(std::tolower(static_cast<unsigned char>(c)));
+            if (std::isspace(static_cast<unsigned char>(l))) {
+                if (!out.empty() && out.back() != ' ')
+                    out += ' ';
+            } else {
+                out += l;
+            }
+        }
+        return out;
+    };
+    std::string l = plain(line);
+    while (!l.empty() && (l.front() == '-' || l.front() == '*' || l.front() == ' ' || l.front() == '"'))
+        l.erase(0, 1);
+    while (!l.empty() && (l.back() == ' ' || l.back() == '"' || l.back() == '.'))
+        l.pop_back();
+    if (std::count_if(l.begin(), l.end(), [](unsigned char c) { return std::isalpha(c); }) < 20)
+        return false;
+    return plain(source).find(l) != std::string::npos;
+}
+
 std::vector<std::string> AgentViewModel::listUnder(const std::string& text, const std::string& heading)
 {
     auto lowered = [](std::string s) {
@@ -965,7 +991,7 @@ void AgentViewModel::planLocal(int generation, std::string question)
     activity_ = "Local model: planning the steps";
     local_->chat(
         plan, [](const std::string&) {}, [](const std::string&) {}, // the plan is shown once it is read
-        [this, generation](const interfaces::LocalChatResult& r) {
+        [this, generation, instructions = std::move(instructions)](const interfaces::LocalChatResult& r) {
             if (generation != generation_)
                 return; // stopped or replaced
             // What to keep in mind, then the steps (after "Steps:" when it wrote that: its list of what
@@ -986,6 +1012,11 @@ void AgentViewModel::planLocal(int generation, std::string question)
             }
             std::vector<std::string> steps = planSteps(stepsText);
             localKeep_ = r.ok ? listUnder(r.text, "Keep in mind") : std::vector<std::string>();
+            // A line copied from the skill's examples ("cups only: ..." for a question with no cups)
+            // is about the example, not the question: left out.
+            localKeep_.erase(std::remove_if(localKeep_.begin(), localKeep_.end(),
+                                            [&](const std::string& line) { return copiedFrom(instructions, line); }),
+                             localKeep_.end());
             // The skills each step needs, out of its text: given with the step, not all up front.
             os::mem::release(localStepSkills_);
             for (std::string& step : steps)
@@ -1288,6 +1319,17 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
     if (generation != generation_)
         return; // stopped or replaced
     const bool empty = at < messages_.size() && messages_[at].text.empty() && r.text.empty();
+    // It went round in a loop, or wrote a tool call that is not one (a loop cut off, often): once more
+    // with some variety, which takes it out of the loop, before the question fails.
+    const bool slipped = r.error.find("repeating itself") != std::string::npos || r.error.find("tool call") != std::string::npos;
+    if (!r.ok && slipped && runTool_ && !localRequest_.tools.empty() && localRequest_.temperature == 0.0f) {
+        if (at < messages_.size())
+            messages_.erase(messages_.begin() + long(at)); // the loop's text, if any: not an answer
+        messages_.push_back({model::ChatRole::Tool, "(The local model went wrong: " + r.error + ". Once more.)"});
+        localRequest_.temperature = kLoopTemperature;
+        sendLocal(generation);
+        return;
+    }
     if (!r.ok) {
         if (empty)
             messages_.erase(messages_.begin() + long(at));

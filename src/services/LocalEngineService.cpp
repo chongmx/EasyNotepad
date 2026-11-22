@@ -824,7 +824,8 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
                     // context, or a tool call that is not JSON (a model repeating itself). Said as it is;
                     // the GPU stays in use (the CPU would take many minutes for the same).
                     const bool modelsFault = r.error.find("too long for the local model") != std::string::npos ||
-                                             r.error.find("tool call") != std::string::npos;
+                                             r.error.find("tool call") != std::string::npos ||
+                                             r.error.find("repeating itself") != std::string::npos;
                     if (r.ok || wrote || cancel->load() || modelsFault) {
                         model->acceleratorAnswered();
                         finish(r);

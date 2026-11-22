@@ -176,7 +176,27 @@ struct Generated {
     int accepted = 0;
     double firstTokenSeconds = 0; // the prompt processed and the first token sampled
     double decodeSeconds = 0;     // after the first token
+    bool looped = false;          // stopped going round in a loop
 };
+
+// Whether the last of `tokens` go round in a loop: one block of 1 to 300 tokens over and over, at
+// least four times and 200 tokens in all. A small model at temperature 0 can write the same lines
+// until its limit (8,192 tokens: ten minutes on a slow GPU, an hour on a CPU).
+bool loops(const std::vector<llama_token>& tokens)
+{
+    const size_t n = tokens.size();
+    for (size_t period = 1; period <= 300 && period * 4 <= n; ++period) {
+        const size_t span = std::max<size_t>(period * 4, 200);
+        if (span > n)
+            continue;
+        bool same = true;
+        for (size_t i = n - span; i + period < n && same; ++i)
+            same = tokens[i] == tokens[i + period];
+        if (same)
+            return true;
+    }
+    return false;
+}
 
 // Generates up to `maxTokens` after the prompt `inp`, from an empty context, as llama.cpp's
 // speculative example does: the drafter (when loaded) proposes tokens, the model checks them in
@@ -274,6 +294,7 @@ Generated generate(Model& m, const Prompt& prompt, int maxTokens, common_params_
         common_speculative_begin(spec, seq, context);
     common_batch batch(ctx);
     llama_tokens draft;
+    llama_tokens written; // the answer's tokens, for loops()
     common_prompt_checkpoint ckpt;
     while (g.produced < maxTokens && !cancelled()) {
         if (spec && draft.empty()) {
@@ -341,6 +362,11 @@ Generated generate(Model& m, const Prompt& prompt, int maxTokens, common_params_
                 break;
             }
             onPiece(common_token_to_piece(ctx, id), id);
+            written.push_back(id);
+            if (written.size() % 32 == 0 && loops(written)) {
+                g.looped = end = true;
+                break;
+            }
         }
         draft.clear();
         llama_memory_seq_rm(llama_get_memory(ctx), seq, past, -1);
@@ -770,6 +796,10 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
         lastUse_ = std::chrono::steady_clock::now();
         if (cancelled()) {
             r.error = "stopped";
+            return r;
+        }
+        if (g.looped) {
+            r.error = "the model went round in a loop, repeating itself (stopped after " + std::to_string(g.produced) + " tokens)";
             return r;
         }
         const common_chat_msg& answer = session.finish();

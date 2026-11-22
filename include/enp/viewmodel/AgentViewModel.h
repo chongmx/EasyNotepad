@@ -107,6 +107,9 @@ public:
     // The lines of the list under a heading ("Keep in mind:" then "- ..." lines), up to the next
     // heading or numbered line; the heading is matched without case.
     static std::vector<std::string> listUnder(const std::string& text, const std::string& heading);
+    // Whether `line` (a line the model wrote) is in `source` word for word, case and spacing aside, and
+    // long enough (20 letters or more) not to be a phrase anyone would write.
+    static bool copiedFrom(const std::string& source, const std::string& line);
     static constexpr size_t kMemoryLines = 12; // the most lines a list of the memory keeps
     // A skill's instructions by its name (empty: no such skill). The plan names the skills each step
     // needs; each step is given those (once a question), not every skill up front.
