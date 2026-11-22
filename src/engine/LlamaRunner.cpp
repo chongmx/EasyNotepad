@@ -179,6 +179,21 @@ struct Generated {
     bool looped = false;          // stopped going round in a loop
 };
 
+// What reading the model's own output threw (a tool call that is not JSON, brackets nested more
+// than 64 deep): the model's fault, not the engine's, so the app keeps the GPU and asks again.
+struct ModelOutputError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+template <class Read>
+decltype(auto) readingOutput(Read read)
+{
+    try {
+        return read();
+    } catch (const std::exception& e) {
+        throw ModelOutputError(e.what());
+    }
+}
+
 // Whether the last of `tokens` go round in a loop: one block of 1 to 300 tokens over and over, at
 // least four times and 200 tokens in all. A small model at temperature 0 can write the same lines
 // until its limit (8,192 tokens: ten minutes on a slow GPU, an hour on a CPU).
@@ -782,7 +797,7 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
         const Generated g = generate(m, prompt, std::min(maxTokens, room), sampling, cancelled, [&](const std::string& piece, llama_token token) {
             common_chat_input chunk;
             chunk.append(piece, token);
-            const common_chat_msg& msg = session.feed(chunk);
+            const common_chat_msg& msg = readingOutput([&]() -> const common_chat_msg& { return session.feed(chunk); });
             // Only the answer's text streams; a tool call's markup is parsed, not shown.
             if (msg.content.size() > sent && msg.content.compare(0, sent, msg.content, 0, sent) == 0) {
                 if (!started) {
@@ -802,7 +817,7 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
             r.error = "the model went round in a loop, repeating itself (stopped after " + std::to_string(g.produced) + " tokens)";
             return r;
         }
-        const common_chat_msg& answer = session.finish();
+        const common_chat_msg& answer = readingOutput([&]() -> const common_chat_msg& { return session.finish(); });
         r.text = withoutChannels(answer.content);
         for (size_t i = 0; i < answer.tool_calls.size(); ++i) {
             const common_chat_tool_call& call = answer.tool_calls[i];
@@ -812,6 +827,8 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
         r.firstTokenSeconds = g.firstTokenSeconds;
         r.tokensPerSecond = g.decodeSeconds > 0 && g.produced > 1 ? (g.produced - 1) / g.decodeSeconds : 0;
         r.ok = true;
+    } catch (const ModelOutputError& e) {
+        r.error = std::string("the model wrote a tool call that cannot be read: ") + e.what();
     } catch (const std::exception& e) {
         r.error = std::string("engine error: ") + e.what();
     }

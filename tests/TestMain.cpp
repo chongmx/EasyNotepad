@@ -4326,6 +4326,12 @@ TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
         const ChatRun bad = askLocal(s, "fake:bad-tool-call");
         CHECK(bad.done && !bad.result.ok && bad.result.error.find("tool call") != std::string::npos);
         CHECK(answeredOnFake(askLocal(s, "fake:answer")));
+        const ChatRun nested = askLocal(s, "fake:nested"); // its brackets in a loop, as an older library says it
+        CHECK(nested.done && !nested.result.ok && nested.result.error.find("nested more than") != std::string::npos);
+        CHECK(answeredOnFake(askLocal(s, "fake:answer")));
+        // An error not about loading: the CPU answers that question, the next one goes to the GPU again.
+        CHECK(answeredOnCpu(askLocal(s, "fake:odd-error")));
+        CHECK(answeredOnFake(askLocal(s, "fake:answer")));
         CHECK(answeredOnCpu(askLocal(s, "fake:fail")));
         CHECK(s.info().accelerator.find("not used (out of fake memory)") != std::string::npos);
         CHECK(answeredOnCpu(askLocal(s, "fake:answer")));

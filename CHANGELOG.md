@@ -218,6 +218,12 @@ its release notes on GitHub.
   - The engine stops an answer that goes round in a loop (one block said over and over, four
     times at least): E2B wrote "152 - 124; 28; 152 - 122; ..." into one tool call until its limit.
     The agent then tries once more with some variety before the question fails.
+  - The local agent still fell back to the CPU for the rest of a session, now and then: engine.log
+    showed why. The model wrote brackets in a loop inside a tool call, and reading it threw "input
+    is nested more than 64 levels deep", which counted as the GPU failing; the same question then
+    took ten minutes on the CPU. What reading the model's output throws is now the model's fault
+    (the GPU stays, the agent asks once more), and an error other than loading the model sends that
+    one question to the CPU and the next back to the GPU (three in a row at most).
   - `calculate` with its one argument under another name takes it as the expression (a small model
     was told "needs `expression`" each time). Gemma 4's tool-call format takes a value without
     quotes only as a number, so an expression without quotes is cut to its first number.

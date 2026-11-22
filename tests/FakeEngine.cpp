@@ -3,7 +3,8 @@
 //
 // At start, ENP_FAKE_ENGINE_START: "ok" (default), "nodevice", "abi" (another interface), "crash".
 // Per chat, the model path: "fake:answer", "fake:fail", "fake:crash", "fake:crash-after-text",
-// "fake:hang", "fake:slow" (writes until cancelled), "fake:bad-tool-call" (the model's fault).
+// "fake:hang", "fake:slow" (writes until cancelled), "fake:bad-tool-call" and "fake:nested" (the
+// model's fault), "fake:odd-error" (an error not about loading).
 #include "enp/engine/EnpEngine.h"
 
 #include <chrono>
@@ -55,6 +56,10 @@ ENP_ENGINE_EXPORT const char* enp_engine_request(enp_engine* engine, const char*
     auto say = [&](const char* kind, const char* text) { event(user, kind, text); };
     if (has("\"fake:bad-tool-call\"")) {
         engine->result = "{\"ok\":false,\"error\":\"engine error: Failed to parse tool call arguments as JSON\"}";
+    } else if (has("\"fake:nested\"")) { // from an older library: the model's brackets in a loop
+        engine->result = "{\"ok\":false,\"error\":\"engine error: input is nested more than 64 levels deep\"}";
+    } else if (has("\"fake:odd-error\"")) {
+        engine->result = "{\"ok\":false,\"error\":\"engine error: something odd\"}";
     } else if (has("\"fake:fail\"")) {
         engine->result = "{\"ok\":false,\"error\":\"out of fake memory\"}";
     } else if (has("\"fake:crash\"")) {

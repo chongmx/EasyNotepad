@@ -68,6 +68,16 @@ using interfaces::EngineRunSettings;
 
 namespace {
 
+// Whether an engine's error is about loading the model (it does not fit, too little memory, a file
+// it cannot read): that would happen again on every question, unlike one question's error.
+[[maybe_unused]] bool loadingFailed(const std::string& error)
+{
+    for (const char* words : {"could not be loaded", "cannot see or hear", "out of memory", "memory"})
+        if (error.find(words) != std::string::npos)
+            return true;
+    return false;
+}
+
 // ---- What the device is ------------------------------------------------------------------------
 
 #if !defined(_WIN32) && !defined(__APPLE__) // Linux and Android read /proc
@@ -823,17 +833,22 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
                     // What the model wrote going wrong is not the GPU failing: a question too long for the
                     // context, or a tool call that is not JSON (a model repeating itself). Said as it is;
                     // the GPU stays in use (the CPU would take many minutes for the same).
+                    // Also what reading its tool call threw ("input is nested more than 64 levels deep":
+                    // brackets in a loop), from an engine library built before it said so.
                     const bool modelsFault = r.error.find("too long for the local model") != std::string::npos ||
                                              r.error.find("tool call") != std::string::npos ||
-                                             r.error.find("repeating itself") != std::string::npos;
+                                             r.error.find("repeating itself") != std::string::npos ||
+                                             r.error.find("nested more than") != std::string::npos;
                     if (r.ok || wrote || cancel->load() || modelsFault) {
                         model->acceleratorAnswered();
                         finish(r);
                         return;
                     }
-                    // Nothing written and an error it gave (the model does not fit, ...): it would give it
-                    // again, so the CPU answers from now on.
-                    model->acceleratorFailed(r.error, false);
+                    // Nothing written and an error it gave. Loading the model (it does not fit, too
+                    // little memory) would fail again: the CPU answers from now on. Anything else is
+                    // tried again on the next question, like a helper that stopped (three in a row at
+                    // most): one odd error kept a whole session on the CPU.
+                    model->acceleratorFailed(r.error, !loadingFailed(r.error));
                 } else {
                     // The helper ended, went silent or did not stop when asked: the CPU answers this
                     // question, and the next one tries the GPU again (a few times in a row at most).

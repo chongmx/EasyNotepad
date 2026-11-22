@@ -1321,7 +1321,8 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
     const bool empty = at < messages_.size() && messages_[at].text.empty() && r.text.empty();
     // It went round in a loop, or wrote a tool call that is not one (a loop cut off, often): once more
     // with some variety, which takes it out of the loop, before the question fails.
-    const bool slipped = r.error.find("repeating itself") != std::string::npos || r.error.find("tool call") != std::string::npos;
+    const bool slipped = r.error.find("repeating itself") != std::string::npos || r.error.find("tool call") != std::string::npos ||
+                         r.error.find("nested more than") != std::string::npos;
     if (!r.ok && slipped && runTool_ && !localRequest_.tools.empty() && localRequest_.temperature == 0.0f) {
         if (at < messages_.size())
             messages_.erase(messages_.begin() + long(at)); // the loop's text, if any: not an answer
