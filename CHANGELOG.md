@@ -137,6 +137,10 @@ its release notes on GitHub.
   batch: llama.cpp ended the GPU helper, the CPU took the question over, and ended the app the same
   way. The batch now holds the largest picture of a model that reads them all at once (1,120
   tokens for 12B), and a picture that still does not fit is refused with a message.
+- Right after the app started, a GPU that failed on the first question could be marked ready
+  again: the check of the engine library, started in the background, ran after the question had
+  found it broken. The next question then went to the broken GPU instead of the CPU. The check now
+  does nothing once a question has found out (the engine tests failed now and then on Windows).
 - A question asked just after stopping the local agent was refused ("the local agent is still
   answering") while the stopped answer wound down. It now waits for it and then starts.
 - The local agent got four of the benchmark's questions wrong on Gemma 4 E4B; it now answers them:
@@ -171,6 +175,14 @@ its release notes on GitHub.
     likeliest words (temperature 0), so a question gets the same calls and answer each time; after
     a call it already made, it goes back to 0.3 so it does not loop. The engine takes the
     temperature with each request (`enp-engine-cuda` built before this keeps 0.3).
+  - The agent was given its skills' names and had to read one itself before a task, which it
+    seldom did. Its plan now names the skills each step needs (`[skills: meetings]`, at most two),
+    and each step comes with those skills' instructions, once a question; a skill the plan names
+    that does not exist is left out. The guide still lists them all, for a question not planned.
+  - `list_files` counts what it lists by kind ("In all: 3 .wav, 1 .mp3, 2 folders"): the agent
+    counted two of three .wav files. Plans total "which has the most" per group, never by max.
+  - It read the transcript left open in the editor by an earlier question instead of the one the
+    question named. A file read while a named one is still unread now says so under its result.
   - A question naming a file was answered without reading anything ("there is no such file"). It
     is sent back to read the files it names first.
   - An expression written without quotes reached `calculate` as a number, and its reply ("needs an

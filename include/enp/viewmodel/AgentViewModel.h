@@ -89,6 +89,13 @@ public:
     // The steps in a plan the model wrote ("1. ...", "2) ...", "Step 3: ..."), at most kMaxPlanSteps.
     static std::vector<std::string> planSteps(const std::string& plan);
     static constexpr size_t kMaxPlanSteps = 6;
+    // The skills a plan's step names at its end ("... [skills: meetings, office-work]"), at most
+    // kMaxStepSkills, taken out of the step's text.
+    static std::vector<std::string> stepSkills(std::string& step);
+    static constexpr size_t kMaxStepSkills = 2;
+    // A skill's instructions by its name (empty: no such skill). The plan names the skills each step
+    // needs; each step is given those (once a question), not every skill up front.
+    void setLocalSkill(std::function<std::string(const std::string& name)> skill) { localSkill_ = std::move(skill); }
     bool hasLocalTools() const { return runTool_ != nullptr; }
     // An edit the local model proposes (its edit tools): listed for review, applied when accepted.
     void proposeChange(const std::string& path, const std::string& before, const std::string& after);
@@ -180,6 +187,11 @@ private:
     bool nextLocalStep(int generation, const std::string& answer);
     std::string localPrompt_;
     std::string localNamed_; // the files the question names (as told to the model): read before answering
+    bool localNamedRead_ = false; // it has read one of them
+    std::function<std::string(const std::string&)> localSkill_;
+    std::vector<std::vector<std::string>> localStepSkills_; // the skills each step of the plan needs
+    std::vector<std::string> localSkillsGiven_;            // given in this question already
+    std::string skillsFor(size_t step);                     // the text of those not given yet
     void sendLocal(int generation);
     void localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r);
     void runLocalTools(int generation, std::vector<interfaces::LocalToolCall> calls, size_t next,

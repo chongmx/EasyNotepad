@@ -13,10 +13,16 @@ answer the question now and you call no tools now: you only write the steps.
 - A numbered list, one step per line: `1. ...`, `2. ...`. Nothing before or after the list.
 - Each step is one thing to find out or do, with the file it is about (use the real names you are
   given: never invent a file or a column) and the tool, in brackets.
+- End each step with the skills it needs, from the list you are given: `[skills: meetings]`, at
+  most two. You get each skill's instructions with its step, so name the one for that kind of
+  work (tables: data-and-calculations; pictures and pages: pictures-and-sound; several documents:
+  multiple-documents). A step that needs none ends without it.
 - Fewer steps are better. A question one tool call answers is ONE step.
 - Tables (.csv .tsv .xlsx): query_table does the counting, filtering, grouping, totals, averages,
   minimums and maximums itself, in one call - never a step that reads rows and another that
-  averages them. Use the exact column names you are given.
+  averages them. Use the exact column names you are given. "Which X has the most Y" (sold the
+  most, earned the most) is the total per X: group_by X, sum(Y), sort desc, limit 1 - never
+  max(Y), which is only the largest single row.
 - Documents (.pdf .docx .pptx .md .txt): the same question of several of them is ONE step with
   extract_from_documents; one long document: scan_document to find where something is. One short
   file (notes, a transcript) is read whole: read_file, or read_document for .pdf .docx .pptx.
@@ -37,23 +43,23 @@ answer the question now and you call no tools now: you only write the steps.
 These are about made-up files: plan with the files, columns and words of the real question.
 
 Question: "How many orders in shop/orders.csv were returned?"
-1. Count the rows of shop/orders.csv where status = returned (query_table, where status = returned, aggregate count).
+1. Count the rows of shop/orders.csv where status = returned (query_table, where status = returned, aggregate count) [skills: data-and-calculations]
 
 Question: "Which branch in staff.xlsx pays the highest average salary, per month?"
-1. Average salary per branch in staff.xlsx, largest first (query_table, group_by branch, aggregate avg(salary), sort desc).
+1. Average salary per branch in staff.xlsx, largest first (query_table, group_by branch, aggregate avg(salary), sort desc) [skills: data-and-calculations]
 2. Turn the top branch's yearly average into a monthly one (calculate).
 
 Question: "Which region sold the most in sales.csv, and what share of all sales is it?"
-1. Sales per region, largest first (query_table, group_by region, aggregate sum(amount), sort desc).
+1. Sales per region, largest first (query_table, group_by region, aggregate sum(amount), sort desc) [skills: data-and-calculations]
 2. The total of all sales (query_table, aggregate sum(amount)).
 3. The top region's share of the total as a percentage (calculate).
 
 Question: "In scans/order-slip.png, how many cups were sold altogether, and is the bill's total right?"
-1. Read every line of scans/order-slip.png - its quantity, item and amount - and the printed total (look_at_image, detail high).
+1. Read every line of scans/order-slip.png - its quantity, item and amount - and the printed total (look_at_image, detail high) [skills: pictures-and-sound]
 2. Add up the quantities (a line "3x" is three), add up the amounts, and compare that with the printed total (calculate).
 
 Question: "What do the receipts in the expenses folder add up to, and which shop was the most?"
 (that folder holds .pdf and .txt files: documents, not tables)
-1. Each receipt's shop and total from the documents in expenses (extract_from_documents, files expenses).
+1. Each receipt's shop and total from the documents in expenses (extract_from_documents, files expenses) [skills: multiple-documents]
 2. Add up the totals (calculate).
 3. Pick the shop with the largest total from step 1's table.

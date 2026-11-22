@@ -571,6 +571,13 @@ EngineInfo LocalEngineService::info()
             auto model = chat_;
             os::dispatch::runAsync([model]() {
                 std::lock_guard<std::mutex> busy(model->mutex);
+                // A question may have taken the lock first and already found out (it failed, or it
+                // works): a late probe would mark a failed library ready again.
+                {
+                    std::lock_guard<std::mutex> a(model->acceleratorMutex);
+                    if (model->accel != ChatModel::Accel::Probing)
+                        return;
+                }
                 if (model->startAccelerator())
                     model->helper->stop(); // known now; started again by the first question
             });

@@ -227,6 +227,25 @@ std::string whichTool(const std::string& path)
     return "Call read_file {\"path\": " + p + "} for its text.";
 }
 
+// The skills (resources/skills/index.json): name and what each is for, in the index's order.
+std::vector<std::pair<std::string, std::string>> skillIndex()
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    if (const std::optional<std::string> index = os::fs::readAsset("skills/index.json"))
+        if (const std::optional<Json> j = Json::parse(*index); j && j->isArray())
+            for (const Json& s : j->items())
+                out.emplace_back(s.getString("name"), s.getString("description"));
+    return out;
+}
+
+std::string skillDescription(const std::string& name)
+{
+    for (const auto& [n, description] : skillIndex())
+        if (n == name)
+            return description;
+    return {};
+}
+
 bool looksBinary(const std::string& bytes)
 {
     const size_t n = std::min<size_t>(bytes.size(), 8192);
@@ -497,6 +516,19 @@ void LocalAgentTools::attach()
         return out;
     });
     vm_.agent().setLocalNamedFiles([this](const std::string& question) { return namedFiles(question); });
+    // A skill for a step of a plan: its instructions without the front matter; one the index does
+    // not list (the plan made it up), or the planning skill itself, is none.
+    vm_.agent().setLocalSkill([](const std::string& name) {
+        if (name == "planning" || skillDescription(name).empty())
+            return std::string();
+        std::string text = os::fs::readAsset("skills/" + name + "/SKILL.md").value_or(std::string());
+        if (text.rfind("---", 0) == 0)
+            if (const size_t end = text.find("\n---", 3); end != std::string::npos) {
+                const size_t body = text.find('\n', end + 4);
+                text.erase(0, body == std::string::npos ? text.size() : body + 1);
+            }
+        return text;
+    });
     // Questions split into steps first, with the planning skill (resources/skills/planning).
     // The plan is made with what the open folder holds (each folder with how many files of which
     // kinds): a plan built on guessed file names fails at its first step.
@@ -554,7 +586,12 @@ void LocalAgentTools::attach()
                 columns += "- " + f + " (a table: query_table) columns: " + listed.substr(at + 9, listed.find('\n', at) - at - 9) + "\n";
         }
         const std::string named = namedFiles(question);
-        return text + "\n\nThe open folder holds (plan with these names; never invent a file):\n" + summary +
+        std::string skills;
+        for (const auto& [name, description] : skillIndex())
+            if (name != "planning")
+                skills += "- " + name + ": " + description + "\n";
+        return text + "\n\nThe skills a step can name:\n" + skills +
+               "\nThe open folder holds (plan with these names; never invent a file):\n" + summary +
                (named.empty() ? std::string() : "\n" + named + "\n") +
                (columns.empty() ? std::string() : "\nTables in the question, with their exact column names:\n" + columns);
     });
@@ -788,7 +825,8 @@ std::string LocalAgentTools::guide() const
             for (const Json& s : j->items())
                 skills += "- " + s.getString("name") + ": " + s.getString("description") + "\n";
     if (!skills.empty())
-        g += "Your skills (read_skill <name> before a task of that kind):\n" + skills;
+        g += "Your skills (a step of a plan comes with those it needs; otherwise read_skill <name> before a task of "
+             "that kind):\n" + skills;
     return g;
 }
 
@@ -965,13 +1003,34 @@ void LocalAgentTools::listFiles(const Json& args, Done done)
         return a.isDirectory != b.isDirectory ? a.isDirectory : lower(a.name) < lower(b.name);
     });
     std::string out = (path.empty() ? std::string("The open folder") : path) + ":\n";
+    std::vector<std::pair<std::string, int>> kinds; // files of each extension, counted for it
+    int folders = 0;
     for (const os::fs::DirEntry& e : entries) {
         if (e.name == ".git")
             continue;
         out += e.isDirectory ? e.name + "/\n" : e.name + "  (" + std::to_string(e.size) + " bytes)\n";
+        if (e.isDirectory) {
+            ++folders;
+            continue;
+        }
+        const std::string ext = extension(e.name);
+        const std::string kind = ext.empty() ? std::string("without an extension") : "." + ext;
+        auto k = std::find_if(kinds.begin(), kinds.end(), [&](const auto& p) { return p.first == kind; });
+        if (k == kinds.end())
+            kinds.emplace_back(kind, 1);
+        else
+            ++k->second;
     }
     if (more)
         out += "[more entries not listed]\n";
+    // Counted here: a small model miscounts a list ("2 .wav files" of three).
+    std::string counts;
+    for (const auto& [kind, n] : kinds)
+        counts += (counts.empty() ? "" : ", ") + std::to_string(n) + " " + kind;
+    if (folders)
+        counts += (counts.empty() ? "" : ", ") + std::to_string(folders) + (folders == 1 ? " folder" : " folders");
+    if (!counts.empty())
+        out += std::string(more ? "Listed: " : "In all: ") + counts + "\n";
     reply(done, out);
 }
 
@@ -1727,6 +1786,7 @@ void LocalAgentTools::extractPass(std::shared_ptr<ExtractJob> job, Done done)
     r.useGpu = now.useGpu;
     r.contextTokens = now.contextTokens;
     r.maxTokens = 600;
+    r.temperature = 0.0f; // the same document and question: the same answer
     r.messages.emplace_back("system", kExtractPrompt);
     std::string ask = "Question: " + job->question + "\nDocument: " + file;
     if (parts.size() > 1)
@@ -1816,6 +1876,7 @@ interfaces::LocalChatRequest LocalAgentTools::passRequest(int maxTokens) const
     r.useGpu = now.useGpu;
     r.contextTokens = now.contextTokens;
     r.maxTokens = maxTokens;
+    r.temperature = 0.0f; // the same part and question: the same answer
     return r;
 }
 

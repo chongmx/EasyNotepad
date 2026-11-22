@@ -4336,14 +4336,21 @@ TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
         services::LocalEngineService s(fakeAccelerator());
         const ChatRun c = askLocal(s, "fake:crash-after-text");
         CHECK(c.done && !c.result.ok && c.text == "Half" && c.result.error.find("the CPU answers now") != std::string::npos);
-        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+        const ChatRun next = askLocal(s, "fake:answer");
+        CHECK(answeredOnCpu(next));
+        if (!answeredOnCpu(next))
+            std::printf("    next: done %d ok %d text '%s' error '%s' backend '%s'; status %s\n", int(next.done), int(next.result.ok),
+                        next.text.c_str(), next.result.error.c_str(), next.result.backend.c_str(), s.info().accelerator.c_str());
     }
 
     // It hangs: ended after the silence, and the CPU answers.
     {
         services::LocalEngineService s(fakeAccelerator(ENP_FAKE_ENGINE, 2));
         CHECK(answeredOnCpu(askLocal(s, "fake:hang")));
-        CHECK(s.info().accelerator.find("stopped responding") != std::string::npos);
+        const std::string hung = s.info().accelerator;
+        CHECK(hung.find("stopped responding") != std::string::npos);
+        if (hung.find("stopped responding") == std::string::npos)
+            std::printf("    status: %s\n", hung.c_str());
     }
 
     // It cannot start: no device, another interface version, a crash while starting.
@@ -4713,6 +4720,19 @@ TEST(local_agent_takes_a_question_in_steps)
     CHECK(parsed.size() == 3 && parsed[0] == "Find the profit by country." && parsed[2] == "Work out the share.");
     CHECK(AgentViewModel::planSteps("1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h").size() == AgentViewModel::kMaxPlanSteps);
     CHECK(AgentViewModel::planSteps("No list at all.").empty());
+    // The skills a step names at its end: taken out of its text, at most two, "none" is none.
+    {
+        std::string step = "Read the slip (look_at_image, detail high) [skills: pictures-and-sound, Data-and-calculations, memory]";
+        const std::vector<std::string> skills = AgentViewModel::stepSkills(step);
+        CHECK(step == "Read the slip (look_at_image, detail high)" && skills.size() == 2 && skills[0] == "pictures-and-sound" &&
+              skills[1] == "data-and-calculations");
+        std::string bare = "Add them up (calculate) - skills: none";
+        CHECK(AgentViewModel::stepSkills(bare).empty() && bare == "Add them up (calculate)");
+        std::string round = "Read it (read_file) (skills: meetings)";
+        CHECK(AgentViewModel::stepSkills(round) == std::vector<std::string>{"meetings"} && round == "Read it (read_file)");
+        std::string untagged = "Count them (query_table).";
+        CHECK(AgentViewModel::stepSkills(untagged).empty() && untagged == "Count them (query_table).");
+    }
 
     FakeEngine engine;
     AgentViewModel agent;
@@ -4739,7 +4759,9 @@ TEST(local_agent_takes_a_question_in_steps)
     });
 
     const std::string question = "Which country made the most profit, and what share of the total is it?";
-    engine.textAnswers = {"1. Find the profit of each country.\n2. Find the total profit.\n3. Work out the share.",
+    agent.setLocalSkill([](const std::string& name) { return name == "data-and-calculations" ? std::string("Use query_table.") : std::string(); });
+    engine.textAnswers = {"1. Find the profit of each country. [skills: data-and-calculations]\n"
+                          "2. Find the total profit. [skills: data-and-calculations, made-up]\n3. Work out the share.",
                           R"j({"name": "query_table", "arguments": {"path": "x.csv"}})j", "Canada: 100.", "Total: 400.", "25 %.",
                           "Canada, 25 % of the total."};
     agent.submitPrompt(question, "audio/other.md:1"); // the editor shows another file
@@ -4757,6 +4779,16 @@ TEST(local_agent_takes_a_question_in_steps)
     CHECK(engine.chats[1].messages.back().text.find("(In the open folder, the files my question names: x.csv)") != std::string::npos);
     CHECK(engine.chats[1].messages.back().text.find("the editor shows") == std::string::npos); // named files: the editor's not mentioned
     CHECK(engine.chats[2].messages.back().role == "tool");
+    // Each step comes with the skills the plan named for it, once a question; one the plan made up is none.
+    CHECK(engine.chats[1].messages.back().text.find("Find the profit of each country.\n") != std::string::npos &&
+          engine.chats[1].messages.back().text.find("Your data-and-calculations skill, for this step:\nUse query_table.") != std::string::npos);
+    CHECK(engine.chats[3].messages.back().text.find("Now step 2: Find the total profit.\n") != std::string::npos &&
+          engine.chats[3].messages.back().text.find("skill, for this step") == std::string::npos);
+    CHECK(agent.messages().size() > 2);
+    bool planShown = false;
+    for (const model::ChatMessage& m : agent.messages())
+        planShown = planShown || m.text.find("1. Find the profit of each country. [skills: data-and-calculations]\n") != std::string::npos;
+    CHECK(planShown);
     CHECK(engine.chats[3].messages.back().text.find("Now step 2: Find the total profit.") != std::string::npos);
     CHECK(engine.chats[3].messages[engine.chats[3].messages.size() - 2].text == "Canada: 100.");
     CHECK(engine.chats[4].messages.back().text.find("Now step 3") != std::string::npos);
@@ -4798,6 +4830,16 @@ TEST(local_agent_takes_a_question_in_steps)
     CHECK_EQ(engine.chats.size(), size_t(14));
     CHECK(engine.chats[12].messages.back().text.find("Make the corrected call now") != std::string::npos);
     CHECK(!agent.busy.get() && agent.messages().back().text == "Sunday: 3.26.");
+
+    // The same file read again at a later step is no loop: the likeliest words still.
+    agent.localInSteps.set(true);
+    const size_t base = engine.chats.size();
+    engine.textAnswers = {"1. Read x.csv.\n2. Total its values.", R"j({"name": "query_table", "arguments": {"path": "x.csv"}})j",
+                          "Read.", R"j({"name": "query_table", "arguments": {"path": "x.csv"}})j", "Total 4.", "It totals 4."};
+    agent.submitPrompt("Read x.csv and total its values, please.");
+    CHECK_EQ(engine.chats.size(), base + 6);
+    CHECK(engine.chats[base + 4].temperature == 0.0f && engine.chats[base + 5].temperature == 0.0f);
+    CHECK(agent.messages().back().text == "It totals 4.");
 }
 
 TEST(local_agent_works_across_many_documents_with_notes)
@@ -4851,6 +4893,7 @@ TEST(local_agent_works_across_many_documents_with_notes)
     const std::string table = call("extract_from_documents", Json::object().set("files", "invoices").set("question", "number and total"));
     CHECK(table.find("| invoices/april.txt | Invoice 102, total 80.00 EUR (page 1) |") != std::string::npos &&
           table.find("| invoices/march.md | Invoice 101, total 120.50 EUR |") != std::string::npos);
+    CHECK(engine.chats.size() == 2 && engine.chats[0].temperature == 0.0f && engine.chats[1].temperature == 0.0f); // the same answer each time
     CHECK(engine.chats.size() == 2 && engine.chats[0].tools.empty() &&
           engine.chats[0].messages.back().text.find("Customer: Brix") != std::string::npos &&
           engine.chats[0].messages.back().text.find("Customer: Acme") == std::string::npos); // one document a pass
@@ -5068,6 +5111,27 @@ TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
     engine.textAnswers = {"Hello."}; // no files named: an answer without tools is fine
     agent.submitPrompt("Say hello to me, please.");
     CHECK_EQ(engine.chats.size(), asked + 4);
+    // It reads another file than the one named (one left open in the editor): told so under the
+    // result, until it reads the named one.
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"read_file", "Reads", "{}"}}; },
+                        [](const interfaces::LocalToolCall& call, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            done(AgentViewModel::ToolOutput{"text of " + call.arguments, {}, {}});
+                        },
+                        []() { return std::string("Guide."); });
+    agent.setLocalNamedFiles([](const std::string&) {
+        return std::string("In the open folder, the files my question names: audio/meeting.md (text: read_file); data/x (2).csv "
+                           "(a table: query_table).");
+    });
+    const size_t reading = engine.chats.size();
+    engine.textAnswers = {R"j({"name": "read_file", "arguments": {"path": "audio/jfk.md"}})j",
+                          R"j({"name": "read_file", "arguments": {"path": "./audio\\meeting.md"}})j",
+                          R"j({"name": "read_file", "arguments": {"path": "audio/jfk.md"}})j", "Lisa does the demo."};
+    agent.submitPrompt("List the action items in audio/meeting.md.");
+    CHECK_EQ(engine.chats.size(), reading + 4);
+    CHECK(engine.chats[reading + 1].messages.back().text.find(
+              "(This is not the file my question is about: audio/meeting.md, data/x (2).csv. Read that one.)") != std::string::npos);
+    CHECK(engine.chats[reading + 2].messages.back().text.find("This is not the file") == std::string::npos);
+    CHECK(engine.chats[reading + 3].messages.back().text.find("This is not the file") == std::string::npos); // a named one was read
     agent.setLocalNamedFiles({});
 }
 
@@ -5244,6 +5308,10 @@ TEST(local_agent_tools_read_the_folder_and_propose_careful_edits)
     for (const char* name : {"", ".", "enp-test-agent-tools"}) {
         const std::string listed = call("list_files", model::Json::object().set("path", name));
         CHECK(listed.find("src/") != std::string::npos && listed.find("notes.md") != std::string::npos);
+        // Counted for it, by kind (a small model miscounts a list).
+        const size_t all = listed.find("In all: ");
+        CHECK(all != std::string::npos && listed.find("1 .md", all) != std::string::npos && listed.find("1 .pdf", all) != std::string::npos &&
+              listed.find("1 .bin", all) != std::string::npos && listed.find(" folder", all) != std::string::npos);
     }
     // Lines by range, numbered; not outside the folder.
     const std::string read = call("read_file", model::Json::object().set("path", "notes.md").set("start_line", "2"));

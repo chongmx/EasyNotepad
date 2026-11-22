@@ -491,6 +491,48 @@ std::optional<interfaces::LocalToolCall> callInText(const std::string& text, con
     return std::nullopt;
 }
 
+// The paths of the files a question names, from what the app told the model ("..., the files my
+// question names: audio/a.md (text: read_file); data/b.csv (a table: query_table).").
+std::vector<std::string> namedPaths(const std::string& named)
+{
+    std::vector<std::string> out;
+    const size_t colon = named.find("names:");
+    if (colon == std::string::npos)
+        return out;
+    std::string rest = named.substr(colon + 6);
+    if (!rest.empty() && rest.back() == '.')
+        rest.pop_back();
+    for (size_t from = 0; from <= rest.size();) {
+        size_t end = rest.find(';', from);
+        if (end == std::string::npos)
+            end = rest.size();
+        std::string part = rest.substr(from, end - from);
+        from = end + 1;
+        if (const size_t use = part.rfind(" ("); use != std::string::npos)
+            part.erase(use);
+        const size_t first = part.find_first_not_of(' ');
+        if (first != std::string::npos)
+            out.push_back(part.substr(first));
+    }
+    return out;
+}
+
+// The file a reading tool reads ("path" of read_file, read_document, look_at_image ...), as the
+// folder-relative path the app names files with; empty for any other call.
+std::string readPath(const interfaces::LocalToolCall& call)
+{
+    static const char* const reading[] = {"read_file", "read_document", "look_at_image", "look_at_page", "query_table",
+                                          "listen_to", "transcribe", "inspect_binary", "scan_document", "scan_image"};
+    if (std::none_of(std::begin(reading), std::end(reading), [&](const char* r) { return call.name == r; }))
+        return {};
+    const std::optional<model::Json> args = model::Json::parse(call.arguments);
+    std::string path = args ? args->getString("path") : std::string();
+    std::replace(path.begin(), path.end(), '\\', '/');
+    while (path.rfind("./", 0) == 0)
+        path.erase(0, 2);
+    return path;
+}
+
 // A tool step as the chat shows it: "read_file  src/main.cpp", with the arguments' values.
 std::string describeCall(const interfaces::LocalToolCall& call)
 {
@@ -666,6 +708,9 @@ void AgentViewModel::endLocal()
     os::mem::release(localSteps_);
     localStep_ = 0;
     os::mem::release(localNamed_);
+    localNamedRead_ = false;
+    os::mem::release(localStepSkills_);
+    os::mem::release(localSkillsGiven_);
 }
 
 std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
@@ -700,6 +745,57 @@ std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
             steps.push_back(std::move(text));
     }
     return steps;
+}
+
+std::vector<std::string> AgentViewModel::stepSkills(std::string& step)
+{
+    std::string lowered = step;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    const size_t at = lowered.rfind("skills:");
+    if (at == std::string::npos)
+        return {};
+    // The tag's start: its bracket ("[skills: ...]", "(skills: ...)") or the word itself.
+    size_t start = at;
+    while (start > 0 && lowered[start - 1] == ' ')
+        --start;
+    if (start > 0 && (lowered[start - 1] == '[' || lowered[start - 1] == '('))
+        --start;
+    std::string list = lowered.substr(at + 7);
+    if (const size_t close = list.find_first_of("])"); close != std::string::npos)
+        list.erase(close);
+    std::vector<std::string> skills;
+    std::string name;
+    for (const char c : list + ",") {
+        if (c == ',' || c == ';' || c == ' ') {
+            if (!name.empty() && name != "none" && name != "and" && skills.size() < kMaxStepSkills &&
+                std::find(skills.begin(), skills.end(), name) == skills.end())
+                skills.push_back(name);
+            name.clear();
+        } else if (std::isalnum(static_cast<unsigned char>(c)) || c == '-') {
+            name += c;
+        }
+    }
+    step.erase(start);
+    while (!step.empty() && (std::isspace(static_cast<unsigned char>(step.back())) || step.back() == '-' || step.back() == ','))
+        step.pop_back();
+    return skills;
+}
+
+std::string AgentViewModel::skillsFor(size_t step)
+{
+    if (!localSkill_ || step >= localStepSkills_.size())
+        return {};
+    std::string out;
+    for (const std::string& name : localStepSkills_[step]) {
+        if (std::find(localSkillsGiven_.begin(), localSkillsGiven_.end(), name) != localSkillsGiven_.end())
+            continue; // given at an earlier step: still in the conversation
+        const std::string text = localSkill_(name);
+        if (text.empty())
+            continue; // a skill the plan made up
+        localSkillsGiven_.push_back(name);
+        out += "\n\nYour " + name + " skill, for this step:\n" + text;
+    }
+    return out;
 }
 
 void AgentViewModel::planLocal(int generation, std::string question)
@@ -737,16 +833,27 @@ void AgentViewModel::planLocal(int generation, std::string question)
             if (generation != generation_)
                 return; // stopped or replaced
             std::vector<std::string> steps = r.ok ? planSteps(r.text) : std::vector<std::string>();
+            // The skills each step needs, out of its text: given with the step, not all up front.
+            os::mem::release(localStepSkills_);
+            for (std::string& step : steps)
+                localStepSkills_.push_back(stepSkills(step));
             if (steps.size() >= 2 && !localRequest_.messages.empty()) {
-                std::string list;
-                for (size_t i = 0; i < steps.size(); ++i)
+                std::string list, shown;
+                for (size_t i = 0; i < steps.size(); ++i) {
                     list += std::to_string(i + 1) + ". " + steps[i] + "\n";
-                messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + list});
+                    std::string skills;
+                    for (const std::string& s : localStepSkills_[i])
+                        skills += (skills.empty() ? " [skills: " : ", ") + s;
+                    shown += std::to_string(i + 1) + ". " + steps[i] + (skills.empty() ? "" : skills + "]") + "\n";
+                }
+                messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + shown});
                 messages_.push_back({model::ChatRole::Tool, "Step 1 of " + std::to_string(steps.size()) + ": " + steps[0]});
                 localRequest_.messages.back().text += "\n\nWe will work through this in steps:\n" + list + "\nDo step 1 only now: " +
-                                                      steps[0] + "\n" + kStepAsk;
+                                                      steps[0] + "\n" + kStepAsk + skillsFor(0);
                 localSteps_ = std::move(steps);
                 localStep_ = 1;
+            } else if (steps.size() == 1 && !localRequest_.messages.empty()) {
+                localRequest_.messages.back().text += skillsFor(0); // the question as it is, with its skills
             }
             sendLocal(generation); // a one-step plan, or none: the question as it is
         });
@@ -763,7 +870,7 @@ bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
         messages_.push_back({model::ChatRole::Tool,
                              "Step " + number + " of " + std::to_string(localSteps_.size()) + ": " + localSteps_[localStep_]});
         next = "Now step " + number + ": " + localSteps_[localStep_] + "\n" + kStepAsk + "\n(My question, for reference: " +
-               localPrompt_ + ")";
+               localPrompt_ + ")" + skillsFor(localStep_);
     } else {
         messages_.push_back({model::ChatRole::Tool, "All steps done: the answer"});
         next = "All the steps are done. Now answer my question in full, from what the steps found, with the figures exactly "
@@ -1015,10 +1122,15 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
         }
         if (!r.toolCalls.empty() && runTool_ && localRounds_ < kMaxToolRounds) {
             ++localRounds_;
-            // A call it made before, the same: greedy choice loops; some variety from here on.
+            // A call it made before in this step (or question), the same: greedy choice loops; some
+            // variety from here on. The same file read again at a later step is no loop.
+            size_t stepStart = localRequest_.messages.size();
+            while (stepStart > 0 && !(localRequest_.messages[stepStart - 1].role == "user" &&
+                                      localRequest_.messages[stepStart - 1].media.empty()))
+                --stepStart;
             for (const interfaces::LocalToolCall& c : r.toolCalls)
-                for (const interfaces::LocalChatMessage& m : localRequest_.messages)
-                    for (const interfaces::LocalToolCall& earlier : m.toolCalls)
+                for (size_t k = stepStart; k < localRequest_.messages.size(); ++k)
+                    for (const interfaces::LocalToolCall& earlier : localRequest_.messages[k].toolCalls)
                         if (earlier.name == c.name && earlier.arguments == c.arguments && localRequest_.temperature == 0.0f)
                             localRequest_.temperature = kLoopTemperature;
             if (empty)
@@ -1111,6 +1223,19 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
         result.text = std::move(out.text);
         if (result.text.size() > kToolTextChars)
             result.text = result.text.substr(0, kToolTextChars) + "\n[cut: ask for a smaller part]";
+        // Another file read than the one the question names (the file left open in the editor):
+        // said under its result, until it reads a named one.
+        if (const std::string read = readPath(calls[next]); !read.empty() && !localNamed_.empty() && !localNamedRead_) {
+            const std::vector<std::string> named = namedPaths(localNamed_);
+            if (std::find(named.begin(), named.end(), read) != named.end()) {
+                localNamedRead_ = true;
+            } else if (!named.empty()) {
+                std::string list;
+                for (const std::string& n : named)
+                    list += (list.empty() ? "" : ", ") + n;
+                result.text += "\n\n(This is not the file my question is about: " + list + ". Read that one.)";
+            }
+        }
         localRequest_.messages.push_back(std::move(result));
         for (interfaces::LocalMedia& m : out.media)
             seen.push_back(std::move(m));
