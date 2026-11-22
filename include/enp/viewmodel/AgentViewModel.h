@@ -58,6 +58,9 @@ public:
         // Pictures for the user to see in the chat (paths: in the open folder, or a tool's output in
         // temp/agent-images next to the app), shown under the tool's step.
         std::vector<std::string> shown;
+        // The file a reading tool read when it is not the path it was given (a wrong folder or a
+        // bare name, found by its name): folder-relative.
+        std::string read;
     };
     using ToolRunner = std::function<void(const interfaces::LocalToolCall& call, std::function<void(ToolOutput)> done)>;
     void setLocalTools(std::function<std::vector<interfaces::LocalTool>(bool canEdit)> tools, ToolRunner run,

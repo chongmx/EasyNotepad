@@ -1155,7 +1155,7 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                                                             " rounds of tools without an answer."});
         else if (empty)
             messages_.erase(messages_.begin() + long(at));
-        char line[160];
+        char line[512];
         std::snprintf(line, sizeof(line), "Local model (%s): %d tokens, %.1f tokens/s, first token after %.1f s%s",
                       r.backend.empty() ? "CPU" : r.backend.c_str(), r.generatedTokens, r.tokensPerSecond,
                       r.firstTokenSeconds, r.loaded ? " (loaded the model)" : "");
@@ -1225,7 +1225,8 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
             result.text = result.text.substr(0, kToolTextChars) + "\n[cut: ask for a smaller part]";
         // Another file read than the one the question names (the file left open in the editor):
         // said under its result, until it reads a named one.
-        if (const std::string read = readPath(calls[next]); !read.empty() && !localNamed_.empty() && !localNamedRead_) {
+        if (const std::string read = out.read.empty() ? readPath(calls[next]) : out.read;
+            !read.empty() && !localNamed_.empty() && !localNamedRead_) {
             const std::vector<std::string> named = namedPaths(localNamed_);
             if (std::find(named.begin(), named.end(), read) != named.end()) {
                 localNamedRead_ = true;

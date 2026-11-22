@@ -187,6 +187,16 @@ its release notes on GitHub.
     is sent back to read the files it names first.
   - An expression written without quotes reached `calculate` as a number, and its reply ("needs an
     expression") made the agent call it the same way again, eleven times. It now says to quote it.
+  - The local agent fell back to the CPU for the rest of the session after one bad answer: a
+    tool call the model wrote wrong (repeating itself until it was not JSON) counted as the GPU
+    failing, and from then on every question read thousands of tokens on the CPU, with 0.4 GB
+    on the GPU and no word why. What the model wrote wrong now keeps the GPU; a helper that
+    crashed, went silent or did not stop when asked is tried again on the next question (on the
+    CPU after three in a row); and an answer from the CPU says in the status line why not the GPU.
+  - A path in a wrong folder or without one (`bin/fixture.dll`, `litware-april.txt`) reads the
+    one file of that name, saying which; `query_table` on a folder lists its files, counted.
+  - A plan sees the columns of the tables a question names, and the values of a column when the
+    question names one ("at dinner": `time [Dinner, Lunch]`).
 - The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
   put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
   straight into memory, and the web build has a 1 MB stack, a Windows main thread's.

@@ -4316,6 +4316,10 @@ TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
         }
         CHECK(ran && run.ok && run.backend == "FAKE0: Fake GPU" && run.generateTokensPerSecond == 123);
 
+        // A tool call the model wrote wrong (repeating itself) is not the GPU failing: it stays in use.
+        const ChatRun bad = askLocal(s, "fake:bad-tool-call");
+        CHECK(bad.done && !bad.result.ok && bad.result.error.find("tool call") != std::string::npos);
+        CHECK(answeredOnFake(askLocal(s, "fake:answer")));
         CHECK(answeredOnCpu(askLocal(s, "fake:fail")));
         CHECK(s.info().accelerator.find("not used (out of fake memory)") != std::string::npos);
         CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
@@ -4331,14 +4335,21 @@ TEST(engine_library_answers_and_anything_wrong_falls_back_to_the_cpu)
             std::printf("    status: %s\n", crashed.c_str());
     }
 
-    // It crashes after writing: the app says so (the half answer stays), and the CPU answers next.
+    // It crashes after writing: the app says so (the half answer stays), and the next question tries
+    // the GPU again (a crash need not happen again); after kAccelTries crashes in a row, the CPU.
     {
         services::LocalEngineService s(fakeAccelerator());
         const ChatRun c = askLocal(s, "fake:crash-after-text");
-        CHECK(c.done && !c.result.ok && c.text == "Half" && c.result.error.find("the CPU answers now") != std::string::npos);
+        CHECK(c.done && !c.result.ok && c.text == "Half" && c.result.error.find("engine stopped (") != std::string::npos &&
+              c.result.error.find("ask again") != std::string::npos);
+        CHECK(s.info().accelerator.find("the next question tries it again") != std::string::npos);
         const ChatRun next = askLocal(s, "fake:answer");
-        CHECK(answeredOnCpu(next));
-        if (!answeredOnCpu(next))
+        CHECK(answeredOnFake(next));
+        for (int i = 0; i < 3; ++i)
+            askLocal(s, "fake:crash-after-text");
+        CHECK(answeredOnCpu(askLocal(s, "fake:answer")));
+        CHECK(s.info().accelerator.find("tries it again") == std::string::npos);
+        if (!answeredOnFake(next))
             std::printf("    next: done %d ok %d text '%s' error '%s' backend '%s'; status %s\n", int(next.done), int(next.result.ok),
                         next.text.c_str(), next.result.error.c_str(), next.result.backend.c_str(), s.info().accelerator.c_str());
     }
@@ -4887,6 +4898,9 @@ TEST(local_agent_works_across_many_documents_with_notes)
     CHECK(call("query_table", Json::object().set("path", "invoices/invoices.csv")).find("invoices/invoices.csv does not exist. invoices/ holds: april.txt, march.md") !=
           std::string::npos);
     CHECK(call("search_documents", Json::object().set("folder", "invoices").set("query", "Brix")).find("invoices/april.txt") != std::string::npos);
+    // A bare name of a document (only one has it): that document, not "does not exist".
+    const std::string bare = call("extract_from_documents", Json::object().set("files", "april.txt").set("question", "the total"));
+    CHECK(bare.find("invoices/april.txt") != std::string::npos && bare.find("does not exist") == std::string::npos);
 
     // One question of each: a pass per document (the long one in parts, what it found carried on).
     engine.textAnswers = {"Invoice 102, total 80.00 EUR (page 1)", "Invoice 101, total 120.50 EUR"};
@@ -5455,6 +5469,19 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(tools.namedFiles("Summarise old/notes.md").empty());    // not a whole path of the folder
     CHECK(tools.namedFiles("What is in meeting.transcript.md.bak?").empty());
     CHECK(tools.namedFiles("How are you?").empty());
+    // A table's columns; the values of a text column that has few when the question names one.
+    CHECK(named.find("data/sales.csv (a table: query_table), its columns: Region, Product, Units, Price.") != std::string::npos);
+    CHECK(tools.namedFiles("Units sold in the Eastern stores, data/sales.csv?").find("its columns: Region [East, West], Product, Units") !=
+          std::string::npos);
+    // A wrong folder or a bare name: the one file of that name, and the model told which.
+    const std::string moved = call("read_file", R"j({"path": "docs/meeting.transcript.md"})j");
+    CHECK(moved.find("(There is no docs/meeting.transcript.md: this is audio/meeting.transcript.md.)") == 0 &&
+          moved.find("# Transcript") != std::string::npos);
+    CHECK(call("read_file", R"j({"path": "old/notes.md"})j").find("old/notes.md does not exist") != std::string::npos); // two have it
+    // A folder as a table: its files, counted.
+    const std::string folder = call("query_table", R"j({"path": "audio", "where": "type = .md"})j");
+    CHECK(folder.find("audio is a folder, not a table") == 0 && folder.find("meeting.transcript.md") != std::string::npos &&
+          folder.find("In all: 1 .md, 1 folder") != std::string::npos);
 
     // Memory: kept in its file, recalled, corrected, forgotten, compacted; temporary ones end with the run.
     CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("#1") != std::string::npos);

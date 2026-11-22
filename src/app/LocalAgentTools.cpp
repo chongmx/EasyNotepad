@@ -881,6 +881,38 @@ std::string LocalAgentTools::fileText(const std::string& absolute, bool& open) c
     return os::fs::readFile(absolute).value_or(std::string());
 }
 
+std::string LocalAgentTools::fileNamed(const std::string& path) const
+{
+    std::string error;
+    const std::string root = resolve("", error);
+    std::string want = path;
+    std::replace(want.begin(), want.end(), '\\', '/');
+    want = lower(fileName(want));
+    if (root.empty() || want.size() < 3 || want.find('.') == std::string::npos)
+        return {};
+    std::string found;
+    std::vector<std::string> todo{root};
+    size_t seen = 0;
+    while (!todo.empty() && seen < 5000) {
+        const std::string dir = todo.back();
+        todo.pop_back();
+        for (const os::fs::DirEntry& e : os::fs::listDirectory(dir)) {
+            if (e.hidden || e.name == "node_modules" || e.name == ".git" || ++seen > 5000)
+                continue;
+            const std::string full = dir + "/" + e.name;
+            if (e.isDirectory) {
+                if (todo.size() < 2000)
+                    todo.push_back(full);
+            } else if (lower(e.name) == want) {
+                if (!found.empty())
+                    return {}; // two files of that name: the model must say which
+                found = full.substr(root.size() + 1);
+            }
+        }
+    }
+    return found;
+}
+
 void LocalAgentTools::run(const interfaces::LocalToolCall& call, Done done)
 {
     // The arguments, forgiving the slips a small model makes: a code fence around them, single
@@ -955,6 +987,19 @@ void LocalAgentTools::run(const interfaces::LocalToolCall& call, Done done)
             const std::string absolute = resolve(path, error);
             const std::string root = resolve("", error);
             if (!absolute.empty() && !root.empty() && !os::fs::stat(absolute).exists) {
+                // A wrong folder or a bare name ("bin/x.dll" for binaries/x.dll): the one file of that
+                // name is read, and the model told which.
+                if (const std::string found = fileNamed(path); !found.empty()) {
+                    Json fixed = args;
+                    fixed.set("path", found);
+                    const std::string note = "(There is no " + path + ": this is " + found + ".)\n";
+                    (this->*handler)(fixed, [done = std::move(done), note, found](viewmodel::AgentViewModel::ToolOutput out) {
+                        out.text = note + out.text;
+                        out.read = found;
+                        done(std::move(out));
+                    });
+                    return;
+                }
                 std::string dir = absolute;
                 while (dir.size() > root.size() && !os::fs::stat(dir).isDirectory)
                     dir = dir.substr(0, dir.find_last_of('/') == std::string::npos ? 0 : dir.find_last_of('/'));
@@ -1034,6 +1079,101 @@ void LocalAgentTools::listFiles(const Json& args, Done done)
     reply(done, out);
 }
 
+namespace {
+// Whether a word of `text` (lower case) starts with `value` (lower case, 3 letters or more): "sun" in
+// "on sundays", "dinner" in "at dinner".
+bool wordStarts(const std::string& text, const std::string& value)
+{
+    if (value.size() < 3)
+        return false;
+    for (size_t at = text.find(value); at != std::string::npos; at = text.find(value, at + 1))
+        if (at == 0 || !std::isalnum(static_cast<unsigned char>(text[at - 1])))
+            return true;
+    return false;
+}
+
+// A table's columns, for a plan: "total_bill, day [Sun, Sat, Thur, Fri], time [Dinner, Lunch]", with
+// the values of a text column that has few of them when `question` (lower case) names one ("at
+// dinner"). From the first rows only; empty when the file is not a table it can read.
+std::string tableColumns(const std::string& absolute, const std::string& question)
+{
+    const os::fs::FileInfo st = os::fs::stat(absolute);
+    if (!st.exists || st.isDirectory || st.size > 16u * 1024 * 1024)
+        return {};
+    std::optional<std::string> bytes = os::fs::readFile(absolute);
+    if (!bytes)
+        return {};
+    std::vector<std::vector<std::string>> rows; // the header, then up to 200 rows
+    const std::string ext = extension(absolute);
+    if (ext == "xlsx" || ext == "xlsm") {
+        const model::viewer::ViewerDocument doc = model::viewer::readViewerDocument(absolute, std::move(*bytes));
+        if (doc.book.sheets.empty())
+            return {};
+        for (const model::viewer::Row& row : doc.book.sheets.front().rows) {
+            if (row.cells.empty())
+                continue;
+            std::vector<std::string> values(row.cells.back().column + 1);
+            for (const model::viewer::Cell& c : row.cells)
+                values[c.column] = c.text;
+            rows.push_back(std::move(values));
+            if (rows.size() > 200)
+                break;
+        }
+    } else {
+        if (bytes->size() > 64 * 1024)
+            bytes->resize(bytes->rfind('\n', 64 * 1024) == std::string::npos ? 64 * 1024 : bytes->rfind('\n', 64 * 1024));
+        const model::csv::Table t = model::csv::parse(*bytes, model::csv::detectDelimiter(*bytes, absolute));
+        for (size_t r = 0; r < t.rowCount() && r <= 200; ++r) {
+            std::vector<std::string> values;
+            for (int c = 0; c < t.columns; ++c)
+                values.emplace_back(t.cell(r, c));
+            rows.push_back(std::move(values));
+        }
+    }
+    if (rows.empty())
+        return {};
+    // Kept apart from the list it goes in ("a (use), its columns: ...; b (use)").
+    auto clean = [](std::string s) {
+        for (char& ch : s)
+            if (ch == ';' || ch == '(' || ch == ')' || ch == '[' || ch == ']' || ch == '\n' || ch == '\r')
+                ch = ' ';
+        return trimmed(s);
+    };
+    std::string out;
+    for (size_t c = 0; c < rows[0].size() && c < 40; ++c) {
+        const std::string name = clean(rows[0][c]);
+        if (name.empty())
+            continue;
+        std::vector<std::string> values;
+        bool text = rows.size() > 2;
+        for (size_t r = 1; r < rows.size() && text; ++r) {
+            const std::string v = c < rows[r].size() ? clean(rows[r][c]) : std::string();
+            if (v.empty())
+                continue;
+            char* end = nullptr;
+            std::strtod(v.c_str(), &end);
+            if (end && *end == '\0')
+                text = false; // a number: its values are not words a question names
+            else if (std::find(values.begin(), values.end(), v) == values.end())
+                values.push_back(v);
+            if (values.size() > 6)
+                text = false;
+        }
+        out += (out.empty() ? "" : ", ") + name;
+        // Only for a column whose values the question names ("at dinner"; "Sun" in "on Sundays"): the
+        // values of the others draw a small model into filters nobody asked for.
+        const bool named = std::any_of(values.begin(), values.end(), [&](const std::string& v) { return wordStarts(question, lower(v)); });
+        if (text && named && values.size() >= 2 && rows.size() > values.size() * 2) {
+            std::string list;
+            for (const std::string& v : values)
+                list += (list.empty() ? "" : ", ") + v.substr(0, 30);
+            out += " [" + list + "]";
+        }
+    }
+    return out;
+}
+} // namespace
+
 std::string LocalAgentTools::namedFiles(const std::string& question)
 {
     std::string error;
@@ -1101,7 +1241,11 @@ std::string LocalAgentTools::namedFiles(const std::string& question)
                           : kindOf(f) == FileKind::Picture  ? "a picture: look_at_image"
                           : kindOf(f) == FileKind::Sound    ? "a recording: transcribe, or listen_to if short"
                                                             : "text: read_file";
-        out += std::string(i ? ";" : "") + " " + f + " (" + use + ")";
+        std::string columns;
+        if (ext == "csv" || ext == "tsv" || ext == "xlsx" || ext == "xlsm")
+            if (const std::string c = tableColumns(root + "/" + f, q); !c.empty())
+                columns = ", its columns: " + c;
+        out += std::string(i ? ";" : "") + " " + f + " (" + use + ")" + columns;
     }
     return out + ".";
 }
@@ -1640,6 +1784,10 @@ bool LocalAgentTools::documentFiles(const Json& args, const std::string& root, s
         }
         const os::fs::FileInfo st = os::fs::stat(absolute);
         if (!st.exists) {
+            if (const std::string found = fileNamed(p); !found.empty() && isDocument(found)) {
+                files.push_back(found); // a bare name ("a.txt" for invoices/a.txt): the one file of that name
+                continue;
+            }
             why = w + " does not exist. search_documents without a query lists the documents.";
             return false;
         }
@@ -2981,6 +3129,12 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
     const std::string absolute = resolve(path, error);
     if (absolute.empty())
         return reply(done, error);
+    // A folder ("how many .wav files in audio"): its files, counted, with their sizes.
+    if (os::fs::stat(absolute).isDirectory)
+        return listFiles(Json::object().set("path", path), [done = std::move(done), path](viewmodel::AgentViewModel::ToolOutput out) {
+            out.text = path + " is a folder, not a table: here are its files (list_files), with their sizes and counts.\n" + out.text;
+            done(std::move(out));
+        });
     std::optional<std::string> bytes = os::fs::readFile(absolute);
     if (!bytes)
         return reply(done, "cannot read " + path);

@@ -427,14 +427,19 @@ struct LocalEngineService::ChatModel {
     std::string accelReason;
     std::vector<EngineDevice> accelDevices;
     std::chrono::steady_clock::time_point helperLastUse;
+    // Requests that failed in a row (it crashed, went silent, did not stop when asked): the next
+    // question tries the GPU again, up to kAccelTries; a library that cannot start is not tried again.
+    static constexpr int kAccelTries = 3;
+    int accelFailures = 0;
+    bool accelRetry = false;
 
-    // Whether to try the library now (it is there and has not failed).
+    // Whether to try the library now (it is there and has not failed for good).
     bool acceleratorWanted()
     {
         if (!helper)
             return false;
         std::lock_guard<std::mutex> lock(acceleratorMutex);
-        if (accel == Accel::Failed)
+        if (accel == Accel::Failed && (!accelRetry || accelFailures >= kAccelTries))
             return false;
         if (os::fs::stat(helper->options().library).size == 0) {
             accel = Accel::Unknown; // dropped next to the app later: tried then
@@ -460,15 +465,34 @@ struct LocalEngineService::ChatModel {
         } else {
             accel = Accel::Failed;
             accelReason = reason;
+            accelRetry = false;
         }
         return ok;
     }
-    void acceleratorFailed(const std::string& reason)
+    // retry: what went wrong may not happen again (the helper ended or went silent), so a later
+    // question tries the GPU again; else (an error the library gave) the CPU answers from now on.
+    void acceleratorFailed(const std::string& reason, bool retry)
     {
         helper->stop();
         std::lock_guard<std::mutex> lock(acceleratorMutex);
         accel = Accel::Failed;
         accelReason = reason;
+        accelRetry = retry;
+        ++accelFailures;
+    }
+    void acceleratorAnswered()
+    {
+        std::lock_guard<std::mutex> lock(acceleratorMutex);
+        accelFailures = 0;
+    }
+    // Why the CPU answers instead, for the status line: empty when the library is not there or not wanted.
+    std::string cpuBecause()
+    {
+        std::lock_guard<std::mutex> lock(acceleratorMutex);
+        if (accel != Accel::Failed)
+            return {};
+        return accelName + " not used: " + accelReason +
+               (accelRetry && accelFailures < kAccelTries ? "; the next question tries it again" : "");
     }
 };
 
@@ -597,7 +621,10 @@ EngineInfo LocalEngineService::info()
             i.devices.push_back(d);
         break;
     }
-    case A::Failed: i.accelerator = name + ": not used (" + chat_->accelReason + "); the CPU answers"; break;
+    case A::Failed:
+        i.accelerator = name + ": not used (" + chat_->accelReason + "); the CPU answers" +
+                        (chat_->accelRetry && chat_->accelFailures < ChatModel::kAccelTries ? ", and the next question tries it again" : "");
+        break;
     }
     return i;
 }
@@ -669,7 +696,7 @@ void LocalEngineService::run(const EngineRunSettings& settings, std::function<vo
                     }
                     reason = r.error;
                 }
-                model->acceleratorFailed(reason);
+                model->acceleratorFailed(reason, false);
             }
             std::lock_guard<std::mutex> a(model->acceleratorMutex);
             gpuFailed = model->accelName + " failed: " + model->accelReason;
@@ -754,26 +781,38 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
                 if (model->helper->request(engine::toJson(request), toStage, toText, cancelled, answer, reason)) {
                     model->helperLastUse = std::chrono::steady_clock::now();
                     interfaces::LocalChatResult r = engine::chatResultFrom(answer);
-                    // A question too long for the context it has is not the GPU failing: said as it is
-                    // (the GPU stays in use; the CPU would take many minutes for the same).
-                    if (r.ok || wrote || cancel->load() || r.error.find("too long for the local model") != std::string::npos) {
+                    // What the model wrote going wrong is not the GPU failing: a question too long for the
+                    // context, or a tool call that is not JSON (a model repeating itself). Said as it is;
+                    // the GPU stays in use (the CPU would take many minutes for the same).
+                    const bool modelsFault = r.error.find("too long for the local model") != std::string::npos ||
+                                             r.error.find("tool call") != std::string::npos;
+                    if (r.ok || wrote || cancel->load() || modelsFault) {
+                        model->acceleratorAnswered();
                         finish(r);
                         return;
                     }
-                    reason = r.error; // nothing written: the CPU answers instead
-                }
-                model->acceleratorFailed(reason);
-                if (wrote) { // half an answer shown: say so, and the next question goes to the CPU
-                    interfaces::LocalChatResult r;
-                    r.error = "the " + model->accelName + " engine stopped (" + reason + "); ask again: the CPU answers now";
-                    finish(r);
-                    return;
+                    // Nothing written and an error it gave (the model does not fit, ...): it would give it
+                    // again, so the CPU answers from now on.
+                    model->acceleratorFailed(r.error, false);
+                } else {
+                    // The helper ended, went silent or did not stop when asked: the CPU answers this
+                    // question, and the next one tries the GPU again (a few times in a row at most).
+                    model->acceleratorFailed(reason, true);
+                    if (wrote) { // half an answer shown: say so
+                        interfaces::LocalChatResult r;
+                        r.error = "the " + model->accelName + " engine stopped (" + reason + "); ask again";
+                        finish(r);
+                        return;
+                    }
                 }
             }
         }
         interfaces::LocalChatResult r = model->runner.chat(request, toStage, toText, cancelled);
-        if (r.ok)
-            r.backend = "CPU";
+        if (r.ok) {
+            // Why not the GPU, when it was meant to answer: shown in the status line.
+            const std::string because = model->cpuBecause();
+            r.backend = because.empty() ? std::string("CPU") : "CPU (" + because + ")";
+        }
         finish(r);
     });
 #endif

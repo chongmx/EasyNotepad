@@ -92,6 +92,9 @@ private:
     // or is an open document; empty (and `error` set) when the model may not go there.
     std::string resolve(const std::string& path, std::string& error) const;
     std::string fileText(const std::string& absolute, bool& open) const; // an open document's text first
+    // The one file in the open folder with the name of `path` (a wrong folder, a bare name), as a
+    // folder-relative path; empty when none or several have it.
+    std::string fileNamed(const std::string& path) const;
 
     void listFiles(const model::Json& args, Done done);
     void readFile(const model::Json& args, Done done);

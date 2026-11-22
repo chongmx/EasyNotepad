@@ -3,7 +3,7 @@
 //
 // At start, ENP_FAKE_ENGINE_START: "ok" (default), "nodevice", "abi" (another interface), "crash".
 // Per chat, the model path: "fake:answer", "fake:fail", "fake:crash", "fake:crash-after-text",
-// "fake:hang", "fake:slow" (writes until cancelled).
+// "fake:hang", "fake:slow" (writes until cancelled), "fake:bad-tool-call" (the model's fault).
 #include "enp/engine/EnpEngine.h"
 
 #include <chrono>
@@ -53,7 +53,9 @@ ENP_ENGINE_EXPORT const char* enp_engine_request(enp_engine* engine, const char*
     const std::string r = request ? request : "";
     auto has = [&r](const char* what) { return r.find(what) != std::string::npos; };
     auto say = [&](const char* kind, const char* text) { event(user, kind, text); };
-    if (has("\"fake:fail\"")) {
+    if (has("\"fake:bad-tool-call\"")) {
+        engine->result = "{\"ok\":false,\"error\":\"engine error: Failed to parse tool call arguments as JSON\"}";
+    } else if (has("\"fake:fail\"")) {
         engine->result = "{\"ok\":false,\"error\":\"out of fake memory\"}";
     } else if (has("\"fake:crash\"")) {
         std::abort();
