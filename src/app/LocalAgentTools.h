@@ -84,6 +84,8 @@ private:
     interfaces::ILocalEngineService* engine_ = nullptr;
     std::string memoryPath_;
     std::vector<std::string> notes_; // working notes, of conversation notesConversation_
+    // The question being answered (lower case), from namedFiles; released when it ends (namedFiles("")).
+    std::string question_;
     int notesConversation_ = -1;
     std::string session_; // this run of the app: temporary memories belong to it
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true); // background reads answer only while it lives
@@ -116,6 +118,12 @@ private:
     void scanImage(const model::Json& args, Done done);
     struct ScanJob;
     void scanPass(std::shared_ptr<ScanJob> job, Done done);
+    // One file read closely: small overlapping windows with line numbers, each read with the
+    // objective, the task's memory and the notes so far; new notes appended (those with a figure the
+    // window does not hold are dropped); tidied when long; then an answer from the notes.
+    void readClosely(const model::Json& args, Done done);
+    struct CloseReadJob;
+    void closePass(std::shared_ptr<CloseReadJob> job, Done done);
     interfaces::LocalChatRequest passRequest(int maxTokens) const; // the exchange's model, for one short pass
     void lookAtPage(const model::Json& args, Done done);
     void lookAtImage(const model::Json& args, Done done);

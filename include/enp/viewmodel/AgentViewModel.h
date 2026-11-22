@@ -60,7 +60,7 @@ public:
         std::vector<std::string> shown;
         // The file a reading tool read when it is not the path it was given (a wrong folder or a
         // bare name, found by its name): folder-relative.
-        std::string read;
+        std::string read{};
     };
     using ToolRunner = std::function<void(const interfaces::LocalToolCall& call, std::function<void(ToolOutput)> done)>;
     void setLocalTools(std::function<std::vector<interfaces::LocalTool>(bool canEdit)> tools, ToolRunner run,
@@ -96,6 +96,18 @@ public:
     // kMaxStepSkills, taken out of the step's text.
     static std::vector<std::string> stepSkills(std::string& step);
     static constexpr size_t kMaxStepSkills = 2;
+    // The task's memory, for a question taken in steps, set up by the model itself: what to keep in
+    // mind (written with its plan, revised after each step) and what the steps found (written as it
+    // revises), with the question, the plan and where it is, and its long-term memory (the user's
+    // preferences). Each step is given it and the step alone, not what the earlier steps read. Written to a file
+    // through this (agent-memory/task.md), for the user to see.
+    void setLocalTaskMemory(std::function<void(const std::string& memory)> write) { localTaskMemory_ = std::move(write); }
+    // What the task in progress keeps in mind (its memory's list): for a tool that reads on its behalf.
+    const std::vector<std::string>& localKeepInMind() const { return localKeep_; }
+    // The lines of the list under a heading ("Keep in mind:" then "- ..." lines), up to the next
+    // heading or numbered line; the heading is matched without case.
+    static std::vector<std::string> listUnder(const std::string& text, const std::string& heading);
+    static constexpr size_t kMemoryLines = 12; // the most lines a list of the memory keeps
     // A skill's instructions by its name (empty: no such skill). The plan names the skills each step
     // needs; each step is given those (once a question), not every skill up front.
     void setLocalSkill(std::function<std::string(const std::string& name)> skill) { localSkill_ = std::move(skill); }
@@ -193,8 +205,39 @@ private:
     bool localNamedRead_ = false; // it has read one of them
     std::function<std::string(const std::string&)> localSkill_;
     std::vector<std::vector<std::string>> localStepSkills_; // the skills each step of the plan needs
-    std::vector<std::string> localSkillsGiven_;            // given in this question already
-    std::string skillsFor(size_t step);                     // the text of those not given yet
+    std::string skillsFor(size_t step);                     // their instructions, for that step
+    // The figures the step in progress found with its tools (each call and its result lines: a
+    // calculation, a table's rows, a folder's counts), shown to the model when it revises its memory
+    // after the step: what to keep of them is its to decide.
+    std::vector<std::string> localStepFacts_;
+    void keepFacts(const interfaces::LocalToolCall& call, const std::string& result);
+    // The task's memory (setLocalTaskMemory): the request's messages before the question (the system
+    // prompt and earlier turns), kept for each step; the question as asked; the rest of the memory.
+    std::function<void(const std::string&)> localTaskMemory_;
+    size_t localBase_ = 0;
+    std::string localQuestion_;
+    std::string localLongTerm_;            // the user's preferences, from the long-term memory
+    std::vector<std::string> localKeep_;   // what to keep in mind
+    std::vector<std::string> localFound_;  // what the steps found
+    std::string taskMemory(size_t now) const; // with step `now` (0-based) marked; steps.size(): all done
+    void reviseMemory(int generation, const std::string& answer);
+    void stepOn(int generation);
+    // What the answer's figures are checked against: the question and every tool result of it (a
+    // step's own context holds only its tools; the memory holds what the model wrote).
+    std::vector<interfaces::LocalChatMessage> localEvidence_;
+    bool localSawMedia_ = false;
+    int localToolsUsed_ = 0;
+    // The calls of the step in progress (name and arguments) and how often each was made: the same
+    // call again is said to be so under its result; a third time ends the step (it is stuck).
+    std::vector<std::pair<std::string, int>> localCallCounts_;
+    int& callCount(const interfaces::LocalToolCall& call);
+public:
+    static constexpr int kStuckCalls = 3;
+    static constexpr size_t kLastStepChars = 6000; // of the last step's tool results, given to the next
+private:
+public:
+    static constexpr size_t kStepFactsChars = 2400; // the first of a step's kept within this
+private:
     void sendLocal(int generation);
     void localAnswered(int generation, size_t at, const interfaces::LocalChatResult& r);
     void runLocalTools(int generation, std::vector<interfaces::LocalToolCall> calls, size_t next,

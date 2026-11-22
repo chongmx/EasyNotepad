@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <mutex>
 #include <fstream>
@@ -453,20 +454,34 @@ struct LocalEngineService::ChatModel {
         std::string reason;
         EngineHelper::Description d;
         const bool ok = helper->start(reason, &d);
-        std::lock_guard<std::mutex> lock(acceleratorMutex);
-        if (ok) {
-            accel = Accel::Ready;
-            if (!d.name.empty())
-                accelName = d.name;
-            accelDevices.clear();
-            for (EngineDevice& e : d.devices)
-                if (e.kind != "CPU")
-                    accelDevices.push_back(std::move(e));
-        } else {
-            accel = Accel::Failed;
-            accelReason = reason;
-            accelRetry = false;
+        std::string logged;
+        {
+            std::lock_guard<std::mutex> lock(acceleratorMutex);
+            if (ok) {
+                accel = Accel::Ready;
+                if (!d.name.empty())
+                    accelName = d.name;
+                accelDevices.clear();
+                for (EngineDevice& e : d.devices)
+                    if (e.kind != "CPU")
+                        accelDevices.push_back(std::move(e));
+            } else {
+                // Never started: the library cannot run here, the CPU from now on. Started again after
+                // it failed in a question (the last one may still be letting go of the card): one more
+                // of the tries in a row.
+                const bool again = accelRetry && accelFailures > 0;
+                accel = Accel::Failed;
+                accelReason = reason;
+                if (again)
+                    ++accelFailures;
+                else
+                    accelRetry = false;
+                logged = accelName + " could not start (" + (again && accelFailures < kAccelTries ? "tried again next question" : "the CPU from now on") +
+                         "): " + reason;
+            }
         }
+        if (!logged.empty())
+            logEngine(logged);
         return ok;
     }
     // retry: what went wrong may not happen again (the helper ended or went silent), so a later
@@ -474,11 +489,32 @@ struct LocalEngineService::ChatModel {
     void acceleratorFailed(const std::string& reason, bool retry)
     {
         helper->stop();
-        std::lock_guard<std::mutex> lock(acceleratorMutex);
-        accel = Accel::Failed;
-        accelReason = reason;
-        accelRetry = retry;
-        ++accelFailures;
+        int failures = 0;
+        {
+            std::lock_guard<std::mutex> lock(acceleratorMutex);
+            accel = Accel::Failed;
+            accelReason = reason;
+            accelRetry = retry;
+            failures = ++accelFailures;
+        }
+        logEngine(accelName + " failed (" + std::to_string(failures) + " in a row, " +
+                  (retry && failures < kAccelTries ? "tried again next question" : "the CPU from now on") + "): " + reason);
+    }
+    // Why the GPU was left, kept in a small file next to the settings (engine.log, the last 64 KB):
+    // a failure while nobody watches (a long run) is found there afterwards.
+    std::string logPath;
+    void logEngine(const std::string& line) const
+    {
+        if (logPath.empty())
+            return;
+        const std::string& path = logPath;
+        std::string text = os::fs::readFile(path).value_or(std::string());
+        if (text.size() > 64 * 1024)
+            text.erase(0, text.size() - 48 * 1024);
+        char when[32] = {};
+        const std::time_t now = std::time(nullptr);
+        std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+        os::fs::writeFile(path, text + when + " " + line + "\n");
     }
     void acceleratorAnswered()
     {
@@ -507,6 +543,7 @@ LocalEngineService::LocalEngineService(std::optional<Accelerator> accelerator) :
         o.command = accelerator->helper;
         o.startSeconds = accelerator->startSeconds;
         o.silenceSeconds = accelerator->silenceSeconds;
+        chat_->logPath = accelerator->log;
         chat_->helper = std::make_unique<EngineHelper>(std::move(o));
         chat_->accel = ChatModel::Accel::Unknown;
     }
@@ -524,6 +561,8 @@ std::optional<LocalEngineService::Accelerator> LocalEngineService::defaultAccele
     Accelerator a;
     a.library = os::fs::path::join(os::fs::path::parent(exe), os::lib::fileName(kAcceleratorBase));
     a.helper = {exe, "--local-engine", a.library};
+    if (const std::string dir = os::fs::appDataDirectory(); !dir.empty())
+        a.log = dir + "/engine.log";
     return a;
 #else
     return std::nullopt;

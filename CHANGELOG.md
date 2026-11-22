@@ -197,6 +197,26 @@ its release notes on GitHub.
     one file of that name, saying which; `query_table` on a folder lists its files, counted.
   - A plan sees the columns of the tables a question names, and the values of a column when the
     question names one ("at dinner": `time [Dinner, Lunch]`).
+  - The agent keeps its own memory of a task. Its plan starts with "Keep in mind:" (the
+    question's conditions, units, names); after each step it rewrites that and "Found:" (what the
+    steps found, with figures). Each step starts afresh with the memory, the last step's tool
+    results and the step, instead of every earlier step's output: a small model reads less and
+    loses less. The memory is in `agent-memory/task.md` next to the settings.
+  - `read_closely` (the `close-reading` skill) reads a long or odd file part by part (a few
+    thousand characters, overlapping, numbered lines) for an objective, taking notes as it goes;
+    a note whose figures are not in its part is left out. It answers from the notes, collects
+    them, or stops at the first part that answers.
+  - `query_table` groups by several columns, totals expressions (`sum(qty * unit_cost)`), gives
+    the row of a `max` or `min`, and says when a limit cut groups off or the question names a
+    value the query does not filter by. `search_files` takes `also` (lines with both words) and
+    counts every match. `read_file` says how many lines it left out.
+  - A step that makes the same call a third time is ended, or asked to answer from what it has:
+    the agent went round a loop until the question timed out.
+  - A folder holding a folder of the same name (`data/data/loans.csv`) was read one level up.
+  - Why the GPU was left is written to `engine.log` next to the settings, and a GPU helper that
+    fails to restart counts as one of its three tries.
+  - A held-out benchmark set (`tests/agent-bench/holdout`, 25 questions on 12 made-up files,
+    made by `make.py`) measures the agent on files nothing was tuned on: E4B 21, E2B 15 to 19.
 - The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
   put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
   straight into memory, and the web build has a 1 MB stack, a Windows main thread's.

@@ -14,7 +14,9 @@ param(
     [string]$Kind = "",
     [int]$Repeat = 1,
     [int]$Timeout = 600,
-    [string]$Out = (Join-Path $PSScriptRoot "results")
+    [string]$Out = (Join-Path $PSScriptRoot "results"),
+    # Another set: -QuestionFile holdout/questions.json -Data holdout/data (both made by holdout/make.py)
+    [string]$QuestionFile = (Join-Path $PSScriptRoot "questions.json")
 )
 $ErrorActionPreference = "Stop"
 
@@ -64,7 +66,7 @@ function Get-CheckName($Check) {
     return "tool " + $Check.tool
 }
 
-$set = Get-Content (Join-Path $PSScriptRoot "questions.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$set = Get-Content $QuestionFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $questions = @($set.questions | Where-Object { ($Only.Count -eq 0 -or $Only -contains $_.id) -and (-not $Kind -or $_.kind -eq $Kind) })
 if ($questions.Count -eq 0) { throw "No questions match." }
 

@@ -36,7 +36,7 @@ that part at high detail. Example - the VAT line near the bottom of a receipt:
 
 ## Receipts, invoices, order lists
 Read every line at high detail: its quantity, item and amount. Then use calculate for both totals,
-in one call: the number of items is the sum of the quantities (a line "3x Tea" is three items),
+in one call: the number of items is the sum of the quantities (a line "3x Pens" is three items),
 and the amounts' sum is compared with the printed total
 (`items = 3 + 1 + 2; lines = 7.50 + 12.00 + 8.40`). Never count them in your head.
 

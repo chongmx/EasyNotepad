@@ -1,0 +1,366 @@
+{
+ "about": "Held-out questions (made by make.py from its own data): for measuring only, never for tuning.",
+ "questions": [
+  {
+   "id": "loans-top-branch",
+   "kind": "table",
+   "question": "Which branch in data/loans.csv lent the most books, and how many loans did it make?",
+   "checks": [
+    {
+     "text": [
+      "Old Town"
+     ]
+    },
+    {
+     "number": 49,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "loans-child-fantasy",
+   "kind": "table",
+   "question": "On average, how many days did children keep Fantasy books, according to data/loans.csv?",
+   "checks": [
+    {
+     "number": 25.846154,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "loans-harbour-fees",
+   "kind": "table",
+   "question": "How much did the Harbour branch collect in late fees (data/loans.csv), and what percentage of all late fees is that?",
+   "checks": [
+    {
+     "number": 37.25,
+     "tol": 0.01
+    },
+    {
+     "number": 18.349754,
+     "tol": 0.1
+    }
+   ]
+  },
+  {
+   "id": "loans-late-count",
+   "kind": "table",
+   "question": "How many loans in data/loans.csv were kept longer than 21 days?",
+   "checks": [
+    {
+     "number": 84,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "weather-wettest-may",
+   "kind": "table",
+   "question": "Which city in data/weather.csv had the most rain in May, and how much rain was that?",
+   "checks": [
+    {
+     "text": [
+      "Bergen"
+     ]
+    },
+    {
+     "number": 127.4,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "weather-bergen-hottest",
+   "kind": "table",
+   "question": "What was the highest maximum temperature in Bergen in April (data/weather.csv), and on which date was it?",
+   "checks": [
+    {
+     "number": 16.7,
+     "tol": 0.05
+    },
+    {
+     "text": [
+      "2026-04-20",
+      "20 April",
+      "April 20"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "weather-bergen-vs-oslo",
+   "kind": "table",
+   "question": "Over the two months in data/weather.csv, how much more rain fell in Bergen than in Oslo?",
+   "checks": [
+    {
+     "number": 149.4,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "stock-north-value",
+   "kind": "table",
+   "question": "What is the total value of the stock (quantity times unit cost) in the North warehouse, in data/stock.csv?",
+   "checks": [
+    {
+     "number": 25549.0,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "stock-low",
+   "kind": "table",
+   "question": "Which items in data/stock.csv have fewer than 10 units in a warehouse?",
+   "checks": [
+    {
+     "text": [
+      "Webcam"
+     ]
+    },
+    {
+     "text": [
+      "Toner"
+     ]
+    },
+    {
+     "text": [
+      "Monitor arm"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "handbook-leave",
+   "kind": "document",
+   "question": "According to docs/handbook.md, how many days of annual leave a year does someone get who has worked here for 4 years?",
+   "checks": [
+    {
+     "number": 25,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "handbook-trip",
+   "kind": "document",
+   "question": "Using docs/handbook.md, what is the most someone can claim for meals and hotel nights on a 3-night trip to a capital city, with meals for 3 days?",
+   "checks": [
+    {
+     "number": 525,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "handbook-missing",
+   "kind": "document",
+   "question": "What does docs/handbook.md say about parental leave?",
+   "checks": [
+    {
+     "text": [
+      "does not",
+      "doesn't",
+      "no mention",
+      "not mention",
+      "not cover",
+      "no information",
+      "not found",
+      "nothing about",
+      "isn't",
+      "is not",
+      "no section",
+      "not include",
+      "not contain"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "minutes-venue",
+   "kind": "document",
+   "question": "In docs/minutes-2026-03-12.md, who has to book the venue, and by when?",
+   "checks": [
+    {
+     "text": [
+      "Tomasz"
+     ]
+    },
+    {
+     "text": [
+      "3 April",
+      "April 3",
+      "2026-04-03",
+      "03/04"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "minutes-budget",
+   "kind": "document",
+   "question": "How much of the open day budget in docs/minutes-2026-03-12.md has not been spent yet?",
+   "checks": [
+    {
+     "number": 3550,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "contracts-monthly",
+   "kind": "documents",
+   "question": "What do the contracts in the contracts folder cost per month altogether?",
+   "checks": [
+    {
+     "number": 4160,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "contracts-ends-first",
+   "kind": "documents",
+   "question": "Which contract in the contracts folder ends first, and on what date?",
+   "checks": [
+    {
+     "text": [
+      "Brightway"
+     ]
+    },
+    {
+     "text": [
+      "January 31",
+      "1 February 2026",
+      "February 1",
+      "31 January 2026",
+      "2026-01-31",
+      "2026-02-01"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "contracts-folder",
+   "kind": "folder",
+   "question": "How many .txt files are in the contracts folder, and which one is the largest?",
+   "checks": [
+    {
+     "number": 4,
+     "tol": 0
+    },
+    {
+     "text": [
+      "security-sentinel.txt"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "config-timeout",
+   "kind": "code",
+   "question": "In config/app.json, what is the payments service's timeout in seconds?",
+   "checks": [
+    {
+     "number": 4.5,
+     "tol": 0.001
+    }
+   ]
+  },
+  {
+   "id": "code-restock",
+   "kind": "code",
+   "question": "In src/stock.py, below what stock level does restock order more, and how many weeks of sales does an order cover?",
+   "checks": [
+    {
+     "number": 12,
+     "tol": 0
+    },
+    {
+     "number": 3,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "log-billing-errors",
+   "kind": "long",
+   "question": "How many ERROR lines from the billing service are in logs/app.log?",
+   "checks": [
+    {
+     "number": 18,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "log-auth-restart",
+   "kind": "long",
+   "question": "When did the auth service restart according to logs/app.log, and why?",
+   "checks": [
+    {
+     "text": [
+      "22:50"
+     ]
+    },
+    {
+     "text": [
+      "certificate",
+      "out of memory",
+      "memory"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "report-dividend-headcount",
+   "kind": "long",
+   "question": "According to docs/annual-report.md, what dividend per share did the board approve, and what was the headcount at the end of the year?",
+   "checks": [
+    {
+     "number": 0.42,
+     "tol": 0.001
+    },
+    {
+     "number": 1284,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "html-velmont-total",
+   "kind": "long",
+   "question": "In exports/orders.html, what do the orders from Velmont add up to?",
+   "checks": [
+    {
+     "number": 22127.12,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "calc-recipe",
+   "kind": "calc",
+   "question": "A recipe for 4 people needs 300 g of flour. How much flour do I need for 10 people?",
+   "checks": [
+    {
+     "number": 750,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "calc-savings",
+   "kind": "calc",
+   "question": "If I put 2,500 euros into savings at 3.5% interest a year, added once a year, how much will there be after 4 years?",
+   "checks": [
+    {
+     "number": 2868.807502,
+     "tol": 0.01
+    }
+   ]
+  }
+ ]
+}

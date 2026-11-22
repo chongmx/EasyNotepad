@@ -1,0 +1,9 @@
+SERVICE AGREEMENT
+
+Supplier: ByteCare
+Customer: Alder & Finch Ltd
+Service: IT support desk and laptop repairs
+Monthly fee: 1,480 EUR (excluding VAT)
+Start date: 01 November 2025
+Term: 6 months from the start date
+Payment: within 30 days of each monthly invoice

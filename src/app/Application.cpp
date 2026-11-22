@@ -67,6 +67,7 @@ Application::~Application()
     viewModel_->agent().setLocalReminder({});
     viewModel_->agent().setLocalNamedFiles({});
     viewModel_->agent().setLocalSkill({});
+    viewModel_->agent().setLocalTaskMemory({});
     viewModel_->agent().setLocalPlanner({});
     viewModel_->agent().setLocalNotes({});
     agentTools_.reset();

@@ -84,6 +84,7 @@ std::string lower(std::string s)
 
 std::string trimmed(std::string s); // (below, with the tables)
 bool isDocument(const std::string& path); // (below, with the many-documents tools)
+std::vector<std::string> splitList(const std::string& text); // (below, with query_table)
 std::vector<std::string> documentsUnder(const std::string& root, const std::string& dir, size_t limit);
 
 std::string extension(const std::string& path)
@@ -516,6 +517,15 @@ void LocalAgentTools::attach()
         return out;
     });
     vm_.agent().setLocalNamedFiles([this](const std::string& question) { return namedFiles(question); });
+    // The task's memory of a question taken in steps, as a file next to the long-term memories:
+    // what each step is given, for the user to see (rewritten as the task goes on).
+    vm_.agent().setLocalTaskMemory([this](const std::string& memory) {
+        if (memoryPath_.empty())
+            return;
+        const std::string dir = viewmodel::FileDialogViewModel::parent(memoryPath_);
+        os::fs::createDirectories(dir);
+        os::fs::writeFile(dir + "/task.md", "# The task's memory\n\n" + memory);
+    });
     // A skill for a step of a plan: its instructions without the front matter; one the index does
     // not list (the plan made it up), or the planning skill itself, is none.
     vm_.agent().setLocalSkill([](const std::string& name) {
@@ -615,8 +625,11 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
                  {"start_line", "integer", "First line, from 1 (default 1)"},
                  {"end_line", "integer", "Last line (default: 200 lines on)"}},
                 {"path"})},
-        {"search_files", "Finds text in every text file of the open folder: each match's file, line and text.",
-         schema({{"query", "string", "The text to find"}, {"include", "string", "Only these files, e.g. *.cpp;*.h (optional)"}},
+        {"search_files", "Finds text in every text file of the open folder: how many lines have it (exactly), and each "
+                         "line's file, number and text. To count lines, this is exact.",
+         schema({{"query", "string", "The text to find"},
+                 {"also", "string", "Other words the line must have too, separated by commas, e.g. billing (optional)"},
+                 {"include", "string", "Only these files, e.g. *.cpp;*.h or *.log (optional)"}},
                 {"query"})},
         {"open_file", "Opens a file in the editor for the user to see, optionally at a line.",
          schema({{"path", "string", "File, relative to the open folder"}, {"line", "integer", "Line to show, from 1 (optional)"}},
@@ -650,6 +663,17 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
                  {"window", "string", "small (3,000 characters), normal (6,000, default), large (10,000), or a number"},
                  {"overlap", "integer", "Percent of a window repeated in the next (default 20)"}},
                 {"path", "find"})},
+        {"read_closely",
+         "Reads one file closely, a small part at a time (overlapping, with line numbers), for an objective, and "
+         "keeps notes of what each part holds for it; then answers from the notes. For a long file, one the other "
+         "tools cannot make sense of (a log, an export, a jumbled PDF text, an odd format), or when every instance "
+         "or an exact figure matters. Slower: a few seconds a part.",
+         schema({{"path", "string", "The file, relative to the open folder"},
+                 {"objective", "string", "What to find or collect, e.g. every payment over 500 EUR, with its date and payee"},
+                 {"mode", "string", "answer (default: the notes, then an answer from them), collect (the notes only), or find "
+                                    "(stop at the first part that has it)"},
+                 {"window", "string", "small (2,500 characters), normal (4,500, default) or large (8,000)"}},
+                {"path", "objective"})},
         {"scan_image",
          "Looks for something in a picture in overlapping tiles, one at a time, then looks again finer where it was "
          "seen (coarse to fine), and says in which region it is. For finding small things: a stamp, a signature, a "
@@ -712,8 +736,8 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
                  {"sheet", "string", "Excel: the sheet's name (default the first)"},
                  {"where", "string", "Conditions joined by 'and', e.g. Country = Canada and Units Sold > 1000; also != >= <= contains"},
                  {"columns", "string", "Columns to show, comma-separated (default all)"},
-                 {"group_by", "string", "A column to group by (optional)"},
-                 {"aggregate", "string", "count, or sum/avg/min/max of a column, comma-separated, e.g. sum(Sales), count"},
+                 {"group_by", "string", "A column to group by, or several separated by commas (\"day, time\": a row for each pair) (optional)"},
+                 {"aggregate", "string", "count, or sum/avg/min/max of a column or of an expression of each row's columns, comma-separated, e.g. sum(Sales), count, sum(Units * Price); min and max also show the row they are on"},
                  {"sort", "string", "A column, or with group_by an aggregate such as sum(Sales); add ' desc' for largest first"},
                  {"limit", "integer", "Rows to show (default 30)"}},
                 {"path"})},
@@ -813,6 +837,8 @@ std::string LocalAgentTools::guide() const
          "them all); extract_from_documents to ask one question of each of them and get a table (read the "
          "multiple-documents skill first)\n"
          "- one long document, or a few: scan_document to find where something is (pages), then read those pages\n"
+         "- a long file, or one the other tools cannot make sense of (a log, an export, an odd format), or when every "
+         "instance or an exact figure matters: read_closely with the objective\n"
          "- a small thing in a picture: scan_image to find where it is, then look_at_image on that region\n"
          "- what you found so far: note it (note), read it back (read_notes)\n"
          "Any arithmetic: calculate (never do sums in your head).\n"
@@ -852,6 +878,11 @@ std::string LocalAgentTools::resolve(const std::string& path, std::string& error
     // whole path) or starts a path with it: those mean the folder, and paths inside it.
     if (p.empty() || p == "." || p == "/")
         return base;
+    // A path that is there as given is that path: a folder named like the open one inside it
+    // ("data/loans.csv" in a folder called data) is not the open folder's name repeated.
+    if (!viewmodel::FileDialogViewModel::isAbsolute(p) && p.find("..") == std::string::npos &&
+        os::fs::stat(base + "/" + p).exists)
+        return base + "/" + p;
     if (!viewmodel::FileDialogViewModel::isAbsolute(p))
         for (size_t slash = base.find('/'); slash != std::string::npos; slash = base.find('/', slash + 1)) {
             const std::string tail = base.substr(slash + 1);
@@ -962,6 +993,7 @@ void LocalAgentTools::run(const interfaces::LocalToolCall& call, Done done)
         {"look_at_page", &LocalAgentTools::lookAtPage},    {"look_at_image", &LocalAgentTools::lookAtImage},
         {"listen_to", &LocalAgentTools::listenTo},         {"transcribe", &LocalAgentTools::transcribe},
         {"inspect_binary", &LocalAgentTools::inspectBinary}, {"read_bytes", &LocalAgentTools::readBytes},
+        {"read_closely", &LocalAgentTools::readClosely},
         {"open_file", &LocalAgentTools::openFile},         {"calculate", &LocalAgentTools::calculate},
         {"query_table", &LocalAgentTools::queryTable},     {"remember", &LocalAgentTools::remember},
         {"recall", &LocalAgentTools::recall},              {"amend_memory", &LocalAgentTools::amendMemory},
@@ -1177,11 +1209,13 @@ std::string tableColumns(const std::string& absolute, const std::string& questio
 std::string LocalAgentTools::namedFiles(const std::string& question)
 {
     std::string error;
+    os::mem::release(question_);
     const std::string root = resolve("", error);
     if (root.empty() || question.empty())
         return {};
     std::string q = lower(question);
     std::replace(q.begin(), q.end(), '\\', '/');
+    question_ = q; // for query_table: the values the question names
     auto word = [&](size_t i) { return i < q.size() && (std::isalnum(static_cast<unsigned char>(q[i])) || q[i] == '_'); };
     // At `at` in the question as a whole name: not inside a longer word or path ("a.wav" in "data.wav",
     // "meeting.wav" in "meeting.wav.transcript").
@@ -1284,6 +1318,10 @@ void LocalAgentTools::readFile(const Json& args, Done done)
             line.pop_back();
         out += std::to_string(i) + "| " + line + "\n";
     }
+    // Only part of a long file: how to go through all of it for something.
+    if (last < total)
+        out += "[" + std::to_string(total - last) + " more lines: read on with start_line, or read_closely {\"path\": \"" + path +
+               "\", \"objective\": \"...\"} to go through all of it for what you need]\n";
     reply(done, out);
 }
 
@@ -1295,17 +1333,36 @@ void LocalAgentTools::searchFiles(const Json& args, Done done)
     const Json result = handleAutomation(vm_, "search_files", params);
     if (!result.getString("error").empty())
         return reply(done, "search failed: " + result.getString("error"));
-    std::string out;
-    int count = 0;
-    if (const Json* matches = result.find("results"))
-        for (const Json& m : matches->items()) {
-            if (++count > 60) {
-                out += "[more matches not listed: narrow the search]\n";
-                break;
-            }
-            out += m.getString("path") + ":" + std::to_string(int(m.getNumber("line"))) + ": " + m.getString("text") + "\n";
+    // Lines that also hold every one of these words (any case): "ERROR" also "billing". Counted
+    // exactly, all of them (a count read off a list, or by reading, was wrong).
+    std::vector<std::string> also;
+    for (const std::string& w : splitList(args.getString("also")))
+        if (!trimmed(w).empty())
+            also.push_back(lower(trimmed(w)));
+    std::string listed;
+    int count = 0, shown = 0;
+    std::vector<std::string> inFiles;
+    for (const auto& file : vm_.findInFiles().results())
+        for (const auto& hit : file.hits) {
+            const std::string low = lower(hit.text);
+            if (std::any_of(also.begin(), also.end(), [&](const std::string& w) { return low.find(w) == std::string::npos; }))
+                continue;
+            ++count;
+            if (std::find(inFiles.begin(), inFiles.end(), file.path) == inFiles.end())
+                inFiles.push_back(file.path);
+            if (++shown <= 60)
+                listed += file.path + ":" + std::to_string(hit.line + 1) + ": " + hit.text + "\n";
         }
-    reply(done, count == 0 ? "No matches for '" + args.getString("query") + "'." : out);
+    std::string what = "'" + args.getString("query") + "'";
+    for (const std::string& w : also)
+        what += " and '" + w + "'";
+    if (count == 0)
+        return reply(done, "No lines with " + what + ".");
+    std::string out = std::to_string(count) + (count == 1 ? " line" : " lines") + " with " + what + ", in " +
+                      std::to_string(inFiles.size()) + (inFiles.size() == 1 ? " file" : " files") + ":\n" + listed;
+    if (shown > 60)
+        out += "[" + std::to_string(shown - 60) + " more lines not listed; the count above is all of them]\n";
+    reply(done, out);
 }
 
 void LocalAgentTools::readDocument(const Json& args, Done done)
@@ -2112,6 +2169,341 @@ void LocalAgentTools::scanDocument(const Json& args, Done done)
             scanPass(job, std::move(done));
         });
     });
+}
+
+// ---- Reading closely: one file, window by window, with notes -------------------------------------
+// For a long file, or one the other tools cannot make sense of: the model reads it a small part at a
+// time (a few thousand characters, numbered lines, overlapping), each time with the objective, what
+// the task keeps in mind and the notes so far, and writes down what is new. The notes only grow (a
+// small model rewriting them all lost some); a note whose figure that part does not hold is dropped;
+// long notes are tidied in a pass that must keep every figure. Then, by default, an answer from the
+// notes alone.
+
+namespace {
+
+constexpr const char* kCloseReadPrompt =
+    "You read one part of a longer file closely, for a task. From this part, write down only what is new and "
+    "matters for the objective: one note per line, starting with '- ', with names, figures and dates exactly as "
+    "written in the file, and where it is at the end: (line N). Do not repeat a note you already have: the lines "
+    "before the mark were in the last part. If nothing in this part is new for the objective, answer only: nothing.";
+constexpr const char* kCloseMergePrompt =
+    "You tidy the notes of a close reading. Merge notes that say the same thing and drop repeats; keep every name, "
+    "figure, date and (line N) exactly as written. Write the notes only, one per line, each starting with '- '.";
+constexpr const char* kCloseAnswerPrompt =
+    "You answer an objective from the notes of a close reading of a file. Use only the notes, with figures exactly "
+    "as written and their (line N). If the notes do not hold all of it, say what they hold and that the rest is not "
+    "in the file.";
+constexpr size_t kCloseWindows = 60;       // parts one reading reads at most
+constexpr size_t kCloseNotesChars = 3000;  // notes longer than this are tidied
+
+// The figures a note gives ("1,250.50" as "1250.50"), not its line references ("(line 12)", "lines 3-9").
+std::vector<std::string> noteFigures(const std::string& text)
+{
+    std::vector<std::string> out;
+    const std::string low = lower(text);
+    bool lineRef = false;
+    for (size_t i = 0; i < text.size();) {
+        if (!std::isdigit(static_cast<unsigned char>(text[i]))) {
+            ++i;
+            continue;
+        }
+        size_t end = i;
+        std::string figure;
+        while (end < text.size() && (std::isdigit(static_cast<unsigned char>(text[end])) ||
+                                     ((text[end] == ',' || text[end] == '.') && end + 1 < text.size() &&
+                                      std::isdigit(static_cast<unsigned char>(text[end + 1]))))) {
+            if (text[end] != ',')
+                figure += text[end];
+            ++end;
+        }
+        size_t back = i;
+        while (back > 0 && low[back - 1] == ' ')
+            --back;
+        const bool afterLine = (back >= 4 && low.compare(back - 4, 4, "line") == 0) || (back >= 5 && low.compare(back - 5, 5, "lines") == 0);
+        const bool rangeEnd = back > 0 && low[back - 1] == '-' && lineRef;
+        lineRef = afterLine || rangeEnd;
+        if (!lineRef)
+            out.push_back(figure);
+        i = end;
+    }
+    return out;
+}
+
+// A text's digits without thousands commas, for finding a note's figures in it.
+std::string withoutDigitCommas(const std::string& text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == ',' && i > 0 && i + 1 < text.size() && std::isdigit(static_cast<unsigned char>(text[i - 1])) &&
+            std::isdigit(static_cast<unsigned char>(text[i + 1])))
+            continue;
+        out += text[i];
+    }
+    return out;
+}
+
+// The notes in a pass's answer: its "- " lines (or "* ", "• "), each as given.
+std::vector<std::string> notesIn(const std::string& answer)
+{
+    std::vector<std::string> out;
+    size_t from = 0;
+    while (from < answer.size()) {
+        size_t end = answer.find('\n', from);
+        if (end == std::string::npos)
+            end = answer.size();
+        std::string line = trimmed(answer.substr(from, end - from));
+        from = end + 1;
+        size_t skip = line.rfind("- ", 0) == 0 || line.rfind("* ", 0) == 0 ? 2 : line.rfind("\xe2\x80\xa2", 0) == 0 ? 3 : 0;
+        if (skip == 0)
+            continue;
+        line = trimmed(line.substr(skip));
+        if (!line.empty() && lower(line) != "nothing")
+            out.push_back(line.substr(0, 400));
+    }
+    return out;
+}
+
+// The printable runs of a binary file (6 characters or more), one a line: text inside a program or
+// an odd file.
+std::string printableRuns(const std::string& bytes)
+{
+    std::string out, run;
+    for (const char c : bytes) {
+        if (c >= 32 && c < 127) {
+            run += c;
+            continue;
+        }
+        if (run.size() >= 6)
+            out += run + "\n";
+        run.clear();
+    }
+    if (run.size() >= 6)
+        out += run + "\n";
+    return out;
+}
+
+} // namespace
+
+struct LocalAgentTools::CloseReadJob {
+    std::string file, objective, mode, keep, kind;
+    std::vector<std::string> windows; // numbered lines, the repeated ones before a mark
+    std::vector<std::string> plain;   // each window's text with digits' thousands commas taken out
+    std::vector<std::string> labels;  // "lines 120-185"
+    size_t next = 0;
+    std::vector<std::string> notes;
+    size_t dropped = 0;
+    size_t tidiedAt = 0; // the notes' length after the last tidy
+    bool busy = false, found = false, answered = false;
+    std::string answer, problem;
+};
+
+void LocalAgentTools::readClosely(const Json& args, Done done)
+{
+    if (!engine_)
+        return reply(done, "read_closely cannot run here: the local model is not available to it.");
+    const std::string objective = trimmed(args.getString("objective"));
+    if (objective.empty())
+        return reply(done, "read_closely needs the objective: what to find or collect. " + usage("read_closely"));
+    std::string error;
+    const std::string path = args.getString("path");
+    const std::string absolute = resolve(path, error);
+    if (absolute.empty())
+        return reply(done, error);
+    if (os::fs::stat(absolute).isDirectory)
+        return reply(done, path + " is a folder: read_closely reads one file (list_files shows what it holds).");
+    std::string mode = lower(trimmed(args.getString("mode")));
+    if (mode != "collect" && mode != "find")
+        mode = "answer";
+    const std::string w = lower(trimmed(args.getString("window")));
+    const size_t window = w == "small" ? 2500 : w == "large" ? 8000 : 4500;
+    auto job = std::make_shared<CloseReadJob>();
+    job->file = path;
+    job->objective = objective;
+    job->mode = mode;
+    job->busy = vm_.agent().busy.get();
+    for (const std::string& k : vm_.agent().localKeepInMind())
+        job->keep += "- " + k + "\n";
+    vm_.agent().setLocalActivity("reading " + path + " closely");
+    std::weak_ptr<bool> alive = alive_;
+    os::dispatch::runAsync([this, alive, absolute, window, job, done = std::move(done)]() mutable {
+        // The text: a document's (pages marked), a text file's, or the printable runs of anything else.
+        std::string all;
+        DocumentText t = documentText(absolute, 4u << 20);
+        if (t.error == "not text") {
+            const std::optional<std::string> bytes = os::fs::readFile(absolute);
+            all = bytes ? printableRuns(bytes->substr(0, 8u << 20)) : std::string();
+            job->kind = "the text found in a binary file";
+        } else if (!t.error.empty()) {
+            job->problem = t.error;
+        } else {
+            job->kind = t.kind;
+            for (size_t p = 0; p < t.pages.size(); ++p)
+                all += (t.paged ? "[page " + std::to_string(p + 1) + "]\n" : std::string()) + t.pages[p] + "\n";
+        }
+        // Lines, numbered; a very long line (minified, one-line exports) in pieces of its number.
+        std::vector<std::pair<size_t, std::string>> lines;
+        size_t number = 0, from = 0;
+        while (from < all.size()) {
+            size_t end = all.find('\n', from);
+            if (end == std::string::npos)
+                end = all.size();
+            ++number;
+            std::string line = all.substr(from, end - from);
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            from = end + 1;
+            for (size_t at = 0; at < line.size() || at == 0; at += window / 2) {
+                lines.emplace_back(number, line.substr(at, window / 2));
+                if (line.size() <= window / 2)
+                    break;
+            }
+        }
+        // Windows of about `window` characters, ending at a line, the next starting about 15% back.
+        size_t start = 0, repeated = 0;
+        while (start < lines.size() && job->windows.size() < kCloseWindows) {
+            std::string text, plain;
+            size_t k = start, chars = 0;
+            while (k < lines.size() && (k == start || chars + lines[k].second.size() <= window)) {
+                if (k == start + repeated && repeated > 0)
+                    text += "--- (the lines above were in the last part; new from here) ---\n";
+                text += std::to_string(lines[k].first) + "| " + lines[k].second + "\n";
+                plain += lines[k].second + "\n";
+                chars += lines[k].second.size() + 1;
+                ++k;
+            }
+            job->windows.push_back(std::move(text));
+            job->plain.push_back(withoutDigitCommas(plain));
+            const size_t first = lines[start].first, last = lines[k - 1].first;
+            job->labels.push_back(first == last ? "line " + std::to_string(first)
+                                                : "lines " + std::to_string(first) + "-" + std::to_string(last));
+            if (k >= lines.size())
+                break;
+            // The next starts with about 15% of this one again (whole lines), and always moves on.
+            size_t back = k, overlap = 0;
+            while (back > start + 1 && overlap + lines[back - 1].second.size() <= window * 15 / 100) {
+                overlap += lines[back - 1].second.size() + 1;
+                --back;
+            }
+            repeated = k - back;
+            start = back;
+        }
+        if (job->windows.size() >= kCloseWindows && start < lines.size())
+            job->problem = "read up to line " + std::to_string(lines[std::min(start, lines.size() - 1)].first) + " of " +
+                           std::to_string(number) + " (the limit of one reading: ask again about the rest)";
+        os::dispatch::postToMain([this, alive, job, done = std::move(done)]() mutable {
+            if (!alive.lock())
+                return;
+            if (job->windows.empty())
+                return reply(done, job->file + (job->problem.empty() ? std::string(" has no text to read.") : ": " + job->problem));
+            closePass(job, std::move(done));
+        });
+    });
+}
+
+void LocalAgentTools::closePass(std::shared_ptr<CloseReadJob> job, Done done)
+{
+    if (job->busy && !vm_.agent().busy.get())
+        return; // the user stopped the agent, or closed the folder: no more passes
+    std::string notes;
+    for (const std::string& n : job->notes)
+        notes += "- " + n + "\n";
+    const bool read = job->next >= job->windows.size() || (job->mode == "find" && job->found);
+    // All read: the notes, and an answer from them (not from the file) unless only notes were asked for.
+    if (read && (job->answered || job->mode != "answer" || job->notes.empty())) {
+        vm_.agent().setLocalActivity(std::string());
+        std::string out = "Read " + job->file + " closely (" + job->kind + ", " + std::to_string(job->next) + " of " +
+                          std::to_string(job->windows.size()) + " parts) for: " + job->objective + "\n\nNotes (" +
+                          std::to_string(job->notes.size()) + "):\n" + (notes.empty() ? std::string("(nothing found)\n") : notes);
+        if (!job->answer.empty())
+            out += "\nFrom the notes:\n" + job->answer + "\n";
+        if (job->dropped)
+            out += "\n(" + std::to_string(job->dropped) + " note(s) left out: their figures are not in the part they came from.)\n";
+        if (!job->problem.empty())
+            out += "Note: " + job->problem + "\n";
+        return reply(done, out);
+    }
+    interfaces::LocalChatRequest r = passRequest(700);
+    const std::string keep = job->keep.empty() ? std::string() : "What the task keeps in mind:\n" + job->keep;
+    enum class Pass { Read, Tidy, Answer } pass =
+        read ? Pass::Answer : notes.size() > kCloseNotesChars && notes.size() > job->tidiedAt + 500 ? Pass::Tidy : Pass::Read;
+    if (pass == Pass::Answer) {
+        r.messages.emplace_back("system", kCloseAnswerPrompt);
+        r.messages.emplace_back("user", "Objective: " + job->objective + "\n" + keep + "\nNotes from reading " + job->file + ":\n" + notes +
+                                            "\nAnswer the objective from these notes.");
+        vm_.agent().setLocalActivity("answering from the notes on " + job->file);
+    } else if (pass == Pass::Tidy) {
+        r.messages.emplace_back("system", kCloseMergePrompt);
+        r.messages.emplace_back("user", "Objective: " + job->objective + "\nThe notes:\n" + notes);
+        vm_.agent().setLocalActivity("tidying the notes on " + job->file);
+    } else {
+        r.messages.emplace_back("system", kCloseReadPrompt);
+        r.messages.emplace_back("user", "Objective: " + job->objective + "\n" + keep + "Your notes so far:\n" +
+                                            (notes.empty() ? std::string("(none yet)\n") : notes) + "\nFile: " + job->file + ", part " +
+                                            std::to_string(job->next + 1) + " of " + std::to_string(job->windows.size()) + " (" +
+                                            job->labels[job->next] + "):\n" + job->windows[job->next] +
+                                            "\nWrite the new notes for the objective from this part, or: nothing." +
+                                            (job->mode == "find"
+                                                 ? std::string("\nThen, only when your notes (with this part's) hold everything the "
+                                                               "objective asks - each thing it names - add a last line: ANSWERED. "
+                                                               "Something only near it (the same name, another event) is not it.")
+                                                 : std::string()));
+        vm_.agent().setLocalActivity("reading " + job->file + " closely (part " + std::to_string(job->next + 1) + " of " +
+                                     std::to_string(job->windows.size()) + ", " + std::to_string(job->notes.size()) + " notes)");
+    }
+    std::weak_ptr<bool> alive = alive_;
+    engine_->chat(
+        r, [](const std::string&) {}, [](const std::string&) {},
+        [this, alive, job, pass, done = std::move(done)](const interfaces::LocalChatResult& result) mutable {
+            if (!alive.lock())
+                return;
+            if (pass == Pass::Answer) {
+                job->answer = result.ok ? trimmed(result.text) : std::string();
+                job->answered = true;
+            } else if (pass == Pass::Tidy) {
+                // Kept only when every figure of the old notes is still there; else the old ones stay
+                // (and are not tidied again).
+                std::vector<std::string> tidy = result.ok ? notesIn(result.text) : std::vector<std::string>();
+                std::string joined;
+                for (const std::string& n : tidy)
+                    joined += n + "\n";
+                joined = withoutDigitCommas(joined);
+                bool kept = !tidy.empty();
+                for (const std::string& n : job->notes)
+                    for (const std::string& f : noteFigures(n))
+                        kept = kept && joined.find(f) != std::string::npos;
+                if (kept && tidy.size() < job->notes.size())
+                    job->notes = std::move(tidy);
+                // Not tidied again until the notes grow (a tidy that changed nothing would repeat).
+                job->tidiedAt = 0;
+                for (const std::string& n : job->notes)
+                    job->tidiedAt += n.size() + 3;
+            } else {
+                for (const std::string& n : result.ok ? notesIn(result.text) : std::vector<std::string>()) {
+                    // Every figure of a note is in the part it came from (or the objective); else made up.
+                    bool held = true;
+                    for (const std::string& f : noteFigures(n))
+                        held = held && (job->plain[job->next].find(f) != std::string::npos ||
+                                        withoutDigitCommas(job->objective).find(f) != std::string::npos);
+                    if (!held) {
+                        ++job->dropped;
+                        continue;
+                    }
+                    if (std::find(job->notes.begin(), job->notes.end(), n) == job->notes.end())
+                        job->notes.push_back(n);
+                }
+                // Find: done when it says all of it is in the notes (and there are notes).
+                if (result.ok && job->mode == "find" && !job->notes.empty()) {
+                    std::string low = lower(result.text);
+                    low.erase(std::remove(low.begin(), low.end(), '*'), low.end());
+                    for (size_t at = low.find("answered"); at != std::string::npos && !job->found; at = low.find("answered", at + 1))
+                        job->found = (at == 0 || low[at - 1] == '\n' || low[at - 1] == ' ') &&
+                                     low.compare(at > 3 ? at - 4 : 0, 4, "not ") != 0 && low.compare(at > 2 ? at - 3 : 0, 3, "un-") != 0;
+                }
+                ++job->next;
+            }
+            closePass(job, std::move(done));
+        });
 }
 
 void LocalAgentTools::scanImage(const Json& args, Done done)
@@ -3354,6 +3746,45 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
         }
         return reply(done, hint + "\nCall query_table again with one of these values exactly.");
     }
+    // The question names a value of a column ("red cars in Lisbon": red of colour, Lisbon of city)
+    // that this query neither picks rows by nor groups by: said first, as a small model drops one of
+    // two filters. A column it filters by another value (one step for Sunday, the next for Saturday)
+    // is not said.
+    if (!question_.empty()) {
+        std::vector<std::string> grouped;
+        for (const std::string& g : splitList(args.getString("group_by")))
+            grouped.push_back(lower(trimmed(g)));
+        grouped.push_back(lower(trimmed(args.getString("group_by"))));
+        for (size_t c = 0; c < header.size(); ++c) {
+            const std::string name = trimmed(header[c]);
+            if (name.empty() || std::find(grouped.begin(), grouped.end(), lower(name)) != grouped.end() ||
+                std::any_of(conditions.begin(), conditions.end(), [&](const Condition& k) { return k.column == int(c); }))
+                continue;
+            std::vector<std::string> values;
+            bool text = true;
+            for (const auto& row : rows) {
+                const std::string v = cell(row, int(c));
+                double n = 0;
+                if (v.empty() || std::find(values.begin(), values.end(), v) != values.end())
+                    continue;
+                if (cellNumber(v, n) || values.size() >= 12) {
+                    text = false; // numbers, or too many values to be categories
+                    break;
+                }
+                values.push_back(v);
+            }
+            if (!text || values.size() < 2)
+                continue;
+            std::string named;
+            for (const std::string& v : values)
+                if (wordStarts(question_, lower(v)))
+                    named += (named.empty() ? "" : ", ") + v;
+            if (!named.empty())
+                note += "(My question names " + named + ", a value of the column " + name +
+                        ", and this query does not pick rows by it: add it to where (" + name + " = " +
+                        named.substr(0, named.find(',')) + "), or group_by " + name + " to see each.)\n";
+        }
+    }
     std::string out = note + path + ": " + std::to_string(picked.size()) + " of " + std::to_string(rows.size()) +
                       " rows match" + (readAs.empty() ? "" : " (" + readAs + ")") + ". Columns: " + columns + "\n";
     const int limit = std::clamp(argInt(args, "limit", 30), 1, 500);
@@ -3363,6 +3794,43 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
         struct Agg {
             std::string fn, label;
             int column = -1;
+            std::string expr; // a sum over each row ("qty * unit_cost") instead of one column
+        };
+        // The columns by name, longest first: put in an expression by name ("Units Sold" before "Units").
+        std::vector<int> byLength;
+        for (size_t c = 0; c < header.size(); ++c)
+            if (!trimmed(header[c]).empty())
+                byLength.push_back(int(c));
+        std::sort(byLength.begin(), byLength.end(), [&](int a, int b) { return trimmed(header[size_t(a)]).size() > trimmed(header[size_t(b)]).size(); });
+        // An expression of a row's columns, worked out with its values (false: a cell is no number,
+        // or it is no expression of columns).
+        auto rowExpression = [&](const std::string& expr, const std::vector<std::string>* row, double& v, std::string& why) {
+            std::string text = expr;
+            for (const int c : byLength) {
+                const std::string name = lower(trimmed(header[size_t(c)]));
+                for (size_t at = lower(text).find(name); at != std::string::npos; at = lower(text).find(name, at)) {
+                    const size_t end = at + name.size();
+                    const auto word = [&](size_t k) { return k < text.size() && (std::isalnum(static_cast<unsigned char>(text[k])) || text[k] == '_'); };
+                    if ((at > 0 && word(at - 1)) || word(end)) {
+                        at = end;
+                        continue;
+                    }
+                    double n = 1;
+                    if (row && !cellNumber(cell(*row, c), n))
+                        return false;
+                    const std::string value = "(" + numberText(n) + ")";
+                    text.replace(at, name.size(), value);
+                    at += value.size();
+                }
+            }
+            Calculator calc;
+            calc.s = text;
+            v = calc.sum();
+            calc.space();
+            if (calc.error.empty() && calc.i < calc.s.size())
+                calc.error = std::string("unexpected '") + calc.s[calc.i] + "'";
+            why = calc.error;
+            return why.empty();
         };
         std::vector<Agg> aggs;
         for (const std::string& a : aggregates) {
@@ -3371,11 +3839,29 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
             const size_t open = a.find('(');
             g.fn = lower(trimmed(open == std::string::npos ? a : a.substr(0, open)));
             if (open != std::string::npos) {
-                const size_t close = a.find(')', open);
-                const std::string name = a.substr(open + 1, close == std::string::npos ? std::string::npos : close - open - 1);
+                const size_t close = a.rfind(')');
+                // "sum(qty) * sum(unit_cost)": an aggregate is one function of one column or expression
+                // (its brackets close after the last, never before).
+                int depth = 0;
+                bool split = false;
+                for (size_t k = open + 1; close != std::string::npos && k < close; ++k) {
+                    depth += a[k] == '(' ? 1 : a[k] == ')' ? -1 : 0;
+                    split = split || depth < 0;
+                }
+                if (close == std::string::npos || close < open || split || !trimmed(a.substr(close + 1)).empty())
+                    return reply(done, "'" + trimmed(a) + "' is not one aggregate. Write each as fn(column) or fn(an expression of "
+                                       "the row's columns), with fn sum, avg, min, max or count: for the value of the stock, "
+                                       "sum(qty * unit_cost), not sum(qty) * sum(unit_cost).");
+                const std::string name = a.substr(open + 1, close - open - 1);
                 g.column = column(name);
-                if (g.column < 0)
-                    return reply(done, unknown(trimmed(name)));
+                if (g.column < 0) {
+                    double v = 0;
+                    std::string why;
+                    if (name.find_first_of("*/+-") == std::string::npos || !rowExpression(name, nullptr, v, why))
+                        return reply(done, unknown(trimmed(name)) + ". Inside an aggregate: a column, or an expression of columns "
+                                           "(sum(qty * unit_cost)).");
+                    g.expr = trimmed(name);
+                }
             }
             if (g.fn == "average" || g.fn == "mean")
                 g.fn = "avg";
@@ -3391,38 +3877,69 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                     g.column = column(cols[0]);
                     g.label = g.fn + "(" + trimmed(cols[0]) + ")";
                 }
-            if (g.fn != "count" && (g.column < 0 || (g.fn != "sum" && g.fn != "avg" && g.fn != "min" && g.fn != "max")))
+            if (g.fn != "count" && ((g.column < 0 && g.expr.empty()) || (g.fn != "sum" && g.fn != "avg" && g.fn != "min" && g.fn != "max")))
                 return reply(done, "Write each aggregate as sum(column), avg(column), min(column), max(column) or count.");
             aggs.push_back(g);
         }
+        // By one column, or by several ("day, time": a group for each pair of values).
         const std::string groupName = args.getString("group_by");
-        const int group = groupName.empty() ? -1 : column(groupName);
-        if (!groupName.empty() && group < 0)
-            return reply(done, unknown(groupName));
+        std::vector<int> groupBy;
+        if (!groupName.empty()) {
+            if (const int one = column(groupName); one >= 0) {
+                groupBy.push_back(one);
+            } else {
+                for (const std::string& name : splitList(groupName)) {
+                    const int c = column(name);
+                    if (c < 0)
+                        return reply(done, unknown(trimmed(name)));
+                    groupBy.push_back(c);
+                }
+            }
+        }
+        const int group = groupBy.empty() ? -1 : groupBy.front();
         std::vector<std::string> order;
         std::map<std::string, std::vector<const std::vector<std::string>*>> groups;
         for (const auto* row : picked) {
-            const std::string key = group >= 0 ? cell(*row, group) : std::string("all rows");
+            std::string key;
+            for (const int c : groupBy)
+                key += (key.empty() ? "" : " | ") + cell(*row, c);
+            if (groupBy.empty())
+                key = "all rows";
             if (!groups.count(key))
                 order.push_back(key);
             groups[key].push_back(row);
         }
-        out += group >= 0 ? trimmed(header[size_t(group)]) : std::string("rows");
+        std::string groupHeader;
+        for (const int c : groupBy)
+            groupHeader += (groupHeader.empty() ? "" : " | ") + trimmed(header[size_t(c)]);
+        out += groupBy.empty() ? std::string("rows") : groupHeader;
         for (const Agg& g : aggs)
             out += " | " + g.label;
         out += "\n";
         // Each group's values first, so the groups can be sorted by one ("sum(Profit) desc").
         std::vector<std::pair<std::string, std::vector<double>>> results;
+        // Without groups, the row a min or max is on (a question asks "on which day").
+        std::vector<const std::vector<std::string>*> extremeRow(aggs.size(), nullptr);
+        std::vector<int> extremeRows(aggs.size(), 0);
         for (const std::string& key : order) {
             std::vector<double> values;
-            for (const Agg& g : aggs) {
+            for (size_t k = 0; k < aggs.size(); ++k) {
+                const Agg& g = aggs[k];
                 double total = 0, low = 0, high = 0;
                 int count = 0;
                 for (const auto* row : groups[key]) {
                     double v = 0;
+                    std::string why;
                     if (g.fn == "count") {
                         ++count;
-                    } else if (cellNumber(cell(*row, g.column), v)) {
+                    } else if (g.expr.empty() ? cellNumber(cell(*row, g.column), v) : rowExpression(g.expr, row, v, why)) {
+                        const double extreme = g.fn == "min" ? low : high;
+                        if (count == 0 || (g.fn == "min" ? v < extreme : v > extreme)) {
+                            extremeRow[k] = row;
+                            extremeRows[k] = 1;
+                        } else if (v == extreme) {
+                            ++extremeRows[k];
+                        }
                         low = count == 0 ? v : std::min(low, v);
                         high = count == 0 ? v : std::max(high, v);
                         total += v;
@@ -3455,15 +3972,21 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                 std::stable_sort(results.begin(), results.end(), [&](const auto& a, const auto& b) {
                     return descending ? a.second[size_t(by)] > b.second[size_t(by)] : a.second[size_t(by)] < b.second[size_t(by)];
                 });
-            else if (group >= 0 && column(sort) == group)
+            else if (group >= 0 && std::find(groupBy.begin(), groupBy.end(), column(sort)) != groupBy.end())
                 std::stable_sort(results.begin(), results.end(), [&](const auto& a, const auto& b) {
                     return descending ? lower(a.first) > lower(b.first) : lower(a.first) < lower(b.first);
                 });
             else // the totals all the same, unsorted, saying how they could be sorted
                 out = "(Not sorted: '" + args.getString("sort") + "' is not a column of this result; sort by " +
-                      (group >= 0 ? trimmed(header[size_t(group)]) + " or " : std::string()) + args.getString("aggregate") +
+                      (group >= 0 ? groupHeader + " or " : std::string()) + args.getString("aggregate") +
                       ", with desc for largest first.)\n" + out;
         }
+        // A limit on groups in the order they come: the first ones, not the largest (it was read as the
+        // largest: "the hottest day" was the first day).
+        if (int(results.size()) > limit && sort.empty())
+            out = "(These are the first " + std::to_string(limit) + " of " + std::to_string(results.size()) +
+                  " groups in the order they come, not the largest: add sort, e.g. " + aggs.front().label +
+                  " desc, for the largest first.)\n" + out;
         int shown = 0;
         for (const auto& [key, values] : results) {
             if (++shown > limit)
@@ -3475,6 +3998,41 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
         }
         if (int(results.size()) > limit)
             out += "[" + std::to_string(results.size() - size_t(limit)) + " more groups]\n";
+        // Columns asked for with a total of all rows ("count" and "item, qty"): the rows too, so it
+        // can name them, not only count them.
+        if (groupBy.empty()) {
+            std::vector<int> cols;
+            for (const std::string& name : splitList(args.getString("columns")))
+                if (const int c = column(name); c >= 0)
+                    cols.push_back(c);
+            if (!cols.empty()) {
+                out += "\nThe rows:\n";
+                for (size_t k = 0; k < cols.size(); ++k)
+                    out += (k ? " | " : "") + trimmed(header[size_t(cols[k])]);
+                out += "\n";
+                int listed = 0;
+                for (const auto* row : picked) {
+                    if (++listed > limit)
+                        break;
+                    for (size_t k = 0; k < cols.size(); ++k)
+                        out += (k ? " | " : "") + cell(*row, cols[k]);
+                    out += "\n";
+                }
+                if (int(picked.size()) > limit)
+                    out += "[" + std::to_string(picked.size() - size_t(limit)) + " more rows]\n";
+            }
+        }
+        if (groupBy.empty())
+            for (size_t k = 0; k < aggs.size(); ++k) {
+                if ((aggs[k].fn != "min" && aggs[k].fn != "max") || !extremeRow[k])
+                    continue;
+                std::string row;
+                for (size_t c = 0; c < header.size(); ++c)
+                    if (!trimmed(header[c]).empty())
+                        row += (row.empty() ? "" : ", ") + trimmed(header[c]) + " = " + cell(*extremeRow[k], int(c));
+                out += aggs[k].label + " is on the row: " + row +
+                       (extremeRows[k] > 1 ? " (the first of " + std::to_string(extremeRows[k]) + " rows with it)" : std::string()) + "\n";
+            }
         return reply(done, out);
     }
 

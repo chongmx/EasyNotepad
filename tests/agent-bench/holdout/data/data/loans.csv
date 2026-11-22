@@ -1,0 +1,181 @@
+loan_id,branch,genre,member,days_out,late_fee
+L0001,Hillcrest,Poetry,Child,37,4.00
+L0002,Riverside,Fantasy,Senior,40,4.75
+L0003,Riverside,History,Child,25,1.00
+L0004,Harbour,History,Senior,32,2.75
+L0005,Old Town,Crime,Senior,24,0.75
+L0006,Harbour,Science,Child,17,0.00
+L0007,Harbour,Cookery,Child,9,0.00
+L0008,Harbour,Cookery,Adult,39,4.50
+L0009,Old Town,Cookery,Adult,36,3.75
+L0010,Hillcrest,Cookery,Child,32,2.75
+L0011,Riverside,Fantasy,Child,17,0.00
+L0012,Harbour,History,Adult,23,0.50
+L0013,Old Town,Poetry,Child,36,3.75
+L0014,Hillcrest,Cookery,Senior,17,0.00
+L0015,Harbour,Cookery,Adult,9,0.00
+L0016,Riverside,Cookery,Child,29,2.00
+L0017,Harbour,History,Senior,21,0.00
+L0018,Old Town,Poetry,Child,30,2.25
+L0019,Riverside,Crime,Adult,27,1.50
+L0020,Hillcrest,History,Child,28,1.75
+L0021,Riverside,Science,Senior,27,1.50
+L0022,Harbour,History,Child,8,0.00
+L0023,Hillcrest,Crime,Senior,19,0.00
+L0024,Hillcrest,Poetry,Child,16,0.00
+L0025,Hillcrest,History,Senior,10,0.00
+L0026,Old Town,Fantasy,Adult,31,2.50
+L0027,Harbour,Science,Adult,40,4.75
+L0028,Old Town,Fantasy,Adult,15,0.00
+L0029,Hillcrest,History,Senior,25,1.00
+L0030,Hillcrest,Poetry,Child,30,2.25
+L0031,Hillcrest,Poetry,Senior,40,4.75
+L0032,Riverside,History,Child,27,1.50
+L0033,Riverside,Cookery,Child,21,0.00
+L0034,Old Town,Fantasy,Child,28,1.75
+L0035,Old Town,History,Child,16,0.00
+L0036,Hillcrest,Cookery,Senior,2,0.00
+L0037,Hillcrest,Crime,Senior,27,1.50
+L0038,Riverside,Crime,Senior,38,4.25
+L0039,Hillcrest,Cookery,Senior,34,3.25
+L0040,Riverside,Poetry,Child,2,0.00
+L0041,Riverside,Crime,Adult,4,0.00
+L0042,Hillcrest,Science,Adult,4,0.00
+L0043,Old Town,Crime,Child,21,0.00
+L0044,Riverside,History,Senior,14,0.00
+L0045,Old Town,Poetry,Adult,30,2.25
+L0046,Harbour,Crime,Senior,30,2.25
+L0047,Old Town,Crime,Child,4,0.00
+L0048,Hillcrest,Fantasy,Child,31,2.50
+L0049,Harbour,Cookery,Senior,15,0.00
+L0050,Harbour,Cookery,Adult,15,0.00
+L0051,Old Town,History,Adult,32,2.75
+L0052,Hillcrest,Poetry,Senior,3,0.00
+L0053,Old Town,Poetry,Child,7,0.00
+L0054,Harbour,Science,Child,21,0.00
+L0055,Harbour,Science,Senior,21,0.00
+L0056,Old Town,Poetry,Child,33,3.00
+L0057,Old Town,Fantasy,Adult,8,0.00
+L0058,Harbour,Poetry,Adult,22,0.25
+L0059,Riverside,Cookery,Senior,15,0.00
+L0060,Hillcrest,Cookery,Child,6,0.00
+L0061,Hillcrest,Crime,Senior,14,0.00
+L0062,Old Town,Fantasy,Senior,33,3.00
+L0063,Harbour,Poetry,Adult,8,0.00
+L0064,Riverside,Fantasy,Adult,2,0.00
+L0065,Old Town,Fantasy,Adult,16,0.00
+L0066,Old Town,Cookery,Child,14,0.00
+L0067,Harbour,Cookery,Adult,17,0.00
+L0068,Hillcrest,Poetry,Senior,19,0.00
+L0069,Riverside,Crime,Adult,13,0.00
+L0070,Harbour,Fantasy,Senior,23,0.50
+L0071,Riverside,Crime,Adult,15,0.00
+L0072,Harbour,Poetry,Senior,9,0.00
+L0073,Harbour,Science,Senior,20,0.00
+L0074,Harbour,Fantasy,Adult,2,0.00
+L0075,Riverside,Crime,Child,16,0.00
+L0076,Old Town,Cookery,Adult,21,0.00
+L0077,Hillcrest,Crime,Child,39,4.50
+L0078,Riverside,Cookery,Child,16,0.00
+L0079,Old Town,Science,Senior,1,0.00
+L0080,Old Town,History,Adult,20,0.00
+L0081,Hillcrest,Poetry,Adult,9,0.00
+L0082,Harbour,Crime,Child,15,0.00
+L0083,Old Town,Crime,Senior,33,3.00
+L0084,Old Town,Fantasy,Adult,34,3.25
+L0085,Old Town,Crime,Senior,33,3.00
+L0086,Riverside,Science,Senior,12,0.00
+L0087,Riverside,Crime,Child,9,0.00
+L0088,Harbour,Poetry,Senior,32,2.75
+L0089,Hillcrest,Fantasy,Senior,27,1.50
+L0090,Hillcrest,Cookery,Child,6,0.00
+L0091,Harbour,Poetry,Child,12,0.00
+L0092,Riverside,History,Child,28,1.75
+L0093,Old Town,History,Child,13,0.00
+L0094,Harbour,Science,Adult,33,3.00
+L0095,Old Town,Cookery,Child,28,1.75
+L0096,Old Town,Cookery,Adult,15,0.00
+L0097,Riverside,Fantasy,Child,7,0.00
+L0098,Riverside,Fantasy,Child,37,4.00
+L0099,Old Town,Fantasy,Senior,7,0.00
+L0100,Harbour,Poetry,Child,3,0.00
+L0101,Hillcrest,Cookery,Child,34,3.25
+L0102,Riverside,History,Child,32,2.75
+L0103,Harbour,Fantasy,Senior,36,3.75
+L0104,Riverside,Fantasy,Child,29,2.00
+L0105,Harbour,Cookery,Adult,24,0.75
+L0106,Riverside,Science,Adult,35,3.50
+L0107,Old Town,Science,Adult,1,0.00
+L0108,Old Town,Cookery,Senior,26,1.25
+L0109,Hillcrest,Crime,Adult,5,0.00
+L0110,Riverside,Fantasy,Adult,12,0.00
+L0111,Harbour,History,Adult,20,0.00
+L0112,Hillcrest,History,Adult,34,3.25
+L0113,Hillcrest,Fantasy,Adult,39,4.50
+L0114,Hillcrest,Poetry,Child,14,0.00
+L0115,Old Town,Science,Child,12,0.00
+L0116,Riverside,Fantasy,Child,14,0.00
+L0117,Riverside,Science,Senior,13,0.00
+L0118,Hillcrest,Cookery,Child,14,0.00
+L0119,Old Town,Crime,Adult,10,0.00
+L0120,Riverside,Fantasy,Child,35,3.50
+L0121,Harbour,Science,Senior,37,4.00
+L0122,Old Town,Fantasy,Adult,10,0.00
+L0123,Riverside,Science,Child,2,0.00
+L0124,Riverside,Fantasy,Senior,21,0.00
+L0125,Old Town,Science,Adult,32,2.75
+L0126,Harbour,History,Senior,29,2.00
+L0127,Riverside,Science,Senior,2,0.00
+L0128,Harbour,Poetry,Child,12,0.00
+L0129,Old Town,Science,Child,23,0.50
+L0130,Riverside,Poetry,Child,37,4.00
+L0131,Hillcrest,Fantasy,Senior,8,0.00
+L0132,Old Town,Poetry,Adult,24,0.75
+L0133,Hillcrest,Science,Senior,33,3.00
+L0134,Riverside,Science,Child,16,0.00
+L0135,Hillcrest,History,Child,24,0.75
+L0136,Old Town,History,Child,13,0.00
+L0137,Hillcrest,Cookery,Adult,20,0.00
+L0138,Harbour,Science,Child,25,1.00
+L0139,Riverside,Fantasy,Child,24,0.75
+L0140,Riverside,Fantasy,Child,29,2.00
+L0141,Old Town,Cookery,Adult,30,2.25
+L0142,Old Town,Poetry,Child,9,0.00
+L0143,Harbour,Cookery,Adult,20,0.00
+L0144,Hillcrest,History,Adult,18,0.00
+L0145,Hillcrest,Fantasy,Child,26,1.25
+L0146,Hillcrest,Fantasy,Senior,34,3.25
+L0147,Riverside,Cookery,Senior,9,0.00
+L0148,Hillcrest,History,Child,34,3.25
+L0149,Old Town,Cookery,Adult,6,0.00
+L0150,Riverside,History,Child,3,0.00
+L0151,Riverside,Poetry,Adult,1,0.00
+L0152,Hillcrest,History,Adult,22,0.25
+L0153,Harbour,Science,Child,3,0.00
+L0154,Hillcrest,Poetry,Child,8,0.00
+L0155,Old Town,Science,Adult,3,0.00
+L0156,Riverside,History,Adult,35,3.50
+L0157,Old Town,Poetry,Senior,20,0.00
+L0158,Old Town,Fantasy,Child,31,2.50
+L0159,Harbour,Poetry,Adult,31,2.50
+L0160,Hillcrest,Cookery,Adult,24,0.75
+L0161,Riverside,Cookery,Senior,19,0.00
+L0162,Riverside,Science,Adult,34,3.25
+L0163,Harbour,Poetry,Senior,13,0.00
+L0164,Old Town,Poetry,Senior,32,2.75
+L0165,Old Town,History,Adult,7,0.00
+L0166,Hillcrest,History,Senior,12,0.00
+L0167,Hillcrest,Cookery,Senior,10,0.00
+L0168,Hillcrest,Fantasy,Child,28,1.75
+L0169,Hillcrest,Cookery,Adult,14,0.00
+L0170,Old Town,Crime,Child,33,3.00
+L0171,Riverside,Fantasy,Senior,36,3.75
+L0172,Old Town,Crime,Adult,23,0.50
+L0173,Hillcrest,Cookery,Child,26,1.25
+L0174,Hillcrest,Poetry,Adult,19,0.00
+L0175,Hillcrest,History,Child,30,2.25
+L0176,Old Town,Cookery,Senior,25,1.00
+L0177,Hillcrest,Crime,Senior,14,0.00
+L0178,Harbour,Fantasy,Senior,29,2.00
+L0179,Riverside,Cookery,Senior,17,0.00
+L0180,Old Town,Crime,Child,29,2.00

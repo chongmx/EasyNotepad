@@ -25,6 +25,7 @@ public:
         std::vector<std::string> helper;
         int startSeconds = 60;
         int silenceSeconds = 180;
+        std::string log; // why the GPU was left, appended here (engine.log next to the settings); empty: not kept
     };
     // enp-engine-cuda next to the executable, served by the executable itself; none on phones and the web.
     static std::optional<Accelerator> defaultAccelerator();

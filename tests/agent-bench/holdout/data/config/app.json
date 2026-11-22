@@ -1,0 +1,21 @@
+{
+  "name": "orders-api",
+  "services": {
+    "payments": {
+      "url": "https://pay.internal/v2",
+      "timeout_ms": 4500,
+      "retries": 3
+    },
+    "search": {
+      "url": "https://search.internal",
+      "timeout_ms": 1200,
+      "retries": 1
+    },
+    "mail": {
+      "url": "smtp://mail.internal",
+      "timeout_ms": 8000,
+      "retries": 5
+    }
+  },
+  "log_level": "info"
+}

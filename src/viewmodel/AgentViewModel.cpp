@@ -37,8 +37,8 @@ constexpr const char* kLocalAgentPrompt =
     "Never work out a number yourself - not a sum, difference, total, average, percentage, share, "
     "conversion or rounding, however small: call calculate (several sums at once, separated by ';') "
     "and give the figures it returns. Only counting a few things you can see one by one is yours to do: "
-    "a total of quantities (2 x tea, 1 x cake) is a sum for calculate. Write figures as digits. Answer "
-    "what was asked, in the question's words: \"how much is left\" is not the total.";
+    "a total of quantities (3 x pens, 2 x folders) is a sum for calculate. Write figures as digits. Answer "
+    "what was asked, in the question's words: \"how many are still free\" is not how many there are.";
 
 // Said with each step of a question taken in steps.
 constexpr const char* kStepAsk = "Use your tools, then tell me what you found. If a tool finds nothing or says the call is "
@@ -339,10 +339,11 @@ std::vector<Figure> spelledFigures(const std::string& text)
 // percentage of it). Small whole numbers (counting) and years are left alone. When the model was
 // given pictures or sounds, figures read from them cannot be checked: only lines that work
 // something out ("=", an operator between numbers) are.
-std::vector<std::string> unsourcedFigures(const std::string& answer, const std::vector<interfaces::LocalChatMessage>& messages)
+std::vector<std::string> unsourcedFigures(const std::string& answer, const std::vector<interfaces::LocalChatMessage>& messages,
+                                          bool sawMedia)
 {
     std::vector<Figure> known;
-    bool media = false;
+    bool media = sawMedia;
     for (const interfaces::LocalChatMessage& m : messages) {
         if (m.role != "tool" && m.role != "user")
             continue;
@@ -710,7 +711,143 @@ void AgentViewModel::endLocal()
     os::mem::release(localNamed_);
     localNamedRead_ = false;
     os::mem::release(localStepSkills_);
-    os::mem::release(localSkillsGiven_);
+    os::mem::release(localStepFacts_);
+    os::mem::release(localCallCounts_);
+    os::mem::release(localQuestion_);
+    os::mem::release(localLongTerm_);
+    os::mem::release(localKeep_);
+    os::mem::release(localFound_);
+    os::mem::release(localEvidence_);
+    localBase_ = 0;
+    localSawMedia_ = false;
+    localToolsUsed_ = 0;
+    if (localNamedFiles_)
+        localNamedFiles_({}); // the tools forget the question too
+}
+
+void AgentViewModel::keepFacts(const interfaces::LocalToolCall& call, const std::string& result)
+{
+    // The lines that carry figures, by tool: not the text of documents (that is what was read, not
+    // what was found).
+    std::vector<std::string> lines;
+    size_t from = 0;
+    while (from < result.size()) {
+        size_t end = result.find('\n', from);
+        if (end == std::string::npos)
+            end = result.size();
+        std::string line = result.substr(from, end - from);
+        from = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line.empty() || line[0] == '(')
+            continue; // the app's notes to the model
+        const bool keep = call.name == "calculate"                ? line.find(" = ") != std::string::npos || line.find(": true") != std::string::npos ||
+                                                                       line.find(": false") != std::string::npos
+                          : call.name == "query_table"            ? line.find(" | ") != std::string::npos
+                          : call.name == "list_files"             ? line.rfind("In all: ", 0) == 0 || line.rfind("Listed: ", 0) == 0
+                          : call.name == "extract_from_documents" ? line.rfind("| ", 0) == 0 && line.find("---") == std::string::npos
+                                                                  : false;
+        if (keep && lines.size() < 12)
+            lines.push_back(line.size() > 200 ? line.substr(0, 200) + "..." : line);
+    }
+    if (lines.empty())
+        return;
+    std::string called = describeCall(call);
+    if (called.rfind("\xe2\x9a\x99 ", 0) == 0)
+        called.erase(0, 4); // the chat's gear
+    std::string fact = "- " + called + ":";
+    for (const std::string& l : lines)
+        fact += "\n  " + l;
+    // The step's own, within a budget: shown to the model when it revises its memory after the step
+    // (what to keep of it is the model's to decide).
+    size_t total = fact.size();
+    for (const std::string& f : localStepFacts_)
+        total += f.size();
+    if (total <= kStepFactsChars)
+        localStepFacts_.push_back(std::move(fact));
+}
+
+int& AgentViewModel::callCount(const interfaces::LocalToolCall& call)
+{
+    const std::string key = call.name + "\n" + call.arguments;
+    for (auto& [k, n] : localCallCounts_)
+        if (k == key)
+            return n;
+    localCallCounts_.emplace_back(key, 0);
+    return localCallCounts_.back().second;
+}
+
+std::vector<std::string> AgentViewModel::listUnder(const std::string& text, const std::string& heading)
+{
+    auto lowered = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        return s;
+    };
+    const std::string want = lowered(heading);
+    std::vector<std::string> out;
+    bool in = false;
+    size_t from = 0;
+    while (from <= text.size()) {
+        size_t end = text.find('\n', from);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = text.substr(from, end - from);
+        from = end + 1;
+        size_t i = 0;
+        while (i < line.size() && (std::isspace(static_cast<unsigned char>(line[i])) || line[i] == '#'))
+            ++i;
+        line.erase(0, i);
+        // "- ", "* ", "• " (before **bold** is taken out, which would take a "* " bullet with it)
+        const bool bullet = line.rfind("- ", 0) == 0 || line.rfind("* ", 0) == 0 || line.rfind("\xe2\x80\xa2", 0) == 0;
+        if (bullet)
+            line.erase(0, line[0] == '\xe2' ? 3 : 1);
+        line.erase(std::remove(line.begin(), line.end(), '*'), line.end()); // **bold**
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front())))
+            line.erase(line.begin());
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+            line.pop_back();
+        if (line.empty())
+            continue;
+        if (!in) {
+            const std::string low = lowered(line);
+            if (low.rfind(want, 0) == 0) {
+                in = true;
+                // "Keep in mind: one thing" on the heading's line
+                const std::string rest = line.substr(std::min(line.size(), want.size()));
+                size_t r = rest.find_first_not_of(" :");
+                if (r != std::string::npos && out.size() < kMemoryLines)
+                    out.push_back(rest.substr(r));
+            }
+            continue;
+        }
+        if (!bullet)
+            break; // the next heading, or the numbered steps
+        if (out.size() < kMemoryLines)
+            out.push_back(line.substr(0, 300));
+    }
+    return out;
+}
+
+std::string AgentViewModel::taskMemory(size_t now) const
+{
+    std::string m = "Your memory for this task (the app keeps it between the steps; it holds what you need from the "
+                    "earlier ones):\n\n## My question\n" + localQuestion_ + "\n";
+    if (!localKeep_.empty()) {
+        m += "\n## Keep in mind\n";
+        for (const std::string& k : localKeep_)
+            m += "- " + k + "\n";
+    }
+    m += "\n## The plan\n";
+    for (size_t i = 0; i < localSteps_.size(); ++i)
+        m += std::to_string(i + 1) + ". " + localSteps_[i] + (i < now ? " (done)" : i == now ? " (now)" : "") + "\n";
+    if (!localFound_.empty()) {
+        m += "\n## Found so far\n";
+        for (const std::string& f : localFound_)
+            m += "- " + f + "\n";
+    }
+    if (!localLongTerm_.empty())
+        m += "\n## From your long-term memory\n" + localLongTerm_ + "\n";
+    return m;
 }
 
 std::vector<std::string> AgentViewModel::planSteps(const std::string& plan)
@@ -787,12 +924,11 @@ std::string AgentViewModel::skillsFor(size_t step)
         return {};
     std::string out;
     for (const std::string& name : localStepSkills_[step]) {
-        if (std::find(localSkillsGiven_.begin(), localSkillsGiven_.end(), name) != localSkillsGiven_.end())
-            continue; // given at an earlier step: still in the conversation
+        // Each step has its own context (the task's memory and the step): its skills come with it,
+        // even when an earlier step had them.
         const std::string text = localSkill_(name);
         if (text.empty())
             continue; // a skill the plan made up
-        localSkillsGiven_.push_back(name);
         out += "\n\nYour " + name + " skill, for this step:\n" + text;
     }
     return out;
@@ -832,26 +968,52 @@ void AgentViewModel::planLocal(int generation, std::string question)
         [this, generation](const interfaces::LocalChatResult& r) {
             if (generation != generation_)
                 return; // stopped or replaced
-            std::vector<std::string> steps = r.ok ? planSteps(r.text) : std::vector<std::string>();
+            // What to keep in mind, then the steps (after "Steps:" when it wrote that: its list of what
+            // to keep in mind may be numbered too).
+            std::string stepsText = r.ok ? r.text : std::string();
+            {
+                std::string low = stepsText;
+                std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                low.erase(std::remove(low.begin(), low.end(), '*'), low.end());
+                const size_t at = low.rfind("steps:");
+                if (at != std::string::npos && (at == 0 || low[at - 1] == '\n' || low[at - 1] == ' ' || low[at - 1] == '#')) {
+                    // the same place in the text as written ('*' taken out of the lowered copy only)
+                    size_t seen = 0, i = 0;
+                    for (; i < stepsText.size() && seen < at; ++i)
+                        seen += stepsText[i] != '*';
+                    stepsText.erase(0, i);
+                }
+            }
+            std::vector<std::string> steps = planSteps(stepsText);
+            localKeep_ = r.ok ? listUnder(r.text, "Keep in mind") : std::vector<std::string>();
             // The skills each step needs, out of its text: given with the step, not all up front.
             os::mem::release(localStepSkills_);
             for (std::string& step : steps)
                 localStepSkills_.push_back(stepSkills(step));
             if (steps.size() >= 2 && !localRequest_.messages.empty()) {
-                std::string list, shown;
+                std::string shown;
                 for (size_t i = 0; i < steps.size(); ++i) {
-                    list += std::to_string(i + 1) + ". " + steps[i] + "\n";
                     std::string skills;
                     for (const std::string& s : localStepSkills_[i])
                         skills += (skills.empty() ? " [skills: " : ", ") + s;
                     shown += std::to_string(i + 1) + ". " + steps[i] + (skills.empty() ? "" : skills + "]") + "\n";
                 }
-                messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + shown});
+                std::string keep;
+                for (const std::string& k : localKeep_)
+                    keep += "- " + k + "\n";
+                messages_.push_back({model::ChatRole::Tool, "Plan, one step at a time:\n" + shown +
+                                                                (keep.empty() ? std::string() : "Keep in mind:\n" + keep)});
                 messages_.push_back({model::ChatRole::Tool, "Step 1 of " + std::to_string(steps.size()) + ": " + steps[0]});
-                localRequest_.messages.back().text += "\n\nWe will work through this in steps:\n" + list + "\nDo step 1 only now: " +
-                                                      steps[0] + "\n" + kStepAsk + skillsFor(0);
                 localSteps_ = std::move(steps);
                 localStep_ = 1;
+                // Step 1 with the task's memory, in place of the question (the memory holds it).
+                localRequest_.messages.erase(localRequest_.messages.begin() + long(std::min(localBase_, localRequest_.messages.size())),
+                                             localRequest_.messages.end());
+                const std::string memory = taskMemory(0);
+                if (localTaskMemory_)
+                    localTaskMemory_(memory);
+                localRequest_.messages.emplace_back("user", memory + "\nDo step 1 only now: " + localSteps_[0] + "\n" + kStepAsk +
+                                                                skillsFor(0));
             } else if (steps.size() == 1 && !localRequest_.messages.empty()) {
                 localRequest_.messages.back().text += skillsFor(0); // the question as it is, with its skills
             }
@@ -863,23 +1025,115 @@ bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
 {
     if (localSteps_.empty() || localStep_ > localSteps_.size())
         return false;
-    localRequest_.messages.emplace_back("assistant", answer);
-    std::string next;
+    if (localStep_ == localSteps_.size() + 1)
+        return false; // the answer was asked for: this is it
+    reviseMemory(generation, answer); // then the next step, or the answer (stepOn)
+    return true;
+}
+
+// After a step: the model revises the task's memory from what the step reported - what to keep in
+// mind (corrected, added to, what is done with left out) and what the steps found - in a request of
+// its own, without tools. Its figures stay checked against the tools' (the evidence), and the
+// tools' own figures stay in the memory as they gave them.
+void AgentViewModel::reviseMemory(int generation, const std::string& answer)
+{
+    const size_t done = localStep_ - 1;
+    std::string stepFacts;
+    for (const std::string& f : localStepFacts_)
+        stepFacts += f + "\n";
+    interfaces::LocalChatRequest revise;
+    revise.modelPath = localRequest_.modelPath;
+    revise.drafterPath = localRequest_.drafterPath;
+    revise.projectorPath = localRequest_.projectorPath;
+    revise.threads = localRequest_.threads;
+    revise.useGpu = localRequest_.useGpu;
+    revise.contextTokens = localRequest_.contextTokens;
+    revise.maxTokens = 600;
+    revise.temperature = 0.0f;
+    revise.messages.emplace_back(
+        "system",
+        "You keep the memory of a task done in steps. From the memory and what the last step reported, write the "
+        "memory for the rest of the task, in exactly this form and nothing else:\n"
+        "Keep in mind:\n- (each detail the remaining steps and the answer need: the values the question picks by, the "
+        "files, columns, units and what it asks for; correct any the step showed wrong, add any it learned, such as an "
+        "exact column or file name; leave out what is done with)\n"
+        "Found:\n- (each thing the steps found, one line each, with its figures exactly as the tools gave them and "
+        "where it came from; keep the earlier ones unless the step showed them wrong; never work out a figure)");
+    revise.messages.emplace_back("user", taskMemory(done) + "\nStep " + std::to_string(done + 1) + " (" + localSteps_[done] +
+                                             ") reported:\n" + (answer.empty() ? std::string("(nothing)") : answer) +
+                                             (stepFacts.empty() ? std::string() : "\n\nIts tools gave:\n" + stepFacts) +
+                                             "\n\nNow write the memory.");
+    activity_ = "Local model: updating the task's memory";
+    local_->chat(
+        revise, [](const std::string&) {}, [](const std::string&) {},
+        [this, generation, answer, done](const interfaces::LocalChatResult& r) {
+            if (generation != generation_)
+                return; // stopped or replaced
+            std::vector<std::string> keep = r.ok ? listUnder(r.text, "Keep in mind") : std::vector<std::string>();
+            std::vector<std::string> found = r.ok ? listUnder(r.text, "Found") : std::vector<std::string>();
+            // A revision that lost what was found (or failed): the step's report is added as it is.
+            if (found.size() < localFound_.size() || found.empty()) {
+                std::string report = answer.substr(0, 600);
+                std::replace(report.begin(), report.end(), '\n', ' ');
+                localFound_.push_back("Step " + std::to_string(done + 1) + ": " + report);
+                if (localFound_.size() > kMemoryLines)
+                    localFound_.erase(localFound_.begin());
+            } else {
+                localFound_ = std::move(found);
+            }
+            if (!keep.empty())
+                localKeep_ = std::move(keep);
+            stepOn(generation);
+        });
+}
+
+void AgentViewModel::stepOn(int generation)
+{
+    os::mem::release(localStepFacts_);
+    os::mem::release(localCallCounts_); // a call made at an earlier step may be made again
+    // What the last step's tools returned, the newest first within a budget: the next step often
+    // works on it (the transcript read, the rows found), and the memory holds only what the model
+    // wrote down. Older steps reach it through the memory alone.
+    std::vector<std::string> lastResults;
+    size_t lastChars = 0;
+    for (size_t k = localRequest_.messages.size(); k-- > std::min(localBase_ + 1, localRequest_.messages.size());) {
+        const interfaces::LocalChatMessage& m = localRequest_.messages[k];
+        if (m.role != "tool" || m.text.empty())
+            continue;
+        std::string text = m.text;
+        if (lastChars + text.size() > kLastStepChars) {
+            if (lastChars + 500 > kLastStepChars)
+                break;
+            text = text.substr(0, kLastStepChars - lastChars) + "\n[cut]";
+        }
+        lastChars += text.size();
+        lastResults.insert(lastResults.begin(), "- " + m.toolName + ":\n" + text);
+    }
+    // A fresh context for each step: the messages before the question, then the memory and the step.
+    localRequest_.messages.erase(localRequest_.messages.begin() + long(std::min(localBase_, localRequest_.messages.size())),
+                                 localRequest_.messages.end());
+    localRequest_.temperature = 0.0f; // a loop's variety was for the step it looped in
+    const std::string memory = taskMemory(localStep_);
+    if (localTaskMemory_)
+        localTaskMemory_(memory);
+    std::string next = memory;
+    if (!lastResults.empty()) {
+        next += "\n## What the last step's tools returned\n";
+        for (const std::string& r : lastResults)
+            next += r + "\n";
+    }
     if (localStep_ < localSteps_.size()) {
         const std::string number = std::to_string(localStep_ + 1);
         messages_.push_back({model::ChatRole::Tool,
                              "Step " + number + " of " + std::to_string(localSteps_.size()) + ": " + localSteps_[localStep_]});
-        next = "Now step " + number + ": " + localSteps_[localStep_] + "\n" + kStepAsk + "\n(My question, for reference: " +
-               localPrompt_ + ")" + skillsFor(localStep_);
+        next += "\nNow step " + number + ": " + localSteps_[localStep_] + "\n" + kStepAsk + skillsFor(localStep_);
     } else {
         messages_.push_back({model::ChatRole::Tool, "All steps done: the answer"});
-        next = "All the steps are done. Now answer my question in full, from what the steps found, with the figures exactly "
-               "as the tools gave them. Answer each thing it asks, one by one, in its words, with the figures each "
-               "rests on: " + localPrompt_;
-        if (const std::string reminder = localReminder_ ? localReminder_() : std::string(); !reminder.empty())
-            next += "\n\n(" + reminder + ")";
+        next += "\nAll the steps are done. Now answer my question in full, from the memory above, with the figures "
+               "exactly as the tools gave them. Answer each thing it asks, one by one, in its words, with the figures "
+               "each rests on: " + localPrompt_;
     }
-    // Its working notes: what earlier steps found, kept outside the conversation.
+    // Its working notes (the note tool), when it kept any.
     if (const std::string notes = localNotes_ ? localNotes_() : std::string(); !notes.empty())
         next += "\n\nYour notes so far:\n" + notes;
     ++localStep_;
@@ -887,7 +1141,6 @@ bool AgentViewModel::nextLocalStep(int generation, const std::string& answer)
     localNudges_ = 0;
     localRequest_.messages.emplace_back("user", std::move(next));
     sendLocal(generation);
-    return true;
 }
 
 void AgentViewModel::askLocal(const std::string& prompt, const std::string& context, const std::string& note)
@@ -988,10 +1241,20 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     // (at 0.3 a small model took another plan or left out a condition now and then). Back to 0.3
     // when it repeats a call (greedy loops).
     request.temperature = tools ? 0.0f : -1.0f;
-    if (const std::string reminder = tools && localReminder_ ? localReminder_() : std::string(); !reminder.empty())
+    localQuestion_ = question; // for the task's memory, when it is taken in steps
+    if (const std::string reminder = tools && localReminder_ ? localReminder_() : std::string(); !reminder.empty()) {
         question += "\n\n(" + reminder + ")";
+        localLongTerm_ = reminder;
+    }
     asked.text = std::move(question);
     request.messages.push_back(std::move(asked));
+    localBase_ = request.messages.size() - 1;
+    // The answer's figures are checked against what the user wrote and what the tools gave.
+    for (const interfaces::LocalChatMessage& m : request.messages)
+        if (m.role == "user") {
+            localEvidence_.emplace_back("user", m.text);
+            localSawMedia_ = localSawMedia_ || !m.media.empty();
+        }
 
     localPrompt_ = prompt;
     const int generation = ++generation_;
@@ -1047,9 +1310,7 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
         }
         // The question names files and it answered without reading anything ("there is no such file"):
         // back to it, to read them first.
-        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && !localNamed_.empty() &&
-            std::none_of(localRequest_.messages.begin(), localRequest_.messages.end(),
-                         [](const interfaces::LocalChatMessage& m) { return m.role == "tool"; })) {
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && !localNamed_.empty() && localToolsUsed_ == 0) {
             ++localNudges_;
             if (empty)
                 messages_.erase(messages_.begin() + long(at));
@@ -1058,6 +1319,28 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                                                             " Read them with those tools now, then answer from what they hold.");
             sendLocal(generation);
             return;
+        }
+        // A question not in steps whose last query did not pick rows by a value the question names
+        // (said at the top of its reply), answered from it all the same: back to it, to query again.
+        // (A step of a plan may want all rows: "the total", for a share.)
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds && localSteps_.empty()) {
+            for (size_t k = localRequest_.messages.size(); k-- > 0;) {
+                const interfaces::LocalChatMessage& m = localRequest_.messages[k];
+                if (m.role != "tool" || m.toolName != "query_table")
+                    continue;
+                if (m.text.rfind("(My question names", 0) == 0) {
+                    ++localNudges_;
+                    localRequest_.messages.emplace_back("assistant", r.text);
+                    localRequest_.messages.emplace_back("user", "Your last query_table call did not pick rows by what my question "
+                                                                "names (the note at the top of its reply). Make the call again "
+                                                                "with it in where, then answer from that.");
+                    if (empty)
+                        messages_.erase(messages_.begin() + long(at));
+                    sendLocal(generation);
+                    return;
+                }
+                break; // the last query: only it counts
+            }
         }
         // The user asked it to remember something and it only said it would: tell it to save it.
         if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && asksToRemember(localPrompt_) &&
@@ -1082,7 +1365,7 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
         // Figures no tool gave: worked out in its head, or made up. Back to it, to use calculate.
         if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localRounds_ < kMaxToolRounds &&
             hasTool(localRequest_.tools, "calculate")) {
-            if (const std::vector<std::string> figures = unsourcedFigures(r.text, localRequest_.messages); !figures.empty()) {
+            if (const std::vector<std::string> figures = unsourcedFigures(r.text, localEvidence_, localSawMedia_); !figures.empty()) {
                 ++localNudges_;
                 std::string list;
                 for (const std::string& f : figures)
@@ -1119,6 +1402,35 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
             localRequest_.messages.emplace_back("user", "Go on: make that tool call now - call the tool, do not describe it.");
             sendLocal(generation);
             return;
+        }
+        // The same call a third time in this step (the second time it was told not to): stuck. A step
+        // of a plan ends there, saying so (its memory keeps that it could not be done); a question
+        // not in steps is asked to answer from what it has.
+        if (!r.toolCalls.empty() && runTool_) {
+            const auto stuck = std::find_if(r.toolCalls.begin(), r.toolCalls.end(),
+                                            [this](const interfaces::LocalToolCall& c) { return callCount(c) >= kStuckCalls - 1; });
+            const bool inStep = !localSteps_.empty() && localStep_ <= localSteps_.size();
+            if (stuck != r.toolCalls.end() && (inStep || localNudges_ < 2)) {
+                std::string what = describeCall(*stuck);
+                if (what.rfind("\xe2\x9a\x99 ", 0) == 0)
+                    what.erase(0, 4);
+                if (empty)
+                    messages_.erase(messages_.begin() + long(at));
+                if (inStep) {
+                    messages_.push_back({model::ChatRole::Tool, "This step is stuck (the same call again: " + what + "): on to the next"});
+                    nextLocalStep(generation, "I could not do this step: " + what + " gave the same reply each time I made it.");
+                    return;
+                }
+                {
+                    ++localNudges_;
+                    localRequest_.messages.emplace_back("assistant", r.text);
+                    localRequest_.messages.emplace_back("user", "You have made that same call three times and got the same reply. "
+                                                                "Do not make it again: answer my question now from what you have, "
+                                                                "and say what you could not find.");
+                    sendLocal(generation);
+                    return;
+                }
+            }
         }
         if (!r.toolCalls.empty() && runTool_ && localRounds_ < kMaxToolRounds) {
             ++localRounds_;
@@ -1221,6 +1533,14 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
         result.toolCallId = calls[next].id;
         result.toolName = calls[next].name;
         result.text = std::move(out.text);
+        keepFacts(calls[next], result.text);
+        // The same call again in this step: said, so it changes something instead of looping.
+        if (++callCount(calls[next]) == kStuckCalls - 1)
+            result.text += "\n\n(You made this same call before in this step and got this same reply: do not make it "
+                           "again. Change it - another column, value, file or tool - or answer from what you have.)";
+        ++localToolsUsed_;
+        localSawMedia_ = localSawMedia_ || !out.media.empty();
+        localEvidence_.emplace_back("tool", result.text);
         if (result.text.size() > kToolTextChars)
             result.text = result.text.substr(0, kToolTextChars) + "\n[cut: ask for a smaller part]";
         // Another file read than the one the question names (the file left open in the editor):

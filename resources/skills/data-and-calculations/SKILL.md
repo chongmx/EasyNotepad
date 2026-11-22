@@ -15,7 +15,7 @@ Several at once, named, each using the ones before (separated by `;`):
 Functions: sqrt abs round(x, places) floor ceil min max sum avg pow log ln exp, pi, e.
 Take the figures from the tools' replies exactly as they are, then answer with what calculate
 returns. Write figures as digits (18000, not "eighteen thousand").
-Mind the units a heading gives: "Population (millions)" 5.5 is 5.5 * 1000000 people. A density, a
+Mind the units a heading gives: "Weight (thousand tonnes)" 4.2 is 4.2 * 1000 tonnes. A rate, a
 share or a price per unit is worked out from the whole figures.
 
 ## Tables: query_table
