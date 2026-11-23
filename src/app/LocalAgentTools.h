@@ -56,6 +56,7 @@ public:
     // with the tool that reads it; empty when it names none.
     std::string namedFiles(const std::string& question);
     std::string othersBeside(const std::string& path, const std::string& absolute, const std::string& self, bool picture) const;
+    std::string transcriptNote(const std::string& path, const std::string& absolute) const;
 
     // Once a frame: a look at a page waits some frames for the page to be read and drawn.
     void tick();

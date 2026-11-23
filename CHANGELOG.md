@@ -176,6 +176,15 @@ its release notes on GitHub.
 - A third search in one step that finds nothing says the thing may be elsewhere or in no text:
   search the whole folder, and look at the pictures and recordings the tools named.
 - Qwen 3.5 9B keeps its context cache in 8 bits on the GPU, for more context in the same memory.
+- `search_files` for a phrase no line holds ("lasagne recipe") answered only "No lines", and the
+  model said the recipe was not there. It now also names the files whose names hold its words
+  (`recipes/lasagne.md`) and the lines with each word alone.
+- A transcript named without its recording's extension ("voicemail 0417.transcript.md") is
+  matched to its recording; `transcribe` and `read_closely` name the other recordings too.
+- The answer check's reply "The previous answer did not give..." replaced the answer: a reply
+  about the answer, not one, keeps the answer checked.
+- An agent that ran out of rounds of tools ended with nothing, or with "Let me search for...". It
+  is now asked once to answer from what the tools found; a step of a plan goes on to the next.
 - A parking fine that was only a photo was searched for 16 rounds of tools, until the agent gave
   up. A `search_files` or `search_documents` that finds nothing now names the pictures and
   recordings it could not read.

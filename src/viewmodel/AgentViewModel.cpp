@@ -426,7 +426,17 @@ bool checkPassed(const std::string& text)
     for (char c : text)
         if (std::isalpha(static_cast<unsigned char>(c)))
             t += char(std::tolower(static_cast<unsigned char>(c)));
-    return t == "ok" || t == "okay" || t == "yes" || t == "yesok" || t == "okyes";
+    if (t == "ok" || t == "okay" || t == "yes" || t == "yesok" || t == "okyes")
+        return true;
+    // A reply about the answer instead of one ("The previous answer did not give the date because the
+    // transcript..."): no better answer, so the answer checked stands.
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    for (const char* about : {"previous answer", "my answer", "the answer above", "earlier answer", "the answer did not",
+                              "the answer does not", "my previous", "the last answer"})
+        if (lower.find(about) != std::string::npos)
+            return true;
+    return false;
 }
 
 // The answer only says it will call one of the tools ("I will now call inspect_binary with ..."),
@@ -780,6 +790,7 @@ void AgentViewModel::endLocal()
     localSawMedia_ = false;
     localToolsUsed_ = 0;
     localChecked_ = false;
+    localOutOfRounds_ = false;
     localCheckedAt_ = std::string::npos;
     localEmptySearches_ = 0;
     if (localNamedFiles_)
@@ -1571,6 +1582,26 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                 }
             }
         }
+        // Out of rounds of tools and still calling (or saying what it will call): the looking ends
+        // there. A step of a plan goes on to the next with what it found; a question is asked once to
+        // answer from what the tools found (it stopped with nothing, or with "Let me search for ...").
+        if (runTool_ && localRounds_ >= kMaxToolRounds && !localOutOfRounds_ &&
+            (!r.toolCalls.empty() || announcesCall(r.text, localRequest_.tools))) {
+            if (at < messages_.size())
+                messages_.erase(messages_.begin() + long(at)); // a call, or one announced: not the answer
+            if (!localSteps_.empty() && localStep_ <= localSteps_.size()) {
+                messages_.push_back({model::ChatRole::Tool, "This step ran out of rounds of tools: on to the next"});
+                nextLocalStep(generation, "I ran out of tool calls in this step: what the tools found is above.");
+                return;
+            }
+            localOutOfRounds_ = true;
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back("user", "That is all the looking there is time for: do not call a tool again. Answer "
+                                                        "my question now from what the tools found above, with the figures as they "
+                                                        "gave them, and say what you could not find.");
+            sendLocal(generation);
+            return;
+        }
         if (!r.toolCalls.empty() && runTool_ && localRounds_ < kMaxToolRounds) {
             ++localRounds_;
             // A call it made before in this step (or question), the same: greedy choice loops; some
@@ -1613,7 +1644,8 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                 "user", "Check your answer against my question: does it give each amount, date or time I asked for, worked out "
                         "to the final figure (not only the figures to work it out from, such as a percentage of a price, a "
                         "time before another, or a rule with a limit)? If it does, reply only: OK. If not, work it out now "
-                        "(calculate) and give the whole answer again.");
+                        "(calculate) and write the whole answer to my question again, as your answer (do not mention this "
+                        "check or an earlier answer).");
             sendLocal(generation);
             return;
         }

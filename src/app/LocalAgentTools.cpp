@@ -1376,16 +1376,65 @@ void LocalAgentTools::readFile(const Json& args, Done done)
                "\", \"objective\": \"...\"} to go through all of it for what you need]\n";
     // A transcript written earlier ("voicemail.wav.transcript.md"): which recording it is of, and the
     // other recordings beside it (a model answered about a voicemail from a team call's transcript).
-    if (const std::string name = fileName(path); lower(name).find(".transcript") != std::string::npos) {
-        const std::string recording = name.substr(0, lower(name).find(".transcript"));
-        if (kindOf(recording) == FileKind::Sound)
-            out += "(This is the transcript of the recording " + recording + "." + othersBeside(path, absolute, recording, false) + ")\n";
-    }
+    out += transcriptNote(path, absolute);
     reply(done, out);
+}
+
+// For a transcript written earlier, named "<recording>.transcript.md" ("voicemail 0417.transcript
+// (2).md", with or without the recording's extension): which recording it is of, and the other
+// recordings beside it when the question names none. Empty for other files.
+std::string LocalAgentTools::transcriptNote(const std::string& path, const std::string& absolute) const
+{
+    const std::string name = fileName(path);
+    if (lower(name).find(".transcript") == std::string::npos)
+        return {};
+    std::string recording = name.substr(0, lower(name).find(".transcript"));
+    if (kindOf(recording) != FileKind::Sound) {
+        const size_t slash = absolute.find_last_of("/\\");
+        std::string found;
+        if (slash != std::string::npos)
+            for (const os::fs::DirEntry& e : os::fs::listDirectory(absolute.substr(0, slash)))
+                if (!e.isDirectory && kindOf(e.name) == FileKind::Sound && e.name.find_last_of('.') != std::string::npos &&
+                    lower(e.name.substr(0, e.name.find_last_of('.'))) == lower(recording))
+                    found = e.name;
+        recording = found;
+    }
+    if (recording.empty())
+        return {};
+    return "(This is the transcript of the recording " + recording + "." + othersBeside(path, absolute, recording, false) + ")\n";
 }
 
 namespace {
 std::string unsearchedMedia(const std::string& root, const std::string& dir);
+std::string oneLine(std::string s, size_t most);
+
+// The files under `root` whose path holds one of `words` (lower case), as paths from it; up to 8.
+std::string filesNamedBy(const std::string& root, const std::vector<std::string>& words)
+{
+    std::string names;
+    size_t count = 0, seen = 0;
+    std::vector<std::string> todo{root};
+    while (!todo.empty() && seen < 3000) {
+        const std::string at = todo.back();
+        todo.pop_back();
+        for (const os::fs::DirEntry& e : os::fs::listDirectory(at)) {
+            if (e.hidden || e.name == "node_modules" || ++seen > 3000)
+                continue;
+            const std::string full = at + "/" + e.name;
+            if (e.isDirectory) {
+                if (todo.size() < 500)
+                    todo.push_back(full);
+                continue;
+            }
+            const std::string rel = full.substr(std::min(full.size(), root.size() + 1));
+            const std::string low = lower(rel);
+            if (std::any_of(words.begin(), words.end(), [&](const std::string& w) { return low.find(w) != std::string::npos; }) &&
+                ++count <= 8)
+                names += (names.empty() ? "" : ", ") + rel;
+        }
+    }
+    return names + (count > 8 ? ", ..." : "");
+}
 } // namespace
 
 void LocalAgentTools::searchFiles(const Json& args, Done done)
@@ -1432,7 +1481,46 @@ void LocalAgentTools::searchFiles(const Json& args, Done done)
     if (count == 0) {
         std::string error;
         const std::string root = resolve("", error);
-        return reply(done, "No lines with " + what + "." + (root.empty() ? std::string() : unsearchedMedia(root, root)));
+        // A phrase no line holds ("lasagne recipe", "boiler pressure"): the files its words name
+        // (lasagne.md, "boiler - user guide.txt"), and the lines with each word alone. A model took
+        // "no lines" for "not in the folder" and answered so.
+        std::string more;
+        std::vector<std::string> words;
+        {
+            static const char* const common[] = {"the", "and", "for", "with", "from", "that", "this", "what", "which", "how",
+                                                 "where", "when", "does", "are", "was", "all", "any", "about", "into"};
+            std::string w;
+            for (char c : lower(args.getString("query")) + " ") {
+                if (std::isalnum(static_cast<unsigned char>(c)) || (c & 0x80)) {
+                    w += c;
+                    continue;
+                }
+                if (w.size() >= 3 && std::none_of(std::begin(common), std::end(common), [&](const char* x) { return w == x; }) &&
+                    std::find(words.begin(), words.end(), w) == words.end())
+                    words.push_back(w);
+                w.clear();
+            }
+        }
+        if (!root.empty() && !words.empty() && also.empty()) {
+            if (const std::string named = filesNamedBy(root, words); !named.empty())
+                more += "\nFiles whose names hold its words: " + named + ". Read or look at the likely one.";
+            if (words.size() > 1)
+                for (const std::string& word : words) {
+                    Json one = params;
+                    one.set("query", word);
+                    if (!handleAutomation(vm_, "search_files", one).getString("error").empty())
+                        continue;
+                    int lines = 0;
+                    std::string some;
+                    for (const auto& file : vm_.findInFiles().results())
+                        for (const auto& hit : file.hits)
+                            if (++lines <= 4)
+                                some += "\n  " + file.path + ":" + std::to_string(hit.line + 1) + ": " + oneLine(hit.text, 120);
+                    if (lines)
+                        more += "\nLines with '" + word + "' alone (" + std::to_string(lines) + "):" + some + (lines > 4 ? "\n  ..." : "");
+                }
+        }
+        return reply(done, "No lines with " + what + "." + more + (root.empty() ? std::string() : unsearchedMedia(root, root)));
     }
     std::string out = std::to_string(count) + (count == 1 ? " line" : " lines") + " with " + what + ", in " +
                       std::to_string(inFiles.size()) + (inFiles.size() == 1 ? " file" : " files") + ":\n" + listed;
@@ -2532,6 +2620,9 @@ void LocalAgentTools::closePass(std::shared_ptr<CloseReadJob> job, Done done)
             out += "\n(" + std::to_string(job->dropped) + " note(s) left out: their figures are not in the part they came from.)\n";
         if (!job->problem.empty())
             out += "Note: " + job->problem + "\n";
+        std::string error;
+        if (const std::string absolute = resolve(job->file, error); !absolute.empty())
+            out += transcriptNote(job->file, absolute);
         return reply(done, out);
     }
     interfaces::LocalChatRequest r = passRequest(700);
@@ -4607,9 +4698,10 @@ void LocalAgentTools::transcribe(const Json& args, Done done)
     }
     std::weak_ptr<bool> alive = alive_;
     viewmodel::NotepadViewModel* vm = &vm_;
+    const std::string others = othersBeside(path, absolute, fileName(path), false);
     writeDown(
         path, std::move(*bytes),
-        [alive, vm, path, target, done = std::move(done)](const interfaces::LocalChatResult& r) {
+        [alive, vm, path, target, others, done = std::move(done)](const interfaces::LocalChatResult& r) {
             if (!alive.lock())
                 return;
             if (!r.ok)
@@ -4624,7 +4716,7 @@ void LocalAgentTools::transcribe(const Json& args, Done done)
             reply(done, "Wrote the transcript of " + path + " (" + std::to_string(words) + " words) to " + vm->workspaceRelative(target) +
                             " and opened it for the user. For minutes: the text does not say who speaks - use the names that "
                             "are said; \"I\" is a participant, not you; list every action item said, with its owner and date. "
-                            "The text:\n" + r.text);
+                            "The text:\n" + r.text + others);
         });
 }
 

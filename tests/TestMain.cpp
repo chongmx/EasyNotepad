@@ -4131,6 +4131,8 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     // counted here, not in chats (an answer that gives what was asked: OK).
     std::string checkReply = "OK";
     std::vector<interfaces::LocalChatRequest> checks;
+    // Told it is out of rounds of tools ("That is all the looking"): answered with this when set.
+    std::string lastWord;
     void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
               std::function<void(const std::string&)> text, std::function<void(const interfaces::LocalChatResult&)> done) override
     {
@@ -4166,6 +4168,13 @@ struct FakeEngine final : interfaces::ILocalEngineService {
             return;
         }
         // The model wants tools: each chat takes the next round of calls (or always, when set).
+        if (!lastWord.empty() && request.messages.back().text.rfind("That is all the looking", 0) == 0) {
+            r.ok = true;
+            r.text = lastWord;
+            text(r.text);
+            done(r);
+            return;
+        }
         if (!toolRounds.empty() || alwaysTools) {
             r.ok = true;
             if (alwaysTools) {
@@ -4733,12 +4742,14 @@ TEST(local_agent_calls_tools_until_it_answers)
     CHECK_EQ(engine.chats.size(), asked2);
 
     // A model that never stops calling tools is stopped after the limit, and says so. Its call is the
-    // same each time: from the third on it is told (twice) to answer from what it has instead.
+    // same each time: from the third on it is told (twice) to answer from what it has instead; out of
+    // rounds, once more to answer without tools.
     engine.alwaysTools = true;
     const size_t before = engine.chats.size();
     agent.submitPrompt("Loop");
-    CHECK_EQ(engine.chats.size() - before, size_t(viewmodel::AgentViewModel::kMaxToolRounds + 1 + 2));
+    CHECK_EQ(engine.chats.size() - before, size_t(viewmodel::AgentViewModel::kMaxToolRounds + 1 + 2 + 1));
     CHECK(!agent.busy.get() && agent.messages().back().text.find("rounds of tools") != std::string::npos);
+    CHECK(engine.chats.back().messages.back().text.rfind("That is all the looking", 0) == 0);
     int stuckSaid = 0;
     for (size_t i = before; i < engine.chats.size(); ++i)
         stuckSaid += engine.chats[i].messages.back().text.find("You have made that same call three times") != std::string::npos;
@@ -4747,6 +4758,11 @@ TEST(local_agent_calls_tools_until_it_answers)
     for (const interfaces::LocalChatMessage& m : engine.chats.back().messages)
         repeatSaid = repeatSaid || m.text.find("(You made this same call before in this step") != std::string::npos;
     CHECK(repeatSaid);
+    // Told so, it answers from what it found: that is the answer shown.
+    engine.lastWord = "The fine is 60 and the gym 39: 99 together.";
+    agent.submitPrompt("Loop again");
+    CHECK(!agent.busy.get() && agent.messages().back().text == engine.lastWord);
+    engine.lastWord.clear();
     engine.alwaysTools = false;
 
     // Plan only: no edit tools.
@@ -5772,6 +5788,10 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
           taxis.find("Exactly as called (Category = Taxi)") != std::string::npos && taxis.find("all rows | 15") != std::string::npos);
     CHECK(taxis.find("all rows | 23") < taxis.find("all rows | 15"));
     CHECK(call("query_table", R"j({"path": "data/spend.csv", "where": "Category = Lunch"})j").find("Other rows hold") == std::string::npos);
+    // A phrase no line holds: the files its words name, and the lines with each word alone.
+    const std::string phrase = call("search_files", R"j({"query": "sales pens report"})j");
+    CHECK(phrase.rfind("No lines with 'sales pens report'.", 0) == 0 && phrase.find("Files whose names hold its words: ") != std::string::npos &&
+          phrase.find("data/sales.csv") != std::string::npos && phrase.find("Lines with 'pens' alone (") != std::string::npos);
     // A search that finds nothing says which pictures and recordings it could not read.
     files.write(root + "/data/ticket.png", "not really a picture", nullptr);
     const std::string missed = call("search_files", R"j({"query": "zebra crossing fine"})j");
@@ -5818,6 +5838,10 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(heard.find("(This is the transcript of the recording call.wav.") != std::string::npos &&
           heard.find("Other recordings beside it: rec/voicemail.wav.") != std::string::npos &&
           heard.find("call listen_to {\"path\": \"rec/voicemail.wav\"} next.") != std::string::npos);
+    // Named without the recording's extension, as transcribe names it.
+    files.write(root + "/rec/voicemail.transcript.md", "[00:00] The plumber comes on Thursday.\n", nullptr);
+    CHECK(call("read_file", R"j({"path": "rec/voicemail.transcript.md"})j").find("transcript of the recording voicemail.wav.\nOther recordings beside it: rec/call.wav") !=
+          std::string::npos);
     tools.namedFiles("What did they decide on the call (call.wav)?");
     CHECK(call("read_file", R"j({"path": "rec/call.wav.transcript.md"})j").find("Other recordings") == std::string::npos);
     tools.namedFiles("");
@@ -6079,6 +6103,11 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
     CHECK(searched.size() == 4 && searched[1].find("third search") == std::string::npos &&
           searched[2].find("That is the third search here that found nothing") != std::string::npos &&
           searched[3].find("third search") == std::string::npos);
+    // A reply about the answer instead of one: the answer checked stands.
+    engine.checkReply = "The previous answer did not give the figure because the file had none.";
+    engine.textAnswers = {"calculate {\"expression\": \"0.4 * 14500\"}", "Lumen pays 40% of 14,500 at kick-off."};
+    agent.submitPrompt("How much does Lumen pay at kick-off?");
+    CHECK(agent.messages().back().text == "Lumen pays 40% of 14,500 at kick-off.");
     // A question that asks for no figure, or an answer without tools: not checked.
     engine.checkReply = "OK";
     checks = engine.checks.size();

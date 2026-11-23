@@ -206,6 +206,7 @@ private:
     // answer checked, kept if the model replies OK, at checkedAt_ in messages_ (npos: none waiting).
     int localEmptySearches_ = 0; // searches that found nothing, in this step
     bool localChecked_ = false;
+    bool localOutOfRounds_ = false; // told once to answer without more tools
     size_t localCheckedAt_ = std::string::npos;
     std::function<std::string(const std::string&)> localPlanner_;
     std::function<std::string()> localNotes_;
