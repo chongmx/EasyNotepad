@@ -1,0 +1,366 @@
+{
+ "about": "Real-life questions (made by make.py and make-media.ps1 from their own data): one person's messy folder, asked as people ask. For measuring only, never for tuning.",
+ "questions": [
+  {
+   "id": "call-launch-action",
+   "kind": "sound",
+   "question": "I missed the team call on 3 March (it's in Recordings). What's the new launch date, and what was I asked to do?",
+   "checks": [
+    {
+     "text": [
+      "14 April",
+      "April 14",
+      "14th of April",
+      "14th April",
+      "April 14th",
+      "fourteenth of April",
+      "14 Apr",
+      "2026-04-14"
+     ]
+    },
+    {
+     "text": [
+      "timeline"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "call-budget",
+   "kind": "sound",
+   "question": "In the recording of the 3 March team call, what budget cap did finance approve?",
+   "checks": [
+    {
+     "number": 18000,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "voicemail-plumber",
+   "kind": "sound",
+   "question": "My landlord left me a voicemail. When is the plumber coming, and where should I leave the key?",
+   "checks": [
+    {
+     "text": [
+      "Thursday"
+     ]
+    },
+    {
+     "text": [
+      "4B",
+      "4 B",
+      "four B"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "memo-gate-code",
+   "kind": "sound",
+   "question": "What was the gate code for the storage unit? I recorded a voice memo about it.",
+   "checks": [
+    {
+     "text": [
+      "4417",
+      "4 4 1 7",
+      "4,417"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "inbox-needs-reply",
+   "kind": "email",
+   "question": "Which e-mails in my Inbox still need a reply from me? Just the ones where someone is waiting on me.",
+   "checks": [
+    {
+     "text": [
+      "Priya"
+     ]
+    },
+    {
+     "text": [
+      "Leo",
+      "Brightwater"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "inbox-report-due",
+   "kind": "email",
+   "question": "When does Priya need the Q1 report?",
+   "checks": [
+    {
+     "text": [
+      "13 March",
+      "March 13",
+      "13th",
+      "Friday 13",
+      "2026-03-13"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "receipt-claim",
+   "kind": "picture",
+   "question": "Can I claim the whole dinner on the receipt photo in Downloads (IMG_2041.png)? I ate alone. Check our expense policy.",
+   "checks": [
+    {
+     "number": 87.4,
+     "tol": 0.01
+    },
+    {
+     "number": 75.0,
+     "tol": 0.01
+    },
+    {
+     "number": 12.4,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "fine-amount-due",
+   "kind": "picture",
+   "question": "There's a photo of a parking fine in my Downloads. How much is it, and by when do I have to pay?",
+   "checks": [
+    {
+     "number": 60.0,
+     "tol": 0.01
+    },
+    {
+     "text": [
+      "26/03/2026",
+      "26 March",
+      "March 26",
+      "26.03",
+      "2026-03-26"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "downloads-duplicates",
+   "kind": "workspace",
+   "question": "Are there any duplicate files in my Downloads folder (the same file saved twice)?",
+   "checks": [
+    {
+     "text": [
+      "Invoice_INV-2291 (1)",
+      "INV-2291 (1)"
+     ]
+    },
+    {
+     "text": [
+      "notes (copy)"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "taxi-march",
+   "kind": "table",
+   "question": "How much did I spend on taxis in March? It's in my expenses workbook in Finance.",
+   "checks": [
+    {
+     "number": 128.56,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "groceries-march",
+   "kind": "table",
+   "question": "What did I spend on groceries in March, going by my bank export? FreshMart and Corner Grocer are my grocery shops.",
+   "checks": [
+    {
+     "number": 336.5,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "brightwater-owes",
+   "kind": "documents",
+   "question": "Has Brightwater paid invoice INV-2291 yet? If not, how much do they still owe me?",
+   "checks": [
+    {
+     "number": 4350.0,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "price-list-changes",
+   "kind": "documents",
+   "question": "What changed between price list v1 and v2 in Work?",
+   "checks": [
+    {
+     "text": [
+      "Business cards"
+     ]
+    },
+    {
+     "text": [
+      "Social media kit"
+     ]
+    },
+    {
+     "text": [
+      "Website banner"
+     ]
+    },
+    {
+     "text": [
+      "Packaging design"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "proposal-price-date",
+   "kind": "documents",
+   "question": "What price did we quote Lumen in the latest proposal, and when do we deliver?",
+   "checks": [
+    {
+     "number": 14500,
+     "tol": 0
+    },
+    {
+     "text": [
+      "29 May",
+      "May 29",
+      "2026-05-29",
+      "29/05"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "proposal-deposit",
+   "kind": "documents",
+   "question": "How much does Lumen pay at kick-off, according to the proposal?",
+   "checks": [
+    {
+     "number": 5800.0,
+     "tol": 0.5
+    }
+   ]
+  },
+  {
+   "id": "standup-blocker",
+   "kind": "documents",
+   "question": "Going by this week's standup notes, what is the release waiting on?",
+   "checks": [
+    {
+     "text": [
+      "colour proof",
+      "color proof",
+      "proofs"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "gym-cancel",
+   "kind": "documents",
+   "question": "How do I cancel my gym membership, and how much notice do I have to give?",
+   "checks": [
+    {
+     "number": 30,
+     "tol": 0
+    },
+    {
+     "text": [
+      "writing",
+      "written",
+      "e-mail",
+      "email",
+      "letter"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pancakes-for-six",
+   "kind": "calc",
+   "question": "How much flour do I need for the pancakes if we're 6 people?",
+   "checks": [
+    {
+     "number": 300,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "wifi-password",
+   "kind": "workspace",
+   "question": "What's our wifi password at home? I wrote it down somewhere.",
+   "checks": [
+    {
+     "text": [
+      "maple-river-208"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "calendar-thursday",
+   "kind": "documents",
+   "question": "Am I free on Thursday 12 March in the afternoon? Check my calendar in Home.",
+   "checks": [
+    {
+     "text": [
+      "Dentist"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "flight-latest-arrival",
+   "kind": "documents",
+   "question": "What's the latest I can get to the airport for my Lisbon flight and still check in my bag?",
+   "checks": [
+    {
+     "text": [
+      "06:50",
+      "6:50",
+      "6.50",
+      "6:50 am",
+      "6:50am"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "owe-this-month",
+   "kind": "documents",
+   "question": "This month I have to pay the parking fine and my gym fee. How much is that together?",
+   "checks": [
+    {
+     "number": 99.0,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "call-vs-proposal",
+   "kind": "documents",
+   "question": "Is the launch date from the 3 March team call before or after the Lumen kick-off date in the proposal, and by how many days?",
+   "checks": [
+    {
+     "text": [
+      "after"
+     ]
+    },
+    {
+     "number": 8,
+     "tol": 0
+    }
+   ]
+  }
+ ]
+}

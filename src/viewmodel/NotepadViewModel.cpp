@@ -1781,6 +1781,8 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
     AgentViewModel::LocalSetup s;
     using Which = EngineLabViewModel::Which;
     EngineLabViewModel& lab = engineLab_;
+    s.hears = lab.chosenModel().hears; // what the chosen model takes in, ready or not
+    s.tokenPixels = lab.chosenModel().tokenPixels;
     if (!lab.hasEngine()) {
         s.why = "this build has no local model.";
         return s;
@@ -1800,6 +1802,10 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
         s.drafterPath = lab.pathFor(Which::Drafter);
     if (lab.fileUsable(Which::Projector))
         s.projectorPath = lab.pathFor(Which::Projector);
+    if (lab.earsUsable()) {
+        s.earsPath = lab.pathFor(Which::Ears);
+        s.earsProjectorPath = lab.pathFor(Which::EarsProjector);
+    }
     s.threads = lab.threads.get();
     s.gpu = lab.useGpu.get();
     return s;

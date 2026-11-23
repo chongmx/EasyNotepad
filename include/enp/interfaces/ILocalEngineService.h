@@ -116,6 +116,9 @@ struct LocalChatRequest {
     // instruction), in windows of this many seconds; the result's text is the transcript.
     bool transcribe = false;
     int audioWindowSeconds = 30;
+    // On the CPU, in this process, beside whatever the GPU holds: a helper model (a speech model as
+    // the ears of one without), so the main model stays loaded on the GPU.
+    bool cpuOnly = false;
 };
 
 struct LocalChatResult {

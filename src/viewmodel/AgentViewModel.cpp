@@ -45,6 +45,7 @@ constexpr const char* kStepAsk = "Use your tools, then tell me what you found. I
                                   "wrong, fix the call from what it tells you and try again before you report.";
 
 constexpr size_t kToolTextChars = 12000; // of one tool result sent to the model (about 3,000 tokens)
+constexpr size_t kRepeatChars = 1500;  // a tool reply longer than this, already in the context, is pointed to
 constexpr float kLoopTemperature = 0.3f;  // once it repeats a call: some variety, out of the loop
 
 std::optional<interfaces::LocalToolCall> callInText(const std::string& text, const std::vector<interfaces::LocalTool>& tools,
@@ -402,6 +403,21 @@ bool announcesCall(const std::string& text, const std::vector<interfaces::LocalT
     static const char* const intents[] = {"i will now", "i will call", "i will use", "i will try", "i'll call", "i'll use",
                                           "i'll try", "i will check", "let me call", "let me use", "let me check", "next, i will",
                                           "i will first", "i need to call", "i need to use", "i'll now", "i will read", "i'll read"};
+    // Its last sentence is what it means to do next ("Let me read the file in smaller chunks."): a
+    // step not taken, whatever it names.
+    {
+        size_t end = lower.find_last_not_of(" \t\r\n*");
+        if (end != std::string::npos && (lower[end] == '.' || lower[end] == ':' || lower[end] == '!'))
+            --end;
+        const size_t stop = end == std::string::npos ? std::string::npos : lower.find_last_of(".!?\n", end);
+        size_t start = stop == std::string::npos ? 0 : stop + 1;
+        while (start < lower.size() && (std::isspace(static_cast<unsigned char>(lower[start])) || lower[start] == '*'))
+            ++start;
+        const std::string last = lower.substr(start);
+        for (const char* next : {"let me ", "i'll ", "i will ", "now i'll ", "now let me ", "next, let me ", "next, i'll "})
+            if (last.rfind(next, 0) == 0)
+                return true;
+    }
     size_t at = std::string::npos;
     for (const char* intent : intents)
         at = std::min(at, lower.rfind(intent));
@@ -1586,6 +1602,16 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
         localEvidence_.emplace_back("tool", result.text);
         if (result.text.size() > kToolTextChars)
             result.text = result.text.substr(0, kToolTextChars) + "\n[cut: ask for a smaller part]";
+        // A long reply it already has, word for word, in what it sees now (a file read again with
+        // other lines asked for, the same two lines): pointed to, not sent again. A bigger model's
+        // context holds fewer tokens on the same card, and a 16 KB line read twice filled it.
+        if (result.text.size() > kRepeatChars && out.media.empty())
+            for (const interfaces::LocalChatMessage& m : localRequest_.messages)
+                if (m.role == "tool" && m.text.rfind(result.text, 0) == 0) {
+                    result.text = "(The same as the " + (m.toolName.empty() ? std::string("tool") : m.toolName) +
+                                  " reply above, unchanged: you have it already. Answer from it, or take another step.)";
+                    break;
+                }
         // Another file read than the one the question names (the file left open in the editor):
         // said under its result, until it reads a named one.
         if (const std::string read = out.read.empty() ? readPath(calls[next]) : out.read;

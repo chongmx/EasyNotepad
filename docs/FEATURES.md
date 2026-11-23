@@ -361,8 +361,10 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
   - **memory** between conversations (`agent-memory/memories.json` in the app's data folder):
     preferences, lessons from mistakes, facts, notes for a week, temporary notes for the session;
     it corrects, forgets and compacts them, and follows your preferences in every answer.
-- **Choice of model**: Gemma 4 E2B, E4B or 12B (the agent set-up's Model list), each downloaded
-  with its own eyes and ears and MTP drafter, checked by SHA-256; the others stay on disk.
+- **Choice of model**: Gemma 4 E2B, E4B or 12B, or Qwen 3.5 9B (the agent set-up's Model list),
+  each downloaded with its own eyes (and, for Gemma, ears and MTP drafter), checked by SHA-256;
+  the others stay on disk. Qwen hears through a speech model of its own download (Qwen3-ASR 0.6B,
+  on the CPU beside it); without it, the agent offers no recording tools.
 - **Many documents**: `search_documents` finds which documents in the folder (PDF, Word, Excel,
   PowerPoint, text) mention something, with page and snippet, or lists them all; `extract_from_documents`
   asks one question of up to 30 documents, one fresh pass each (long ones part by part), and

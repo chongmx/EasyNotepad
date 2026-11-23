@@ -67,6 +67,14 @@ public:
     static bool lookBox(const model::Json& args, float box[4], std::string& why);
     // The tokens a look spends on its picture: its detail, at least the user's minimum.
     int pictureTokens(const std::string& detail) const;
+    // What the chosen model takes in: sound too (Gemma), or pictures only (Qwen: no listen_to or
+    // transcribe offered); and the pixels of a picture one of its tokens covers.
+    bool hears() const;
+    int tokenPixels() const;
+    // Hears through its own projector (Gemma), rather than through a speech model as its ears (Qwen).
+    bool nativeEars() const;
+    // Writes down the speech of a recording (bytes read), with the model's own ears or its speech model.
+    void writeDown(const std::string& path, std::string bytes, std::function<void(const interfaces::LocalChatResult&)> done);
 
 private:
     struct Look {

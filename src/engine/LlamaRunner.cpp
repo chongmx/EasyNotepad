@@ -595,10 +595,14 @@ void transcribeAudio(Model& m, const interfaces::LocalChatRequest& request, cons
     if (request.messages.empty())
         throw std::runtime_error("nothing to transcribe");
     const interfaces::LocalChatMessage& last = request.messages.back();
+    // A speech model (Qwen3-ASR: "<asr_text>" in its template) takes the sound alone and answers
+    // "language English<asr_text>the words"; a chat model is told what to do.
+    const bool speechModel = common_chat_templates_source(m.templates.get()).find("<asr_text>") != std::string::npos;
     const std::string instruction =
-        last.text.empty() ? std::string("Transcribe this audio word for word, in the language spoken, with punctuation. "
-                                        "If there is no speech, write [no speech].")
-                          : last.text;
+        speechModel ? std::string()
+        : last.text.empty() ? std::string("Transcribe this audio word for word, in the language spoken, with punctuation. "
+                                          "If there is no speech, write [no speech].")
+                            : last.text;
     const int sampleRate = std::max(1, mtmd_get_audio_sample_rate(m.media.get()));
     const int window = std::clamp(request.audioWindowSeconds, 5, 30);
     common_params_sampling sampling = m.params.sampling;
@@ -636,6 +640,9 @@ void transcribeAudio(Model& m, const interfaces::LocalChatRequest& request, cons
             std::string words;
             const Generated g = generate(m, prompt, 512, sampling, cancelled,
                                          [&](const std::string& piece, llama_token) { words += piece; });
+            // The speech model's language tag before its words; "language None": no speech.
+            if (const size_t tag = words.find("<asr_text>"); tag != std::string::npos)
+                words = trimText(words.substr(tag + 10)).empty() ? std::string("[no speech]") : words.substr(tag + 10);
             const std::string part = (r.text.empty() ? "" : "\n\n") + std::string("[") + clockText(at) + "] " + sentenceCase(trimText(words));
             r.text += part;
             text(part);

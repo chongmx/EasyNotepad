@@ -1,0 +1,55 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 524 >>
+stream
+BT
+/F1 11 Tf
+14 TL
+56 790 Td
+/F1 16 Tf
+(Gymworks - membership terms) Tj
+T*
+/F1 11 Tf
+T*
+() Tj
+T*
+(1. The membership costs 39.00 per month, taken on the 11th.) Tj
+T*
+(2. The minimum term is 6 months from the start date.) Tj
+T*
+(3. To cancel, give 30 days' notice in writing \(a letter, or an e-mail to) Tj
+T*
+(   members@gymworks.example.com\). Notice given by phone is not accepted.) Tj
+T*
+(4. Fees already paid are not refunded.) Tj
+T*
+(5. A membership can be frozen for up to 2 months a year for medical reasons.) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000816 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+913
+%%EOF

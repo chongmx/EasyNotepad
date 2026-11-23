@@ -491,6 +491,8 @@ void AgentPanel::renderLocalSetup(float inner)
     const Lab::FileStatus model = lab.fileStatus(Lab::Which::Model);
     const Lab::FileStatus drafter = lab.fileStatus(Lab::Which::Drafter);
     const Lab::FileStatus projector = lab.fileStatus(Lab::Which::Projector);
+    const Lab::FileStatus ears = lab.fileStatus(Lab::Which::Ears);
+    const Lab::FileStatus earsProjector = lab.fileStatus(Lab::Which::EarsProjector);
     const bool ready = lab.fileUsable(Lab::Which::Model);
     const bool withDrafter = lab.chosenModel().drafter != nullptr;
     char drafterSize[32];
@@ -500,8 +502,13 @@ void AgentPanel::renderLocalSetup(float inner)
     std::snprintf(size, sizeof(size), "%.2f GB", double(lab.file(Lab::Which::Model).size) / 1e9);
     char eyes[32];
     std::snprintf(eyes, sizeof(eyes), "%.0f MB", double(lab.file(Lab::Which::Projector).size) / 1e6);
-    if (model.state == State::Downloading || drafter.state == State::Downloading || projector.state == State::Downloading) {
-        const Lab::FileStatus& d = model.state == State::Downloading ? model : drafter.state == State::Downloading ? drafter : projector;
+    if (model.state == State::Downloading || drafter.state == State::Downloading || projector.state == State::Downloading ||
+        ears.state == State::Downloading || earsProjector.state == State::Downloading) {
+        const Lab::FileStatus& d = model.state == State::Downloading       ? model
+                                   : drafter.state == State::Downloading   ? drafter
+                                   : projector.state == State::Downloading ? projector
+                                   : ears.state == State::Downloading      ? ears
+                                                                           : earsProjector;
         const float fraction = d.total ? float(double(d.have) / double(d.total)) : 0.0f;
         ImGui::TextUnformatted(lab.importing() ? "Copying the file in..." : "Downloading...");
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, col(palette_.accent));
@@ -511,7 +518,8 @@ void AgentPanel::renderLocalSetup(float inner)
             ImGui::TextColored(col(palette_.iconOrange), "%s", d.note.c_str());
         if (ImGui::Button(ICON_FA_STOP " Stop"))
             lab.cancelDownload();
-    } else if (model.state == State::Verifying || drafter.state == State::Verifying || projector.state == State::Verifying) {
+    } else if (model.state == State::Verifying || drafter.state == State::Verifying || projector.state == State::Verifying ||
+               ears.state == State::Verifying || earsProjector.state == State::Verifying) {
         ImGui::TextDisabled("Checking the download...");
     } else if (ready) {
         ImGui::TextColored(col(palette_.iconGreen), ICON_FA_CIRCLE_CHECK);
@@ -532,7 +540,8 @@ void AgentPanel::renderLocalSetup(float inner)
         if (lab.fileUsable(Lab::Which::Projector)) {
             ImGui::TextColored(col(palette_.iconGreen), ICON_FA_EYE);
             ImGui::SameLine();
-            ImGui::TextUnformatted("It can look at pictures and pages, and listen to recordings.");
+            ImGui::TextUnformatted(lab.chosenModel().hears ? "It can look at pictures and pages, and listen to recordings."
+                                                           : "It can look at pictures and pages.");
             // How many tokens a picture costs at least: more reads small print better, and takes longer.
             static const char* const kPictureChoices[] = {"It chooses per look (70 to 1,120 tokens)", "At least 280 tokens",
                                                           "At least 560 tokens", "Always 1,120 tokens (the most it can take)"};
@@ -557,6 +566,26 @@ void AgentPanel::renderLocalSetup(float inner)
                             "recordings (WAV, MP3, FLAC).");
             registerLastItem("agent-local-projector", "button", "Download the eyes and ears",
                              [&lab]() { lab.download(Lab::Which::Projector); });
+        }
+        // A model without ears of its own (Qwen): a speech model as its ears, a download of its own.
+        if (lab.chosenModel().ears) {
+            lab.fetchEarsProjector(); // the ears' audio encoder comes with them (once; a failure waits for the button)
+            if (lab.earsUsable()) {
+                ImGui::TextColored(col(palette_.iconGreen), ICON_FA_HEADPHONES);
+                ImGui::SameLine();
+                ImGui::TextUnformatted("It hears speech in recordings through its ears (Qwen3-ASR, on the CPU).");
+            } else if (!lab.downloading()) {
+                char earsSize[32];
+                std::snprintf(earsSize, sizeof(earsSize), "%.0f MB",
+                              double(lab.file(Lab::Which::Ears).size + lab.file(Lab::Which::EarsProjector).size) / 1e6);
+                const Lab::Which next = lab.fileUsable(Lab::Which::Ears) ? Lab::Which::EarsProjector : Lab::Which::Ears;
+                const std::string hear = std::string(ICON_FA_DOWNLOAD " Let it hear (") + earsSize + ")";
+                if (ImGui::Button(hear.c_str()))
+                    lab.download(next);
+                ui::itemTooltip("Its ears: a small speech model (Qwen3-ASR 0.6B) that writes down what recordings say "
+                                "(WAV, MP3, FLAC), for the model to read. Speech only, not other sounds or music.");
+                registerLastItem("agent-local-ears", "button", "Download the ears", [&lab, next]() { lab.download(next); });
+            }
         }
     } else {
         ImGui::TextWrapped("%s (%s) answers questions on this device, without a network or an account. It works in the "

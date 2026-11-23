@@ -44,6 +44,11 @@ public:
         std::string why; // when not ready
         std::string modelPath, drafterPath;
         std::string projectorPath; // its eyes and ears (pictures and sounds); empty when not downloaded
+        bool hears = true;          // its projector takes sound (Gemma); Qwen's sees pictures only
+        // A model without ears of its own: its speech model and that one's audio encoder (Qwen3-ASR),
+        // when downloaded; empty otherwise.
+        std::string earsPath, earsProjectorPath;
+        int tokenPixels = 48 * 48;  // the pixels of a picture one of its tokens covers
         int threads = 4;
         bool gpu = false;
     };

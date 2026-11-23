@@ -40,8 +40,14 @@ public:
         const CatalogFile* drafter; // its MTP assistant (speculative decoding), or none
         bool drafterByDefault;      // used unless turned off (else only when turned on)
         uint64_t memoryNeeded; // about, to run with its eyes and ears and a working context
+        bool hears = true;            // its projector takes sound (Gemma); else pictures only (Qwen)
+        int tokenPixels = 48 * 48;    // the pixels of a picture one of its tokens covers
+        // A model without ears of its own gets a speech model as its ears (Qwen3-ASR for Qwen): it
+        // writes down what a recording says, on the CPU beside the model, and the model reads that.
+        const CatalogFile* ears = nullptr;
+        const CatalogFile* earsProjector = nullptr;
     };
-    static constexpr int kModelChoices = 3;
+    static constexpr int kModelChoices = 4;
     static const ModelChoice& modelChoiceInfo(int index);
     Property<int> modelChoice{0};
     // The chosen model's drafter: fetched with the model and used by the agent; off, neither. Each
@@ -65,7 +71,12 @@ public:
         double verifyFraction = 0;
         std::string note; // e.g. "waiting for Wi-Fi"
     };
-    enum class Which { Model, Drafter, Projector };
+    enum class Which { Model, Drafter, Projector, Ears, EarsProjector };
+    static constexpr int kWhich = 5;
+    // The chosen model's ears (its speech model and that one's audio projector), when it has them.
+    bool earsUsable() const;
+    // Downloads the ears' projector once their model is here (as the drafter comes with the model).
+    void fetchEarsProjector();
 
     struct Record {
         std::string when; // local time, "2026-11-01 14:05"
@@ -105,6 +116,8 @@ public:
     Property<std::string> customModelPath;
     Property<std::string> customDrafterPath;
     Property<std::string> customProjectorPath;
+    Property<std::string> customEarsPath;          // (not saved: for tests and the lab)
+    Property<std::string> customEarsProjectorPath;
 
     Property<int> threads{4};
     Property<bool> useGpu{false};
@@ -145,7 +158,7 @@ private:
     void say(const std::string& text, bool error = false);
     std::string notice_;
     bool noticeError_ = false;
-    std::string downloadErrors_[3];
+    std::string downloadErrors_[kWhich];
     Property<std::string>& customPath(Which which);
     std::string deviceLabel();
 
@@ -154,7 +167,7 @@ private:
     bool infoLoaded_ = false;
     bool acceleratorStale_ = false; // a run ended: the engine library's status may have changed
     int downloading_ = -1; // Which, while a catalogue download runs
-    int drafterSetting_[3] = {-1, -1, -1}; // per model: -1 its default, 0 off, 1 on
+    int drafterSetting_[kModelChoices] = {-1, -1, -1, -1}; // per model: -1 its default, 0 off, 1 on
     interfaces::DownloadStatus lastDownload_;
     int verifying_ = -1;
     double verifyFraction_ = 0;

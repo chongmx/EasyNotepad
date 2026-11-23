@@ -59,7 +59,7 @@ void EngineLabView::renderSummary()
     }
     if (l.downloading()) {
         Which busy = Which::Model;
-        for (Which w : {Which::Model, Which::Drafter, Which::Projector})
+        for (Which w : {Which::Model, Which::Drafter, Which::Projector, Which::Ears, Which::EarsProjector})
             if (l.fileStatus(w).state == viewmodel::EngineLabViewModel::FileState::Downloading)
                 busy = w;
         const auto st = l.fileStatus(busy);
@@ -143,9 +143,17 @@ void EngineLabView::render(bool fullScreen, ImVec2 areaMin, ImVec2 areaMax)
         if (section(ICON_FA_DOWNLOAD, "Model files")) {
             renderFile(Which::Model);
             ImGui::Spacing();
-            renderFile(Which::Drafter);
-            ImGui::Spacing();
+            if (lab().chosenModel().drafter) {
+                renderFile(Which::Drafter);
+                ImGui::Spacing();
+            }
             renderFile(Which::Projector);
+            if (lab().chosenModel().ears) {
+                ImGui::Spacing();
+                renderFile(Which::Ears);
+                ImGui::Spacing();
+                renderFile(Which::EarsProjector);
+            }
         }
         renderRun();
         renderLatest();
@@ -236,7 +244,11 @@ void EngineLabView::renderFile(Which which)
 {
     const auto& file = lab().file(which);
     const viewmodel::EngineLabViewModel::FileStatus st = lab().fileStatus(which);
-    const char* id = which == Which::Model ? "model" : which == Which::Drafter ? "drafter" : "projector";
+    const char* id = which == Which::Model     ? "model"
+                     : which == Which::Drafter ? "drafter"
+                     : which == Which::Ears    ? "ears"
+                     : which == Which::EarsProjector ? "ears-projector"
+                                                     : "projector";
     ImGui::PushID(id);
 
     ImGui::TextUnformatted(file.label);

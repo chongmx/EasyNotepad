@@ -76,6 +76,36 @@ const EngineLabViewModel::CatalogFile kDrafter12B{
     "b0e6a56d3078fb76e7ad950e85e478091a8ae1925fae8489ba4e58908068f0f3", 253707904ull,
     "community conversion (Disya) of google/gemma-4-12B-it-qat-q4_0-unquantized-assistant"};
 
+// Another family: Qwen 3.5 9B (Alibaba, Apache-2.0), quantized by Unsloth from Qwen's own weights,
+// with its vision projector from the same commit. It sees pictures but has no ears (no audio), and
+// no drafter here.
+const EngineLabViewModel::CatalogFile kModelQwen9B{
+    "Qwen 3.5 9B (Unsloth, Q4_K_M)", "Qwen3.5-9B-Q4_K_M.gguf",
+    "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/"
+    "Qwen3.5-9B-Q4_K_M.gguf",
+    "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8", 5680522464ull,
+    "unsloth/Qwen3.5-9B-GGUF (of Qwen/Qwen3.5-9B)"};
+const EngineLabViewModel::CatalogFile kProjectorQwen9B{
+    "Eyes for Qwen 3.5 9B (vision only)", "Qwen3.5-9B-mmproj-F16.gguf",
+    "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/mmproj-F16.gguf",
+    "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f", 918166080ull,
+    "unsloth/Qwen3.5-9B-GGUF (of Qwen/Qwen3.5-9B)"};
+
+// Qwen 3.5's ears: Qwen3-ASR 0.6B (Alibaba, Apache-2.0), a speech model on Qwen3-Omni's audio
+// encoder (30 languages and 22 Chinese dialects), converted by ggml-org; Q8_0, pinned the same way.
+const EngineLabViewModel::CatalogFile kEarsQwen{
+    "Ears for Qwen (Qwen3-ASR 0.6B, Q8_0)", "Qwen3-ASR-0.6B-Q8_0.gguf",
+    "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/b98bf4381df3b400b929dcaff0dc83b6dafe221b/"
+    "Qwen3-ASR-0.6B-Q8_0.gguf",
+    "05c9e10cecb37f6fc0cac0e786195dba82f12c15021f0b8a09473dbf3b6f090d", 804749536ull,
+    "ggml-org/Qwen3-ASR-0.6B-GGUF (of Qwen/Qwen3-ASR-0.6B)"};
+const EngineLabViewModel::CatalogFile kEarsProjectorQwen{
+    "Audio encoder for Qwen3-ASR 0.6B (Q8_0)", "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+    "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/b98bf4381df3b400b929dcaff0dc83b6dafe221b/"
+    "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+    "3b5e371a03e7d14bc1b5a66f38ff3c5eec3a99b3f96deb72b3814da9adafb16d", 214392544ull,
+    "ggml-org/Qwen3-ASR-0.6B-GGUF (of Qwen/Qwen3-ASR-0.6B)"};
+
 const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices] = {
     {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, &kDrafter, true,
      5ull << 30},
@@ -83,6 +113,9 @@ const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices
      &kModelE4B, &kProjectorE4B, &kDrafterE4B, true, 7ull << 30},
     {"Gemma 4 12B", "the most careful; slow, and needs a graphics card of 12 GB or more to be quick", &kModel12B,
      &kProjector12B, &kDrafter12B, false, 9ull << 30},
+    {"Qwen 3.5 9B", "another family (Alibaba): careful with tables and documents; hears speech through Qwen3-ASR; needs a "
+     "graphics card of 8 GB",
+     &kModelQwen9B, &kProjectorQwen9B, nullptr, false, 8ull << 30, false, 32 * 32, &kEarsQwen, &kEarsProjectorQwen},
 };
 
 // Room kept free beyond the download itself.
@@ -148,13 +181,29 @@ const EngineLabViewModel::ModelChoice& EngineLabViewModel::modelChoiceInfo(int i
 
 const EngineLabViewModel::CatalogFile& EngineLabViewModel::file(Which which) const
 {
+    // A model with no drafter (Qwen): a file of no name, never downloaded or used.
+    static const CatalogFile none{"Not for this model", "", "", "", 0, ""};
     const ModelChoice& c = chosenModel();
-    return which == Which::Model ? *c.model : which == Which::Projector ? *c.projector : *c.drafter;
+    switch (which) {
+    case Which::Model: return *c.model;
+    case Which::Projector: return *c.projector;
+    case Which::Drafter: return c.drafter ? *c.drafter : none;
+    case Which::Ears: return c.ears ? *c.ears : none;
+    case Which::EarsProjector: return c.earsProjector ? *c.earsProjector : none;
+    }
+    return none;
 }
 
 Property<std::string>& EngineLabViewModel::customPath(Which which)
 {
-    return which == Which::Model ? customModelPath : which == Which::Drafter ? customDrafterPath : customProjectorPath;
+    switch (which) {
+    case Which::Model: return customModelPath;
+    case Which::Drafter: return customDrafterPath;
+    case Which::Ears: return customEarsPath;
+    case Which::EarsProjector: return customEarsProjectorPath;
+    case Which::Projector: break;
+    }
+    return customProjectorPath;
 }
 
 EngineLabViewModel::EngineLabViewModel(interfaces::ILocalEngineService* engine) : engine_(engine)
@@ -201,7 +250,8 @@ std::string EngineLabViewModel::pathFor(Which which) const
     if (!engine_)
         return {};
     const std::string dir = engine_->modelsDirectory();
-    return dir.empty() ? std::string() : dir + "/" + file(which).fileName;
+    const std::string name = file(which).fileName;
+    return dir.empty() || name.empty() ? std::string() : dir + "/" + name;
 }
 
 EngineLabViewModel::FileStatus EngineLabViewModel::fileStatus(Which which) const
@@ -251,7 +301,7 @@ bool EngineLabViewModel::fileUsable(Which which) const
 
 void EngineLabViewModel::download(Which which)
 {
-    if (!engine_ || downloading_ >= 0)
+    if (!engine_ || downloading_ >= 0 || !*file(which).url)
         return;
     if (engine_->meteredNetwork() && !allowMobileData.get()) {
         confirm_ = int(which); // the view asks first
@@ -392,6 +442,9 @@ void EngineLabViewModel::verify(Which which)
                 // The drafter comes with the model, unless it is turned off (or already here).
                 if (which == Which::Model && path == pathFor(Which::Model))
                     fetchDrafter();
+                // The ears' audio encoder comes with them.
+                if (which == Which::Ears && path == pathFor(Which::Ears))
+                    fetchEarsProjector();
             } else {
                 mismatched_.push_back(path);
                 say(sha.empty() ? "The file could not be read." : "Checksum does not match: download it again.", true);
@@ -401,8 +454,23 @@ void EngineLabViewModel::verify(Which which)
         });
 }
 
+bool EngineLabViewModel::earsUsable() const
+{
+    return chosenModel().ears && fileUsable(Which::Ears) && fileUsable(Which::EarsProjector);
+}
+
+void EngineLabViewModel::fetchEarsProjector()
+{
+    if (chosenModel().earsProjector && customEarsProjectorPath.get().empty() && fileUsable(Which::Ears) &&
+        downloadErrors_[int(Which::EarsProjector)].empty() && fileStatus(Which::EarsProjector).state == FileState::Missing &&
+        downloading_ < 0 && verifying_ < 0 && confirm_ < 0)
+        download(Which::EarsProjector);
+}
+
 bool EngineLabViewModel::drafterOn() const
 {
+    if (!chosenModel().drafter)
+        return false;
     const int setting = drafterSetting_[std::clamp(modelChoice.get(), 0, kModelChoices - 1)];
     return setting < 0 ? chosenModel().drafterByDefault : setting == 1;
 }
@@ -559,7 +627,12 @@ model::Json EngineLabViewModel::save() const
                          .set("result", resultJson(r.result)));
     return model::Json::object()
         .set("model", modelChoice.get())
-        .set("drafters", model::Json::array().push(drafterSetting_[0]).push(drafterSetting_[1]).push(drafterSetting_[2]))
+        .set("drafters", [this]() {
+            model::Json d = model::Json::array();
+            for (int setting : drafterSetting_)
+                d.push(setting);
+            return d;
+        }())
         .set("customModel", customModelPath.get())
         .set("customDrafter", customDrafterPath.get())
         .set("customProjector", customProjectorPath.get())

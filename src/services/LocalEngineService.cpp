@@ -821,8 +821,9 @@ void LocalEngineService::chat(const interfaces::LocalChatRequest& request, std::
             wrote = true;
             post(text, t);
         };
-        // The engine library first, when there is one that works; anything wrong, the CPU.
-        if (model->acceleratorWanted()) {
+        // The engine library first, when there is one that works; anything wrong, the CPU. A helper
+        // model asked for on the CPU (the ears) leaves the GPU's model where it is.
+        if (!request.cpuOnly && model->acceleratorWanted()) {
             std::string reason;
             if (model->startAccelerator()) {
                 model->runner.unload(); // one copy of the model in memory

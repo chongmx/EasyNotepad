@@ -21,7 +21,8 @@ public:
         int line = 0;
         int column = 0;
         int length = 0;
-        std::string text; // the line (trimmed to a reasonable length)
+        std::string text; // the line, or on a long line the part around the match (a reasonable length)
+        int textColumn = 0; // the column of the line `text` starts at
     };
     struct FileResult {
         std::string path; // workspace-relative (or as opened)

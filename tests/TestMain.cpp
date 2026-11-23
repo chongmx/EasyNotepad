@@ -5037,6 +5037,59 @@ TEST(local_agent_reads_a_file_closely)
     CHECK_EQ(engine.chats.size(), size_t(3));
 }
 
+TEST(qwen_hears_through_its_speech_model_on_the_cpu)
+{
+    // Qwen 3.5 has no ears of its own: with its speech model (Qwen3-ASR) here, listen_to and
+    // transcribe are offered, and a recording goes to the speech model on the CPU (the GPU keeps
+    // Qwen), its words coming back as text.
+    using Lab = viewmodel::EngineLabViewModel;
+    services::FileService files;
+    const std::string root = scratchDirectory() + "/enp-test-agent-ears";
+    os::fs::createDirectories(root);
+    files.write(root + "/memo.wav", std::string("RIFF0000WAVEfmt "), nullptr);
+    FakeEngine engine;
+    viewmodel::NotepadViewModel vm(nullptr, &files, nullptr, nullptr, &engine);
+    CHECK(vm.openFolder(root));
+    vm.engineLab().modelChoice.set(3);
+    engine.files["/models/Qwen3.5-9B-Q4_K_M.gguf"] = 5680522464ull;
+    app::LocalAgentTools tools(vm, []() { return static_cast<view::MainView*>(nullptr); }, &engine);
+    auto offered = [&](const char* name) {
+        for (const interfaces::LocalTool& tool : tools.tools(true))
+            if (tool.name == name)
+                return true;
+        return false;
+    };
+    auto call = [&](const char* name, const std::string& args) {
+        std::string out;
+        tools.run({"c", name, args}, [&](viewmodel::AgentViewModel::ToolOutput o) { out = o.text; });
+        return out;
+    };
+    CHECK(!offered("listen_to") && call("listen_to", R"j({"path": "memo.wav"})j").find("cannot hear") != std::string::npos);
+    CHECK(vm.engineLab().pathFor(Lab::Which::Ears) == "/models/Qwen3-ASR-0.6B-Q8_0.gguf");
+    engine.files["/models/Qwen3-ASR-0.6B-Q8_0.gguf"] = 804749536ull;
+    CHECK(!vm.engineLab().earsUsable()); // its audio encoder too
+    engine.files["/models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"] = 214392544ull;
+    CHECK(vm.engineLab().earsUsable() && offered("listen_to") && offered("transcribe"));
+    CHECK(tools.guide().find("listen_to") != std::string::npos);
+    engine.textAnswers = {"[00:00] The gate code is 4417."};
+    const size_t before = engine.chats.size();
+    const std::string heard = call("listen_to", R"j({"path": "memo.wav"})j");
+    CHECK(heard.find("The gate code is 4417.") != std::string::npos && heard.find("speech model") != std::string::npos);
+    CHECK_EQ(engine.chats.size(), before + 1);
+    if (engine.chats.size() == before + 1) {
+        const interfaces::LocalChatRequest& r = engine.chats.back();
+        CHECK(r.cpuOnly && r.transcribe && r.modelPath == "/models/Qwen3-ASR-0.6B-Q8_0.gguf" &&
+              r.projectorPath == "/models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf" && r.messages.size() == 1 &&
+              r.messages[0].media.size() == 1);
+    }
+    // Gemma hears with its own projector: the sound goes to the model itself, nothing is written down.
+    vm.engineLab().modelChoice.set(0);
+    tools.run({"c", "listen_to", R"j({"path": "memo.wav"})j"}, [&](viewmodel::AgentViewModel::ToolOutput o) {
+        CHECK(o.media.size() == 1 && o.text.find("Listened to") != std::string::npos);
+    });
+    CHECK_EQ(engine.chats.size(), before + 1);
+}
+
 TEST(local_agent_tools_read_a_folder_inside_one_of_the_same_name)
 {
     // The open folder is called data and holds a data folder: "data/x.csv" is that file, not the
@@ -5178,7 +5231,7 @@ TEST(local_agent_works_across_many_documents_with_notes)
     CHECK(call("read_notes", Json::object()).find("No notes yet") != std::string::npos);
 }
 
-TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
+TEST(engine_lab_offers_four_models_each_with_its_eyes_and_ears)
 {
     using Lab = viewmodel::EngineLabViewModel;
     FakeEngine engine;
@@ -5198,6 +5251,20 @@ TEST(engine_lab_offers_three_models_each_with_its_eyes_and_ears)
     for (int i = 0; i < Lab::kModelChoices; ++i) {
         const Lab::ModelChoice& c = Lab::modelChoiceInfo(i);
         CHECK(std::string(c.model->url).find("/resolve/") != std::string::npos && std::string(c.projector->sha256).size() == 64);
+    }
+    // Qwen 3.5 9B: pinned the same way; eyes but no ears, and no drafter (nothing to fetch or use).
+    {
+        Lab q(&engine);
+        q.modelChoice.set(3);
+        CHECK(std::string(q.chosenModel().name) == "Qwen 3.5 9B" && !q.chosenModel().hears && q.chosenModel().tokenPixels == 32 * 32);
+        CHECK(q.pathFor(Lab::Which::Model) == "/models/Qwen3.5-9B-Q4_K_M.gguf" &&
+              q.pathFor(Lab::Which::Projector) == "/models/Qwen3.5-9B-mmproj-F16.gguf");
+        CHECK(!q.chosenModel().drafter && !q.drafterOn() && q.pathFor(Lab::Which::Drafter).empty() && !q.fileUsable(Lab::Which::Drafter));
+        q.setDrafterOn(true);
+        CHECK(!q.drafterOn());
+        q.download(Lab::Which::Drafter);
+        CHECK(!q.downloading());
+        CHECK(Lab::modelChoiceInfo(0).hears && Lab::modelChoiceInfo(0).tokenPixels == 48 * 48);
     }
     // A download is the chosen model's; the choice is saved with the other settings.
     lab.download(Lab::Which::Model);
@@ -5591,6 +5658,11 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     os::fs::createDirectories(root + "/data");
     files.write(root + "/data/sales.csv",
                 "Region,Product,Units,Price\nEast,Pens,120,\"$1,200.50\"\nWest,Pens,80,800\nEast,Paper,30,90\nWest,Ink,5,(50)\n", nullptr);
+    // An export on one long line (minified HTML).
+    files.write(root + "/data/orders.html",
+                "<html><head>" + std::string(400, ' ') + "</head><table><tr><td>Velmont</td><td>11.11</td></tr>" +
+                    std::string(400, ' ') + "<tr><td>Velmont</td><td>22.22</td></tr></table></html>",
+                nullptr);
     std::optional<std::string> dll = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/binary/fixture.dll");
     if (dll)
         files.write(root + "/fixture.dll", *dll, nullptr);
@@ -5739,6 +5811,11 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     const std::string lines = call("search_files", R"j({"query": "East", "also": "Pens", "include": "*.csv"})j");
     CHECK(lines.rfind("1 line with 'East' and 'pens', in 1 file:\ndata/sales.csv:2: East,Pens,120", 0) == 0);
     CHECK(call("search_files", R"j({"query": "East", "include": "*.csv"})j").rfind("2 lines with 'East', in 1 file:", 0) == 0);
+    // On a long line, each hit shows the text around it (not the line's start each time).
+    const std::string velmont = call("search_files", R"j({"query": "Velmont", "include": "data/orders.html"})j");
+    CHECK(velmont.find("11.11") != std::string::npos && velmont.find("22.22") != std::string::npos);
+    // A path as the filter: its file name.
+    CHECK(call("search_files", R"j({"query": "East", "include": "data/sales.csv"})j").rfind("2 lines with 'East', in 1 file:", 0) == 0);
     CHECK(call("search_files", R"j({"query": "East", "also": "Ink", "include": "*.csv"})j") == "No lines with 'East' and 'ink'.");
     // Grouped by two columns: a row for each pair of values; a column it does not have is said.
     const std::string pairs = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region, Product", "aggregate": "sum(Units)"})j");
@@ -5808,6 +5885,26 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(call("read_file", "not json at all").find("Call it like this") != std::string::npos);
     CHECK(call("teleport", "{}").find("Tools: list_files") != std::string::npos);
     CHECK(call("transcribe", R"j({"path": "data/sales.csv"})j").find("not a recording") != std::string::npos);
+
+    // Gemma hears; Qwen 3.5 sees pictures only: no listen_to or transcribe offered, in the guide or
+    // the skills, and a call to one anyway is told so.
+    auto offered = [&](const char* name) {
+        for (const interfaces::LocalTool& tool : tools.tools(true))
+            if (tool.name == name)
+                return true;
+        return false;
+    };
+    CHECK(offered("listen_to") && offered("transcribe") && tools.guide().find("listen_to") != std::string::npos);
+    vm.engineLab().modelChoice.set(3);
+    CHECK(std::string(vm.engineLab().chosenModel().name) == "Qwen 3.5 9B");
+    CHECK(!offered("listen_to") && !offered("transcribe") && offered("look_at_image"));
+    const std::string deaf = tools.guide();
+    CHECK(deaf.find("listen_to") == std::string::npos && deaf.find("transcribe") == std::string::npos &&
+          deaf.find("cannot hear recordings") != std::string::npos && deaf.find("- meetings:") == std::string::npos);
+    CHECK(call("listen_to", R"j({"path": "talk.wav"})j").find("cannot hear recordings") != std::string::npos);
+    CHECK(vm.localSetup().tokenPixels == 32 * 32 && !vm.localSetup().hears);
+    vm.engineLab().modelChoice.set(0);
+    CHECK(offered("transcribe"));
 }
 
 TEST(local_agent_runs_a_tool_call_written_as_text)
@@ -5828,7 +5925,7 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
     agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}}; },
                         [&](const interfaces::LocalToolCall& c, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
                             ran.push_back(c);
-                            done({"2+2 = 4", {}, {}});
+                            done({c.arguments.find("long") != std::string::npos ? std::string(2000, 'x') : std::string("2+2 = 4"), {}, {}});
                         },
                         []() { return std::string(); });
     // The fake answers its scripted text once: a call in a code fence, not in the chat format.
@@ -5858,6 +5955,27 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
     CHECK_EQ(engine.chats.size() - before, size_t(3)); // the question, then two nudges; the third announcement ends it
     CHECK(engine.chats.back().messages.back().text.find("Go on") != std::string::npos);
     CHECK(!agent.busy.get());
+
+    // Its last sentence says what it will do next, naming no tool: also a step not taken.
+    const size_t then = engine.chats.size();
+    engine.textAnswers = {"The search found nothing. Let me read the file in smaller parts to find them.", "The total is 12."};
+    agent.submitPrompt("Total the orders");
+    CHECK_EQ(engine.chats.size() - then, size_t(2));
+    CHECK(agent.messages().back().text == "The total is 12.");
+    // An answer that only mentions the future earlier on is an answer.
+    const size_t done = engine.chats.size();
+    engine.textAnswers = {"I'll keep it short. The total is 12."};
+    agent.submitPrompt("Total again");
+    CHECK_EQ(engine.chats.size() - done, size_t(1));
+
+    // A long reply it already has, word for word, is pointed to instead of sent again; a short one is sent.
+    engine.textAnswers = {"calculate {\"expression\": \"long\"}", "calculate {\"expression\": \"long\", \"x\": 1}", "Done."};
+    agent.submitPrompt("Read it twice");
+    std::vector<std::string> replies;
+    for (const interfaces::LocalChatMessage& m : engine.chats.back().messages)
+        if (m.role == "tool")
+            replies.push_back(m.text);
+    CHECK(replies.size() == 2 && replies[0] == std::string(2000, 'x') && replies[1].find("you have it already") != std::string::npos);
 }
 
 TEST(opening_another_folder_forgets_the_previous_one)

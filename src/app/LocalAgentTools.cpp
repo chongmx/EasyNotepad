@@ -40,7 +40,6 @@ constexpr int kListLimit = 300;          // entries of a folder
 constexpr int kDocumentPages = 3;        // pages of a document, when no range is asked for
 constexpr size_t kPartChars = 10000;     // of a document without pages (Word reflowed, Excel)
 constexpr size_t kDocumentChars = 11000; // of pages in one reply (the agent cuts a tool result at 12000)
-constexpr int kTokenPixels = 48 * 48;   // Gemma 4 spends one token on about 48 x 48 pixels of a picture
 constexpr int kMinPictureTokens = 70, kMaxPictureTokens = 1120; // ... and 70 to 1120 tokens on one
 constexpr size_t kSoundBytes = 25u << 20; // a recording read whole (about 2 minutes of WAV)
 constexpr int kLookMinFrames = 4;        // a page shown is drawn at least this often before it is captured
@@ -214,7 +213,7 @@ FileKind kindOf(const std::string& path)
 }
 
 // The call to make for a file, spelled out: a small model follows an example better than a rule.
-std::string whichTool(const std::string& path)
+std::string whichTool(const std::string& path, bool hears)
 {
     const std::string p = Json(path).dump(); // quoted and escaped
     switch (kindOf(path)) {
@@ -222,7 +221,9 @@ std::string whichTool(const std::string& path)
         return "It is a document: call read_document {\"path\": " + p + "} for its text, or look_at_page {\"path\": " + p +
                ", \"page\": 1} to see a page.";
     case FileKind::Picture: return "It is a picture: call look_at_image {\"path\": " + p + "}.";
-    case FileKind::Sound: return "It is a recording: call listen_to {\"path\": " + p + "}.";
+    case FileKind::Sound:
+        return hears ? "It is a recording: call listen_to {\"path\": " + p + "}."
+                     : "It is a recording, and this local model cannot hear recordings: tell the user so (Gemma can).";
     case FileKind::Text: break;
     }
     return "Call read_file {\"path\": " + p + "} for its text.";
@@ -260,6 +261,12 @@ bool looksBinary(const std::string& bytes)
 
 // The tokens a look spends on its picture: by how carefully it looks (low, normal, high, or a
 // number), never fewer than the user's minimum (the agent set-up), within what Gemma 4 takes.
+bool LocalAgentTools::nativeEars() const { return vm_.engineLab().chosenModel().hears; }
+
+bool LocalAgentTools::hears() const { return nativeEars() || vm_.engineLab().earsUsable(); }
+
+int LocalAgentTools::tokenPixels() const { return vm_.engineLab().chosenModel().tokenPixels; }
+
 int LocalAgentTools::pictureTokens(const std::string& detail) const
 {
     const std::string d = lower(trimmed(detail));
@@ -276,11 +283,13 @@ int LocalAgentTools::pictureTokens(const std::string& detail) const
 namespace {
 
 // RGBA (as decoded or captured) to the RGB picture the model is given, resized so it costs about
-// `tokens` (Gemma 4: one per 48 x 48 pixels): shrunk by averaging, or enlarged smoothly (a small
-// part zoomed into keeps its detail for the model instead of being a few tokens).
-LocalMedia picture(const std::string& name, const unsigned char* rgba, int width, int height, int stride, int tokens)
+// `tokens` (one per `tokenPixels`: 48 x 48 for Gemma 4, 32 x 32 for Qwen 3.5): shrunk by averaging,
+// or enlarged smoothly (a small part zoomed into keeps its detail for the model instead of being a
+// few tokens).
+LocalMedia picture(const std::string& name, const unsigned char* rgba, int width, int height, int stride, int tokens,
+                   int tokenPixels)
 {
-    const double k = std::sqrt(double(tokens) * kTokenPixels / (double(width) * double(height)));
+    const double k = std::sqrt(double(tokens) * tokenPixels / (double(width) * double(height)));
     LocalMedia m;
     m.kind = LocalMedia::Kind::Image;
     m.name = name;
@@ -598,7 +607,7 @@ void LocalAgentTools::attach()
         const std::string named = namedFiles(question);
         std::string skills;
         for (const auto& [name, description] : skillIndex())
-            if (name != "planning")
+            if (name != "planning" && (hears() || name != "meetings"))
                 skills += "- " + name + ": " + description + "\n";
         return text + "\n\nThe skills a step can name:\n" + skills +
                "\nThe open folder holds (plan with these names; never invent a file):\n" + summary +
@@ -761,6 +770,9 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
         {"read_skill", "Reads one of your skills: how to do a kind of task well with these tools. Read it before such a task.",
          schema({{"name", "string", "The skill's name, from the list in your guide"}}, {"name"})},
     };
+    if (!hears()) // pictures only (Qwen): no recordings offered
+        t.erase(std::remove_if(t.begin(), t.end(), [](const LocalTool& tool) { return tool.name == "listen_to" || tool.name == "transcribe"; }),
+                t.end());
     if (canEdit) {
         t.push_back({"edit_file",
                      "Proposes a change to a text file: `old_text` (as in the file, found once) becomes `new_text`. The user "
@@ -821,16 +833,23 @@ std::string LocalAgentTools::guide() const
                                                 "user reviews and accepts: say the change waits for their review, never that "
                                                 "it is done.\n"
                                               : "Mode: Plan only - you cannot change files; describe the changes instead.\n";
+    const bool ears = hears();
     g += vm_.localSetup().projectorPath.empty()
-             ? "You cannot see pictures or hear recordings yet: the user can download your eyes and ears in the agent "
-               "set-up (the gear). Use read_document for documents meanwhile.\n"
-             : "You can see pictures and pages (look_at_image, look_at_page) and hear recordings (listen_to).\n";
+             ? std::string(ears ? "You cannot see pictures or hear recordings yet: the user can download your eyes and ears in "
+                                  "the agent set-up (the gear). Use read_document for documents meanwhile.\n"
+                                : "You cannot see pictures yet: the user can download your eyes in the agent set-up (the "
+                                  "gear). Use read_document for documents meanwhile.\n")
+             : std::string(ears ? "You can see pictures and pages (look_at_image, look_at_page) and hear recordings (listen_to).\n"
+                                : "You can see pictures and pages (look_at_image, look_at_page).\n");
+    if (!ears)
+        g += "You cannot hear recordings (.wav .mp3 .flac): if a question needs one, say so; a Gemma model can.\n";
     g += "Which tool for which file:\n"
          "- code, notes (.cpp .py .md .txt .json ...): read_file; find text in them with search_files\n"
          "- tables (.csv .tsv .xlsx): query_table to filter, sort, group and total rows; read_document for an overview\n"
          "- documents (.pdf .docx .xlsx .pptx): read_document for the text; look_at_page to see a page (tables, charts)\n"
          "- pictures (.png .jpg .gif .webp ...): look_at_image\n"
-         "- recordings (.wav .mp3 .flac): listen_to for a short one; transcribe for a meeting or anything long\n"
+         + std::string(ears ? "- recordings (.wav .mp3 .flac): listen_to for a short one; transcribe for a meeting or anything long\n"
+                            : "") +
          "- programs and libraries (.exe .dll .so .o .a .lib): inspect_binary; read_bytes for raw bytes of any file\n"
          "- a folder: list_files\n"
          "- several documents at once: search_documents to find which mention something (or, with no query, to see "
@@ -849,7 +868,8 @@ std::string LocalAgentTools::guide() const
     if (const std::optional<std::string> index = os::fs::readAsset("skills/index.json"))
         if (const std::optional<Json> j = Json::parse(*index); j && j->isArray())
             for (const Json& s : j->items())
-                skills += "- " + s.getString("name") + ": " + s.getString("description") + "\n";
+                if (ears || s.getString("name") != "meetings") // transcribing: not without ears
+                    skills += "- " + s.getString("name") + ": " + s.getString("description") + "\n";
     if (!skills.empty())
         g += "Your skills (a step of a plan comes with those it needs; otherwise read_skill <name> before a task of "
              "that kind):\n" + skills;
@@ -1008,6 +1028,9 @@ void LocalAgentTools::run(const interfaces::LocalToolCall& call, Done done)
         {"read_skill", &LocalAgentTools::readSkill},
         {"show_image", &LocalAgentTools::showImage},
     };
+    if (!hears() && (call.name == "listen_to" || call.name == "transcribe"))
+        return reply(done, "This local model cannot hear recordings yet: tell the user so (its ears can be downloaded in the "
+                           "agent set-up, or a Gemma model hears).");
     for (const auto& [name, handler] : handlers) {
         if (call.name != name)
             continue;
@@ -1301,7 +1324,8 @@ std::string LocalAgentTools::namedFiles(const std::string& question)
                               ? "a program: inspect_binary"
                           : kindOf(f) == FileKind::Document ? "a document: read_document"
                           : kindOf(f) == FileKind::Picture  ? "a picture: look_at_image"
-                          : kindOf(f) == FileKind::Sound    ? "a recording: transcribe, or listen_to if short"
+                          : kindOf(f) == FileKind::Sound    ? (hears() ? "a recording: transcribe, or listen_to if short"
+                                                                           : "a recording, which this model cannot hear")
                                                             : "text: read_file";
         std::string columns;
         if (ext == "csv" || ext == "tsv" || ext == "xlsx" || ext == "xlsm")
@@ -1324,7 +1348,7 @@ void LocalAgentTools::readFile(const Json& args, Done done)
     if (text.empty() && !open && !os::fs::exists(absolute))
         return reply(done, path + " does not exist");
     if (kindOf(path) != FileKind::Text)
-        return reply(done, path + " is not a text file. " + whichTool(path));
+        return reply(done, path + " is not a text file. " + whichTool(path, hears()));
     if (looksBinary(text))
         return reply(done, path + " is a binary file (a program, library or data): the tools cannot read it as text.");
     std::vector<std::string> lines;
@@ -1356,8 +1380,18 @@ void LocalAgentTools::readFile(const Json& args, Done done)
 void LocalAgentTools::searchFiles(const Json& args, Done done)
 {
     Json params = Json::object().set("query", args.getString("query"));
-    if (!args.getString("include").empty())
-        params.set("include", args.getString("include"));
+    // The filter matches file names: a path given ("exports/orders.html") is its name.
+    if (std::string include = args.getString("include"); !include.empty()) {
+        std::string names;
+        std::replace(include.begin(), include.end(), ';', ',');
+        for (std::string entry : splitList(include)) {
+            std::replace(entry.begin(), entry.end(), '\\', '/');
+            entry = trimmed(entry.substr(entry.find_last_of('/') == std::string::npos ? 0 : entry.find_last_of('/') + 1));
+            if (!entry.empty())
+                names += (names.empty() ? "" : ";") + entry;
+        }
+        params.set("include", names.empty() ? include : names);
+    }
     const Json result = handleAutomation(vm_, "search_files", params);
     if (!result.getString("error").empty())
         return reply(done, "search failed: " + result.getString("error"));
@@ -1404,13 +1438,13 @@ void LocalAgentTools::readDocument(const Json& args, Done done)
     const int to = std::max(from, argInt(args, "to_page", from + kDocumentPages - 1));
     // Read in the background (a long document takes a while); answered on the main thread.
     std::weak_ptr<bool> alive = alive_;
-    os::dispatch::runAsync([alive, absolute, path, from, to, done = std::move(done)]() mutable {
+    os::dispatch::runAsync([alive, absolute, ears = hears(), path, from, to, done = std::move(done)]() mutable {
         std::string out;
         std::optional<std::string> bytes = os::fs::readFile(absolute);
         if (!bytes) {
             out = "cannot read " + path;
         } else if (model::viewer::viewerFormat(absolute, *bytes).empty()) {
-            out = path + " is not a PDF, Word, Excel or PowerPoint document. " + whichTool(path);
+            out = path + " is not a PDF, Word, Excel or PowerPoint document. " + whichTool(path, ears);
         } else {
             model::viewer::ViewerDocument doc = model::viewer::readViewerDocument(absolute, std::move(*bytes));
             if (doc.needsPassword) {
@@ -2551,7 +2585,7 @@ void LocalAgentTools::scanImage(const Json& args, Done done)
     services::DecodedImage image;
     std::string note;
     if (!bytes || !services::decodeImage(*bytes, image, note, 8192))
-        return reply(done, kindOf(path) != FileKind::Picture ? path + " is not a picture. " + whichTool(path)
+        return reply(done, kindOf(path) != FileKind::Picture ? path + " is not a picture. " + whichTool(path, hears())
                                                              : path + " is a picture this cannot read: " + note);
     float region[4];
     if (!lookBox(args, region, error))
@@ -2629,7 +2663,7 @@ void LocalAgentTools::scanPass(std::shared_ptr<ScanJob> job, Done done)
                 std::to_string(int(pass.box[2] * 100 + 0.5f)) + "," + std::to_string(int(pass.box[3] * 100 + 0.5f)) + "\" (" +
                 boxText(pass.box) + (pass.depth > 1 ? ", closer" : "") + ")";
         ask.media.push_back(picture(fileName(job->picture), job->rgba.data() + (size_t(top) * size_t(job->width) + size_t(left)) * 4,
-                                    right - left, bottom - top, job->width * 4, job->tokens));
+                                    right - left, bottom - top, job->width * 4, job->tokens, tokenPixels()));
         ask.text += "This is one part of the picture " + job->picture + ". Say what in it is about that, and where in this part; or answer only: nothing.";
     }
     r.messages.push_back(std::move(ask));
@@ -2755,7 +2789,7 @@ void LocalAgentTools::deliverCapture(bool ok, int width, int height, const std::
         const int bottom = std::clamp(int(std::min(y1, p[1] + (p[3] - p[1]) * f[3])), top + 1, height);
         Output out;
         out.media.push_back(picture(l.what, rgba.data() + (size_t(top) * size_t(width) + size_t(left)) * 4, right - left,
-                                    bottom - top, width * 4, l.tokens));
+                                    bottom - top, width * 4, l.tokens, tokenPixels()));
         out.text = (area ? "Looked at " + l.what + " (as shown in the viewer)."
                          : "The document is not shown in the viewer, so this is the whole window.") +
                    blankNote(out.media.back());
@@ -2783,7 +2817,7 @@ void LocalAgentTools::lookAtImage(const Json& args, Done done)
     std::string note;
     // Whole (up to 8192 across): a part zoomed into keeps the picture's own detail.
     if (!services::decodeImage(*bytes, image, note, 8192))
-        return reply(done, kindOf(path) != FileKind::Picture ? path + " is not a picture. " + whichTool(path)
+        return reply(done, kindOf(path) != FileKind::Picture ? path + " is not a picture. " + whichTool(path, hears())
                                                              : path + " is a picture this cannot read: " + note);
     const int left = std::clamp(int(box[0] * float(image.width)), 0, image.width - 1);
     const int top = std::clamp(int(box[1] * float(image.height)), 0, image.height - 1);
@@ -2794,7 +2828,7 @@ void LocalAgentTools::lookAtImage(const Json& args, Done done)
     Output out;
     out.media.push_back(picture(fileName(path) + (part.empty() ? "" : ", " + part),
                                 image.rgba.data() + (size_t(top) * size_t(image.width) + size_t(left)) * 4, right - left,
-                                bottom - top, image.width * 4, tokens));
+                                bottom - top, image.width * 4, tokens, tokenPixels()));
     out.text = "Looked at " + path + (part.empty() ? "" : ", " + part) + " (" + image.format + ", " +
                std::to_string(image.sourceWidth) + " x " + std::to_string(image.sourceHeight) + " pixels; about " +
                std::to_string(tokens) + " tokens)." + blankNote(out.media.back());
@@ -2815,7 +2849,7 @@ void LocalAgentTools::listenTo(const Json& args, Done done)
         return reply(done, error);
     const std::string ext = extension(path);
     if (ext != "wav" && ext != "mp3" && ext != "flac")
-        return reply(done, kindOf(path) != FileKind::Sound ? path + " is not a recording. " + whichTool(path)
+        return reply(done, kindOf(path) != FileKind::Sound ? path + " is not a recording. " + whichTool(path, hears())
                                                            : path + " is a recording this cannot play: WAV, MP3 and FLAC can be heard.");
     const os::fs::FileInfo st = os::fs::stat(absolute);
     if (!st.exists)
@@ -2825,6 +2859,18 @@ void LocalAgentTools::listenTo(const Json& args, Done done)
     std::optional<std::string> bytes = os::fs::readFile(absolute);
     if (!bytes)
         return reply(done, "cannot read " + path);
+    // Ears of its own: the sound goes to the model. A speech model as its ears: what it writes down.
+    if (!nativeEars()) {
+        std::weak_ptr<bool> alive = alive_;
+        return writeDown(path, std::move(*bytes), [alive, path, done = std::move(done)](const interfaces::LocalChatResult& r) {
+            if (!alive.lock())
+                return;
+            if (!r.ok)
+                return reply(done, "Listening to " + path + " failed: " + r.error);
+            reply(done, "What is said in " + path + " (written down word for word by your ears, a speech model: speech "
+                        "only, not other sounds or music):\n" + (r.text.empty() ? std::string("[no speech]") : r.text));
+        });
+    }
     Output out;
     LocalMedia sound;
     sound.kind = LocalMedia::Kind::Audio;
@@ -2833,6 +2879,51 @@ void LocalAgentTools::listenTo(const Json& args, Done done)
     out.media.push_back(std::move(sound));
     out.text = "Listened to " + path + ".";
     done(std::move(out));
+}
+
+void LocalAgentTools::writeDown(const std::string& path, std::string bytes, std::function<void(const interfaces::LocalChatResult&)> done)
+{
+    if (!engine_) {
+        interfaces::LocalChatResult none;
+        none.error = "this build has no local model";
+        return done(none);
+    }
+    const viewmodel::AgentViewModel::LocalSetup setup = vm_.localSetup();
+    interfaces::LocalChatRequest request;
+    if (nativeEars()) {
+        request.modelPath = setup.modelPath;
+        request.drafterPath = setup.drafterPath;
+        request.projectorPath = setup.projectorPath;
+        request.useGpu = setup.gpu;
+        request.contextTokens = 0; // as the agent's chats: the model stays loaded
+    } else {
+        // Its speech model, on the CPU beside it: the model on the GPU stays loaded.
+        request.modelPath = setup.earsPath;
+        request.projectorPath = setup.earsProjectorPath;
+        request.cpuOnly = true;
+        request.contextTokens = 4096; // a window of speech and its words
+    }
+    request.threads = setup.threads;
+    request.maxTokens = 8192;
+    request.transcribe = true;
+    interfaces::LocalChatMessage message;
+    message.role = "user";
+    message.text.clear(); // the engine's own instruction: the words as spoken
+    LocalMedia sound;
+    sound.kind = LocalMedia::Kind::Audio;
+    sound.name = fileName(path);
+    sound.data = std::move(bytes);
+    message.media.push_back(std::move(sound));
+    request.messages.push_back(std::move(message));
+    std::weak_ptr<bool> alive = alive_;
+    viewmodel::NotepadViewModel* vm = &vm_;
+    engine_->chat(
+        request,
+        [alive, vm](const std::string& stage) {
+            if (alive.lock())
+                vm->statusText.set(stage);
+        },
+        [](const std::string&) {}, std::move(done));
 }
 
 void LocalAgentTools::openFile(const Json& args, Done done)
@@ -3610,7 +3701,7 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                 rows.push_back(std::move(values));
         }
     } else {
-        return reply(done, path + " is not a table. " + whichTool(path));
+        return reply(done, path + " is not a table. " + whichTool(path, hears()));
     }
     if (header.empty())
         return reply(done, path + " is empty.");
@@ -4305,9 +4396,9 @@ void LocalAgentTools::transcribe(const Json& args, Done done)
     if (absolute.empty())
         return reply(done, error);
     if (kindOf(path) != FileKind::Sound)
-        return reply(done, path + " is not a recording. " + whichTool(path));
+        return reply(done, path + " is not a recording. " + whichTool(path, hears()));
     const viewmodel::AgentViewModel::LocalSetup setup = vm_.localSetup();
-    if (!engine_ || !setup.ready || setup.projectorPath.empty())
+    if (!engine_ || !setup.ready || (nativeEars() ? setup.projectorPath.empty() : setup.earsPath.empty()))
         return reply(done, "Transcribing needs the local model's ears: the user can download them in the agent set-up.");
     const os::fs::FileInfo info = os::fs::stat(absolute);
     if (!info.exists)
@@ -4325,33 +4416,10 @@ void LocalAgentTools::transcribe(const Json& args, Done done)
         const size_t dot = base.find_last_of('.');
         target = base.substr(0, dot) + " (" + std::to_string(n) + ")" + base.substr(dot);
     }
-    interfaces::LocalChatRequest request;
-    request.modelPath = setup.modelPath;
-    request.drafterPath = setup.drafterPath;
-    request.projectorPath = setup.projectorPath;
-    request.threads = setup.threads;
-    request.useGpu = setup.gpu;
-    request.contextTokens = 0; // as the agent's chats: the model stays loaded
-    request.maxTokens = 8192;
-    request.transcribe = true;
-    interfaces::LocalChatMessage message;
-    message.role = "user";
-    message.text.clear(); // the engine's own instruction: the words as spoken
-    LocalMedia sound;
-    sound.kind = LocalMedia::Kind::Audio;
-    sound.name = fileName(path);
-    sound.data = std::move(*bytes);
-    message.media.push_back(std::move(sound));
-    request.messages.push_back(std::move(message));
     std::weak_ptr<bool> alive = alive_;
     viewmodel::NotepadViewModel* vm = &vm_;
-    engine_->chat(
-        request,
-        [alive, vm](const std::string& stage) {
-            if (alive.lock())
-                vm->statusText.set(stage);
-        },
-        [](const std::string&) {},
+    writeDown(
+        path, std::move(*bytes),
         [alive, vm, path, target, done = std::move(done)](const interfaces::LocalChatResult& r) {
             if (!alive.lock())
                 return;
@@ -4419,7 +4487,7 @@ void LocalAgentTools::showImage(const Json& args, Done done)
     if (!os::fs::exists(absolute))
         return reply(done, path + " does not exist");
     if (kindOf(absolute) != FileKind::Picture)
-        return reply(done, path + " is not a picture. " + whichTool(path));
+        return reply(done, path + " is not a picture. " + whichTool(path, hears()));
     Output out;
     out.text = "Shown " + fileName(path) + " to the user.";
     out.shown.push_back(absolute);

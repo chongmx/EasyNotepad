@@ -87,6 +87,16 @@ its release notes on GitHub.
   drafter is fetched with the model by itself and used: on for E2B and E4B; off for 12B, which
   with it no longer fits an 8 GB card and slows from 33 to 20 tokens/s. Power users turn it on or
   off per model in the Engine Lab (Agent uses the drafter).
+- A fourth local model, from another family: Qwen 3.5 9B (Alibaba, Apache-2.0; Unsloth's Q4_K_M,
+  5.7 GB, and its vision projector, 0.9 GB, pinned by commit and SHA-256). It sees pictures and
+  pages, and hears through ears of its own download: Qwen3-ASR 0.6B (Alibaba, Apache-2.0; 0.8 GB
+  with its audio encoder, 0.2 GB), a speech model that writes down what a recording says, in 30
+  languages and 22 Chinese dialects. It runs on the CPU beside Qwen, so Qwen stays loaded on the
+  GPU; `listen_to` gives Qwen the words, and `transcribe` writes them to a file with [mm:ss] times
+  as with Gemma. Speech only: it does not describe other sounds or music. Without the ears, the
+  agent is not offered `listen_to` or `transcribe` (nor the meetings skill), and its guide says it
+  cannot hear. Its tool calls are XML, so every argument is text. Pictures are sized for its own
+  tokens (one per 32 x 32 pixels; Gemma's cover 48 x 48). It has no drafter.
 - Scanning with the local model: `scan_document` shows a long document (or several) to the model
   in overlapping windows (small, normal or large; overlap in percent), one at a time with what is
   looked for, and returns the pages and quotes where it is; `scan_image` shows a picture in a grid
@@ -132,6 +142,17 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- The local agent read the same long reply into its context twice: a one-line 16 KB HTML file
+  read again with other lines asked for filled Qwen 3.5 9B's context (18K tokens on an 8 GB card).
+  A tool reply of more than 1,500 characters that is already in what the model sees, word for
+  word, is now pointed to instead of sent again.
+- `search_files` with a path as its filter ("exports/orders.html") found nothing: the filter
+  matches file names, and a path now stands for its file name.
+- Find in Files (and the agent's `search_files`) showed only the first 240 characters of a long
+  line, so 43 hits on one line of minified HTML all showed its head and none of the matches. A hit
+  on a long line now shows the text around its match, highlighted in the Search panel.
+- A local answer ending in what it means to do next ("Let me read the file in smaller parts.")
+  was taken as the answer when it named no tool: it is told to go on, as an announced call is.
 - The local agent on Gemma 4 12B closed the app when it looked at a large picture or page. 12B
   reads a picture all at once, and a picture of more than 512 tokens did not fit the engine's
   batch: llama.cpp ended the GPU helper, the CPU took the question over, and ended the app the same

@@ -25,6 +25,15 @@ It opens the data folder as the workspace (it stops if documents are unsaved) an
 for each question. A small model's answers vary from run to run: use `-Repeat` before reading much
 into one result.
 
+Two more sets, made by a script from their own made-up data (for measuring only, never for
+tuning): `holdout/` (25 questions: tables, documents, a log, an HTML export, code) and `reallife/`
+(23 questions over one person's messy folder: downloads with duplicates, an inbox of e-mails,
+recordings of a call, a voicemail and a voice memo spoken by Windows' voices, photos of a receipt
+and a parking fine, an expenses workbook with messy categories, a bank export, a calendar, two
+versions of a price list, a proposal, a gym contract, a flight booking; asked as people ask, some
+across several files). Make them with `python3 holdout/make.py`, and `python3 reallife/make.py`
+then `reallife/make-media.ps1`; run with `-QuestionFile <set>/questions.json -Data <set>/data`.
+
 Public benchmarks for the same kinds of work, for later: GAIA (multi-step questions with attached
 spreadsheets, PDFs, pictures and audio; gated on Hugging Face), the Berkeley Function Calling
 Leaderboard (tool-call syntax), tau-bench (tool use in conversations), OfficeBench (office tasks),
