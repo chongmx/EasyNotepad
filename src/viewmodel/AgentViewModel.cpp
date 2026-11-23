@@ -409,7 +409,14 @@ bool announcesCall(const std::string& text, const std::vector<interfaces::LocalT
         size_t end = lower.find_last_not_of(" \t\r\n*");
         if (end != std::string::npos && (lower[end] == '.' || lower[end] == ':' || lower[end] == '!'))
             --end;
-        const size_t stop = end == std::string::npos ? std::string::npos : lower.find_last_of(".!?\n", end);
+        // A sentence ends at a stop followed by a space, not at the dot of a file name ("notice.eml").
+        size_t stop = std::string::npos;
+        for (size_t i = end == std::string::npos ? 0 : end + 1; end != std::string::npos && i-- > 0;)
+            if (lower[i] == '\n' || ((lower[i] == '.' || lower[i] == '!' || lower[i] == '?') && i + 1 < lower.size() &&
+                                     std::isspace(static_cast<unsigned char>(lower[i + 1])))) {
+                stop = i;
+                break;
+            }
         size_t start = stop == std::string::npos ? 0 : stop + 1;
         while (start < lower.size() && (std::isspace(static_cast<unsigned char>(lower[start])) || lower[start] == '*'))
             ++start;

@@ -152,7 +152,21 @@ its release notes on GitHub.
   line, so 43 hits on one line of minified HTML all showed its head and none of the matches. A hit
   on a long line now shows the text around its match, highlighted in the Search panel.
 - A local answer ending in what it means to do next ("Let me read the file in smaller parts.")
-  was taken as the answer when it named no tool: it is told to go on, as an announced call is.
+  was taken as the answer when it named no tool: it is told to go on, as an announced call is. A
+  file name's dot ("Let me check the bank notice.eml file") no longer hides such an ending.
+- `query_table` with `Category = Taxi` left out rows labelled "Transport - taxi", and both Qwen
+  and Gemma summed only part of the taxis. When other values of that column hold the value asked
+  for, the result with them comes first, those values named, then the result exactly as called.
+- Asked which product sold the most units, Qwen sorted the rows and took the top one (one sale);
+  asked how many bills smokers paid, it counted from five rows shown. `query_table` asked for rows
+  that name a column of a few repeated values now gives the totals per value first (count and the
+  sums of the numeric columns, sorted as asked), then the rows as called.
+- The local agent looked at the wrong photo in a folder ("a photo of a parking fine in my
+  Downloads"), said it was a receipt, and stopped. `look_at_image` on a picture the question does
+  not name now lists the other pictures beside it, with the call to look at the next one.
+- A parking fine that was only a photo was searched for 16 rounds of tools, until the agent gave
+  up. A `search_files` or `search_documents` that finds nothing now names the pictures and
+  recordings it could not read.
 - The local agent on Gemma 4 12B closed the app when it looked at a large picture or page. 12B
   reads a picture all at once, and a picture of more than 512 tokens did not fit the engine's
   batch: llama.cpp ended the GPU helper, the CPU took the question over, and ended the app the same

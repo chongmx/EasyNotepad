@@ -5565,7 +5565,14 @@ TEST(local_agent_looks_zoom_into_parts_and_spend_the_tokens_asked)
     };
     const auto whole = look(Json::object().set("path", "fax.tif").set("detail", "low"));
     CHECK(whole.media.size() == 1 && std::abs(tokens(whole.media[0]) - 70) < 8);
-    CHECK(whole.text.find("TIFF, 300 x 40") != std::string::npos);
+    CHECK(whole.text.find("TIFF, 300 x 40") != std::string::npos && whole.text.find("Other pictures") == std::string::npos);
+    // A picture the question does not name: the others beside it are said; one it names, not.
+    files.write(root + "/scan2.tif", fax.value_or(std::string()), nullptr);
+    tools.namedFiles("There's a photo of a fax in this folder. What does it say?");
+    CHECK(look(Json::object().set("path", "fax.tif").set("detail", "low")).text.find("Other pictures beside it: scan2.tif.") != std::string::npos);
+    tools.namedFiles("What does fax.tif say?");
+    CHECK(look(Json::object().set("path", "fax.tif").set("detail", "low")).text.find("Other pictures") == std::string::npos);
+    tools.namedFiles("");
     const auto careful = look(Json::object().set("path", "fax.tif").set("detail", "high"));
     CHECK(careful.media.size() == 1 && std::abs(tokens(careful.media[0]) - 1120) < 30);
     // The white rows at the top, then the black bar under them (rows 4 to 6, x 10 to 249).
@@ -5741,6 +5748,26 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     const std::string none = call("query_table", R"j({"path": "data/sales.csv", "where": "Region = North"})j");
     CHECK(none.find("no rows match") != std::string::npos && none.find("Region holds: ") != std::string::npos &&
           none.find("East") != std::string::npos && none.find("West") != std::string::npos);
+    // A label written several ways: the rows that hold the same word otherwise are given too, both results.
+    files.write(root + "/data/spend.csv", "Category,Amount\nTaxi,10\ntaxi ,5\nTransport - taxi,7\nTaxis and more,1\nLunch,3\n", nullptr);
+    const std::string taxis = call("query_table", R"j({"path": "data/spend.csv", "where": "Category = Taxi", "aggregate": "sum(Amount)"})j");
+    CHECK(taxis.find("'Transport - taxi', 'Taxis and more' (2 rows)") != std::string::npos &&
+          taxis.find("Category contains Taxi") != std::string::npos && taxis.find("all rows | 23") != std::string::npos &&
+          taxis.find("Exactly as called (Category = Taxi)") != std::string::npos && taxis.find("all rows | 15") != std::string::npos);
+    CHECK(taxis.find("all rows | 23") < taxis.find("all rows | 15"));
+    CHECK(call("query_table", R"j({"path": "data/spend.csv", "where": "Category = Lunch"})j").find("Other rows hold") == std::string::npos);
+    // A search that finds nothing says which pictures and recordings it could not read.
+    files.write(root + "/data/ticket.png", "not really a picture", nullptr);
+    const std::string missed = call("search_files", R"j({"query": "zebra crossing fine"})j");
+    CHECK(missed.find("No lines with") != std::string::npos && missed.find("Not searched: ") != std::string::npos &&
+          missed.find("data/ticket.png") != std::string::npos);
+    // Rows asked for where a column repeats a few values: the totals per value first, then the rows.
+    files.write(root + "/data/units.csv", "Product,Units\nPaseo,50\nAmarilla,40\nAmarilla,30\nPaseo,5\nAmarilla,20\nPaseo,1\n", nullptr);
+    const std::string most = call("query_table", R"j({"path": "data/units.csv", "columns": "Product, Units", "sort": "Units desc", "limit": 1})j");
+    CHECK(most.find("Product repeats from row to row") != std::string::npos && most.find("Amarilla | 3 | 90") != std::string::npos &&
+          most.find("The rows, as called:") != std::string::npos && most.find("Paseo | 50") != std::string::npos);
+    CHECK(most.find("Amarilla | 3 | 90") < most.find("Paseo | 3 | 56"));
+    CHECK(call("query_table", R"j({"path": "data/units.csv", "columns": "Units"})j").find("repeats") == std::string::npos);
     // A sheet the workbook does not have (a year meant as a filter): refused, not the first sheet's totals.
     if (std::optional<std::string> book = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/viewer/challenge.xlsx")) {
         files.write(root + "/data/book.xlsx", *book, nullptr);
@@ -5816,7 +5843,7 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(velmont.find("11.11") != std::string::npos && velmont.find("22.22") != std::string::npos);
     // A path as the filter: its file name.
     CHECK(call("search_files", R"j({"query": "East", "include": "data/sales.csv"})j").rfind("2 lines with 'East', in 1 file:", 0) == 0);
-    CHECK(call("search_files", R"j({"query": "East", "also": "Ink", "include": "*.csv"})j") == "No lines with 'East' and 'ink'.");
+    CHECK(call("search_files", R"j({"query": "East", "also": "Ink", "include": "*.csv"})j").rfind("No lines with 'East' and 'ink'.", 0) == 0);
     // Grouped by two columns: a row for each pair of values; a column it does not have is said.
     const std::string pairs = call("query_table", R"j({"path": "data/sales.csv", "group_by": "Region, Product", "aggregate": "sum(Units)"})j");
     CHECK(pairs.find("Region | Product | sum(Units)\n") != std::string::npos && pairs.find("East | Pens | 120\n") != std::string::npos &&
@@ -5962,6 +5989,11 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
     agent.submitPrompt("Total the orders");
     CHECK_EQ(engine.chats.size() - then, size_t(2));
     CHECK(agent.messages().back().text == "The total is 12.");
+    // A file name's dot ends no sentence: "Let me check the bank notice.eml file - ..." is one.
+    const size_t dotted = engine.chats.size();
+    engine.textAnswers = {"Let me check the bank notice.eml file - it might say more.", "The total is 12."};
+    agent.submitPrompt("Total the fees");
+    CHECK_EQ(engine.chats.size() - dotted, size_t(2));
     // An answer that only mentions the future earlier on is an answer.
     const size_t done = engine.chats.size();
     engine.textAnswers = {"I'll keep it short. The total is 12."};

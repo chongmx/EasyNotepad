@@ -1377,6 +1377,10 @@ void LocalAgentTools::readFile(const Json& args, Done done)
     reply(done, out);
 }
 
+namespace {
+std::string unsearchedMedia(const std::string& root, const std::string& dir);
+} // namespace
+
 void LocalAgentTools::searchFiles(const Json& args, Done done)
 {
     Json params = Json::object().set("query", args.getString("query"));
@@ -1418,8 +1422,11 @@ void LocalAgentTools::searchFiles(const Json& args, Done done)
     std::string what = "'" + args.getString("query") + "'";
     for (const std::string& w : also)
         what += " and '" + w + "'";
-    if (count == 0)
-        return reply(done, "No lines with " + what + ".");
+    if (count == 0) {
+        std::string error;
+        const std::string root = resolve("", error);
+        return reply(done, "No lines with " + what + "." + (root.empty() ? std::string() : unsearchedMedia(root, root)));
+    }
     std::string out = std::to_string(count) + (count == 1 ? " line" : " lines") + " with " + what + ", in " +
                       std::to_string(inFiles.size()) + (inFiles.size() == 1 ? " file" : " files") + ":\n" + listed;
     if (shown > 60)
@@ -1690,6 +1697,39 @@ std::string oneLine(std::string s, size_t most)
     return out;
 }
 
+// For a search that found nothing: the pictures and recordings under `dir`, whose words no search
+// reads ("the parking fine" was only a photo, and a model searched 16 rounds for it). Empty if none.
+std::string unsearchedMedia(const std::string& root, const std::string& dir)
+{
+    std::string names;
+    size_t count = 0, seen = 0;
+    std::vector<std::string> todo{dir};
+    while (!todo.empty() && seen < 3000) {
+        const std::string at = todo.back();
+        todo.pop_back();
+        for (const os::fs::DirEntry& e : os::fs::listDirectory(at)) {
+            if (e.hidden || ++seen > 3000)
+                continue;
+            const std::string full = at + "/" + e.name;
+            if (e.isDirectory) {
+                if (todo.size() < 500)
+                    todo.push_back(full);
+                continue;
+            }
+            const FileKind kind = kindOf(e.name);
+            if (kind != FileKind::Picture && kind != FileKind::Sound)
+                continue;
+            if (++count <= 6)
+                names += (names.empty() ? "" : ", ") + full.substr(std::min(full.size(), root.size() + 1));
+        }
+    }
+    if (!count)
+        return {};
+    return "\nNot searched: " + std::to_string(count) + (count == 1 ? " picture or recording" : " pictures and recordings") +
+           ", whose words only looking or listening finds: " + names + (count > 6 ? ", ..." : "") +
+           ". If what you look for may be in a photo or a recording, look at or listen to the likely one.";
+}
+
 // search_documents' answer: the catalogue (no words), or the pages that mention the words, best first.
 std::string searchDocumentsText(const std::string& root, const std::string& dir, const std::string& query)
 {
@@ -1777,7 +1817,7 @@ std::string searchDocumentsText(const std::string& root, const std::string& dir,
     }
     if (hits.empty())
         return "No document in " + where + " mentions " + query + " (" + std::to_string(files.size()) +
-               " searched). Try other words, or search_documents without a query to see the documents.";
+               " searched). Try other words, or search_documents without a query to see the documents." + unsearchedMedia(root, dir);
     std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.score > b.score; });
     std::string out = std::to_string(mentioning) + " of " + std::to_string(files.size()) + " documents mention it; the best pages:\n";
     for (size_t i = 0; i < hits.size() && i < 25; ++i)
@@ -2832,6 +2872,29 @@ void LocalAgentTools::lookAtImage(const Json& args, Done done)
     out.text = "Looked at " + path + (part.empty() ? "" : ", " + part) + " (" + image.format + ", " +
                std::to_string(image.sourceWidth) + " x " + std::to_string(image.sourceHeight) + " pixels; about " +
                std::to_string(tokens) + " tokens)." + blankNote(out.media.back());
+    // A picture the question does not name, picked from a folder ("a photo of a parking fine in my
+    // Downloads"): the other pictures beside it are said, for when this is not the one (a model that
+    // found a receipt there said so and stopped).
+    if (part.empty() && !question_.empty() && question_.find(lower(fileName(path))) == std::string::npos) {
+        const size_t slash = absolute.find_last_of("/\\");
+        const std::string shown = path.substr(0, path.find_last_of("/\\") == std::string::npos ? 0 : path.find_last_of("/\\") + 1);
+        std::string others, first;
+        int count = 0;
+        if (slash != std::string::npos)
+            for (const os::fs::DirEntry& e : os::fs::listDirectory(absolute.substr(0, slash))) {
+                if (e.isDirectory || e.hidden || kindOf(e.name) != FileKind::Picture || lower(e.name) == lower(fileName(path)))
+                    continue;
+                if (first.empty())
+                    first = shown + e.name;
+                if (++count <= 8)
+                    others += (others.empty() ? "" : ", ") + shown + e.name;
+            }
+        // Said as the call to make: a model told only that others exist answered from the wrong one.
+        if (count)
+            out.text += "\nOther pictures beside it: " + others + (count > 8 ? ", ..." : "") +
+                        ". If this picture is not the one the question is about, do not answer from it: call look_at_image "
+                        "{\"path\": \"" + first + "\"} next" + (count > 1 ? ", then the others" : "") + ".";
+    }
     // The user sees what it looked at: the picture, or the part it zoomed into.
     if (part.empty())
         out.shown.push_back(absolute);
@@ -3865,6 +3928,51 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
         }
         return reply(done, hint + "\nCall query_table again with one of these values exactly.");
     }
+    // A label written several ways ("Taxi", "Transport - taxi"): "Category = Taxi" leaves out the rows
+    // whose value holds the same word among others. The query is also made with "contains", and both
+    // results are given, those rows named, for the model to judge (a model shown only the exact
+    // result summed it). `exact_values` (set here, not by the model) is the query as made.
+    if (!picked.empty() && !args.getBool("exact_values")) {
+        std::string wider, others;
+        size_t extra = 0;
+        for (const Condition& k : conditions) {
+            double n = 0;
+            const bool widen = k.op == "=" && k.value.size() >= 3 && !cellNumber(k.value, n);
+            const std::string& value = k.value;
+            const size_t before = extra;
+            if (widen) {
+                const std::string want = lower(k.value);
+                std::vector<std::string> seen;
+                for (const auto& row : rows) {
+                    const std::string v = cell(row, k.column), low = lower(v);
+                    // As "contains" picks them, so the rows said are the rows added.
+                    if (low != want && low.find(want) != std::string::npos) {
+                        ++extra;
+                        if (std::find(seen.begin(), seen.end(), v) == seen.end() && seen.size() < 8)
+                            seen.push_back(v);
+                    }
+                }
+                for (const std::string& v : seen)
+                    others += (others.empty() ? "'" : ", '") + v + "'";
+            }
+            wider += (wider.empty() ? "" : " and ") + trimmed(header[size_t(k.column)]) +
+                     (extra > before ? " contains " : " " + k.op + " ") + value;
+        }
+        if (extra > 0) {
+            Json widerArgs = args, exactArgs = args;
+            widerArgs.set("where", wider);
+            widerArgs.set("exact_values", true);
+            exactArgs.set("exact_values", true);
+            const std::string head = "Other rows hold the same word in another way of writing it: " + others + " (" +
+                                     std::to_string(extra) + " rows). If they are the same thing, this is the result with them (" + wider + "):\n";
+            return queryTable(widerArgs, [this, exactArgs = std::move(exactArgs), head, where, done = std::move(done)](viewmodel::AgentViewModel::ToolOutput w) mutable {
+                queryTable(exactArgs, [w = std::move(w), head, where, done = std::move(done)](viewmodel::AgentViewModel::ToolOutput e) mutable {
+                    w.text = head + w.text + "\n\nExactly as called (" + where + "), without them:\n" + e.text;
+                    done(std::move(w));
+                });
+            });
+        }
+    }
     // The question names a value of a column ("red cars in Lisbon": red of colour, Lisbon of city)
     // that this query neither picks rows by nor groups by: said first, as a small model drops one of
     // two filters. A column it filters by another value (one step for Sunday, the next for Saturday)
@@ -3927,6 +4035,62 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                 done(std::move(f));
             });
         });
+    }
+    // Rows asked for, with a column of a few values each repeated ("Product, Units Sold" sorted, limit
+    // 1): the totals per value come first, then the rows. Models read the top row as the product that
+    // sold most, and counted smokers from five rows shown. `as_rows` (set here) is the call as made.
+    if (args.getString("group_by").empty() && args.getString("aggregate").empty() && !args.getBool("as_rows") && picked.size() > 4) {
+        std::string category;
+        std::vector<std::string> sums;
+        for (const std::string& name : splitList(args.getString("columns"))) {
+            const int c = column(name);
+            if (c < 0)
+                continue;
+            std::vector<std::string> values;
+            bool numbers = true, few = true;
+            for (const auto* row : picked) {
+                const std::string v = cell(*row, c);
+                double n = 0;
+                numbers = numbers && (v.empty() || cellNumber(v, n));
+                if (!v.empty() && std::find(values.begin(), values.end(), v) == values.end()) {
+                    values.push_back(v);
+                    if (values.size() > 12) {
+                        few = false;
+                        break;
+                    }
+                }
+            }
+            if (numbers)
+                sums.push_back("sum(" + trimmed(header[size_t(c)]) + ")");
+            else if (category.empty() && few && values.size() >= 2 && picked.size() >= values.size() * 2)
+                category = trimmed(header[size_t(c)]);
+        }
+        if (!category.empty()) {
+            Json grouped = args, asRows = args;
+            grouped.set("group_by", category);
+            std::string aggregate = "count";
+            for (const std::string& s : sums)
+                aggregate += ", " + s;
+            grouped.set("aggregate", aggregate);
+            // Sorted by a column it totals (as its sum), else as the groups come.
+            const std::string sort = lower(args.getString("sort"));
+            std::string bySum;
+            for (const std::string& s : sums)
+                if (!sort.empty() && sort.find(lower(s.substr(4, s.size() - 5))) != std::string::npos)
+                    bySum = s + (sort.find("asc") != std::string::npos ? " asc" : " desc");
+            grouped.set("sort", bySum);
+            grouped.set("columns", std::string());
+            grouped.set("limit", 30);
+            grouped.set("as_rows", true);
+            asRows.set("as_rows", true);
+            return queryTable(grouped, [this, asRows = std::move(asRows), category, done = std::move(done)](viewmodel::AgentViewModel::ToolOutput g) mutable {
+                queryTable(asRows, [g = std::move(g), category, done = std::move(done)](viewmodel::AgentViewModel::ToolOutput r) mutable {
+                    g.text = category + " repeats from row to row: all rows of each " + category + " together first (for 'which " +
+                             category + " has the most', 'how many are ...'):\n" + g.text + "\n\nThe rows, as called:\n" + r.text;
+                    done(std::move(g));
+                });
+            });
+        }
     }
     std::string out = note + path + ": " + std::to_string(picked.size()) + " of " + std::to_string(rows.size()) +
                       " rows match" + (readAs.empty() ? "" : " (" + readAs + ")") + ". Columns: " + columns + "\n";
