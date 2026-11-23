@@ -4127,11 +4127,24 @@ struct FakeEngine final : interfaces::ILocalEngineService {
     std::vector<std::vector<interfaces::LocalToolCall>> toolRounds;
     bool alwaysTools = false;
     std::vector<std::string> textAnswers;
+    // The final answer's check ("Check your answer against my question"): answered with this, and
+    // counted here, not in chats (an answer that gives what was asked: OK).
+    std::string checkReply = "OK";
+    std::vector<interfaces::LocalChatRequest> checks;
     void chat(const interfaces::LocalChatRequest& request, std::function<void(const std::string&)> stage,
               std::function<void(const std::string&)> text, std::function<void(const interfaces::LocalChatResult&)> done) override
     {
-        chats.push_back(request);
         interfaces::LocalChatResult r;
+        if (!request.messages.empty() && request.messages.back().role == "user" &&
+            request.messages.back().text.rfind("Check your answer against my question", 0) == 0) {
+            checks.push_back(request);
+            r.ok = true;
+            r.text = checkReply;
+            text(r.text);
+            done(r);
+            return;
+        }
+        chats.push_back(request);
         if (chatFails) {
             r.error = "out of memory";
             done(r);
@@ -5256,7 +5269,7 @@ TEST(engine_lab_offers_four_models_each_with_its_eyes_and_ears)
     {
         Lab q(&engine);
         q.modelChoice.set(3);
-        CHECK(std::string(q.chosenModel().name) == "Qwen 3.5 9B" && !q.chosenModel().hears && q.chosenModel().tokenPixels == 32 * 32);
+        CHECK(std::string(q.chosenModel().name) == "Qwen 3.5 9B" && !q.chosenModel().hears && q.chosenModel().tokenPixels == 32 * 32 && q.chosenModel().compactCache);
         CHECK(q.pathFor(Lab::Which::Model) == "/models/Qwen3.5-9B-Q4_K_M.gguf" &&
               q.pathFor(Lab::Which::Projector) == "/models/Qwen3.5-9B-mmproj-F16.gguf");
         CHECK(!q.chosenModel().drafter && !q.drafterOn() && q.pathFor(Lab::Which::Drafter).empty() && !q.fileUsable(Lab::Which::Drafter));
@@ -5264,7 +5277,7 @@ TEST(engine_lab_offers_four_models_each_with_its_eyes_and_ears)
         CHECK(!q.drafterOn());
         q.download(Lab::Which::Drafter);
         CHECK(!q.downloading());
-        CHECK(Lab::modelChoiceInfo(0).hears && Lab::modelChoiceInfo(0).tokenPixels == 48 * 48);
+        CHECK(Lab::modelChoiceInfo(0).hears && Lab::modelChoiceInfo(0).tokenPixels == 48 * 48 && !Lab::modelChoiceInfo(0).compactCache);
     }
     // A download is the chosen model's; the choice is saved with the other settings.
     lab.download(Lab::Which::Model);
@@ -5491,6 +5504,9 @@ TEST(engine_json_carries_pictures_sounds_and_tool_calls)
     CHECK(back.temperature < 0.0f); // the engine's own
     r.temperature = 0.0f;
     CHECK(engine::chatRequestFrom(*model::Json::parse(engine::toJson(r).dump())).temperature == 0.0f);
+    CHECK(!back.compactCache);
+    r.compactCache = true;
+    CHECK(engine::chatRequestFrom(*model::Json::parse(engine::toJson(r).dump())).compactCache);
     CHECK(back.messages.size() == 3 && back.messages[0].media.size() == 2);
     CHECK(back.messages[0].media[0].data == picture.data && back.messages[0].media[0].width == 1);
     CHECK(back.messages[0].media[1].kind == interfaces::LocalMedia::Kind::Audio && back.messages[0].media[1].data == sound.data);
@@ -5792,6 +5808,19 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(tools.namedFiles("Summarise old/notes.md").empty());    // not a whole path of the folder
     CHECK(tools.namedFiles("What is in meeting.transcript.md.bak?").empty());
     CHECK(tools.namedFiles("How are you?").empty());
+    // A transcript says which recording it is of, and the others beside it when the question names none.
+    os::fs::createDirectories(root + "/rec");
+    files.write(root + "/rec/call.wav", "RIFF", nullptr);
+    files.write(root + "/rec/voicemail.wav", "RIFF", nullptr);
+    files.write(root + "/rec/call.wav.transcript.md", "[00:00] We moved the launch.\n", nullptr);
+    tools.namedFiles("What did the landlord say in his voicemail?");
+    const std::string heard = call("read_file", R"j({"path": "rec/call.wav.transcript.md"})j");
+    CHECK(heard.find("(This is the transcript of the recording call.wav.") != std::string::npos &&
+          heard.find("Other recordings beside it: rec/voicemail.wav.") != std::string::npos &&
+          heard.find("call listen_to {\"path\": \"rec/voicemail.wav\"} next.") != std::string::npos);
+    tools.namedFiles("What did they decide on the call (call.wav)?");
+    CHECK(call("read_file", R"j({"path": "rec/call.wav.transcript.md"})j").find("Other recordings") == std::string::npos);
+    tools.namedFiles("");
     // A table's columns; the values of a text column that has few when the question names one.
     CHECK(named.find("data/sales.csv (a table: query_table), its columns: Region, Product, Units, Price.") != std::string::npos);
     CHECK(tools.namedFiles("Units sold in the Eastern stores, data/sales.csv?").find("its columns: Region [East, West], Product, Units") !=
@@ -5861,7 +5890,6 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     const std::string folder = call("query_table", R"j({"path": "audio", "where": "type = .md"})j");
     CHECK(folder.find("audio is a folder, not a table") == 0 && folder.find("meeting.transcript.md") != std::string::npos &&
           folder.find("In all: 1 .md, 1 folder") != std::string::npos);
-
     // Memory: kept in its file, recalled, corrected, forgotten, compacted; temporary ones end with the run.
     CHECK(call("remember", R"j({"text": "The user wants answers in British English", "kind": "preference"})j").find("#1") != std::string::npos);
     CHECK(call("remember", R"j({"text": "query_table needs the column names exactly", "kind": "lesson"})j").find("#2") != std::string::npos);
@@ -5929,7 +5957,7 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(deaf.find("listen_to") == std::string::npos && deaf.find("transcribe") == std::string::npos &&
           deaf.find("cannot hear recordings") != std::string::npos && deaf.find("- meetings:") == std::string::npos);
     CHECK(call("listen_to", R"j({"path": "talk.wav"})j").find("cannot hear recordings") != std::string::npos);
-    CHECK(vm.localSetup().tokenPixels == 32 * 32 && !vm.localSetup().hears);
+    CHECK(vm.localSetup().tokenPixels == 32 * 32 && !vm.localSetup().hears && vm.localSetup().compactCache);
     vm.engineLab().modelChoice.set(0);
     CHECK(offered("transcribe"));
 }
@@ -5949,10 +5977,14 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
         []() { return std::string(); });
     agent.agentChoice.set(int(viewmodel::AgentViewModel::Choice::Local));
     std::vector<interfaces::LocalToolCall> ran;
-    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}}; },
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}, {"list_files", "Lists", "{}"}, {"search_files", "Searches", "{}"}}; },
                         [&](const interfaces::LocalToolCall& c, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
                             ran.push_back(c);
-                            done({c.arguments.find("long") != std::string::npos ? std::string(2000, 'x') : std::string("2+2 = 4"), {}, {}});
+                            done({c.arguments.find("long") != std::string::npos ? std::string(2000, 'x')
+                                  : c.name == "list_files"                       ? std::string("photo.png\nfine.png (60.00)")
+                                  : c.name == "search_files"                     ? std::string("No lines with 'parking'.")
+                                  : c.arguments.find("14500") != std::string::npos ? std::string("0.4 * 14500 = 5800")
+                                                                                 : std::string("2+2 = 4"), {}, {}});
                         },
                         []() { return std::string(); });
     // The fake answers its scripted text once: a call in a code fence, not in the chat format.
@@ -6008,6 +6040,53 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
         if (m.role == "tool")
             replies.push_back(m.text);
     CHECK(replies.size() == 2 && replies[0] == std::string(2000, 'x') && replies[1].find("you have it already") != std::string::npos);
+
+    // It asks me for the file before looking at all: told to look first; the question is not shown as the answer.
+    const size_t asked = engine.chats.size();
+    engine.textAnswers = {"I need to know the exact path to the photo of the fine. Could you tell me?", "list_files {}", "It is 60.00."};
+    agent.submitPrompt("Which photo shows the parking fine?");
+    CHECK_EQ(engine.chats.size() - asked, size_t(3));
+    CHECK(engine.chats.size() == asked + 3 && engine.chats[asked + 1].messages.back().text.rfind("Look first", 0) == 0);
+    CHECK(agent.messages().back().text == "It is 60.00.");
+    for (const model::ChatMessage& m : agent.messages())
+        CHECK(m.text.find("Could you tell me") == std::string::npos);
+
+    // An answer to "how much" after tools is checked once: OK keeps it, not shown as an answer.
+    size_t checks = engine.checks.size();
+    engine.textAnswers = {"calculate {\"expression\": \"0.4 * 14500\"}", "Lumen pays 40% of 14,500 at kick-off."};
+    agent.submitPrompt("How much does Lumen pay at kick-off?");
+    CHECK_EQ(engine.checks.size() - checks, size_t(1));
+    CHECK(agent.messages().back().text == "Lumen pays 40% of 14,500 at kick-off.");
+    // A reply that works it out takes the answer's place.
+    checks = engine.checks.size();
+    engine.checkReply = "Lumen pays 5800 at kick-off (40% of 14,500).";
+    engine.textAnswers = {"calculate {\"expression\": \"0.4 * 14500\"}", "Lumen pays 40% of 14,500 at kick-off."};
+    agent.submitPrompt("How much does Lumen pay at kick-off?");
+    CHECK_EQ(engine.checks.size() - checks, size_t(1));
+    CHECK(agent.messages().back().text == "Lumen pays 5800 at kick-off (40% of 14,500).");
+    size_t shown = 0;
+    for (const model::ChatMessage& m : agent.messages())
+        shown += m.text == "Lumen pays 40% of 14,500 at kick-off." ? 1 : 0;
+    CHECK_EQ(shown, size_t(1)); // the first question's answer stays; the second's was replaced
+    // The third search that finds nothing: told it may be looking in the wrong place (once).
+    engine.textAnswers = {"search_files {\"query\": \"parking\"}", "search_files {\"query\": \"fine\"}",
+                          "search_files {\"query\": \"penalty\"}", "search_files {\"query\": \"ticket\"}", "Not found."};
+    agent.submitPrompt("Where is the parking fine?");
+    std::vector<std::string> searched;
+    for (const interfaces::LocalChatMessage& m : engine.chats.back().messages)
+        if (m.role == "tool" && m.toolName == "search_files")
+            searched.push_back(m.text);
+    CHECK(searched.size() == 4 && searched[1].find("third search") == std::string::npos &&
+          searched[2].find("That is the third search here that found nothing") != std::string::npos &&
+          searched[3].find("third search") == std::string::npos);
+    // A question that asks for no figure, or an answer without tools: not checked.
+    engine.checkReply = "OK";
+    checks = engine.checks.size();
+    engine.textAnswers = {"calculate {\"expression\": \"1+1\"}", "Yes, it is there."};
+    agent.submitPrompt("Is the report in the folder?");
+    engine.textAnswers = {"About 12."};
+    agent.submitPrompt("How many days in a fortnight, roughly?");
+    CHECK_EQ(engine.checks.size(), checks);
 }
 
 TEST(opening_another_folder_forgets_the_previous_one)

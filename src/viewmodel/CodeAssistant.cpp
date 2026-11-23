@@ -227,6 +227,7 @@ void CodeAssistant::startLocal(const IntellisenseViewModel::Request& request)
     chat.drafterPath = local.drafterPath;
     chat.threads = local.threads;
     chat.useGpu = local.gpu;
+    chat.compactCache = local.compactCache;
     chat.maxTokens = kMaxTokens;
     chat.contextTokens = kContextTokens;
     chat.messages.push_back({"system", systemPrompt(request)});

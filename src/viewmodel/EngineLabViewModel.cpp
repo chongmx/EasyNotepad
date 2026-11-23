@@ -115,7 +115,7 @@ const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices
      &kProjector12B, &kDrafter12B, false, 9ull << 30},
     {"Qwen 3.5 9B", "another family (Alibaba): careful with tables and documents; hears speech through Qwen3-ASR; needs a "
      "graphics card of 8 GB",
-     &kModelQwen9B, &kProjectorQwen9B, nullptr, false, 8ull << 30, false, 32 * 32, &kEarsQwen, &kEarsProjectorQwen},
+     &kModelQwen9B, &kProjectorQwen9B, nullptr, false, 8ull << 30, false, 32 * 32, &kEarsQwen, &kEarsProjectorQwen, true},
 };
 
 // Room kept free beyond the download itself.

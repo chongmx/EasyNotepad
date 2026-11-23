@@ -164,6 +164,18 @@ its release notes on GitHub.
 - The local agent looked at the wrong photo in a folder ("a photo of a parking fine in my
   Downloads"), said it was a receipt, and stopped. `look_at_image` on a picture the question does
   not name now lists the other pictures beside it, with the call to look at the next one.
+- Gemma 4 E4B answered "I need the exact path to the photo" or "please provide the recipe" without
+  looking. An answer that asks for what the files may hold, before any tool, is sent back: look in
+  the open folder first.
+- Gemma 4 E4B stopped one step short: "40% of 14,500", "45 minutes before 07:35". The final
+  answer to a question that asks for an amount, a date or a time is checked once: the model says
+  OK (the answer stands) or works the figure out and answers again.
+- A transcript written earlier says which recording it is of, and the other recordings beside it
+  when the question names none (E4B answered about a voicemail from a team call's transcript).
+  `listen_to` names the others too.
+- A third search in one step that finds nothing says the thing may be elsewhere or in no text:
+  search the whole folder, and look at the pictures and recordings the tools named.
+- Qwen 3.5 9B keeps its context cache in 8 bits on the GPU, for more context in the same memory.
 - A parking fine that was only a photo was searched for 16 rounds of tools, until the agent gave
   up. A `search_files` or `search_documents` that finds nothing now names the pictures and
   recordings it could not read.

@@ -394,6 +394,41 @@ std::vector<std::string> unsourcedFigures(const std::string& answer, const std::
     return out;
 }
 
+// The answer asks the user for what the files may hold ("I need to know the exact path to the
+// photo", "Could you please provide the recipe?", "I do not have access to your inbox").
+bool asksInsteadOfLooking(const std::string& text)
+{
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    static const char* const asks[] = {"please provide", "could you provide", "can you provide", "could you tell me",
+                                       "can you tell me", "please tell me", "i need to know", "which file", "do not have access",
+                                       "don't have access", "cannot access", "can't access", "please share", "could you share",
+                                       "let me know which", "please specify", "could you specify"};
+    return std::any_of(std::begin(asks), std::end(asks), [&](const char* a) { return lower.find(a) != std::string::npos; });
+}
+
+// The question asks for a figure, a date or a time ("how much", "when", "the latest I can"): its
+// answer is checked once for giving it worked out, not only the figures to work it out from.
+bool asksForFigure(const std::string& question)
+{
+    std::string lower = " " + question + " ";
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    static const char* const asks[] = {"how much", "how many", "what time", " when ", "when?", "latest", "earliest", "by when",
+                                       "how long", "how often", "how far", "total", " cost", " price", "left over", " left?",
+                                       "difference", "average", "percent", " per "};
+    return std::any_of(std::begin(asks), std::end(asks), [&](const char* a) { return lower.find(a) != std::string::npos; });
+}
+
+// The model's reply to that check is "OK": the answer stands.
+bool checkPassed(const std::string& text)
+{
+    std::string t;
+    for (char c : text)
+        if (std::isalpha(static_cast<unsigned char>(c)))
+            t += char(std::tolower(static_cast<unsigned char>(c)));
+    return t == "ok" || t == "okay" || t == "yes" || t == "yesok" || t == "okyes";
+}
+
 // The answer only says it will call one of the tools ("I will now call inspect_binary with ..."),
 // without calling it.
 bool announcesCall(const std::string& text, const std::vector<interfaces::LocalTool>& tools)
@@ -744,6 +779,9 @@ void AgentViewModel::endLocal()
     localBase_ = 0;
     localSawMedia_ = false;
     localToolsUsed_ = 0;
+    localChecked_ = false;
+    localCheckedAt_ = std::string::npos;
+    localEmptySearches_ = 0;
     if (localNamedFiles_)
         localNamedFiles_({}); // the tools forget the question too
 }
@@ -1003,6 +1041,7 @@ void AgentViewModel::planLocal(int generation, std::string question)
     plan.projectorPath = localRequest_.projectorPath;
     plan.threads = localRequest_.threads;
     plan.useGpu = localRequest_.useGpu;
+    plan.compactCache = localRequest_.compactCache;
     plan.contextTokens = localRequest_.contextTokens;
     plan.maxTokens = 512;
     plan.temperature = 0.0f; // the same plan for the same question
@@ -1101,6 +1140,7 @@ void AgentViewModel::reviseMemory(int generation, const std::string& answer)
     revise.projectorPath = localRequest_.projectorPath;
     revise.threads = localRequest_.threads;
     revise.useGpu = localRequest_.useGpu;
+    revise.compactCache = localRequest_.compactCache;
     revise.contextTokens = localRequest_.contextTokens;
     revise.maxTokens = 600;
     revise.temperature = 0.0f;
@@ -1193,6 +1233,7 @@ void AgentViewModel::stepOn(int generation)
     ++localStep_;
     localRounds_ = 0; // each step has its own rounds of tools
     localNudges_ = 0;
+    localEmptySearches_ = 0;
     localRequest_.messages.emplace_back("user", std::move(next));
     sendLocal(generation);
 }
@@ -1219,6 +1260,7 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     request.projectorPath = setup.projectorPath;
     request.threads = setup.threads;
     request.useGpu = setup.gpu;
+    request.compactCache = setup.compactCache;
     const bool tools = runTool_ && localTools_;
     if (tools) {
         request.tools = localTools_(autonomyIndex.get() == 0);
@@ -1374,6 +1416,37 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                 return;
             }
         }
+        // The reply to the answer's check. "OK": the answer checked stands (the OK is not shown). Else
+        // the new answer (after any tools) takes the checked one's place.
+        if (r.toolCalls.empty() && localCheckedAt_ != std::string::npos) {
+            const size_t checked = localCheckedAt_;
+            localCheckedAt_ = std::string::npos;
+            if (checkPassed(r.text) && checked < at && at < messages_.size()) {
+                messages_.erase(messages_.begin() + long(at));
+                interfaces::LocalChatResult kept = r;
+                kept.text = messages_[checked].text;
+                localAnswered(generation, checked, kept);
+                return;
+            }
+            if (checked < at && at < messages_.size() && !empty) {
+                messages_.erase(messages_.begin() + long(checked));
+                --at;
+            }
+        }
+        // It asks me for what the files may hold ("I need the exact path to the photo", "please
+        // provide the recipe") before looking at all: told to look first.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && localToolsUsed_ == 0 && hasTool(localRequest_.tools, "list_files") &&
+            asksInsteadOfLooking(r.text)) {
+            ++localNudges_;
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back("user", "Look first: my files are in the open folder, and you can read them. Find it "
+                                                        "there (list_files, search_files, search_documents, then read or look at "
+                                                        "what you find) and answer from it. Ask me only if my files do not have it.");
+            if (at < messages_.size())
+                messages_.erase(messages_.begin() + long(at)); // a question to me, not the answer
+            sendLocal(generation);
+            return;
+        }
         // The question names files and it answered without reading anything ("there is no such file"):
         // back to it, to read them first.
         if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && !localNamed_.empty() && localToolsUsed_ == 0) {
@@ -1528,6 +1601,22 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
             nextLocalStep(generation, r.text);
             return;
         }
+        // The final answer to a question that asks for a figure, a date or a time: checked once for
+        // giving it worked out (a small model stopped at "40% of 14,500" and at "45 minutes before
+        // 07:35"). The answer stays shown; an "OK" keeps it.
+        if (r.toolCalls.empty() && runTool_ && !empty && !r.text.empty() && !localChecked_ && localToolsUsed_ > 0 &&
+            localRounds_ < kMaxToolRounds && asksForFigure(localPrompt_)) {
+            localChecked_ = true;
+            localCheckedAt_ = at;
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back(
+                "user", "Check your answer against my question: does it give each amount, date or time I asked for, worked out "
+                        "to the final figure (not only the figures to work it out from, such as a percentage of a price, a "
+                        "time before another, or a rule with a limit)? If it does, reply only: OK. If not, work it out now "
+                        "(calculate) and give the whole answer again.");
+            sendLocal(generation);
+            return;
+        }
         if (!r.toolCalls.empty())
             messages_.push_back({model::ChatRole::Tool, "The local model stopped after " + std::to_string(kMaxToolRounds) +
                                                             " rounds of tools without an answer."});
@@ -1604,6 +1693,13 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
         if (++callCount(calls[next]) == kStuckCalls - 1)
             result.text += "\n\n(You made this same call before in this step and got this same reply: do not make it "
                            "again. Change it - another column, value, file or tool - or answer from what you have.)";
+        // A third search in this step that found nothing: it may be looking in the wrong place (a plan
+        // said Finance, and the fine was a photo in Downloads: 16 rounds of searching there).
+        if ((calls[next].name == "search_files" || calls[next].name == "search_documents") &&
+            (result.text.rfind("No lines with", 0) == 0 || result.text.rfind("No document in", 0) == 0) && ++localEmptySearches_ == 3)
+            result.text += "\n\n(That is the third search here that found nothing: what you look for may not be where you are "
+                           "looking, or not written in a text at all. Search the whole open folder (no path, no include), and "
+                           "look at or listen to a picture or recording the tools name that may hold it.)";
         ++localToolsUsed_;
         localSawMedia_ = localSawMedia_ || !out.media.empty();
         localEvidence_.emplace_back("tool", result.text);

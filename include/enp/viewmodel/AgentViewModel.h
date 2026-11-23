@@ -49,6 +49,7 @@ public:
         // when downloaded; empty otherwise.
         std::string earsPath, earsProjectorPath;
         int tokenPixels = 48 * 48;  // the pixels of a picture one of its tokens covers
+        bool compactCache = false;  // its context cache in 8 bits (LocalChatRequest::compactCache)
         int threads = 4;
         bool gpu = false;
     };
@@ -201,6 +202,11 @@ private:
     interfaces::LocalChatRequest localRequest_;
     int localRounds_ = 0;
     int localNudges_ = 0; // times it was told to make the call it announced
+    // The final answer's check (does it give the figure asked for?): asked once a question; the
+    // answer checked, kept if the model replies OK, at checkedAt_ in messages_ (npos: none waiting).
+    int localEmptySearches_ = 0; // searches that found nothing, in this step
+    bool localChecked_ = false;
+    size_t localCheckedAt_ = std::string::npos;
     std::function<std::string(const std::string&)> localPlanner_;
     std::function<std::string()> localNotes_;
     int conversation_ = 0;

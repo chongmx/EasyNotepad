@@ -1374,6 +1374,13 @@ void LocalAgentTools::readFile(const Json& args, Done done)
     if (last < total)
         out += "[" + std::to_string(total - last) + " more lines: read on with start_line, or read_closely {\"path\": \"" + path +
                "\", \"objective\": \"...\"} to go through all of it for what you need]\n";
+    // A transcript written earlier ("voicemail.wav.transcript.md"): which recording it is of, and the
+    // other recordings beside it (a model answered about a voicemail from a team call's transcript).
+    if (const std::string name = fileName(path); lower(name).find(".transcript") != std::string::npos) {
+        const std::string recording = name.substr(0, lower(name).find(".transcript"));
+        if (kindOf(recording) == FileKind::Sound)
+            out += "(This is the transcript of the recording " + recording + "." + othersBeside(path, absolute, recording, false) + ")\n";
+    }
     reply(done, out);
 }
 
@@ -2091,6 +2098,7 @@ void LocalAgentTools::extractPass(std::shared_ptr<ExtractJob> job, Done done)
     r.projectorPath = now.projectorPath;
     r.threads = now.threads;
     r.useGpu = now.useGpu;
+    r.compactCache = now.compactCache;
     r.contextTokens = now.contextTokens;
     r.maxTokens = 600;
     r.temperature = 0.0f; // the same document and question: the same answer
@@ -2181,6 +2189,7 @@ interfaces::LocalChatRequest LocalAgentTools::passRequest(int maxTokens) const
     r.projectorPath = now.projectorPath;
     r.threads = now.threads;
     r.useGpu = now.useGpu;
+    r.compactCache = now.compactCache;
     r.contextTokens = now.contextTokens;
     r.maxTokens = maxTokens;
     r.temperature = 0.0f; // the same part and question: the same answer
@@ -2839,6 +2848,38 @@ void LocalAgentTools::deliverCapture(bool ok, int width, int height, const std::
     }
 }
 
+// A picture or recording the question does not name, picked from a folder ("a photo of a parking
+// fine in my Downloads", "my landlord's voicemail"): the others of its kind beside it, for when this
+// is not the one, said as the call to make (a model told only that others exist answered from the
+// wrong one). `self` is the file's own name, left out; empty when the question names it or there
+// are no others.
+std::string LocalAgentTools::othersBeside(const std::string& path, const std::string& absolute, const std::string& self, bool picture) const
+{
+    if (question_.empty() || question_.find(lower(self)) != std::string::npos)
+        return {};
+    const size_t slash = absolute.find_last_of("/\\");
+    const size_t pathSlash = path.find_last_of("/\\");
+    const std::string folder = path.substr(0, pathSlash == std::string::npos ? 0 : pathSlash + 1);
+    std::string others, first;
+    int count = 0;
+    if (slash != std::string::npos)
+        for (const os::fs::DirEntry& e : os::fs::listDirectory(absolute.substr(0, slash))) {
+            if (e.isDirectory || e.hidden || kindOf(e.name) != (picture ? FileKind::Picture : FileKind::Sound) || lower(e.name) == lower(self))
+                continue;
+            if (first.empty())
+                first = folder + e.name;
+            if (++count <= 8)
+                others += (others.empty() ? "" : ", ") + folder + e.name;
+        }
+    if (!count)
+        return {};
+
+    const std::string tool = picture ? "look_at_image" : "listen_to";
+    return std::string("\nOther ") + (picture ? "pictures" : "recordings") + " beside it: " + others + (count > 8 ? ", ..." : "") +
+           ". If this " + (picture ? "picture" : "recording") + " is not the one the question is about, do not answer from it: call " +
+           tool + " {\"path\": \"" + first + "\"} next" + (count > 1 ? ", then the others" : "") + ".";
+}
+
 void LocalAgentTools::lookAtImage(const Json& args, Done done)
 {
     std::string error;
@@ -2875,26 +2916,8 @@ void LocalAgentTools::lookAtImage(const Json& args, Done done)
     // A picture the question does not name, picked from a folder ("a photo of a parking fine in my
     // Downloads"): the other pictures beside it are said, for when this is not the one (a model that
     // found a receipt there said so and stopped).
-    if (part.empty() && !question_.empty() && question_.find(lower(fileName(path))) == std::string::npos) {
-        const size_t slash = absolute.find_last_of("/\\");
-        const std::string shown = path.substr(0, path.find_last_of("/\\") == std::string::npos ? 0 : path.find_last_of("/\\") + 1);
-        std::string others, first;
-        int count = 0;
-        if (slash != std::string::npos)
-            for (const os::fs::DirEntry& e : os::fs::listDirectory(absolute.substr(0, slash))) {
-                if (e.isDirectory || e.hidden || kindOf(e.name) != FileKind::Picture || lower(e.name) == lower(fileName(path)))
-                    continue;
-                if (first.empty())
-                    first = shown + e.name;
-                if (++count <= 8)
-                    others += (others.empty() ? "" : ", ") + shown + e.name;
-            }
-        // Said as the call to make: a model told only that others exist answered from the wrong one.
-        if (count)
-            out.text += "\nOther pictures beside it: " + others + (count > 8 ? ", ..." : "") +
-                        ". If this picture is not the one the question is about, do not answer from it: call look_at_image "
-                        "{\"path\": \"" + first + "\"} next" + (count > 1 ? ", then the others" : "") + ".";
-    }
+    if (part.empty())
+        out.text += othersBeside(path, absolute, fileName(path), true);
     // The user sees what it looked at: the picture, or the part it zoomed into.
     if (part.empty())
         out.shown.push_back(absolute);
@@ -2922,16 +2945,17 @@ void LocalAgentTools::listenTo(const Json& args, Done done)
     std::optional<std::string> bytes = os::fs::readFile(absolute);
     if (!bytes)
         return reply(done, "cannot read " + path);
+    const std::string others = othersBeside(path, absolute, fileName(path), false);
     // Ears of its own: the sound goes to the model. A speech model as its ears: what it writes down.
     if (!nativeEars()) {
         std::weak_ptr<bool> alive = alive_;
-        return writeDown(path, std::move(*bytes), [alive, path, done = std::move(done)](const interfaces::LocalChatResult& r) {
+        return writeDown(path, std::move(*bytes), [alive, path, others, done = std::move(done)](const interfaces::LocalChatResult& r) {
             if (!alive.lock())
                 return;
             if (!r.ok)
                 return reply(done, "Listening to " + path + " failed: " + r.error);
             reply(done, "What is said in " + path + " (written down word for word by your ears, a speech model: speech "
-                        "only, not other sounds or music):\n" + (r.text.empty() ? std::string("[no speech]") : r.text));
+                        "only, not other sounds or music):\n" + (r.text.empty() ? std::string("[no speech]") : r.text) + others);
         });
     }
     Output out;
@@ -2940,7 +2964,7 @@ void LocalAgentTools::listenTo(const Json& args, Done done)
     sound.name = fileName(path);
     sound.data = std::move(*bytes);
     out.media.push_back(std::move(sound));
-    out.text = "Listened to " + path + ".";
+    out.text = "Listened to " + path + "." + others;
     done(std::move(out));
 }
 
@@ -2958,6 +2982,7 @@ void LocalAgentTools::writeDown(const std::string& path, std::string bytes, std:
         request.drafterPath = setup.drafterPath;
         request.projectorPath = setup.projectorPath;
         request.useGpu = setup.gpu;
+        request.compactCache = setup.compactCache;
         request.contextTokens = 0; // as the agent's chats: the model stays loaded
     } else {
         // Its speech model, on the CPU beside it: the model on the GPU stays loaded.

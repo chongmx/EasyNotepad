@@ -34,6 +34,14 @@ versions of a price list, a proposal, a gym contract, a flight booking; asked as
 across several files). Make them with `python3 holdout/make.py`, and `python3 reallife/make.py`
 then `reallife/make-media.ps1`; run with `-QuestionFile <set>/questions.json -Data <set>/data`.
 
+`reallife2/` (20 questions) is another person's folder with the same kinds of tasks: a parents'
+evening, a garage voicemail and a memo; photos of a pharmacy label and a concert ticket; an inbox, a
+tenancy agreement, a card statement with one shop under several names, an electricity workbook,
+chores per child, insurance, term dates, a car loan. It was written after the harness was tuned on
+`reallife/`, to see whether that tuning carries over. Make it with `python3 reallife2/make.py`, then
+`reallife/make-media.ps1 -Set reallife2`. Both scripts share `benchfiles.py` (the folder, the
+checks, and PDF, Word, Excel and e-mail files written with the standard library).
+
 Public benchmarks for the same kinds of work, for later: GAIA (multi-step questions with attached
 spreadsheets, PDFs, pictures and audio; gated on Hugging Face), the Berkeley Function Calling
 Leaderboard (tool-call syntax), tau-bench (tool use in conversations), OfficeBench (office tasks),

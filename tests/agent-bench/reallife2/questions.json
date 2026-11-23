@@ -1,0 +1,321 @@
+{
+ "about": "A second real-life set (made by make.py and reallife/make-media.ps1): another person's folder, written after the tuning on reallife/. For measuring only, never for tuning.",
+ "questions": [
+  {
+   "id": "teacher-practise-test",
+   "kind": "sound",
+   "question": "At Mia's parents' evening, what did the teacher say she should practise, and when is her test? It's in Audio.",
+   "checks": [
+    {
+     "text": [
+      "fraction"
+     ]
+    },
+    {
+     "text": [
+      "2 June",
+      "June 2",
+      "2nd of June",
+      "second of June",
+      "2nd June",
+      "June 2nd",
+      "2026-06-02"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "garage-bill-saturday",
+   "kind": "sound",
+   "question": "The garage left me a voicemail. How much is the bill, and until what time can I pick the car up on Saturday?",
+   "checks": [
+    {
+     "number": 245,
+     "tol": 0
+    },
+    {
+     "text": [
+      "1 pm",
+      "1pm",
+      "one o'clock",
+      "1 o'clock",
+      "13:00",
+      "1:00",
+      "13.00"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "memo-present",
+   "kind": "sound",
+   "question": "I left myself a voice memo about mum's birthday present. What was I going to get her, and from where?",
+   "checks": [
+    {
+     "text": [
+      "scarf"
+     ]
+    },
+    {
+     "text": [
+      "Larkin"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ticket-seat",
+   "kind": "picture",
+   "question": "Where am I sitting at the orchestra concert? I took a photo of the ticket.",
+   "checks": [
+    {
+     "text": [
+      "Row F",
+      "row F",
+      "F12",
+      "F 12",
+      "F-12",
+      "F, seat",
+      "F seat"
+     ]
+    },
+    {
+     "number": 12,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "label-dose",
+   "kind": "picture",
+   "question": "How often should I take the capsules from the pharmacy, and what's the most I can take in a day? I took a photo of the label.",
+   "checks": [
+    {
+     "number": 8,
+     "tol": 0
+    },
+    {
+     "number": 6,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "mail-to-answer",
+   "kind": "email",
+   "question": "Which of my e-mails do I still have to answer? Only the ones where someone is waiting for me.",
+   "checks": [
+    {
+     "text": [
+      "school",
+      "Hillside",
+      "trip"
+     ]
+    },
+    {
+     "text": [
+      "Jo",
+      "swap"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rent-increase",
+   "kind": "documents",
+   "question": "By how much is my rent going up, and from when?",
+   "checks": [
+    {
+     "number": 70,
+     "tol": 0
+    },
+    {
+     "text": [
+      "1 May",
+      "May 1",
+      "1st of May",
+      "1st May",
+      "2026-05-01",
+      "01/05"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "deposit",
+   "kind": "documents",
+   "question": "How much deposit did I pay on the flat?",
+   "checks": [
+    {
+     "number": 1620.0,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "tesco-april",
+   "kind": "table",
+   "question": "How much did I spend at Tesco in April? My card statement is in Money.",
+   "checks": [
+    {
+     "number": 585.26,
+     "tol": 0.05
+    }
+   ]
+  },
+  {
+   "id": "electricity-peak",
+   "kind": "table",
+   "question": "Which month did we use the most electricity, and what did it cost?",
+   "checks": [
+    {
+     "text": [
+      "2026-03",
+      "March"
+     ]
+    },
+    {
+     "number": 116.83,
+     "tol": 0.01
+    }
+   ]
+  },
+  {
+   "id": "pocket-money-most",
+   "kind": "table",
+   "question": "Which of the kids earned the most coins from chores in total, and how many?",
+   "checks": [
+    {
+     "text": [
+      "Ada"
+     ]
+    },
+    {
+     "number": 42,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "insurance-renewal-excess",
+   "kind": "documents",
+   "question": "When does my car insurance renew, and what's the excess if I claim?",
+   "checks": [
+    {
+     "text": [
+      "14 July",
+      "July 14",
+      "14/07",
+      "2026-07-14"
+     ]
+    },
+    {
+     "number": 250,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "half-term",
+   "kind": "documents",
+   "question": "When is the summer half term at Mia's school?",
+   "checks": [
+    {
+     "text": [
+      "25",
+      "25th"
+     ]
+    },
+    {
+     "text": [
+      "29"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "loan-payments-left",
+   "kind": "calc",
+   "question": "How many more monthly payments until the car loan is paid off?",
+   "checks": [
+    {
+     "number": 20.0,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "lasagne-for-ten",
+   "kind": "calc",
+   "question": "I'm making the lasagne for 10 people. How much mince do I need?",
+   "checks": [
+    {
+     "number": 1250,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "boiler-pressure",
+   "kind": "workspace",
+   "question": "The boiler pressure is low. What should the gauge read after I top it up? There's a manual somewhere.",
+   "checks": [
+    {
+     "number": 1.5,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "bins-day",
+   "kind": "workspace",
+   "question": "Which day do the blue bins go out?",
+   "checks": [
+    {
+     "text": [
+      "Monday"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "afford-garage-trip",
+   "kind": "documents",
+   "question": "I have 300 pounds left this week. If I pay the garage bill and Mia's school trip, how much will I have left?",
+   "checks": [
+    {
+     "number": 20,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "renewal-vs-halfterm",
+   "kind": "documents",
+   "question": "Does my car insurance renew before or after the summer half term, and by how many days after its last day?",
+   "checks": [
+    {
+     "text": [
+      "after"
+     ]
+    },
+    {
+     "number": 46,
+     "tol": 0
+    }
+   ]
+  },
+  {
+   "id": "test-before-halfterm",
+   "kind": "documents",
+   "question": "Is Mia's maths test (the teacher mentioned it at parents' evening) before or after the summer half term?",
+   "checks": [
+    {
+     "text": [
+      "after"
+     ]
+    }
+   ]
+  }
+ ]
+}

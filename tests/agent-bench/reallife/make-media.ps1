@@ -5,10 +5,11 @@ Makes the real-life set's recordings and photos from media.json (written by make
 
   powershell -ExecutionPolicy Bypass -File tests/agent-bench/reallife/make-media.ps1
 #>
+param([string]$Set = "") # another set's folder (with its media.json); this one by default
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Speech
 Add-Type -AssemblyName System.Drawing
-$here = $PSScriptRoot
+$here = if ($Set) { $Set } else { $PSScriptRoot }
 $media = Get-Content (Join-Path $here "media.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $data = Join-Path $here "data"
 

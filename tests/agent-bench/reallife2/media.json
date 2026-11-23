@@ -1,0 +1,91 @@
+{
+ "speech": [
+  {
+   "file": "Audio/parents evening Mia.wav",
+   "lines": [
+    [
+     "Zira",
+     "Thanks for coming in, Mr Okafor. Mia is doing really well in English, her reading has come on a lot."
+    ],
+    [
+     "David",
+     "That's good to hear. How is she getting on with maths?"
+    ],
+    [
+     "Zira",
+     "Maths is where she needs a bit more practice. Fractions in particular. If she could do ten minutes of fractions a few evenings a week, that would help."
+    ],
+    [
+     "David",
+     "Fractions, OK. Is there a test coming up?"
+    ],
+    [
+     "Zira",
+     "Yes, the end of year maths test is on the second of June."
+    ],
+    [
+     "David",
+     "Second of June. We'll work on it. Anything else?"
+    ],
+    [
+     "Zira",
+     "Just that the school trip form needs to come back signed. Otherwise she's a pleasure to teach."
+    ]
+   ]
+  },
+  {
+   "file": "Audio/voicemail 0417.wav",
+   "lines": [
+    [
+     "David",
+     "Hello, this is Kevin from Millbrook Motors calling for Sam Okafor. Your car is ready to collect. We replaced the front brake pads and did the service. The bill comes to two hundred and forty five pounds. On Saturday we close at one o'clock, so please come before then. Thanks."
+    ]
+   ]
+  },
+  {
+   "file": "Audio/memo 2.wav",
+   "lines": [
+    [
+     "Zira",
+     "Reminder for mum's birthday. Get the blue scarf from Larkin's, size medium. It's about forty pounds."
+    ]
+   ]
+  }
+ ],
+ "pictures": [
+  {
+   "file": "Phone/PXL_20260411_183002.png",
+   "kind": "receipt",
+   "lines": [
+    "LANEWAY PHARMACY",
+    "",
+    "Patient: S OKAFOR",
+    "Amoxicillin 500 mg capsules",
+    "Qty: 21",
+    "",
+    "Take 1 capsule every 8 hours",
+    "Do not take more than 6 in 24 hours",
+    "Complete the course",
+    "",
+    "Dispensed 11/04/2026"
+   ]
+  },
+  {
+   "file": "Phone/PXL_20260402_201544.png",
+   "kind": "letter",
+   "lines": [
+    "THE ARCADIA - LIVE",
+    "",
+    "NORTHERN LIGHTS ORCHESTRA",
+    "Saturday 16 May 2026",
+    "",
+    "Doors 19:00   Show 19:45",
+    "",
+    "STALLS   ROW F   SEAT 12",
+    "",
+    "Price GBP 38.50",
+    "Ticket no. 0048817"
+   ]
+  }
+ ]
+}

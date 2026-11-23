@@ -55,6 +55,7 @@ public:
     // The files of the open folder a question names (by path, or by a name only one file has), each
     // with the tool that reads it; empty when it names none.
     std::string namedFiles(const std::string& question);
+    std::string othersBeside(const std::string& path, const std::string& absolute, const std::string& self, bool picture) const;
 
     // Once a frame: a look at a page waits some frames for the page to be read and drawn.
     void tick();

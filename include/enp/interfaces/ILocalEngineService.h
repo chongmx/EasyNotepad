@@ -119,6 +119,9 @@ struct LocalChatRequest {
     // On the CPU, in this process, beside whatever the GPU holds: a helper model (a speech model as
     // the ears of one without), so the main model stays loaded on the GPU.
     bool cpuOnly = false;
+    // The cache of what it has read (keys and values) in 8 bits on the GPU: about twice the context in
+    // the same memory (Qwen 3.5 9B on 8 GB). Part of what is loaded: the same for every request to a model.
+    bool compactCache = false;
 };
 
 struct LocalChatResult {

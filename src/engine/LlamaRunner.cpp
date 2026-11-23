@@ -725,15 +725,22 @@ interfaces::LocalChatResult Runner::chat(const interfaces::LocalChatRequest& req
         // only ends the helper). On the CPU, in the app's own process, a fixed size: fitting 128k tokens
         // into the RAM that happens to be free aborted the app.
         const int contextTokens = request.contextTokens > 0 ? request.contextTokens : request.useGpu ? 0 : kCpuContextTokens;
+        const bool compact = request.compactCache && request.useGpu;
         const std::string key = request.modelPath + "|" + request.drafterPath + "|" + request.projectorPath + "|" +
                                 std::to_string(request.threads) + "|" + (request.useGpu ? "gpu" : "cpu") + "|" +
-                                std::to_string(contextTokens);
+                                std::to_string(contextTokens) + (compact ? "|q8" : "");
         if (!loaded_ || key_ != key) {
             unload();
             stage("Loading the local model");
             LoadWatch watch{&cancelled, &stage, "Loading the local model"};
             common_params params = engineParams(request.modelPath, request.drafterPath, request.threads, request.useGpu,
                                                 contextTokens, 2048, &watch); // prompts read 2048 tokens a batch
+            // Keys and values in 8 bits: the fit gives about twice the context (8-bit values need flash
+            // attention, which llama.cpp turns on by itself where the GPU has it).
+            if (compact) {
+                params.cache_type_k = GGML_TYPE_Q8_0;
+                params.cache_type_v = GGML_TYPE_Q8_0;
+            }
             // A projector that reads a picture all at once (non-causal: Gemma 4 12B) needs the whole
             // picture in one batch: llama.cpp aborts the process otherwise.
             if (const int whole = wholePictureTokens(request.projectorPath); whole > params.n_ubatch) {
