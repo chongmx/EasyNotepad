@@ -122,6 +122,9 @@ struct LocalChatRequest {
     // The cache of what it has read (keys and values) in 8 bits on the GPU: about twice the context in
     // the same memory (Qwen 3.5 9B on 8 GB). Part of what is loaded: the same for every request to a model.
     bool compactCache = false;
+    // The model reasons before it answers (its template's thinking): what it thinks is not in the
+    // answer. Slower; for a plan, where a small model's first idea missed what the question asked.
+    bool thinking = false;
 };
 
 struct LocalChatResult {

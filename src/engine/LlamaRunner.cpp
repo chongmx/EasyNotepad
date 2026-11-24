@@ -425,7 +425,7 @@ common_chat_templates_inputs chatInputs(const interfaces::LocalChatRequest& requ
         inputs.tools.push_back({tool.name, tool.description, tool.parameters});
     inputs.parallel_tool_calls = !request.tools.empty();
     inputs.add_generation_prompt = true;
-    inputs.enable_thinking = false; // quick answers; thinking used the whole budget in the trial
+    inputs.enable_thinking = request.thinking; // off for quick answers (thinking used the whole budget in a trial); on for plans
     inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO; // thinking it writes anyway goes apart, not into the answer
     return inputs;
 }

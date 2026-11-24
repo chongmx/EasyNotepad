@@ -1529,6 +1529,15 @@ void LocalAgentTools::searchFiles(const Json& args, Done done)
                     if (lines)
                         more += "\nLines with '" + word + "' alone (" + std::to_string(lines) + "):" + some + (lines > 4 ? "\n  ..." : "");
                 }
+            // Lines with several words, not as one phrase, are counted by the tool, all of them (a
+            // model read a long log by hand and counted 3 of 18).
+            if (words.size() > 1) {
+                std::string others;
+                for (size_t k = 1; k < words.size(); ++k)
+                    others += (others.empty() ? "" : ", ") + words[k];
+                more += "\nTo count the lines with all of these words, in any order: search_files {\"query\": \"" + words[0] +
+                        "\", \"also\": \"" + others + "\"} (leave out a word the lines may not hold).";
+            }
         }
         return reply(done, "No lines with " + what + "." + more + (root.empty() ? std::string() : unsearchedMedia(root, root)));
     }

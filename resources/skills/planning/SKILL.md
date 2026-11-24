@@ -41,7 +41,12 @@ Two to six short lines; only what the question says, nothing you guess.
   the sums and comparisons of what it shows are one calculate step after it.
 - calculate only combines figures that earlier steps found (a difference, a share, a sum of
   totals from several files). Every such number is a calculate step: never plan to work one out
-  without it.
+  without it. A calculation repeated over rounds (interest for several years, a price cut twice,
+  days between two dates) is ONE calculate step, written whole: "1800 * 1.02^6",
+  "9 November 2025 - 2 August 2025" - never a step per year.
+- Every count is a tool's: rows of a table (query_table, aggregate count), lines of a file or
+  log (search_files with the word, and the other words in also: it counts all of them), files in
+  a folder (list_files: its "In all" line). Never plan to count by reading.
 - Name what each step finds in the question's own words: "how many seats are still free" stays
   "how many are free", never "how many seats there are". A question asking three things has a step (or a
   part of one) for each.

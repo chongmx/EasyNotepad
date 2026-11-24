@@ -1094,19 +1094,28 @@ void AgentViewModel::planLocal(int generation, std::string question)
     plan.useGpu = localRequest_.useGpu;
     plan.compactCache = localRequest_.compactCache;
     plan.contextTokens = localRequest_.contextTokens;
-    plan.maxTokens = 512;
+    // Thought through first when the model plans better so (Gemma 4 E4B): its thinking takes tokens
+    // of its own, and is not in the plan.
+    plan.thinking = localPlanThinking_;
+    plan.maxTokens = plan.thinking ? kPlanThinkingTokens : 512;
     plan.temperature = 0.0f; // the same plan for the same question
     std::string tools;
     for (const interfaces::LocalTool& t : localRequest_.tools)
         tools += "- " + t.name + ": " + t.description.substr(0, t.description.find(". ")) + "\n";
     plan.messages.emplace_back("system", instructions + "\n\nThe tools you will have:\n" + tools);
     plan.messages.emplace_back("user", "Write the steps for this question:\n\n" + question);
-    activity_ = "Local model: planning the steps";
+    activity_ = plan.thinking ? "Local model: thinking the question through" : "Local model: planning the steps";
     local_->chat(
         plan, [](const std::string&) {}, [](const std::string&) {}, // the plan is shown once it is read
-        [this, generation, instructions = std::move(instructions)](const interfaces::LocalChatResult& r) {
+        [this, generation, question, instructions = std::move(instructions)](const interfaces::LocalChatResult& r) {
             if (generation != generation_)
                 return; // stopped or replaced
+            // Thinking that ran out of room (or round in a loop) before the plan: planned again, without.
+            if (localPlanThinking_ && (!r.ok || std::all_of(r.text.begin(), r.text.end(), [](unsigned char c) { return std::isspace(c) != 0; }))) {
+                localPlanThinking_ = false;
+                planLocal(generation, question);
+                return;
+            }
             // What to keep in mind, then the steps (after "Steps:" when it wrote that: its list of what
             // to keep in mind may be numbered too).
             std::string stepsText = r.ok ? r.text : std::string();
@@ -1313,6 +1322,7 @@ void AgentViewModel::askLocal(const std::string& prompt, const std::string& cont
     request.threads = setup.threads;
     request.useGpu = setup.gpu;
     request.compactCache = setup.compactCache;
+    localPlanThinking_ = setup.planThinking;
     const bool tools = runTool_ && localTools_;
     if (tools) {
         request.tools = localTools_(autonomyIndex.get() == 0);
@@ -1446,6 +1456,16 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
         messages_.push_back({model::ChatRole::Tool, "(The local model went wrong: " + r.error + ". Once more.)"});
         localRequest_.temperature = kLoopTemperature;
         sendLocal(generation);
+        return;
+    }
+    // A step of a plan that went wrong again: the task's memory keeps what the steps before found, so
+    // on to the next step (or the answer), not the whole question lost.
+    if (!r.ok && slipped && runTool_ && !localSteps_.empty() && localStep_ <= localSteps_.size()) {
+        if (at < messages_.size())
+            messages_.erase(messages_.begin() + long(at));
+        messages_.push_back({model::ChatRole::Tool, "(The local model went wrong again in this step: on to the next.)"});
+        localRequest_.temperature = 0.0f;
+        nextLocalStep(generation, "I could not finish this step (the model went wrong); what the tools found is above.");
         return;
     }
     if (!r.ok) {

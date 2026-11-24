@@ -72,6 +72,7 @@ Json toJson(const interfaces::LocalChatRequest& r)
         .set("threads", r.threads)
         .set("useGpu", r.useGpu)
         .set("compactCache", r.compactCache)
+        .set("thinking", r.thinking)
         .set("maxTokens", r.maxTokens)
         .set("contextTokens", r.contextTokens)
         .set("temperature", double(r.temperature))
@@ -112,6 +113,7 @@ interfaces::LocalChatRequest chatRequestFrom(const Json& j)
     r.threads = integer(j, "threads", r.threads);
     r.useGpu = j.getBool("useGpu", r.useGpu);
     r.compactCache = j.getBool("compactCache");
+    r.thinking = j.getBool("thinking");
     r.maxTokens = integer(j, "maxTokens", r.maxTokens);
     r.contextTokens = integer(j, "contextTokens", r.contextTokens);
     if (const Json* t = j.find("temperature"); t && t->isNumber())

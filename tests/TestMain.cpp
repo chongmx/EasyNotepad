@@ -4771,6 +4771,60 @@ TEST(local_agent_calls_tools_until_it_answers)
     CHECK(engine.chats.back().tools.size() == 2);
 }
 
+TEST(local_agent_thinks_its_plan_through_and_keeps_going_when_a_step_goes_wrong)
+{
+    using viewmodel::AgentViewModel;
+    FakeEngine engine;
+    AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/models/m.gguf";
+            s.planThinking = true;
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(AgentViewModel::Choice::Local));
+    agent.setLocalTools([](bool) { return std::vector<interfaces::LocalTool>{{"calculate", "Calculates.", "{}"}}; },
+                        [](const interfaces::LocalToolCall&, std::function<void(AgentViewModel::ToolOutput)> done) {
+                            done(AgentViewModel::ToolOutput{"ok", {}, {}});
+                        },
+                        []() { return std::string(); });
+    agent.setLocalPlanner([](const std::string&) { return std::string("Write the steps."); });
+    // The plan is thought through (its thinking with room of its own); the steps are not.
+    engine.textAnswers = {"1. Answer it.", "Done."};
+    agent.submitPrompt("A question long enough to be planned first, please.");
+    CHECK(engine.chats.size() == 2 && engine.chats[0].tools.empty() && engine.chats[0].thinking &&
+          engine.chats[0].maxTokens == AgentViewModel::kPlanThinkingTokens && !engine.chats[1].thinking);
+    CHECK(agent.messages().back().text == "Done.");
+    // Thinking that left no plan (it ran out of room): planned again, without thinking.
+    engine.chats.clear();
+    engine.textAnswers = {"", "1. Answer it.", "Done."};
+    agent.submitPrompt("A question long enough to be planned first, please.");
+    CHECK(engine.chats.size() == 3 && engine.chats[0].thinking && !engine.chats[1].thinking && engine.chats[1].maxTokens == 512 &&
+          engine.chats[1].tools.empty());
+    CHECK(agent.messages().back().text == "Done.");
+    // A step that goes round in a loop twice: on to the next step, the question not lost.
+    engine.chats.clear();
+    engine.textAnswers = {"1. Work out the first part.\n2. Work out the second part.",
+                          "error: the model went round in a loop, repeating itself (stopped after 500 tokens)",
+                          "error: the model went round in a loop, repeating itself (stopped after 400 tokens)",
+                          "Keep in mind:\n- both parts\nFound:\n- nothing yet",
+                          "The second part is 4.",
+                          "Keep in mind:\n- both parts\nFound:\n- the second part is 4",
+                          "The second part is 4; the first could not be worked out."};
+    agent.submitPrompt("A question in two parts, long enough to be planned first.");
+    bool wentOn = false, failed = false;
+    for (const model::ChatMessage& m : agent.messages()) {
+        wentOn = wentOn || m.text.find("went wrong again in this step: on to the next") != std::string::npos;
+        failed = failed || m.text.rfind("The local model failed", 0) == 0;
+    }
+    CHECK(wentOn && !failed && !agent.busy.get());
+    CHECK(agent.messages().back().text == "The second part is 4; the first could not be worked out.");
+}
+
 TEST(local_agent_takes_a_question_in_steps)
 {
     using viewmodel::AgentViewModel;
@@ -5294,6 +5348,9 @@ TEST(engine_lab_offers_four_models_each_with_its_eyes_and_ears)
         q.download(Lab::Which::Drafter);
         CHECK(!q.downloading());
         CHECK(Lab::modelChoiceInfo(0).hears && Lab::modelChoiceInfo(0).tokenPixels == 48 * 48 && !Lab::modelChoiceInfo(0).compactCache);
+        // Gemma 4 E4B thinks its plans through; the others plan straight away.
+        CHECK(Lab::modelChoiceInfo(1).planThinking && Lab::modelChoiceInfo(1).drafter && !Lab::modelChoiceInfo(1).compactCache &&
+              !Lab::modelChoiceInfo(0).planThinking && !Lab::modelChoiceInfo(3).planThinking);
     }
     // A download is the chosen model's; the choice is saved with the other settings.
     lab.download(Lab::Which::Model);
@@ -5523,6 +5580,9 @@ TEST(engine_json_carries_pictures_sounds_and_tool_calls)
     CHECK(!back.compactCache);
     r.compactCache = true;
     CHECK(engine::chatRequestFrom(*model::Json::parse(engine::toJson(r).dump())).compactCache);
+    CHECK(!back.thinking);
+    r.thinking = true;
+    CHECK(engine::chatRequestFrom(*model::Json::parse(engine::toJson(r).dump())).thinking);
     CHECK(back.messages.size() == 3 && back.messages[0].media.size() == 2);
     CHECK(back.messages[0].media[0].data == picture.data && back.messages[0].media[0].width == 1);
     CHECK(back.messages[0].media[1].kind == interfaces::LocalMedia::Kind::Audio && back.messages[0].media[1].data == sound.data);
@@ -5792,6 +5852,7 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     const std::string phrase = call("search_files", R"j({"query": "sales pens report"})j");
     CHECK(phrase.rfind("No lines with 'sales pens report'.", 0) == 0 && phrase.find("Files whose names hold its words: ") != std::string::npos &&
           phrase.find("data/sales.csv") != std::string::npos && phrase.find("Lines with 'pens' alone (") != std::string::npos);
+    CHECK(phrase.find(R"(search_files {"query": "sales", "also": "pens, report"})") != std::string::npos);
     // A search that finds nothing says which pictures and recordings it could not read.
     files.write(root + "/data/ticket.png", "not really a picture", nullptr);
     const std::string missed = call("search_files", R"j({"query": "zebra crossing fine"})j");
@@ -6023,6 +6084,9 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
           deaf.find("cannot hear recordings") != std::string::npos && deaf.find("- meetings:") == std::string::npos);
     CHECK(call("listen_to", R"j({"path": "talk.wav"})j").find("cannot hear recordings") != std::string::npos);
     CHECK(vm.localSetup().tokenPixels == 32 * 32 && !vm.localSetup().hears && vm.localSetup().compactCache);
+    CHECK(!vm.localSetup().planThinking);
+    vm.engineLab().modelChoice.set(1);
+    CHECK(vm.localSetup().planThinking);
     vm.engineLab().modelChoice.set(0);
     CHECK(offered("transcribe"));
 }

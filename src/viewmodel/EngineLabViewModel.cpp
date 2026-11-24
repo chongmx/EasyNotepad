@@ -110,7 +110,7 @@ const EngineLabViewModel::ModelChoice kChoices[EngineLabViewModel::kModelChoices
     {"Gemma 4 E2B", "the fastest: quick questions, phones and computers without a graphics card", &kModel, &kProjector, &kDrafter, true,
      5ull << 30},
     {"Gemma 4 E4B", "better at questions with several parts; about half as fast; best with a graphics card of 8 GB",
-     &kModelE4B, &kProjectorE4B, &kDrafterE4B, true, 7ull << 30},
+     &kModelE4B, &kProjectorE4B, &kDrafterE4B, true, 7ull << 30, true, 48 * 48, nullptr, nullptr, false, true},
     {"Gemma 4 12B", "the most careful; slow, and needs a graphics card of 12 GB or more to be quick", &kModel12B,
      &kProjector12B, &kDrafter12B, false, 9ull << 30},
     {"Qwen 3.5 9B", "another family (Alibaba): careful with tables and documents; hears speech through Qwen3-ASR; needs a "

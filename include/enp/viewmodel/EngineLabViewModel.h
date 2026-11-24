@@ -49,6 +49,8 @@ public:
         // Its context cache in 8 bits on the GPU: about twice the context in the same memory, for a
         // model whose context the card holds back (Qwen 3.5 9B on 8 GB: 18K tokens in 16 bits).
         bool compactCache = false;
+        // It reasons (thinks) before writing a question's plan: a small model planned better so.
+        bool planThinking = false;
     };
     static constexpr int kModelChoices = 4;
     static const ModelChoice& modelChoiceInfo(int index);

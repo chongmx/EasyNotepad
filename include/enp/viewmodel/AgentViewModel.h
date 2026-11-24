@@ -50,6 +50,7 @@ public:
         std::string earsPath, earsProjectorPath;
         int tokenPixels = 48 * 48;  // the pixels of a picture one of its tokens covers
         bool compactCache = false;  // its context cache in 8 bits (LocalChatRequest::compactCache)
+        bool planThinking = false;  // it thinks before writing a plan (LocalChatRequest::thinking)
         int threads = 4;
         bool gpu = false;
     };
@@ -125,6 +126,7 @@ public:
     void proposeChange(const std::string& path, const std::string& before, const std::string& after);
     // Tool calls the local model may make for one question before it must answer.
     static constexpr int kMaxToolRounds = 16;
+    static constexpr int kPlanThinkingTokens = 4096; // its thinking and the plan
     bool localReady() const;
     bool claudeReady() const; // Claude Code can answer here now
     // A local answer: send the question it answered to Claude Code instead.
@@ -206,6 +208,7 @@ private:
     // answer checked, kept if the model replies OK, at checkedAt_ in messages_ (npos: none waiting).
     int localEmptySearches_ = 0; // searches that found nothing, in this step
     bool localChecked_ = false;
+    bool localPlanThinking_ = false; // the plan is thought through first (LocalSetup::planThinking)
     bool localOutOfRounds_ = false; // told once to answer without more tools
     bool localLookedFurther_ = false; // told, this step, to look further before saying "not there"
     size_t localCheckedAt_ = std::string::npos;

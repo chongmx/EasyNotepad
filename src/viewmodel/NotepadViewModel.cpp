@@ -1784,6 +1784,7 @@ AgentViewModel::LocalSetup NotepadViewModel::localSetup()
     s.hears = lab.chosenModel().hears; // what the chosen model takes in, ready or not
     s.tokenPixels = lab.chosenModel().tokenPixels;
     s.compactCache = lab.chosenModel().compactCache;
+    s.planThinking = lab.chosenModel().planThinking;
     if (!lab.hasEngine()) {
         s.why = "this build has no local model.";
         return s;

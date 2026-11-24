@@ -197,6 +197,13 @@ its release notes on GitHub.
   pictures and recordings it names itself, or through the whole folder.
 - A figure put into `calculate` that no tool reply or the question holds is pointed out under the
   result (a rent of 1,080 calculated as 1,100).
+- Gemma 4 E4B thinks a question through before writing its plan (the model's own reasoning, kept
+  out of the plan), and plans again without it if the thinking runs out of room.
+- The plan does every count with a tool (rows, lines of a log, files of a folder) and a
+  calculation repeated over years in one `calculate`; `search_files` for a phrase no line holds
+  shows how to count the lines with all its words.
+- A step of a plan where the model went round in a loop twice goes on to the next step, instead of
+  the whole question failing.
 - A parking fine that was only a photo was searched for 16 rounds of tools, until the agent gave
   up. A `search_files` or `search_documents` that finds nothing now names the pictures and
   recordings it could not read.
