@@ -5473,16 +5473,25 @@ TEST(local_agent_figures_no_tool_gave_go_to_the_calculator)
     CHECK(engine.chats[sent].temperature == 0.0f && engine.chats[sent + 1].temperature == 0.0f &&
           engine.chats[sent + 2].temperature > 0.0f);
     // It went round in a loop (the engine stopped it): once more with some variety, then the answer;
-    // a second loop fails the question.
+    // a second loop asks once for the answer from what the tools found, and a loop after that fails.
     const size_t looped = engine.chats.size();
     engine.textAnswers = {"error: the model went round in a loop, repeating itself (stopped after 900 tokens)", "It is 6."};
     agent.submitPrompt("What is three plus three?");
     CHECK_EQ(engine.chats.size(), looped + 2);
     CHECK(engine.chats[looped].temperature == 0.0f && engine.chats[looped + 1].temperature > 0.0f);
     CHECK(!agent.busy.get() && agent.messages().back().text == "It is 6.");
-    engine.textAnswers = {"error: the model went round in a loop, repeating itself", "error: the model went round in a loop, repeating itself"};
+    engine.textAnswers = {"error: the model went round in a loop, repeating itself", "error: the model went round in a loop, repeating itself",
+                          "It is 8."};
     agent.submitPrompt("What is four plus four?");
-    CHECK_EQ(engine.chats.size(), looped + 4);
+    CHECK_EQ(engine.chats.size(), looped + 5);
+    CHECK(engine.chats.back().temperature == 0.0f &&
+          engine.chats.back().messages.back().text.rfind("Your last reply went round in a loop", 0) == 0);
+    CHECK(!agent.busy.get() && agent.messages().back().text == "It is 8.");
+    const size_t rescued = engine.chats.size();
+    engine.textAnswers = {"error: the model went round in a loop, repeating itself", "error: the model went round in a loop, repeating itself",
+                          "error: the model went round in a loop, repeating itself", "error: the model went round in a loop, repeating itself"};
+    agent.submitPrompt("What is five plus five?");
+    CHECK_EQ(engine.chats.size(), rescued + 4);
     CHECK(!agent.busy.get() && agent.messages().back().text.rfind("The local model failed: the model went round", 0) == 0);
     // The question names a file and it answers without reading anything: sent back to read it.
     agent.setLocalNamedFiles([](const std::string& q) {
@@ -5903,6 +5912,9 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
         CHECK(year.find("There is no sheet '2014' in data/book.xlsx. Its sheets: Formats & cells, Data") != std::string::npos &&
               year.find("(column = 2014)") != std::string::npos && year.find("rows match") == std::string::npos);
         CHECK(call("query_table", R"j({"path": "data/book.xlsx", "sheet": "data", "limit": 1})j").find("(this is Data)") != std::string::npos);
+        // read_file of a workbook: pointed at query_table first, as a table.
+        CHECK(call("read_file", R"j({"path": "data/book.xlsx"})j").find("It is a table: call query_table {\"path\": \"data/book.xlsx\"}") !=
+              std::string::npos);
     } else {
         CHECK(false);
     }
@@ -6213,6 +6225,17 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
     engine.textAnswers = {"calculate {\"expression\": \"0.4 * 14500\"}", "Lumen pays 40% of 14,500 at kick-off."};
     agent.submitPrompt("How much does Lumen pay at kick-off?");
     CHECK(agent.messages().back().text == "Lumen pays 40% of 14,500 at kick-off.");
+    // "How many": the check quotes each count asked (a list of the things is not the count).
+    checks = engine.checks.size();
+    engine.textAnswers = {"list_files {\"path\": \"audio\"}", "The .wav files are a.wav and b.wav; b.wav is the largest."};
+    agent.submitPrompt("How many .wav files are in the audio folder, and which one is the largest?");
+    CHECK_EQ(engine.checks.size() - checks, size_t(1));
+    CHECK(engine.checks.back().messages.back().text.find("My question asks \"How many .wav files are in the audio folder\": does "
+                                                         "your answer say that number") != std::string::npos);
+    checks = engine.checks.size();
+    engine.textAnswers = {"calculate {\"expression\": \"0.4 * 14500\"}", "Lumen pays 5800 at kick-off."};
+    agent.submitPrompt("How much does Lumen pay at kick-off?");
+    CHECK(engine.checks.size() == checks + 1 && engine.checks.back().messages.back().text.find("My question asks") == std::string::npos);
     // A question that asks for no figure, or an answer without tools: not checked.
     engine.checkReply = "OK";
     checks = engine.checks.size();

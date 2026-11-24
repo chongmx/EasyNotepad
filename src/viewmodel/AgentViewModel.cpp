@@ -458,6 +458,33 @@ bool asksForFigure(const std::string& question)
     return std::any_of(std::begin(asks), std::end(asks), [&](const char* a) { return lower.find(a) != std::string::npos; });
 }
 
+// Each "how many ..." the question asks, in its words, up to the end of that part ("how many .wav
+// files are in the audio folder"): the answer's check names them (a small model listed the files
+// and never said how many).
+std::vector<std::string> countsAsked(const std::string& question)
+{
+    std::string lower = question;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    std::vector<std::string> found;
+    for (size_t at = lower.find("how many"); at != std::string::npos; at = lower.find("how many", at + 8)) {
+        if (at > 0 && std::isalpha(static_cast<unsigned char>(lower[at - 1])))
+            continue;
+        size_t end = lower.find_first_of(",;?!\n", at);
+        if (const size_t dot = lower.find(". ", at); dot < end)
+            end = dot;
+        if (end == std::string::npos)
+            end = lower.size();
+        for (const char* stop : {" and which", " and what", " and how", " and who", " and where", " and when", " and is", " and are"})
+            if (const size_t s = lower.find(stop, at); s < end)
+                end = s;
+        std::string part = question.substr(at, std::min<size_t>(end - at, 120));
+        while (!part.empty() && (part.back() == ' ' || part.back() == '.'))
+            part.pop_back();
+        found.push_back(std::move(part));
+    }
+    return found;
+}
+
 // The model's reply to that check is "OK": the answer stands.
 bool checkPassed(const std::string& text)
 {
@@ -830,6 +857,7 @@ void AgentViewModel::endLocal()
     localToolsUsed_ = 0;
     localChecked_ = false;
     localOutOfRounds_ = false;
+    localLoopRescued_ = false;
     localLookedFurther_ = false;
     localCheckedAt_ = std::string::npos;
     localEmptySearches_ = 0;
@@ -1468,6 +1496,22 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
         nextLocalStep(generation, "I could not finish this step (the model went wrong); what the tools found is above.");
         return;
     }
+    // A question not in steps that went wrong again (often a calculation written badly, over and
+    // over): asked once, without variety, to answer from what the tools found.
+    if (!r.ok && slipped && runTool_ && (localSteps_.empty() || localStep_ > localSteps_.size()) && !localLoopRescued_ &&
+        !localRequest_.tools.empty()) {
+        localLoopRescued_ = true;
+        if (at < messages_.size())
+            messages_.erase(messages_.begin() + long(at));
+        messages_.push_back({model::ChatRole::Tool, "(The local model went wrong again: asked for the answer.)"});
+        localRequest_.temperature = 0.0f;
+        localRequest_.messages.emplace_back("assistant", std::string());
+        localRequest_.messages.emplace_back("user", "Your last reply went round in a loop and was cut off. Answer my question now "
+                                                    "from what the tools found above. If a calculation is still needed, make it "
+                                                    "as ONE calculate call, the whole expression as a quoted string, then answer.");
+        sendLocal(generation);
+        return;
+    }
     if (!r.ok) {
         if (empty)
             messages_.erase(messages_.begin() + long(at));
@@ -1733,12 +1777,20 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
             localChecked_ = true;
             localCheckedAt_ = at;
             localRequest_.messages.emplace_back("assistant", r.text);
+            std::string counts;
+            for (const std::string& c : countsAsked(localPrompt_))
+                counts += (counts.empty() ? "" : ", ") + ("\"" + c + "\"");
             localRequest_.messages.emplace_back(
                 "user", "Check your answer against my question: does it give each amount, date or time I asked for, worked out "
                         "to the final figure (not only the figures to work it out from, such as a percentage of a price, a "
-                        "time before another, or a rule with a limit)? If it does, reply only: OK. If not, work it out now "
-                        "(calculate) and write the whole answer to my question again, as your answer (do not mention this "
-                        "check or an earlier answer).");
+                        "time before another, or a rule with a limit)?" +
+                            (counts.empty() ? std::string()
+                                            : " My question asks " + counts +
+                                                  ": does your answer say that number, in so many words (a list of the "
+                                                  "things is not the count)?") +
+                            " If it does, reply only: OK. If not, work it out now (calculate, or the count a tool gave) and "
+                            "write the whole answer to my question again, as your answer (do not mention this check or an "
+                            "earlier answer).");
             sendLocal(generation);
             return;
         }

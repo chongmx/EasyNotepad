@@ -210,6 +210,7 @@ private:
     bool localChecked_ = false;
     bool localPlanThinking_ = false; // the plan is thought through first (LocalSetup::planThinking)
     bool localOutOfRounds_ = false; // told once to answer without more tools
+    bool localLoopRescued_ = false; // a question not in steps that looped twice: asked once to answer
     bool localLookedFurther_ = false; // told, this step, to look further before saying "not there"
     size_t localCheckedAt_ = std::string::npos;
     std::function<std::string(const std::string&)> localPlanner_;

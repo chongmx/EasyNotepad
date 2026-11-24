@@ -142,6 +142,15 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- Gemma 4 E4B's sums came out garbled: written without the string's quotes
+  (`expression:2500.00 * 1.035^4`), the tool-call grammar took the value as a number and let only
+  digits follow, so calculate got 2500.0010375 and the question looped. A bare value that starts
+  as a number may now go on as an expression and reaches the tool as a string; a plain number
+  stays a number (patches/llama.cpp/0003).
+- The local agent's answer check now quotes each "how many ..." the question asks: E4B listed the
+  files and never said how many. A question not taken in steps that loops twice is asked once to
+  answer from what the tools found, instead of failing. `read_file` of a workbook points to
+  `query_table` first.
 - The local agent read the same long reply into its context twice: a one-line 16 KB HTML file
   read again with other lines asked for filled Qwen 3.5 9B's context (18K tokens on an 8 GB card).
   A tool reply of more than 1,500 characters that is already in what the model sees, word for

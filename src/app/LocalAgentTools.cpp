@@ -218,6 +218,10 @@ std::string whichTool(const std::string& path, bool hears)
     const std::string p = Json(path).dump(); // quoted and escaped
     switch (kindOf(path)) {
     case FileKind::Document:
+        if (const std::string ext = extension(path); ext == "xlsx" || ext == "xlsm")
+            return "It is a table: call query_table {\"path\": " + p +
+                   "} to count, filter, group and total its rows (its reply names the columns), or read_document {\"path\": " + p +
+                   "} for its text.";
         return "It is a document: call read_document {\"path\": " + p + "} for its text, or look_at_page {\"path\": " + p +
                ", \"page\": 1} to see a page.";
     case FileKind::Picture: return "It is a picture: call look_at_image {\"path\": " + p + "}.";
