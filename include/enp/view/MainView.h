@@ -53,6 +53,7 @@ public:
     static Layout chooseLayout(float widthDp, float heightDp);
     Layout layout() const { return layout_; }
     const EditorView& editor() const { return editor_; }
+    EditorView& editor() { return editor_; }
     const EditorView* secondColumn() const { return editor2_.get(); } // null with one column (tests)
     const MapView& map() const { return map_; }
     const Fonts& fonts() const { return fonts_; }

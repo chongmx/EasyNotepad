@@ -141,9 +141,10 @@ void SearchPanel::render()
                 float x = rowMin.x + 22.0f * s_;
                 dl->AddText(ImVec2(x, rowMin.y), palette_.gutterText, number.c_str());
                 x += ImGui::CalcTextSize("00000").x;
-                const std::string before = hit.text.substr(lead, size_t(std::max(0, hit.column - int(lead))));
-                const std::string match = hit.text.substr(size_t(std::min<int>(hit.column, int(hit.text.size()))), size_t(hit.length));
-                const std::string after = size_t(hit.column + hit.length) < hit.text.size() ? hit.text.substr(size_t(hit.column + hit.length)) : "";
+                const int col = std::clamp(hit.column - hit.textColumn, 0, int(hit.text.size())); // in hit.text
+                const std::string before = hit.text.substr(std::min<size_t>(lead, size_t(col)), size_t(std::max(0, col - int(lead))));
+                const std::string match = hit.text.substr(size_t(col), size_t(hit.length));
+                const std::string after = size_t(col + hit.length) < hit.text.size() ? hit.text.substr(size_t(col + hit.length)) : "";
                 dl->AddText(ImVec2(x, rowMin.y), palette_.textDim, before.c_str());
                 x += ImGui::CalcTextSize(before.c_str()).x;
                 const float mw = ImGui::CalcTextSize(match.c_str()).x;

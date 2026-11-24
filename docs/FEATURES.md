@@ -222,6 +222,38 @@ lists and task lists, quotes, tables, links and coloured code blocks.
 - Links open in the browser, or open the file they point to in the workspace.
 - New untitled Markdown documents start as text.
 
+## Documents: Word, Excel, PowerPoint and PDF
+
+Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`) and PDF files open read-only in a tab of the
+Code workspace, as a picture does. No workspace of its own is needed to read them (editing is
+plan 27). They are read off the UI thread; "Reading" shows until a document or a page is ready.
+
+- **Word:** pages as printed (size, margins, headers and footers with page numbers, footnotes at the
+  foot of their page), or **Reflow to the window**. The document's own fonts, from the system or a
+  bundled metric-compatible set (Carlito for Calibri, Caladea for Cambria, Liberation for Times,
+  Arial and Courier). Styles, numbered headings and lists, tab stops and leaders, tables with their
+  styles, floating pictures, charts; comments listed at the end.
+- **Excel:** the sheet as Excel draws it, with sheet tabs along the bottom: number formats, fonts,
+  fills, borders, merged cells, frozen panes, conditional formatting (rules, colour scales, data
+  bars, icon sets), table styles, and pictures and charts over the cells. A click selects a cell,
+  the arrows move, **Ctrl+C** copies it. Values are as the file saved them; formulas are not
+  recalculated.
+- **PowerPoint:** one slide after another, fitted to the window (**Fit the slide**): masters and
+  layouts, theme colours and fonts, shapes, tables, pictures, charts, SmartArt.
+- **PDF:** pages read as they come into view, text in the document's place, pictures at the size
+  shown, shadings and clips. **Encrypted PDFs** open (RC4 and AES); one that needs a password asks
+  for it.
+- **Find** (**Ctrl+F**, or the magnifier on a phone) in PDFs and slides: matches in reading order,
+  two-column pages included, ligatures and line breaks ignored, every match marked on the page.
+- **Zoom:** the buttons, **Ctrl+wheel**, or a pinch, which keeps the point under the fingers where
+  it is, for every kind. Previous and next page or slide, and a page number.
+- A file that cannot be read says why and offers **Open as text anyway**; what a document holds
+  but the viewer does not show (videos, some charts) is listed, not dropped silently.
+- Chinese, Japanese and Korean text use a system font, loaded while such a document is open.
+- **Memory:** closing a document gives back its pages, pictures and fonts.
+- Not yet: the agents reading a document's text (plan 26 step 1), the old `.doc`, `.xls`, `.ppt`
+  and `.rtf` formats, and editing (plan 27).
+
 ## Phones, tablets and small windows
 
 The layout follows the shape of the window. It is the same view on every platform, so Android, a
@@ -298,15 +330,85 @@ downloaded once from the agent set-up (the gear), or from the Engine Lab.
 - **Answers say who gave them** (*Agent · Local* or *Agent · Claude*). Under a local answer, **Ask
   Claude instead** sends the same question to Claude Code.
 - **What the local model sees:**
-  - the selection, or the 40 lines around the caret, with the question (it cannot open files
-    itself);
-  - the recent conversation.
-  It cannot edit files or use the app, and says so when asked.
+  - the selection, or the 40 lines around the caret, with the question;
+  - the recent conversation;
+  - whatever its tools bring it (below).
+- **It works in the open folder with the app's tools**, calling them by itself, up to 16 rounds a
+  question, each step shown in the chat (`⚙ read_file  src/main.cpp`):
+  - the folder: list it, find text in it, read files by line range (open files as you have them,
+    unsaved edits included). It cannot leave the open folder.
+  - documents: the text of PDF, Word, Excel and PowerPoint files, a few pages at a time;
+    **look at a page** in the viewer as a picture, at a zoom and region (top, bottom-left, ...)
+    for tables, charts, drawings and small print. The page is shown to you as it looks.
+  - **pictures** (PNG, JPEG, GIF, WebP, TIFF, ...) and **recordings** (WAV, MP3, FLAC: speech,
+    music, sounds), with its eyes and ears: a 987 MB download in the agent set-up (*Let it see and
+    hear*), loaded only when a question needs them.
+  - **edits**: it proposes changes (a replacement in a file, or a whole new file). They wait under
+    the conversation (*N changes to review*: **Review** side by side, **Accept all**, **Reject
+    all**); an accepted change opens in the editor, unsaved. With *Plan only* it has no edit tools.
+  - **open a file** at a line, to show you what it means.
+  - **office work**: `query_table` filters, sorts, groups and totals CSV and Excel sheets;
+    `calculate` does every sum exactly (`15% of 2340 + 7.5% of 980`).
+  - **meetings**: `transcribe` writes a recording down word for word, however long (30-second
+    windows with [mm:ss] times), into `<recording>.transcript.md`, then it writes the minutes.
+  - **programs and libraries**: `inspect_binary` reads what the binary view shows (exports with
+    readable C++ names, imports and their libraries, sections); `read_bytes` shows any file as hex.
+  - **how carefully it looks**: `detail` low, normal or high (about 70, 280 or 1,100 tokens a
+    picture) - high for reading text (OCR) and small print.
+  - **pictures in the chat**: what it looks at shows under the tool's step, `show_image` shows a
+    picture, and its answers may hold `![caption](path)`. Tools that make pictures keep them in
+    `temp/agent-images` next to the app (a day).
+  - **memory** between conversations (`agent-memory/memories.json` in the app's data folder):
+    preferences, lessons from mistakes, facts, notes for a week, temporary notes for the session;
+    it corrects, forgets and compacts them, and follows your preferences in every answer.
+- **Choice of model**: Gemma 4 E2B, E4B or 12B, or Qwen 3.5 9B (the agent set-up's Model list),
+  each downloaded with its own eyes (and, for Gemma, ears and MTP drafter), checked by SHA-256;
+  the others stay on disk. Qwen hears through a speech model of its own download (Qwen3-ASR 0.6B,
+  on the CPU beside it); without it, the agent offers no recording tools.
+- **Many documents**: `search_documents` finds which documents in the folder (PDF, Word, Excel,
+  PowerPoint, text) mention something, with page and snippet, or lists them all; `extract_from_documents`
+  asks one question of up to 30 documents, one fresh pass each (long ones part by part), and
+  returns a table; working notes (`note`, `read_notes`) keep what it found for the next steps.
+- **Scanning**: `scan_document` (overlapping windows over long documents: where something is, with
+  pages and quotes) and `scan_image` (overlapping tiles over a picture, cut finer where something
+  was seen: which region to look at).
+- **Numbers by the calculator only**: a figure in an answer that no tool gave goes back to the
+  model to be worked out with `calculate` (several named sums in one call).
+- **Zooming and picture tokens**: `look_at_image` and `look_at_page` take a `region` (top,
+  bottom-right, "top third", "middle-left quarter", or "left,top,right,bottom" in percent), a
+  `zoom` (percent) and `at` (the point to zoom around). Pages are zoomed in the viewer, pictures
+  cut from the full-size file. Each look costs 70 to 1,120 tokens by its `detail`; the agent
+  set-up can set a minimum for every look ("Pictures": at least 280, 560, or always 1,120).
+- **Questions in steps**: before the work, the model splits the question into at most six steps
+  (the `planning` skill); the app gives it one step at a time, each with its own rounds of tools,
+  then asks for the answer from what the steps found. The plan and each step show in the chat. A
+  question under 20 characters, or one the plan keeps as a single step, goes as it is.
+- **Forgiving calls**: arguments with single quotes, a trailing comma or a code fence are read; a
+  wrong call is answered with the tool's usage and an example; a call written as text (JSON or
+  `tool(key="value")`) is run; an answer that only announces a call is told to make it.
+- **Context**: the largest that fits on a GPU (128k tokens on an RTX 5060 with the eyes and ears);
+  32k on the CPU.
+- **Skills** (`resources/skills/`): short guides it reads before a kind of task (the folder,
+  documents, pictures and sound, editing, the app). Its guide lists them with every question,
+  with which tool reads which kind of file.
+- It cannot run programs, build, use Git or save files, and says so.
 - **Speed:**
   - it streams as it writes, using the drafter when it is downloaded;
   - the model loads on the first question (a few seconds) and is unloaded after 5 idle minutes,
     giving its memory back;
   - S24 Ultra (CPU): about 30 tokens/s writing, about 100 tokens/s reading the question.
+- **On an NVIDIA GPU** (Windows x64 and Linux x64): put `enp-engine-cuda` next to EasyNotepad
+  (on Windows with the `cublas64_*.dll` and `cublasLt64_*.dll` that come with it; it is a separate
+  download from the release) and the local agent answers on the GPU, with nothing to set.
+  RTX 5060 laptop: 105 tokens/s writing (185 with the drafter), against 19 on its CPU.
+  - It is optional. Without it the app is the same, and the CPU answers.
+  - It is fail-safe: it runs in a helper process (`EasyNotepad --local-engine`). When it cannot
+    start (no NVIDIA GPU, a driver too old, a DLL missing) or fails while answering (a crash, a
+    hang, too little GPU memory), the CPU answers instead, the same question when nothing was
+    written yet, and the next question otherwise. It is not tried again until the app restarts.
+  - The Engine Lab shows which GPU it uses, or why it is not used; *Use the GPU* runs its
+    measurements on it.
+  - When idle for 5 minutes its helper ends, giving the GPU's memory back.
 
 ## Engine lab (developer view)
 

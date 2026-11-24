@@ -49,6 +49,8 @@ bool deletePath(const std::string& path, bool* recycled = nullptr, std::string* 
 
 std::string currentDirectory();
 std::string executableDirectory();
+// The running program's own file (empty where there is none to start again: Android, the web).
+std::string executablePath();
 // Android: the shared storage ("/storage/emulated/0") once the app may read it, else the app's own folder.
 std::string homeDirectory();
 // Per-user writable directory for settings (created on demand).

@@ -23,6 +23,105 @@ its release notes on GitHub.
   unless "Aa" is on, ligatures match their letters, and a line break matches a space, so a phrase
   is found across lines. In two columns, the column with the keyboard goes to each match; the
   other, when it shows the same document, keeps its place and shows the highlights.
+- The local agent works in the open folder with the app's own tools, and reads, looks and listens.
+  It calls them by itself (each step shows in the chat): it lists the folder, finds text, reads
+  files by line range, reads PDF, Word, Excel and PowerPoint text a few pages at a time, looks at a
+  page in the viewer as a picture (zoomed, a region of it) for tables and charts, looks at pictures,
+  listens to recordings (WAV, MP3, FLAC), and opens files to show you. Its edits are proposals,
+  listed under the conversation to review side by side, accept or reject; with *Plan only* it has
+  none. It cannot leave the open folder. Pictures and sound need its eyes and ears, Gemma 4's
+  vision and audio encoders from Google (987 MB, *Let it see and hear* in the agent set-up),
+  loaded only for a question that needs them. Skills in `resources/skills/` teach it each kind of
+  task. Tested with Gemma 4 E2B on the CPU: it read a datasheet's numbers, described a chart on a
+  slide and took down a voicemail. The engine library's interface is version 2: an
+  `enp-engine-cuda` built before this is not loaded (the CPU answers) until it is replaced.
+- The local agent does office work and remembers: `query_table` (filter, sort, group and total CSV
+  and Excel sheets) and `calculate` (exact sums, percentages); `transcribe` writes a meeting down
+  word for word into a text file next to it, with times, for minutes; `inspect_binary` and
+  `read_bytes` read programs and libraries as the binary view does; how carefully it looks at a
+  picture is chosen per look (low, normal, high for OCR); pictures show in the chat; a memory
+  between conversations keeps your preferences, its lessons and notes, and is corrected and
+  compacted by the agent. Small-model slips are caught: loose JSON, calls written as text, calls
+  announced but not made, a preference said but not saved. Tested with Gemma 4 E2B on Microsoft's
+  Financial Sample workbook, a photographed receipt, a mock meeting and a test DLL
+  (`C:\cpp\agent-samples`, a small downloaded set, outside the repository).
+- The local agent takes a question in steps: it first splits it into steps (the `planning` skill,
+  at most six), then the app gives it one step at a time and asks for the answer from what the
+  steps found. The plan and each step show in the chat; a simple question is one step and goes
+  as before. With Gemma 4 E2B, "which country made the most profit, how much, and what share of
+  the total" went from an invented figure to three tool-backed steps and the right answer (19 s
+  on an RTX 5060).
+- TIFF and WebP pictures open. TIFF is decoded by the app itself: strips and tiles, uncompressed,
+  PackBits, LZW, Deflate and CCITT fax (Modified Huffman, Group 3, Group 4), 1- to 16-bit grey,
+  palette, RGB(A), CMYK, the predictor; tested pixel for pixel against files from Windows' own
+  encoder. WebP comes from libwebp 1.5.0 (a new submodule, decoder only): lossy, lossless, alpha.
+  Not yet: JPEG inside TIFF, BigTIFF, animated WebP.
+- The local agent zooms: `look_at_image` and `look_at_page` take a `region` (halves, thirds,
+  quarters, corners, the centre, or a box in percent), a `zoom` and the point to zoom `at`. A
+  picture is cut from the full-size file; a page is zoomed in the viewer until the part fills it,
+  so small print is read from real pixels. Each picture is sized to the tokens it is given (70 to
+  1,120, one per 48 x 48 pixels), and the agent set-up has a minimum for every look (up to always
+  1,120). A look at an empty part says so. Page looks were also cut from the wrong place on
+  screens where the window is not at the screen's corner, and missed a document opened by the
+  same call: both fixed.
+- The agent set-up shows "Take questions in steps"; both settings are saved.
+- Retries: a call to the wrong tool for a file, a region it cannot read, or a filter that matches
+  no rows (the reply now lists the values the column holds, and "Sunday" finds "Sun") is followed
+  by "make the corrected call now" instead of a report of the failure.
+- `tests/agent-bench`: 27 questions with known answers over the sample files, and a runner that
+  asks them in the running app and grades the answers.
+- The local agent works across the folder's documents: `search_documents` searches inside every
+  PDF, Word, Excel, PowerPoint and text file (or lists them with kind, pages and title);
+  `extract_from_documents` asks one question of many documents, each in a pass of its own (a long
+  one part by part, what it found carried along), and returns a table; working notes (`note`,
+  `read_notes`) hold what it found, are repeated at each step, and start again with a new chat.
+  The `multiple-documents` skill teaches the way: find, extract per document, note, calculate,
+  answer with sources. The planner sees what the folder holds (documents or tables) and plans with
+  real names. Four invoices in different layouts: total and largest supplier right in 17 s.
+- Three local models to choose from in the agent set-up: Gemma 4 E2B (4.3 GB, fastest), E4B
+  (6.1 GB, better at questions with several parts) and 12B (7.2 GB, the most careful), each with
+  its own eyes and ears and its own MTP drafter (speculative decoding), all pinned by commit and
+  SHA-256. Google publishes the drafters (its "assistant" checkpoints) only as unquantized weights:
+  E2B's, E4B's and 12B's are community GGUF conversions of them. On an RTX 5060 laptop GPU, E4B
+  generates 65 tokens/s alone and 112 with its drafter (56% of drafted tokens accepted). The
+  drafter is fetched with the model by itself and used: on for E2B and E4B; off for 12B, which
+  with it no longer fits an 8 GB card and slows from 33 to 20 tokens/s. Power users turn it on or
+  off per model in the Engine Lab (Agent uses the drafter).
+- A fourth local model, from another family: Qwen 3.5 9B (Alibaba, Apache-2.0; Unsloth's Q4_K_M,
+  5.7 GB, and its vision projector, 0.9 GB, pinned by commit and SHA-256). It sees pictures and
+  pages, and hears through ears of its own download: Qwen3-ASR 0.6B (Alibaba, Apache-2.0; 0.8 GB
+  with its audio encoder, 0.2 GB), a speech model that writes down what a recording says, in 30
+  languages and 22 Chinese dialects. It runs on the CPU beside Qwen, so Qwen stays loaded on the
+  GPU; `listen_to` gives Qwen the words, and `transcribe` writes them to a file with [mm:ss] times
+  as with Gemma. Speech only: it does not describe other sounds or music. Without the ears, the
+  agent is not offered `listen_to` or `transcribe` (nor the meetings skill), and its guide says it
+  cannot hear. Its tool calls are XML, so every argument is text. Pictures are sized for its own
+  tokens (one per 32 x 32 pixels; Gemma's cover 48 x 48). It has no drafter.
+- Scanning with the local model: `scan_document` shows a long document (or several) to the model
+  in overlapping windows (small, normal or large; overlap in percent), one at a time with what is
+  looked for, and returns the pages and quotes where it is; `scan_image` shows a picture in a grid
+  of overlapping tiles and cuts again, finer, the tiles where it was seen (coarse to fine, up to 3
+  levels), and returns the regions to look at closely. The planner is given the real columns of
+  the tables a question names, and plans counts, totals and averages as one query_table step.
+- Numbers: the local model no longer works figures out itself. An answer with a figure no tool
+  gave and the user did not write goes back to it, to be done with `calculate`; `calculate` takes
+  several sums at once, named ("total = 86.40 * 1.18; each = total / 3"). Counting stays its own.
+- Tools: the file open in the editor is named, not pasted, into a question (it had taken over
+  questions about other files); `read_document` lists a document's tables and figures with their
+  pages and says which pages it left out; `query_table` reads conditions joined by commas, `&&`
+  or `==`, "sum" of the one column named, and gives totals unsorted rather than failing on a sort
+  it cannot do; a guessed file name gets "does not exist" with what the folder holds;
+  `inspect_binary` shows where a forwarded export goes; each tool step in the chat shows the
+  first line of what the tool answered. Benchmark: 16 of 25 before, 20 of 25 after the number and
+  tool fixes.
+- The local agent runs on an NVIDIA GPU when `enp-engine-cuda` (llama.cpp with its CUDA backend,
+  a separate download, built by CI for Windows x64 and Linux x64) is next to the executable. On an
+  RTX 5060 laptop it writes 105 tokens/s (185 with the drafter) against 19 on its CPU, and reads a
+  prompt at about 7,400 tokens/s. It is optional: without it, or when it
+  cannot start (no NVIDIA GPU, an old driver, a missing cuBLAS DLL) or fails while answering
+  (a crash, a hang, out of memory), the CPU answers as before. It is loaded in a helper process
+  (`EasyNotepad --local-engine`), so even a crash in it or in the driver leaves the editor running.
+  The Engine Lab says whether it is used, and why not.
 
 ### Changed
 - The app has its logo as its icon everywhere, instead of each system's generic one: the Windows
@@ -43,6 +142,189 @@ its release notes on GitHub.
   `patches/imgui/BASE` names, and the submodule no longer follows a branch.
 
 ### Fixed
+- Gemma 4 E4B's sums came out garbled: written without the string's quotes
+  (`expression:2500.00 * 1.035^4`), the tool-call grammar took the value as a number and let only
+  digits follow, so calculate got 2500.0010375 and the question looped. A bare value that starts
+  as a number may now go on as an expression and reaches the tool as a string; a plain number
+  stays a number (patches/llama.cpp/0003).
+- The local agent's answer check now quotes each "how many ..." the question asks: E4B listed the
+  files and never said how many. A question not taken in steps that loops twice is asked once to
+  answer from what the tools found, instead of failing. `read_file` of a workbook points to
+  `query_table` first.
+- The local agent read the same long reply into its context twice: a one-line 16 KB HTML file
+  read again with other lines asked for filled Qwen 3.5 9B's context (18K tokens on an 8 GB card).
+  A tool reply of more than 1,500 characters that is already in what the model sees, word for
+  word, is now pointed to instead of sent again.
+- `search_files` with a path as its filter ("exports/orders.html") found nothing: the filter
+  matches file names, and a path now stands for its file name.
+- Find in Files (and the agent's `search_files`) showed only the first 240 characters of a long
+  line, so 43 hits on one line of minified HTML all showed its head and none of the matches. A hit
+  on a long line now shows the text around its match, highlighted in the Search panel.
+- A local answer ending in what it means to do next ("Let me read the file in smaller parts.")
+  was taken as the answer when it named no tool: it is told to go on, as an announced call is. A
+  file name's dot ("Let me check the bank notice.eml file") no longer hides such an ending.
+- `query_table` with `Category = Taxi` left out rows labelled "Transport - taxi", and both Qwen
+  and Gemma summed only part of the taxis. When other values of that column hold the value asked
+  for, the result with them comes first, those values named, then the result exactly as called.
+- Asked which product sold the most units, Qwen sorted the rows and took the top one (one sale);
+  asked how many bills smokers paid, it counted from five rows shown. `query_table` asked for rows
+  that name a column of a few repeated values now gives the totals per value first (count and the
+  sums of the numeric columns, sorted as asked), then the rows as called.
+- The local agent looked at the wrong photo in a folder ("a photo of a parking fine in my
+  Downloads"), said it was a receipt, and stopped. `look_at_image` on a picture the question does
+  not name now lists the other pictures beside it, with the call to look at the next one.
+- Gemma 4 E4B answered "I need the exact path to the photo" or "please provide the recipe" without
+  looking. An answer that asks for what the files may hold, before any tool, is sent back: look in
+  the open folder first.
+- Gemma 4 E4B stopped one step short: "40% of 14,500", "45 minutes before 07:35". The final
+  answer to a question that asks for an amount, a date or a time is checked once: the model says
+  OK (the answer stands) or works the figure out and answers again.
+- A transcript written earlier says which recording it is of, and the other recordings beside it
+  when the question names none (E4B answered about a voicemail from a team call's transcript).
+  `listen_to` names the others too.
+- A third search in one step that finds nothing says the thing may be elsewhere or in no text:
+  search the whole folder, and look at the pictures and recordings the tools named.
+- Qwen 3.5 9B keeps its context cache in 8 bits on the GPU, for more context in the same memory.
+- `search_files` for a phrase no line holds ("lasagne recipe") answered only "No lines", and the
+  model said the recipe was not there. It now also names the files whose names hold its words
+  (`recipes/lasagne.md`) and the lines with each word alone.
+- A transcript named without its recording's extension ("voicemail 0417.transcript.md") is
+  matched to its recording; `transcribe` and `read_closely` name the other recordings too.
+- The answer check's reply "The previous answer did not give..." replaced the answer: a reply
+  about the answer, not one, keeps the answer checked.
+- An agent that ran out of rounds of tools ended with nothing, or with "Let me search for...". It
+  is now asked once to answer from what the tools found; a step of a plan goes on to the next.
+- `calculate` works with dates: "3 October 2025 - 18 August 2025" gives 46 days, "2025-05-02 + 21"
+  a date (a small model counted days by hand and was two out).
+- `query_table` takes a month of a column of dates: `Date = March`, `March 2026`, `2026-03`. A
+  small model tried "Date contains March", then each date of the month in turn.
+- A calendar (.ics) is read as its events, with their days and times, by `read_file` and the
+  document tools; its raw DTSTART lines were read as a free afternoon.
+- `transcribe` of a recording transcribed before gives that transcript again, instead of writing
+  "transcript (2).md", "(3)" that later questions read instead of, or as well as, the first.
+- An answer that says the thing is not there is sent back once a step, to look further: at the
+  pictures and recordings it names itself, or through the whole folder.
+- A figure put into `calculate` that no tool reply or the question holds is pointed out under the
+  result (a rent of 1,080 calculated as 1,100).
+- Gemma 4 E4B thinks a question through before writing its plan (the model's own reasoning, kept
+  out of the plan), and plans again without it if the thinking runs out of room.
+- The plan does every count with a tool (rows, lines of a log, files of a folder) and a
+  calculation repeated over years in one `calculate`; `search_files` for a phrase no line holds
+  shows how to count the lines with all its words.
+- A step of a plan where the model went round in a loop twice goes on to the next step, instead of
+  the whole question failing.
+- A parking fine that was only a photo was searched for 16 rounds of tools, until the agent gave
+  up. A `search_files` or `search_documents` that finds nothing now names the pictures and
+  recordings it could not read.
+- The local agent on Gemma 4 12B closed the app when it looked at a large picture or page. 12B
+  reads a picture all at once, and a picture of more than 512 tokens did not fit the engine's
+  batch: llama.cpp ended the GPU helper, the CPU took the question over, and ended the app the same
+  way. The batch now holds the largest picture of a model that reads them all at once (1,120
+  tokens for 12B), and a picture that still does not fit is refused with a message.
+- Right after the app started, a GPU that failed on the first question could be marked ready
+  again: the check of the engine library, started in the background, ran after the question had
+  found it broken. The next question then went to the broken GPU instead of the CPU. The check now
+  does nothing once a question has found out (the engine tests failed now and then on Windows).
+- A question asked just after stopping the local agent was refused ("the local agent is still
+  answering") while the stopped answer wound down. It now waits for it and then starts.
+- The local agent got four of the benchmark's questions wrong on Gemma 4 E4B; it now answers them:
+  - A file the question named in a subfolder was not in the folder's top listing, and the agent
+    asked the user for it. The question now says which of the files it names the open folder holds,
+    and the tool for each (to the plan too).
+  - `query_table` with a sheet the workbook does not have (a year, "2014") totalled the first
+    sheet and answered another question. It is refused, with the sheets and how to filter by the
+    value instead.
+  - A plan turned "how much of the budget is left" into "the total budget", and the answer gave
+    the total. Plans keep the question's words, and the answer is asked for each thing the question
+    asks.
+  - Items on a receipt were counted in the agent's head (2 + 1 + 1 + 1 gave 6). A total of
+    quantities goes to `calculate`, and everything read from one picture is one step of a plan (it
+    looked at the receipt three times, at 1,120 tokens each).
+  - `extract_from_documents` given one short text file asked the model a narrower question of it
+    than the user's, and the answer lost what it needed. One short text file (up to 6,000
+    characters) is handed back whole instead.
+  - `calculate` compares: `9.50 + 4 = 13.50` gives true or false (also `== != < > <= >=`), for
+    checking that lines add up to a total.
+  - The check that sends back figures no tool gave did not know numbers written in words, as a
+    transcript has them ("that leaves eighteen thousand"): it sent a right 18,000 back as made up,
+    and the agent replaced it with a wrong sum. Numbers in words now count as given.
+  - A population in millions divided by an area gave 0.00 people per km². `calculate` now says,
+    under a result below 0.001, that a figure in millions or thousands should be written out.
+  - After its tools the agent sometimes said nothing, and the question ended without an answer. It
+    is now asked for the answer (twice at most).
+  - A transcript left open in the editor by an earlier question was read instead of the one the
+    question named. When a question names files, the editor's file is no longer mentioned to it.
+  - The same question took another plan, or left out a condition, from one run to the next: the
+    agent picked its words with some chance (temperature 0.3). Its plan and its steps now take the
+    likeliest words (temperature 0), so a question gets the same calls and answer each time; after
+    a call it already made, it goes back to 0.3 so it does not loop. The engine takes the
+    temperature with each request (`enp-engine-cuda` built before this keeps 0.3).
+  - The agent was given its skills' names and had to read one itself before a task, which it
+    seldom did. Its plan now names the skills each step needs (`[skills: meetings]`, at most two),
+    and each step comes with those skills' instructions, once a question; a skill the plan names
+    that does not exist is left out. The guide still lists them all, for a question not planned.
+  - `list_files` counts what it lists by kind ("In all: 3 .wav, 1 .mp3, 2 folders"): the agent
+    counted two of three .wav files. Plans total "which has the most" per group, never by max.
+  - It read the transcript left open in the editor by an earlier question instead of the one the
+    question named. A file read while a named one is still unread now says so under its result.
+  - A question naming a file was answered without reading anything ("there is no such file"). It
+    is sent back to read the files it names first.
+  - An expression written without quotes reached `calculate` as a number, and its reply ("needs an
+    expression") made the agent call it the same way again, eleven times. It now says to quote it.
+  - The local agent fell back to the CPU for the rest of the session after one bad answer: a
+    tool call the model wrote wrong (repeating itself until it was not JSON) counted as the GPU
+    failing, and from then on every question read thousands of tokens on the CPU, with 0.4 GB
+    on the GPU and no word why. What the model wrote wrong now keeps the GPU; a helper that
+    crashed, went silent or did not stop when asked is tried again on the next question (on the
+    CPU after three in a row); and an answer from the CPU says in the status line why not the GPU.
+  - A path in a wrong folder or without one (`bin/fixture.dll`, `litware-april.txt`) reads the
+    one file of that name, saying which; `query_table` on a folder lists its files, counted.
+  - A plan sees the columns of the tables a question names, and the values of a column when the
+    question names one ("at dinner": `time [Dinner, Lunch]`).
+  - The agent keeps its own memory of a task. Its plan starts with "Keep in mind:" (the
+    question's conditions, units, names); after each step it rewrites that and "Found:" (what the
+    steps found, with figures). Each step starts afresh with the memory, the last step's tool
+    results and the step, instead of every earlier step's output: a small model reads less and
+    loses less. The memory is in `agent-memory/task.md` next to the settings.
+  - `read_closely` (the `close-reading` skill) reads a long or odd file part by part (a few
+    thousand characters, overlapping, numbered lines) for an objective, taking notes as it goes;
+    a note whose figures are not in its part is left out. It answers from the notes, collects
+    them, or stops at the first part that answers.
+  - `query_table` groups by several columns, totals expressions (`sum(qty * unit_cost)`), gives
+    the row of a `max` or `min`, and says when a limit cut groups off or the question names a
+    value the query does not filter by. `search_files` takes `also` (lines with both words) and
+    counts every match. `read_file` says how many lines it left out.
+  - A step that makes the same call a third time is ended, or asked to answer from what it has:
+    the agent went round a loop until the question timed out.
+  - A folder holding a folder of the same name (`data/data/loans.csv`) was read one level up.
+  - Why the GPU was left is written to `engine.log` next to the settings, and a GPU helper that
+    fails to restart counts as one of its three tries.
+  - The engine stops an answer that goes round in a loop (one block said over and over, four
+    times at least): E2B wrote "152 - 124; 28; 152 - 122; ..." into one tool call until its limit.
+    The agent then tries once more with some variety before the question fails.
+  - The local agent still fell back to the CPU for the rest of a session, now and then: engine.log
+    showed why. The model wrote brackets in a loop inside a tool call, and reading it threw "input
+    is nested more than 64 levels deep", which counted as the GPU failing; the same question then
+    took ten minutes on the CPU. What reading the model's output throws is now the model's fault
+    (the GPU stays, the agent asks once more), and an error other than loading the model sends that
+    one question to the CPU and the next back to the GPU (three in a row at most).
+  - `calculate` with its one argument under another name takes it as the expression (a small model
+    was told "needs `expression`" each time). Gemma 4's tool-call format takes a value without
+    quotes only as a number, so an expression without quotes is cut to its first number.
+  - A value the question names once (male Gentoo penguins), of a column a `query_table` call does
+    not pick rows by, is added to that query, whose result comes first, then the query as called:
+    told so in a note, E2B went on without it three times. A plan sees the values of a column from
+    the whole table (a file sorted by species had Gentoo far down) and the columns the question
+    names by their words ("party size": size).
+  - Lines of the plan's "Keep in mind" copied word for word from the planning skill's examples
+    are left out (E2B kept "cups only" for a question about a receipt).
+  - A held-out benchmark set (`tests/agent-bench/holdout`, 25 questions on 12 made-up files,
+    made by `make.py`) measures the agent on files nothing was tuned on: E4B 21, E2B 15 to 19.
+- The web version stopped at its start with a blank page (since 1.2.0 at least): reading a file
+  put a 64 KB buffer on the stack, which is the browser build's whole stack. Files are now read
+  straight into memory, and the web build has a 1 MB stack, a Windows main thread's.
+- Open on the web shows the browser's file picker, so files on the user's computer can be opened;
+  it showed the in-app browser, which sees only the page's own files.
 - A pinch (or Ctrl+wheel) on Word, Excel, Markdown and pictures made the content jitter and slide
   away from the fingers; only PDF and slides zoomed about the point under them. Word and Excel
   laid out at the old size while scrolling for the new one, and none of them grows in proportion

@@ -27,6 +27,43 @@ extern char** environ;
 
 namespace enp::os::process {
 
+void InputStream::write(std::string data)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (closed_)
+            return;
+        queue_.push_back(std::move(data));
+    }
+    ready_.notify_one();
+}
+
+void InputStream::close()
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        closed_ = true;
+    }
+    ready_.notify_all();
+}
+
+bool InputStream::closed() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_;
+}
+
+bool InputStream::next(std::string& data)
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    ready_.wait(lock, [this]() { return closed_ || !queue_.empty(); });
+    if (queue_.empty())
+        return false;
+    data = std::move(queue_.front());
+    queue_.pop_front();
+    return true;
+}
+
 #if defined(_WIN32)
 
 namespace {
@@ -262,11 +299,22 @@ Result run(const Command& command)
     HANDLE job = startInJob(info);
     CloseHandle(info.hThread);
     dispatch::Group pipes; // pool threads, kept: see dispatch::runAsync
-    pipes.run([inWrite, &input = command.input]() {
-        DWORD written = 0;
-        size_t done = 0;
-        while (done < input.size() && WriteFile(inWrite, input.data() + done, DWORD(input.size() - done), &written, nullptr))
-            done += written;
+    pipes.run([inWrite, &input = command.input, stream = command.inputStream]() {
+        auto writeAll = [inWrite](const std::string& data) {
+            DWORD written = 0;
+            size_t done = 0;
+            while (done < data.size() && WriteFile(inWrite, data.data() + done, DWORD(data.size() - done), &written, nullptr))
+                done += written;
+            return done == data.size();
+        };
+        if (stream) {
+            std::string chunk;
+            while (stream->next(chunk))
+                if (!writeAll(chunk))
+                    break;
+        } else {
+            writeAll(input);
+        }
         CloseHandle(inWrite);
     });
     pipes.run([&]() {
@@ -285,6 +333,8 @@ Result run(const Command& command)
             result.errorOutput.append(buffer, read);
     });
     waitForExit(info.hProcess, job, command.timeoutSeconds, command.cancel, result);
+    if (command.inputStream)
+        command.inputStream->close(); // the writer stops waiting for more
     DWORD code = 0;
     GetExitCodeProcess(info.hProcess, &code);
     result.exitCode = int(code);
@@ -494,13 +544,24 @@ Result run(const Command& command)
     close(err[1]);
     signal(SIGPIPE, SIG_IGN);
     dispatch::Group writer; // a pool thread, kept: see dispatch::runAsync
-    writer.run([fd = in[1], &input = command.input]() {
-        size_t done = 0;
-        while (done < input.size()) {
-            const ssize_t n = write(fd, input.data() + done, input.size() - done);
-            if (n <= 0)
-                break;
-            done += size_t(n);
+    writer.run([fd = in[1], &input = command.input, stream = command.inputStream]() {
+        auto writeAll = [fd](const std::string& data) {
+            size_t done = 0;
+            while (done < data.size()) {
+                const ssize_t n = write(fd, data.data() + done, data.size() - done);
+                if (n <= 0)
+                    return false;
+                done += size_t(n);
+            }
+            return true;
+        };
+        if (stream) {
+            std::string chunk;
+            while (stream->next(chunk))
+                if (!writeAll(chunk))
+                    break;
+        } else {
+            writeAll(input);
         }
         close(fd);
     });
@@ -542,6 +603,8 @@ Result run(const Command& command)
     int status = 0;
     waitpid(pid, &status, 0);
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (command.inputStream)
+        command.inputStream->close(); // the writer stops waiting for more
     writer.wait();
     if (result.exitCode == 126)
         result.error = "could not enter " + command.workingDirectory;

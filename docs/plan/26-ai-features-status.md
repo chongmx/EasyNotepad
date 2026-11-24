@@ -81,7 +81,7 @@ sample workspace but does nothing real in a real folder.
 | Feature | Status |
 |---|---|
 | The agent on a viewer document | **Not connected.** The local model gets no text from it (`agentContextText()` reads the empty buffer), and Explain sends "Explain this code." with `file:1` as the place. Claude Code can still open the file itself. |
-| Agents reading a document as structure (plan 25's aim) | Not built: see `read_document` above |
+| Agents reading a document as structure (plan 27, step 27.2) | Not built: see `read_document` above |
 
 ### Developer tools
 

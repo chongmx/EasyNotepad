@@ -118,10 +118,13 @@ FindInFilesViewModel::Outcome FindInFilesViewModel::run(const std::vector<Source
             if (m.line != currentLine) {
                 currentLine = m.line;
                 currentText = lineAt(text, m.line);
-                if (currentText.size() > kMaxLineShown)
-                    currentText = currentText.substr(0, kMaxLineShown);
             }
-            result.hits.push_back({m.line, m.column, m.length, currentText});
+            // A long line (minified HTML, a one-line export): the part around this match, so each
+            // hit shows its own surroundings rather than the line's start every time.
+            size_t from = 0;
+            if (currentText.size() > kMaxLineShown && size_t(m.column + m.length) > kMaxLineShown - 40)
+                from = size_t(std::max(0, m.column - 80));
+            result.hits.push_back({m.line, m.column, m.length, currentText.substr(std::min(from, currentText.size()), kMaxLineShown), int(from)});
             if (++out.hits >= kMaxHits) {
                 out.truncated = true;
                 break;

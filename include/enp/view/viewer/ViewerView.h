@@ -65,6 +65,39 @@ public:
         const auto it = entries_.find(documentId);
         return it == entries_.end() ? -1 : it->second.currentPage;
     }
+    // The agent looks at a page: page `page` (from 0) of a paged document, at `zoom` (0 fits the width; below
+    // 0 leaves it as it is), from the next frame. False when this view does not show the document.
+    // With a part (fractions of the page x0, y0, x1, y1), a paged document is zoomed so that part
+    // fills the view, with its middle in the middle of the view: the part the agent looks at.
+    // A document opened just now has no entry until it is first drawn, and one read again gets a
+    // new entry: the page asked for is kept until a frame shows it (pending_).
+    bool showPage(int documentId, int page, float zoom, const float* part = nullptr)
+    {
+        if (page >= 0) {
+            Pending& p = pending_[documentId];
+            p.page = page;
+            for (int k = 0; k < 4; ++k)
+                p.part[k] = part ? part[k] : -1.0f;
+        }
+        const auto it = entries_.find(documentId);
+        if (it == entries_.end())
+            return page >= 0;
+        applyPending(it->second);
+        if (zoom >= 0.0f)
+            it->second.zoom = zoom;
+        return true;
+    }
+    // Where page `page` (from 0) of a paged document was drawn last frame, in screen units (the
+    // part outside the view included). False when it was not drawn.
+    bool pageOnScreen(int documentId, int page, float rect[4]) const
+    {
+        const auto it = entries_.find(documentId);
+        if (it == entries_.end() || it->second.drawnPage != page || page < 0)
+            return false;
+        for (int k = 0; k < 4; ++k)
+            rect[k] = it->second.drawnRect[k];
+        return true;
+    }
     std::size_t entryCount() const { return entries_.size(); }
     std::size_t heldImageCount() const; // for the tests: pictures decoded for open documents
     // For the tests: the pictures of page `page` it holds that could not be shown, with why.
@@ -74,6 +107,11 @@ public:
     std::uint8_t scripts() const;
 
 private:
+    struct Pending {
+        int page = -1;
+        float part[4] = {-1, -1, -1, -1};
+    };
+    std::map<int, Pending> pending_; // by document id: a page to show, until a frame shows it
     struct HeldImage {
         std::string key; // in the image cache
         const MarkdownImage* image = nullptr;
@@ -102,6 +140,9 @@ private:
         float pageScale = 0.0f;
         int currentPage = 0;
         int goToPage = -1;          // scroll to this page's top next frame (the toolbar's arrows, Home / End)
+        float focusBox[4] = {-1, -1, -1, -1}; // or this part of it to fill the view (the agent's zoom)
+        int drawnPage = -1;         // the current page, where it was drawn last frame (the agent's looks)
+        float drawnRect[4] = {0, 0, 0, 0};
         float scrollSpeed = 0.0f;   // pages: how fast the content moves (pixels a second, smoothed)
         // The point a pinch zooms about, kept while the fingers stay down (found once: found again
         // each frame from a scroll of whole pixels, it would creep). PDF and slides, and Word's
@@ -185,6 +226,7 @@ private:
     Entry& entryFor(const model::Document& doc, const viewmodel::ViewerViewModel::Entry& model);
     void releaseImages(std::map<std::string, HeldImage>& held);
     void releaseEntry(Entry& e);
+    void applyPending(Entry& e); // a page asked for before the entry was made (showPage)
     const MarkdownImage* image(Entry& e, std::map<std::string, HeldImage>& held, const std::string& media);
     void toolbar(model::Document& doc, Entry& e, const model::viewer::ViewerDocument& d, float width);
     void flow(Entry& e, const model::viewer::ViewerDocument& d, ImVec2 size);

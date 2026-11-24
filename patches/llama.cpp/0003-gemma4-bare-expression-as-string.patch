@@ -1,0 +1,33 @@
+diff --git a/common/chat-peg-parser.cpp b/common/chat-peg-parser.cpp
+index 74b81dc..f84b70b 100644
+--- a/common/chat-peg-parser.cpp
++++ b/common/chat-peg-parser.cpp
+@@ -973,7 +973,12 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
+         return "";
+     }
+ 
+-    if (node.rule == "gemma4-number" || node.rule == "gemma4-bool" || node.rule == "gemma4-null") {
++    if (node.rule == "gemma4-number") {
++        // A number that went on as an expression ("2500 * 1.035^4", its quotes left out): a string.
++        const std::string text(trim(node.text));
++        return ordered_json::parse_no_throw(text).is_number() ? text : ordered_json(text).dump();
++    }
++    if (node.rule == "gemma4-bool" || node.rule == "gemma4-null") {
+         return std::string(node.text);
+     }
+ 
+diff --git a/common/parsers/gemma4.cpp b/common/parsers/gemma4.cpp
+index 1a63fa9..327788b 100644
+--- a/common/parsers/gemma4.cpp
++++ b/common/parsers/gemma4.cpp
+@@ -224,7 +224,9 @@ common_chat_params common_chat_params_init_gemma4(const common_chat_template &
+             p.rule("gemma4-string", p.literal("<|\"|>") + p.ref("gemma4-string-content") + p.literal("<|\"|>"));
+             p.rule("gemma4-bool", p.json_bool());
+             p.rule("gemma4-null", p.json_null());
+-            p.rule("gemma4-number", p.json_number());
++            // A bare value that starts as a number may go on as an expression ("2500 * 1.035^4": a small
++            // model leaves out the string quotes): taken whole, and passed on as a string.
++            p.rule("gemma4-number", p.json_number() + p.chars("[^,}\\]<\\n]", 0, -1));
+             p.rule("gemma4-dict-key", p.rule("gemma4-dict-key-name", p.chars("[^:}]", 1, -1)) + p.literal(":"));
+             p.rule("gemma4-dict-kv", p.ref("gemma4-dict-key") + p.space() + p.ref("gemma4-value"));
+             p.rule("gemma4-dict", [&]() {

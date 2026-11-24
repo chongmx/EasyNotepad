@@ -8,6 +8,7 @@
 #include "enp/view/Fonts.h"
 #include "enp/view/IWindowFrame.h"
 #include "enp/view/MainView.h"
+#include "LocalAgentTools.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include <memory>
@@ -52,7 +53,7 @@ public:
 
     // A screenshot was asked for (the automation's "screenshot"): after drawing this frame, the main
     // loop captures it (FrameCapture) and hands the pixels to deliverCapture, which answers.
-    bool captureWanted() const { return !captures_.empty(); }
+    bool captureWanted() const { return !captures_.empty() || (agentTools_ && agentTools_->captureWanted()); }
     void deliverCapture(bool ok, int width, int height, std::vector<unsigned char>& rgba, const std::string& failure);
 
 private:
@@ -77,6 +78,7 @@ private:
         services::AutomationServer::Reply reply;
     };
     std::vector<Capture> captures_; // screenshots waiting for the next frame
+    std::unique_ptr<LocalAgentTools> agentTools_; // the local model's tools (looks at pages wait for a capture)
 };
 
 } // namespace enp::app

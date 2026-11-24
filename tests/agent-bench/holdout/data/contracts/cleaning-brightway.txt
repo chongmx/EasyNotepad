@@ -1,0 +1,9 @@
+SERVICE AGREEMENT
+
+Supplier: Brightway Cleaning
+Customer: Alder & Finch Ltd
+Service: office cleaning, five days a week
+Monthly fee: 640 EUR (excluding VAT)
+Start date: 01 February 2025
+Term: 12 months from the start date
+Payment: within 30 days of each monthly invoice

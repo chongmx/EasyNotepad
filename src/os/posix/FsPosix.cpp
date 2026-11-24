@@ -142,13 +142,18 @@ std::optional<std::string> readFile(const std::string& path, std::string* error)
             *error = errnoMessage();
         return std::nullopt;
     }
+    // Straight into the string at the size stat gives: no copy, and no large buffer on the stack
+    // (the web build's whole stack is small). Bytes past that size (a file that grew since, or one
+    // whose size stat does not know, such as /proc) come through the small tail buffer.
     std::string data;
     struct stat st{};
     if (::fstat(fd, &st) == 0 && st.st_size > 0)
-        data.reserve(size_t(st.st_size));
-    char buffer[64 * 1024];
+        data.resize(size_t(st.st_size));
+    size_t got = 0;
+    char tail[4096];
     for (;;) {
-        ssize_t n = ::read(fd, buffer, sizeof(buffer));
+        const bool inPlace = got < data.size();
+        const ssize_t n = inPlace ? ::read(fd, &data[got], data.size() - got) : ::read(fd, tail, sizeof(tail));
         if (n < 0 && errno == EINTR)
             continue;
         if (n < 0) {
@@ -159,8 +164,14 @@ std::optional<std::string> readFile(const std::string& path, std::string* error)
         }
         if (n == 0)
             break;
-        data.append(buffer, size_t(n));
+        if (inPlace) {
+            got += size_t(n);
+        } else {
+            data.append(tail, size_t(n));
+            got = data.size();
+        }
     }
+    data.resize(got); // fewer bytes than stat said: it shrank since
     ::close(fd);
     return data;
 }

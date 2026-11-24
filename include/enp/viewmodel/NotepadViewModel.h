@@ -368,6 +368,10 @@ public:
     // Without a path, changes last for the session only.
     void setSettingsPath(const std::string& path);
     const std::string& settingsPath() const { return settings_.path(); }
+    // Where the system has a file picker the in-app one cannot stand in for (the web: the user's
+    // files are outside the page), Open asks it; it calls back with the chosen file's path.
+    using FilePicker = std::function<void(std::function<void(const std::string& path)> opened)>;
+    void setFilePicker(FilePicker picker) { filePicker_ = std::move(picker); }
     // The settings store: views keep their own state (panel sizes) in it too.
     Settings& settings() { return settings_; }
 
@@ -527,6 +531,7 @@ private:
     void refreshExplorer(); // re-reads the workspace folder tree (within explorerLimits_)
     void scanExplorerFolder(ExplorerItem& folder); // reads one folder's entries
     ExplorerLimits explorerLimits_;
+    FilePicker filePicker_;
     bool saveDocument(model::Document& doc);
 
     void beginEdit(EditKind kind);

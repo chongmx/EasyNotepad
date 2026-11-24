@@ -34,6 +34,7 @@ public:
     const DataViews& dataViews() const { return data_; }
     const LibraryView& libraryView() const { return library_; }
     const ViewerView& viewerView() const { return viewer_; } // Word, Excel, PowerPoint and PDF documents
+    ViewerView& viewerView() { return viewer_; }
     // A phone layout: no side bar (layers, minimap); the text gets the whole width.
     void setCompact(bool compact) { compact_ = compact; }
     // Rendered-Markdown states held (one per open Markdown document; tests check that closed

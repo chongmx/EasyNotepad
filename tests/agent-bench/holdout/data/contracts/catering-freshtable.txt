@@ -1,0 +1,9 @@
+SERVICE AGREEMENT
+
+Supplier: Fresh Table
+Customer: Alder & Finch Ltd
+Service: lunch catering for the canteen
+Monthly fee: 890 EUR (excluding VAT)
+Start date: 15 June 2025
+Term: 18 months from the start date
+Payment: within 30 days of each monthly invoice

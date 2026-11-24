@@ -1,0 +1,31 @@
+sku,item,warehouse,qty,unit_cost
+SKU-100-N,Desk lamp,North,36,24.75
+SKU-100-S,Desk lamp,South,67,24.75
+SKU-101-N,Office chair,North,54,4.50
+SKU-101-S,Office chair,South,57,149.00
+SKU-102-N,Monitor arm,North,4,4.50
+SKU-102-S,Monitor arm,South,21,149.00
+SKU-103-N,Keyboard,North,56,24.75
+SKU-103-S,Keyboard,South,18,39.00
+SKU-104-N,Mouse,North,72,4.50
+SKU-104-S,Mouse,South,16,39.00
+SKU-105-N,Webcam,North,3,9.90
+SKU-105-S,Webcam,South,74,24.75
+SKU-106-N,Headset,North,60,39.00
+SKU-106-S,Headset,South,29,89.00
+SKU-107-N,Notebook,North,28,89.00
+SKU-107-S,Notebook,South,57,9.90
+SKU-108-N,Stapler,North,22,9.90
+SKU-108-S,Stapler,South,76,4.50
+SKU-109-N,Whiteboard,North,57,4.50
+SKU-109-S,Whiteboard,South,53,149.00
+SKU-110-N,Marker set,North,37,149.00
+SKU-110-S,Marker set,South,22,24.75
+SKU-111-N,Paper ream,North,38,39.00
+SKU-111-S,Paper ream,South,27,39.00
+SKU-112-N,Toner,North,5,89.00
+SKU-112-S,Toner,South,53,4.50
+SKU-113-N,Cable kit,North,55,149.00
+SKU-113-S,Cable kit,South,78,12.00
+SKU-114-N,USB hub,North,44,39.00
+SKU-114-S,USB hub,South,69,24.75

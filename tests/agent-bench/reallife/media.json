@@ -1,0 +1,115 @@
+{
+ "speech": [
+  {
+   "file": "Recordings/2026-03-03 team call.wav",
+   "lines": [
+    [
+     "David",
+     "Morning Dana. Thanks for joining. Let's go through the launch quickly, I have a hard stop at ten thirty."
+    ],
+    [
+     "Zira",
+     "Morning Marco. Sure. Where did we land on the date?"
+    ],
+    [
+     "David",
+     "We agreed to move the launch to the fourteenth of April. The original date in March is off, the supplier cannot deliver the packaging in time."
+    ],
+    [
+     "Zira",
+     "OK, the fourteenth of April. And the budget?"
+    ],
+    [
+     "David",
+     "Finance approved a cap of eighteen thousand dollars for the whole launch, including the venue."
+    ],
+    [
+     "Zira",
+     "Good. What do you need from me?"
+    ],
+    [
+     "David",
+     "Dana, can you send everyone the revised timeline by Friday? That's your action."
+    ],
+    [
+     "Zira",
+     "Yes, I'll send the revised timeline by Friday."
+    ],
+    [
+     "David",
+     "I will book the venue by the twentieth of March, and Priya is updating the press kit."
+    ],
+    [
+     "Zira",
+     "Great. Anything else?"
+    ],
+    [
+     "David",
+     "No, that's it. Same time next Tuesday. Thanks Dana."
+    ]
+   ]
+  },
+  {
+   "file": "Recordings/voicemail from landlord.wav",
+   "lines": [
+    [
+     "David",
+     "Hi Dana, it's Tom, your landlord. Just to let you know the plumber is coming on Thursday between nine and eleven in the morning to fix the boiler. If you're not home, please leave the key with your neighbour in flat four B. Thanks, bye."
+    ]
+   ]
+  },
+  {
+   "file": "Recordings/memo 0412.wav",
+   "lines": [
+    [
+     "Zira",
+     "Note to self. The storage unit is number two one two, and the gate code is four, four, one, seven."
+    ]
+   ]
+  }
+ ],
+ "pictures": [
+  {
+   "file": "Downloads/IMG_2041.png",
+   "kind": "receipt",
+   "lines": [
+    "THE HARBOUR KITCHEN",
+    "12 Quay Street",
+    "Tel 555 0142",
+    "",
+    "Date: 05/03/2026  20:41",
+    "Table 7   Covers: 1",
+    "",
+    "Grilled salmon         32.50",
+    "Risotto                24.00",
+    "Sparkling water         6.50",
+    "House red (bottle)     24.40",
+    "",
+    "TOTAL                  87.40",
+    "Paid by card",
+    "",
+    "Thank you!"
+   ]
+  },
+  {
+   "file": "Downloads/scan0003.png",
+   "kind": "letter",
+   "lines": [
+    "CITY OF HARBOURVIEW - PARKING SERVICES",
+    "",
+    "PENALTY CHARGE NOTICE",
+    "",
+    "Reference: PCN-88172",
+    "Vehicle: KX21 LMV",
+    "Date of contravention: 26/02/2026",
+    "Location: Quay Street (bay 14)",
+    "",
+    "Amount due: GBP 60.00",
+    "Pay by: 26/03/2026",
+    "If paid within 14 days, the amount is reduced by half.",
+    "",
+    "Pay online at harbourview.example.gov/pay"
+   ]
+  }
+ ]
+}

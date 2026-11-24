@@ -1,0 +1,4 @@
+Boiler user guide
+
+To repressurise: open the filling loop until the gauge reads 1.5 bar, then close it.
+Service once a year.

@@ -3,11 +3,13 @@
 #pragma once
 
 #include "enp/view/Fonts.h"
+#include "enp/view/MarkdownImages.h"
 #include "enp/view/MarkdownView.h"
 #include "enp/view/Theme.h"
 #include "enp/viewmodel/NotepadViewModel.h"
 
 #include <deque>
+#include <map>
 #include <string>
 
 namespace enp::view {
@@ -44,6 +46,12 @@ private:
     bool editingCommand_ = false;
     EmojiCache* emoji_ = nullptr; // owned by MainView
     std::deque<MarkdownView> markdown_; // per message (deque: views keep their address as it grows)
+    // Pictures in the conversation (the agent's answers, its tools' looks): decoded once, held by source
+    // until the conversation is replaced (a new chat, another folder), then released.
+    MarkdownImages images_;
+    std::map<std::string, const MarkdownImage*> heldImages_;
+    const MarkdownImage* chatImage(const std::string& source);
+    void releaseImages();
 };
 
 } // namespace enp::view

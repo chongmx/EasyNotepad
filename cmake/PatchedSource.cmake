@@ -37,6 +37,7 @@ function(enp_patched_source name)
         file(SHA256 "${patch}" sum)
         string(APPEND stamp " ${sum}")
     endforeach()
+    string(APPEND stamp " paths: ${P_PATHS}") # a path added later is exported too
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${P_PATCHES}/BASE" ${patches})
 
     set(out "${CMAKE_BINARY_DIR}/${name}-src")
