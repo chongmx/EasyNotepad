@@ -5804,6 +5804,37 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
           most.find("The rows, as called:") != std::string::npos && most.find("Paseo | 50") != std::string::npos);
     CHECK(most.find("Amarilla | 3 | 90") < most.find("Paseo | 3 | 56"));
     CHECK(call("query_table", R"j({"path": "data/units.csv", "columns": "Units"})j").find("repeats") == std::string::npos);
+    // A month asked of a column of dates: its rows, however the month is written; no Month column
+    // says to ask it of the dates.
+    files.write(root + "/data/trips.csv",
+                "Date,Kind,Cost\n2025-05-30,Bus,3\n2025-06-02,Bus,4\n2025-06-17,Bus,5.5\n03/07/2025,Bus,6\n2024-06-09,Bus,100\n", nullptr);
+    for (const char* month : {"June 2025", "Jun 2025", "2025-06", "06/2025"}) {
+        const std::string june = call("query_table", std::string(R"j({"path": "data/trips.csv", "aggregate": "sum(Cost)", "where": "Date = )j") + month + "\"}");
+        CHECK(june.find("9.5") != std::string::npos);
+    }
+    CHECK(call("query_table", R"j({"path": "data/trips.csv", "aggregate": "sum(Cost)", "where": "Date contains June"})j").find("109.5") !=
+          std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/trips.csv", "aggregate": "sum(Cost)", "where": "Date = July"})j").find("| 6") !=
+          std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/trips.csv", "where": "Month = June"})j").find("Date = March (or March 2026") !=
+          std::string::npos);
+    CHECK(call("query_table", R"j({"path": "data/trips.csv", "where": "Kind = June"})j").find("no rows match") != std::string::npos);
+    // Dates in calculate: the days between two; a date with days added.
+    CHECK(call("calculate", R"j({"expression": "3 October 2025 - 18 August 2025"})j").find("= 46 days") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2025-10-03 - Aug 18th, 2025"})j").find("= 46 days") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "2025-05-02 + 21"})j").find("= 23 May 2025") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "due = 26/03/2025 + 14; due - 2025-03-01"})j").find("due = 26/03/2025 + 14 = 9 April 2025") !=
+          std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "1 May 2025 < 2 June 2025"})j").find("true") != std::string::npos);
+    CHECK(call("calculate", R"j({"expression": "12 * 3 + 5"})j").find("= 41") != std::string::npos);
+    // A calendar read as its events, with their days.
+    files.write(root + "/data/diary.ics",
+                "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Piano lesson\r\nDTSTART:20250605T163000\r\nDTEND:20250605T171500\r\n"
+                "LOCATION:Hall\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nSUMMARY:Car service\r\nDTSTART;VALUE=DATE:20250602\r\nEND:VEVENT\r\n"
+                "END:VCALENDAR\r\n", nullptr);
+    const std::string diary = call("read_file", R"j({"path": "data/diary.ics"})j");
+    CHECK(diary.find("- Monday 2 June 2025: Car service\n- Thursday 5 June 2025, 16:30-17:15: Piano lesson (at Hall)") != std::string::npos);
+    CHECK(diary.find("| DTSTART:20250605T163000") != std::string::npos);
     // A sheet the workbook does not have (a year meant as a filter): refused, not the first sheet's totals.
     if (std::optional<std::string> book = os::fs::readFile(std::string(ENP_SOURCE_DIR) + "/tests/data/viewer/challenge.xlsx")) {
         files.write(root + "/data/book.xlsx", *book, nullptr);
@@ -5964,6 +5995,16 @@ TEST(local_agent_work_tools_memory_and_forgiving_calls)
     CHECK(call("read_file", "not json at all").find("Call it like this") != std::string::npos);
     CHECK(call("teleport", "{}").find("Tools: list_files") != std::string::npos);
     CHECK(call("transcribe", R"j({"path": "data/sales.csv"})j").find("not a recording") != std::string::npos);
+    // A recording transcribed here before (and not changed since): that transcript again, not a second copy.
+    files.write(root + "/data/talk.wav", "RIFF not really sound", nullptr);
+    files.write(root + "/data/talk.transcript.md", "# Transcript of talk.wav\n\n[00:00] Hello there.\n", nullptr);
+    const std::string again = call("transcribe", R"j({"path": "data/talk.wav"})j");
+    CHECK(again.find("Transcribed before: the transcript of data/talk.wav is data/talk.transcript.md") != std::string::npos &&
+          again.find("[00:00] Hello there.") != std::string::npos && !os::fs::exists(root + "/data/talk.transcript (2).md"));
+    files.write(root + "/data/talk.transcript.md", "My own notes about the talk.\n", nullptr); // not one written here
+    CHECK(call("transcribe", R"j({"path": "data/talk.wav"})j").find("Transcribed before") == std::string::npos);
+    os::fs::deletePath(root + "/data/talk.wav");
+    os::fs::deletePath(root + "/data/talk.transcript.md");
 
     // Gemma hears; Qwen 3.5 sees pictures only: no listen_to or transcribe offered, in the guide or
     // the skills, and a call to one anyway is told so.
@@ -6116,6 +6157,66 @@ TEST(local_agent_runs_a_tool_call_written_as_text)
     engine.textAnswers = {"About 12."};
     agent.submitPrompt("How many days in a fortnight, roughly?");
     CHECK_EQ(engine.checks.size(), checks);
+}
+
+TEST(local_agent_looks_further_before_saying_it_is_not_there)
+{
+    FakeEngine engine;
+    viewmodel::AgentViewModel agent;
+    agent.setLocal(
+        &engine,
+        []() {
+            viewmodel::AgentViewModel::LocalSetup s;
+            s.ready = true;
+            s.modelPath = "/m.gguf";
+            return s;
+        },
+        []() { return std::string(); });
+    agent.agentChoice.set(int(viewmodel::AgentViewModel::Choice::Local));
+    agent.setLocalTools(
+        [](bool) {
+            return std::vector<interfaces::LocalTool>{{"calculate", "Calculates", "{}"}, {"list_files", "Lists", "{}"},
+                                                      {"search_documents", "Searches", "{}"}, {"look_at_image", "Looks", "{}"}};
+        },
+        [&](const interfaces::LocalToolCall& c, std::function<void(viewmodel::AgentViewModel::ToolOutput)> done) {
+            done({c.name == "list_files"         ? std::string("Phone: receipt.png, scan7.png")
+                  : c.name == "search_documents" ? std::string("Mail/rent.eml: the rent goes from 1,080 to 1,150 a month.")
+                  : c.name == "look_at_image"    ? std::string("A receipt from a cafe: 12.40.")
+                                                 : std::string("1150 - 1100 = 50"),
+                  {}, {}});
+        },
+        []() { return std::string(); });
+    // A picture of several looked at, the wrong one: the one it names itself, to look at next.
+    engine.textAnswers = {"look_at_image {\"path\": \"Phone/receipt.png\"}",
+                          "Phone/receipt.png is a receipt and does not contain the fine. If you have another image, such as "
+                          "Phone/scan7.png, I can look at it.",
+                          "The fine is on Phone/scan7.png.", "Not found."};
+    agent.submitPrompt("How much is the fine?");
+    std::string told;
+    for (const interfaces::LocalChatRequest& chat : engine.chats)
+        if (!chat.messages.empty() && chat.messages.back().text.rfind("Before you say it is not there", 0) == 0)
+            told = chat.messages.back().text;
+    CHECK(told.find("you name Phone/scan7.png yourself") != std::string::npos && told.find("receipt.png") == std::string::npos);
+    CHECK(agent.messages().back().text == "The fine is on Phone/scan7.png.");
+    for (const model::ChatMessage& m : agent.messages())
+        CHECK(m.text.find("If you have another image") == std::string::npos);
+    engine.textAnswers.clear();
+    // Nothing named: told to search the whole folder; once only - the second "not there" stands.
+    const size_t asked = engine.chats.size();
+    engine.textAnswers = {"list_files {}", "No relevant files were found for chores.", "There is no record of chores."};
+    agent.submitPrompt("Who earned the most coins from chores?");
+    CHECK_EQ(engine.chats.size() - asked, size_t(3));
+    CHECK(engine.chats.back().messages.back().text.find("search the whole open folder for its words") != std::string::npos);
+    CHECK(agent.messages().back().text == "There is no record of chores.");
+    // A figure put into calculate that no tool gave: said under its result (1,100; the mail says 1,080).
+    engine.textAnswers = {"search_documents {\"query\": \"rent\"}", "calculate {\"expression\": \"1150 - 1100\"}", "It goes up by 70."};
+    agent.submitPrompt("By how much is my rent going up?");
+    std::string calculated;
+    for (const interfaces::LocalChatMessage& m : engine.chats.back().messages)
+        if (m.role == "tool" && m.toolName == "calculate")
+            calculated = m.text;
+    CHECK(calculated.find("(1100 is in no tool reply and not in my question") != std::string::npos &&
+          calculated.find("1150 is") == std::string::npos);
 }
 
 TEST(opening_another_folder_forgets_the_previous_one)

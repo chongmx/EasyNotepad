@@ -185,6 +185,18 @@ its release notes on GitHub.
   about the answer, not one, keeps the answer checked.
 - An agent that ran out of rounds of tools ended with nothing, or with "Let me search for...". It
   is now asked once to answer from what the tools found; a step of a plan goes on to the next.
+- `calculate` works with dates: "3 October 2025 - 18 August 2025" gives 46 days, "2025-05-02 + 21"
+  a date (a small model counted days by hand and was two out).
+- `query_table` takes a month of a column of dates: `Date = March`, `March 2026`, `2026-03`. A
+  small model tried "Date contains March", then each date of the month in turn.
+- A calendar (.ics) is read as its events, with their days and times, by `read_file` and the
+  document tools; its raw DTSTART lines were read as a free afternoon.
+- `transcribe` of a recording transcribed before gives that transcript again, instead of writing
+  "transcript (2).md", "(3)" that later questions read instead of, or as well as, the first.
+- An answer that says the thing is not there is sent back once a step, to look further: at the
+  pictures and recordings it names itself, or through the whole folder.
+- A figure put into `calculate` that no tool reply or the question holds is pointed out under the
+  result (a rent of 1,080 calculated as 1,100).
 - A parking fine that was only a photo was searched for 16 rounds of tools, until the agent gave
   up. A `search_files` or `search_documents` that finds nothing now names the pictures and
   recordings it could not read.

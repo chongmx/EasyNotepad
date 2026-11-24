@@ -207,6 +207,7 @@ private:
     int localEmptySearches_ = 0; // searches that found nothing, in this step
     bool localChecked_ = false;
     bool localOutOfRounds_ = false; // told once to answer without more tools
+    bool localLookedFurther_ = false; // told, this step, to look further before saying "not there"
     size_t localCheckedAt_ = std::string::npos;
     std::function<std::string(const std::string&)> localPlanner_;
     std::function<std::string()> localNotes_;

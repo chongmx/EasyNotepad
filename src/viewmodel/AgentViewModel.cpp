@@ -407,6 +407,45 @@ bool asksInsteadOfLooking(const std::string& text)
     return std::any_of(std::begin(asks), std::end(asks), [&](const char* a) { return lower.find(a) != std::string::npos; });
 }
 
+// The answer says what was asked is not there ("does not contain any information about", "no
+// relevant files were found", "not available in the provided context", "is unknown").
+bool saysNotThere(const std::string& text)
+{
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    static const char* const says[] = {"not found", "could not find", "couldn't find", "cannot find", "can't find", "unable to find",
+                                       "did not find", "didn't find", "does not contain", "doesn't contain", "do not contain",
+                                       "no information", "not available", "not mentioned", "is unknown", "are unknown",
+                                       "no relevant", "do not have the relevant", "don't have the relevant", "cannot be determined",
+                                       "can't be determined", "not calculable", "cannot be made", "not in the provided",
+                                       "no record of", "there is no mention"};
+    return std::any_of(std::begin(says), std::end(says), [&](const char* s) { return lower.find(s) != std::string::npos; });
+}
+
+// The pictures and recordings an answer names ("If you have another image, such as
+// Downloads/scan0003.png"): ones to look at before saying a thing is not there.
+std::vector<std::string> mediaNamed(const std::string& text)
+{
+    static const char* const kinds[] = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic",
+                                        ".wav", ".mp3", ".m4a", ".ogg", ".flac"};
+    std::vector<std::string> out;
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    for (const char* kind : kinds)
+        for (size_t at = lower.find(kind); at != std::string::npos; at = lower.find(kind, at + 1)) {
+            const size_t end = at + std::strlen(kind);
+            if (end < lower.size() && std::isalnum(static_cast<unsigned char>(lower[end])))
+                continue;
+            size_t start = at;
+            while (start > 0 && !std::strchr(" `'\"*([\n\t,", text[start - 1]))
+                --start;
+            const std::string path = text.substr(start, end - start);
+            if (end > start && std::find(out.begin(), out.end(), path) == out.end())
+                out.push_back(path);
+        }
+    return out;
+}
+
 // The question asks for a figure, a date or a time ("how much", "when", "the latest I can"): its
 // answer is checked once for giving it worked out, not only the figures to work it out from.
 bool asksForFigure(const std::string& question)
@@ -791,6 +830,7 @@ void AgentViewModel::endLocal()
     localToolsUsed_ = 0;
     localChecked_ = false;
     localOutOfRounds_ = false;
+    localLookedFurther_ = false;
     localCheckedAt_ = std::string::npos;
     localEmptySearches_ = 0;
     if (localNamedFiles_)
@@ -1245,6 +1285,7 @@ void AgentViewModel::stepOn(int generation)
     localRounds_ = 0; // each step has its own rounds of tools
     localNudges_ = 0;
     localEmptySearches_ = 0;
+    localLookedFurther_ = false;
     localRequest_.messages.emplace_back("user", std::move(next));
     sendLocal(generation);
 }
@@ -1455,6 +1496,38 @@ void AgentViewModel::localAnswered(int generation, size_t at, const interfaces::
                                                         "what you find) and answer from it. Ask me only if my files do not have it.");
             if (at < messages_.size())
                 messages_.erase(messages_.begin() + long(at)); // a question to me, not the answer
+            sendLocal(generation);
+            return;
+        }
+        // It says the thing is not there, having looked little (a list of folders; one photo of
+        // several; a step of a plan it did not try): once a step, told to look further first - at the
+        // pictures and recordings it names itself, or through the whole folder.
+        if (r.toolCalls.empty() && runTool_ && localNudges_ < 2 && !localLookedFurther_ && localRounds_ < kMaxToolRounds &&
+            hasTool(localRequest_.tools, "search_documents") && saysNotThere(r.text)) {
+            localLookedFurther_ = true;
+            ++localNudges_;
+            std::string unseen;
+            for (const std::string& path : mediaNamed(r.text)) {
+                bool seen = false;
+                for (const interfaces::LocalChatMessage& m : localRequest_.messages)
+                    for (const interfaces::LocalToolCall& c : m.toolCalls)
+                        seen = seen || ((c.name == "look_at_image" || c.name == "listen_to" || c.name == "transcribe") &&
+                                        c.arguments.find(path) != std::string::npos);
+                if (!seen)
+                    unseen += (unseen.empty() ? "" : ", ") + path;
+            }
+            localRequest_.messages.emplace_back("assistant", r.text);
+            localRequest_.messages.emplace_back(
+                "user", unseen.empty()
+                            ? "Before you say it is not there, look further: search the whole open folder for its words "
+                              "(search_documents, then search_files, with no path), and look at or listen to the pictures "
+                              "and recordings that may hold it (list_files names them). Say it is not there only if all "
+                              "of that finds nothing."
+                            : "Before you say it is not there: you name " + unseen +
+                                  " yourself. Look at it, or listen to it, now (look_at_image or listen_to), then answer "
+                                  "from what it shows.");
+            if (at < messages_.size())
+                messages_.erase(messages_.begin() + long(at)); // not the answer yet
             sendLocal(generation);
             return;
         }
@@ -1732,6 +1805,23 @@ void AgentViewModel::runLocalTools(int generation, std::vector<interfaces::Local
             result.text += "\n\n(That is the third search here that found nothing: what you look for may not be where you are "
                            "looking, or not written in a text at all. Search the whole open folder (no path, no include), and "
                            "look at or listen to a picture or recording the tools name that may hold it.)";
+        // A figure put into calculate that nothing it was given holds: misread or remembered wrong (a
+        // rent of 1,080 calculated as 1,100). Said under the result; figures from pictures and sounds
+        // cannot be checked, and the usual units (100, 60, 365) are no figures of the files.
+        if (calls[next].name == "calculate" && !localSawMedia_ && out.media.empty()) {
+            std::string list;
+            int count = 0;
+            for (const std::string& f : unsourcedFigures(calls[next].arguments, localEvidence_, false)) {
+                const double v = std::atof(f.c_str());
+                if (v == 100 || v == 1000 || v == 24 || v == 60 || v == 365 || v == 366 || v == 52 || v == 30 || v == 31)
+                    continue;
+                list += (list.empty() ? "" : ", ") + f;
+                ++count;
+            }
+            if (count > 0)
+                result.text += "\n\n(" + list + (count == 1 ? " is" : " are") + " in no tool reply and not in my question: if "
+                               "it is a figure from a file, read it there again and calculate with the figure the file gives.)";
+        }
         ++localToolsUsed_;
         localSawMedia_ = localSawMedia_ || !out.media.empty();
         localEvidence_.emplace_back("tool", result.text);

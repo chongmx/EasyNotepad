@@ -734,7 +734,8 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
                       "sin cos tan, pi, e. Use it for EVERY number you work out - sums, differences, totals, "
                       "averages, percentages, shares, conversions, rounding - never in your head. Several at once, "
                       "separated by ';', each may be named and used by the next. Compares too: "
-                      "'9.50 + 4 = 13.50' gives true or false (also != < > <= >=).",
+                      "'9.50 + 4 = 13.50' gives true or false (also != < > <= >=). Dates too: "
+                      "'3 October 2025 - 18 August 2025' gives the days between, '2025-05-02 + 21' a date.",
          schema({{"expression", "string",
                   "e.g. 15% of 2340 + 7.5% of 980; or several: total = 42.50 * 1.08; each = total / 4; round(each, 2)"}},
                 {"expression"})},
@@ -743,7 +744,7 @@ std::vector<LocalTool> LocalAgentTools::tools(bool canEdit) const
                         "limit 1. Call it again for another grouping.",
          schema({{"path", "string", "CSV, TSV or Excel file, relative to the open folder"},
                  {"sheet", "string", "Excel: the sheet's name (default the first)"},
-                 {"where", "string", "Conditions joined by 'and', e.g. Country = Canada and Units Sold > 1000; also != >= <= contains"},
+                 {"where", "string", "Conditions joined by 'and', e.g. Country = Canada and Units Sold > 1000; also != >= <= contains; a month of dates: Date = June 2025"},
                  {"columns", "string", "Columns to show, comma-separated (default all)"},
                  {"group_by", "string", "A column to group by, or several separated by commas (\"day, time\": a row for each pair) (optional)"},
                  {"aggregate", "string", "count, or sum/avg/min/max of a column or of an expression of each row's columns, comma-separated, e.g. sum(Sales), count, sum(Units * Price); min and max also show the row they are on"},
@@ -1336,6 +1337,10 @@ std::string LocalAgentTools::namedFiles(const std::string& question)
     return out + ".";
 }
 
+namespace {
+std::string calendarText(const std::string& ics);
+}
+
 void LocalAgentTools::readFile(const Json& args, Done done)
 {
     std::string error;
@@ -1364,6 +1369,11 @@ void LocalAgentTools::readFile(const Json& args, Done done)
     const int last = std::clamp(argInt(args, "end_line", first + kReadLines - 1), first, total);
     std::string out = path + (open ? " (open in the editor)" : "") + ", lines " + std::to_string(first) + "-" +
                       std::to_string(last) + " of " + std::to_string(total) + ":\n";
+    // A calendar: its events as dates and times first, then its lines.
+    if (first == 1 && extension(path) == "ics")
+        if (const std::string events = calendarText(text); !events.empty())
+            out = path + ": a calendar. " + events + "\nIts lines " + std::to_string(first) + "-" + std::to_string(last) + " of " +
+                  std::to_string(total) + ":\n";
     for (int i = first; i <= last; ++i) {
         std::string line = lines[size_t(i - 1)];
         if (!line.empty() && line.back() == '\r')
@@ -1669,6 +1679,113 @@ struct DocumentText {
 };
 
 // A document's text, up to about `maxChars`, read here (call it off the main thread).
+long long civilDays(int y, int m, int d);
+
+// A calendar (.ics) as its events, one a line, in date order: "Thursday 12 March 2026, 14:00-15:00:
+// Dentist (at Bright Smile)". A small model read DTSTART:20260312T140000 and said the afternoon was
+// free. Empty when the text holds no event.
+std::string calendarText(const std::string& ics)
+{
+    static const char* const days[] = {"Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"};
+    static const char* const months[] = {"January", "February", "March", "April", "May", "June", "July", "August",
+                                         "September", "October", "November", "December"};
+    // Lines unfolded (a line starting with a space goes on the one before).
+    std::vector<std::string> lines;
+    std::string line;
+    for (size_t i = 0; i <= ics.size(); ++i) {
+        const char c = i < ics.size() ? ics[i] : '\n';
+        if (c == '\r')
+            continue;
+        if (c != '\n') {
+            line += c;
+            continue;
+        }
+        if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && !lines.empty())
+            lines.back() += line.substr(1);
+        else
+            lines.push_back(line);
+        line.clear();
+    }
+    struct Event {
+        std::string start, end, summary, location, repeats;
+    };
+    std::vector<Event> events;
+    Event e;
+    bool in = false;
+    auto unescape = [](std::string v) {
+        std::string out;
+        for (size_t k = 0; k < v.size(); ++k) {
+            if (v[k] == '\\' && k + 1 < v.size()) {
+                ++k;
+                out += v[k] == 'n' || v[k] == 'N' ? ' ' : v[k];
+            } else {
+                out += v[k];
+            }
+        }
+        return out;
+    };
+    for (const std::string& l : lines) {
+        if (l == "BEGIN:VEVENT") {
+            e = Event();
+            in = true;
+            continue;
+        }
+        if (l == "END:VEVENT") {
+            if (in)
+                events.push_back(e);
+            in = false;
+            continue;
+        }
+        const size_t colon = l.find(':');
+        if (!in || colon == std::string::npos)
+            continue;
+        std::string name = l.substr(0, l.find_first_of(";:"));
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+        const std::string value = l.substr(colon + 1);
+        if (name == "DTSTART")
+            e.start = value;
+        else if (name == "DTEND")
+            e.end = value;
+        else if (name == "SUMMARY")
+            e.summary = unescape(value);
+        else if (name == "LOCATION")
+            e.location = unescape(value);
+        else if (name == "RRULE")
+            e.repeats = value;
+    }
+    if (events.empty())
+        return {};
+    std::stable_sort(events.begin(), events.end(), [](const Event& a, const Event& b) { return a.start < b.start; });
+    auto when = [&](const std::string& v, bool withDay) {
+        if (v.size() < 8 || !std::all_of(v.begin(), v.begin() + 8, [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }))
+            return v;
+        const int y = std::atoi(v.substr(0, 4).c_str()), m = std::atoi(v.substr(4, 2).c_str()), d = std::atoi(v.substr(6, 2).c_str());
+        std::string out;
+        if (withDay && m >= 1 && m <= 12) {
+            const long long n = civilDays(y, m, d);
+            out = std::string(days[((n % 7) + 7) % 7]) + " " + std::to_string(d) + " " + months[m - 1] + " " + std::to_string(y);
+        }
+        if (v.size() >= 13 && v[8] == 'T')
+            out += (out.empty() ? "" : ", ") + v.substr(9, 2) + ":" + v.substr(11, 2) + (v.back() == 'Z' ? " UTC" : "");
+        return out;
+    };
+    std::string out = "Its events, in date order:\n";
+    for (const Event& ev : events) {
+        std::string t = when(ev.start, true);
+        if (!ev.end.empty()) {
+            const bool sameDay = ev.end.compare(0, 8, ev.start, 0, std::min<size_t>(8, ev.start.size())) == 0 && ev.end.size() >= 13;
+            t += (sameDay ? "-" + when(ev.end, false) : " to " + when(ev.end, true));
+        }
+        out += "- " + t + ": " + (ev.summary.empty() ? std::string("(no title)") : ev.summary);
+        if (!ev.location.empty())
+            out += " (at " + ev.location + ")";
+        if (!ev.repeats.empty())
+            out += " [repeats: " + ev.repeats + "]";
+        out += "\n";
+    }
+    return out;
+}
+
 DocumentText documentText(const std::string& absolute, size_t maxChars)
 {
     DocumentText d;
@@ -1717,6 +1834,9 @@ DocumentText documentText(const std::string& absolute, size_t maxChars)
         return d;
     }
     d.kind = "text";
+    if (extension(absolute) == "ics")
+        if (std::string events = calendarText(*bytes); !events.empty())
+            *bytes = std::move(events);
     if (bytes->size() > maxChars)
         bytes->resize(maxChars);
     d.pageCount = 1;
@@ -2086,7 +2206,10 @@ void LocalAgentTools::extractFromDocuments(const Json& args, Done done)
     // than the user's lost what it needed: "the total budget", without what was spent).
     if (files.size() == 1 && kindOf(files.front()) == FileKind::Text) {
         bool open = false;
-        const std::string text = fileText(root + "/" + files.front(), open);
+        std::string text = fileText(root + "/" + files.front(), open);
+        if (extension(files.front()) == "ics")
+            if (std::string events = calendarText(text); !events.empty())
+                text = std::move(events);
         if (!text.empty() && text.size() <= kShortTextChars && !looksBinary(text))
             return reply(done, files.front() + " is short, so here it is whole; answer from it:\n\n" + text);
     }
@@ -3635,6 +3758,267 @@ std::string plainNumbers(const std::string& text)
 
 // Several sums in one call, separated by ';' or new lines (or a list in "expressions"); each may be
 // named ("total = 86.40 * 1.18") and later ones use the names ("each = total / 3").
+namespace {
+
+// Days since 1970-01-01 of a calendar date (proleptic Gregorian).
+long long civilDays(int y, int m, int d)
+{
+    y -= m <= 2;
+    const long long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = unsigned(y - era * 400);
+    const unsigned doy = unsigned((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<long long>(doe) - 719468;
+}
+
+void civilFromDays(long long days, int& year, int& month, int& day)
+{
+    days += 719468;
+    const long long era = (days >= 0 ? days : days - 146096) / 146097;
+    const unsigned doe = unsigned(days - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    day = int(doy - (153 * mp + 2) / 5 + 1);
+    month = int(mp < 10 ? mp + 3 : mp - 9);
+    year = int(static_cast<long long>(yoe) + era * 400 + (month <= 2));
+}
+
+std::string civilDate(long long days)
+{
+    int y = 0, m = 0, d = 0;
+    civilFromDays(days, y, m, d);
+    static const char* const names[] = {"January", "February", "March", "April", "May", "June", "July", "August",
+                                        "September", "October", "November", "December"};
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%d %s %d", d, names[m - 1], y);
+    return buf;
+}
+
+// The dates in an expression as day numbers, so that "14 July 2026 - 29 May 2026" is 46 (a small
+// model counted the days by hand and got 44), and "2026-03-26 + 14" a date. Written as 2026-07-14,
+// 14 July 2026, 14th July, July 14, 2026 or 26/03/2026 (day first, as a 13 or more says, else as
+// written in most of the world). A date without its year takes the year of another in it.
+std::string datesAsDays(const std::string& expression, int& found)
+{
+    static const char* const months[] = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"};
+    static const char* const full[] = {"january", "february", "march", "april", "may", "june", "july", "august",
+                                       "september", "october", "november", "december"};
+    std::string low = expression;
+    std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    struct Hit {
+        size_t at = 0, length = 0;
+        int y = 0, m = 0, d = 0;
+    };
+    std::vector<Hit> hits;
+    auto digits = [&](size_t i, size_t& end) {
+        end = i;
+        while (end < low.size() && std::isdigit(static_cast<unsigned char>(low[end])))
+            ++end;
+        return end > i ? std::atoi(low.substr(i, end - i).c_str()) : -1;
+    };
+    auto month = [&](size_t i, size_t& end) {
+        for (int k = 0; k < 12; ++k) {
+            const size_t n = low.compare(i, std::strlen(full[k]), full[k]) == 0 ? std::strlen(full[k])
+                             : low.compare(i, 3, months[k]) == 0                 ? 3
+                                                                                 : 0;
+            if (n == 0)
+                continue;
+            end = i + n;
+            if (n == 3 && end < low.size() && low[end] == '.')
+                ++end;
+            if (end < low.size() && std::isalpha(static_cast<unsigned char>(low[end])))
+                return 0; // "march" matched as "mar": the longer was tried first; "mayor" is no month
+            return k + 1;
+        }
+        return 0;
+    };
+    auto spaces = [&](size_t i) {
+        while (i < low.size() && (low[i] == ' ' || low[i] == ','))
+            ++i;
+        return i;
+    };
+    auto ordinal = [&](size_t i) {
+        for (const char* s : {"st", "nd", "rd", "th"})
+            if (low.compare(i, 2, s) == 0 && !(i + 2 < low.size() && std::isalpha(static_cast<unsigned char>(low[i + 2]))))
+                return i + 2;
+        return i;
+    };
+    auto year = [&](size_t i, size_t& end) {
+        const size_t s = spaces(i);
+        size_t e = s;
+        const int y = digits(s, e);
+        if (y >= 1900 && y <= 2200 && e - s == 4) {
+            end = e;
+            return y;
+        }
+        end = i;
+        return 0;
+    };
+    for (size_t i = 0; i < low.size();) {
+        const bool wordStart = i == 0 || !std::isalnum(static_cast<unsigned char>(low[i - 1]));
+        if (!wordStart) {
+            ++i;
+            continue;
+        }
+        size_t e = i;
+        if (std::isdigit(static_cast<unsigned char>(low[i]))) {
+            const int a = digits(i, e);
+            // 2026-07-14
+            if (e - i == 4 && e < low.size() && (low[e] == '-' || low[e] == '/')) {
+                size_t e2 = e + 1, e3 = 0;
+                const int m = digits(e + 1, e2);
+                if (m >= 1 && m <= 12 && e2 < low.size() && low[e2] == low[e]) {
+                    const int d = digits(e2 + 1, e3);
+                    if (d >= 1 && d <= 31) {
+                        hits.push_back({i, e3 - i, a, m, d});
+                        i = e3;
+                        continue;
+                    }
+                }
+            }
+            // 26/03/2026, 26.03.2026
+            if (e - i <= 2 && e < low.size() && (low[e] == '/' || low[e] == '.')) {
+                size_t e2 = e + 1, e3 = 0;
+                const int b = digits(e + 1, e2);
+                if (b >= 1 && e2 - (e + 1) <= 2 && e2 < low.size() && low[e2] == low[e]) {
+                    const int y = digits(e2 + 1, e3);
+                    if (e3 - (e2 + 1) == 4 && y >= 1900) {
+                        const bool monthFirst = b > 12 && a <= 12;
+                        const int d = monthFirst ? b : a, m = monthFirst ? a : b;
+                        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+                            hits.push_back({i, e3 - i, y, m, d});
+                            i = e3;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // 14 July 2026, 14th of July
+            if (a >= 1 && a <= 31 && e - i <= 2) {
+                size_t s = spaces(ordinal(e));
+                if (low.compare(s, 3, "of ") == 0)
+                    s += 3;
+                size_t me = 0;
+                if (s > e || ordinal(e) > e)
+                    if (const int m = month(s, me)) {
+                        size_t ye = me;
+                        const int y = year(me, ye);
+                        hits.push_back({i, ye - i, y, m, a});
+                        i = ye;
+                        continue;
+                    }
+            }
+            i = e;
+            continue;
+        }
+        // July 14, 2026
+        if (std::isalpha(static_cast<unsigned char>(low[i]))) {
+            size_t me = 0;
+            if (const int m = month(i, me)) {
+                const size_t s = spaces(me);
+                size_t de = s;
+                const int d = s > me ? digits(s, de) : -1;
+                if (d >= 1 && d <= 31 && de - s <= 2) {
+                    size_t ye = ordinal(de);
+                    const int y = year(ye, ye);
+                    hits.push_back({i, ye - i, y, m, d});
+                    i = ye;
+                    continue;
+                }
+            }
+            while (i < low.size() && std::isalpha(static_cast<unsigned char>(low[i])))
+                ++i;
+            continue;
+        }
+        ++i;
+    }
+    found = int(hits.size());
+    if (hits.empty())
+        return expression;
+    int known = 0;
+    for (const Hit& h : hits)
+        known = known ? known : h.y;
+    if (!known) {
+        const std::time_t now = std::time(nullptr);
+        std::tm tm{};
+#if defined(_WIN32)
+        localtime_s(&tm, &now);
+#else
+        localtime_r(&now, &tm);
+#endif
+        known = tm.tm_year + 1900;
+    }
+    std::string out = expression;
+    for (auto h = hits.rbegin(); h != hits.rend(); ++h)
+        out.replace(h->at, h->length, "(" + std::to_string(civilDays(h->y ? h->y : known, h->m, h->d)) + ")");
+    return out;
+}
+
+// A cell that is one date and nothing else ("2026-03-04", "4 March 2026", "04/03/2026").
+bool cellDate(const std::string& text, int& year, int& month, int& day)
+{
+    int found = 0;
+    const std::string days = datesAsDays(text, found);
+    if (found != 1 || days.size() < 3 || days.front() != '(' || days.back() != ')')
+        return false;
+    for (size_t k = 1; k + 1 < days.size(); ++k)
+        if (!std::isdigit(static_cast<unsigned char>(days[k])) && !(k == 1 && days[k] == '-'))
+            return false;
+    civilFromDays(std::atoll(days.c_str() + 1), year, month, day);
+    return true;
+}
+
+// A month asked for, with its year or without: "March", "Mar 2026", "March 2026", "2026-03",
+// "03/2026". A small model filtered a date column with "Date contains March", then day by day.
+bool monthAsked(const std::string& text, int& year, int& month)
+{
+    static const char* const names[] = {"january", "february", "march", "april", "may", "june", "july", "august",
+                                        "september", "october", "november", "december"};
+    std::string t;
+    for (char c : text)
+        if (c != '\'' && c != '"')
+            t += char(std::tolower(static_cast<unsigned char>(c)));
+    while (!t.empty() && t.back() == ' ')
+        t.pop_back();
+    while (!t.empty() && t.front() == ' ')
+        t.erase(t.begin());
+    year = 0;
+    month = 0;
+    // 2026-03, 2026/03, 03/2026, 3-2026
+    if (t.size() >= 6 && t.size() <= 7 && std::count_if(t.begin(), t.end(), [](char c) { return c == '-' || c == '/'; }) == 1) {
+        const size_t sep = t.find_first_of("-/");
+        const std::string a = t.substr(0, sep), b = t.substr(sep + 1);
+        auto allDigits = [](const std::string& s) { return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }); };
+        if (allDigits(a) && allDigits(b)) {
+            const bool yearFirst = a.size() == 4;
+            year = std::atoi((yearFirst ? a : b).c_str());
+            month = std::atoi((yearFirst ? b : a).c_str());
+            return (yearFirst ? b : a).size() <= 2 && month >= 1 && month <= 12 && year >= 1900;
+        }
+    }
+    // March, Mar, March 2026, Mar. 2026
+    std::string word = t.substr(0, t.find(' '));
+    if (!word.empty() && word.back() == '.')
+        word.pop_back();
+    for (int k = 0; k < 12; ++k) {
+        const std::string name = names[k];
+        if (word != name && !(word.size() == 3 && name.rfind(word, 0) == 0) && !(word == "sept" && k == 8))
+            continue;
+        const std::string rest = t.find(' ') == std::string::npos ? std::string() : t.substr(t.find(' ') + 1);
+        if (!rest.empty()) {
+            if (rest.size() != 4 || !std::all_of(rest.begin(), rest.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }))
+                return false;
+            year = std::atoi(rest.c_str());
+        }
+        month = k + 1;
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
 void LocalAgentTools::calculate(const Json& args, Done done)
 {
     std::vector<std::string> parts;
@@ -3665,6 +4049,7 @@ void LocalAgentTools::calculate(const Json& args, Done done)
     if (parts.empty())
         return reply(done, "calculate needs an expression. " + usage("calculate"));
     std::vector<std::pair<std::string, double>> named; // longest names first when substituted
+    std::vector<std::string> dated;                    // names given a date
     std::string out;
     bool tiny = false; // a result below 0.001: a unit (millions) likely missed
     for (const std::string& part : parts) {
@@ -3679,6 +4064,12 @@ void LocalAgentTools::calculate(const Json& args, Done done)
                 expression = trimmed(part.substr(eq + 1));
             }
         }
+        // Its dates as days; a name given a date earlier counts as one.
+        int dates = 0;
+        const std::string shown = expression;
+        expression = datesAsDays(expression, dates);
+        for (const std::string& name : dated)
+            dates += lower(expression).find(lower(name)) != std::string::npos;
         auto evaluate = [&named](const std::string& expr, std::string& error) {
             // Earlier names, as their values.
             std::string text = expr;
@@ -3733,14 +4124,23 @@ void LocalAgentTools::calculate(const Json& args, Done done)
                 const bool same = std::abs(a - b) <= 1e-9 * std::max({1.0, std::abs(a), std::abs(b)});
                 const bool holds = op == "=" || op == "==" ? same : op == "!=" ? !same : op == "<" ? a < b && !same
                                    : op == ">" ? a > b && !same : op == "<=" ? a < b || same : a > b || same;
-                out += expression + ": " + (holds ? "true" : "false") + " (" + numberText(a) + " " + op + " " + numberText(b) + ")\n";
+                out += shown + ": " + (holds ? "true" : "false") + " (" + numberText(a) + " " + op + " " + numberText(b) + ")\n";
                 continue;
             }
         }
         const double v = op.empty() ? evaluate(expression, error) : 0.0;
         if (!error.empty())
-            return reply(done, out + "Cannot calculate '" + expression + "': " + error + ". " + usage("calculate"));
-        out += (label.empty() ? expression : label + " = " + expression) + " = " + numberText(v) + "\n";
+            return reply(done, out + "Cannot calculate '" + shown + "': " + error + ". " + usage("calculate"));
+        // With dates: two or more give the days between them; one, with days added or taken, a date.
+        std::string value = numberText(v);
+        if (dates == 1 && std::abs(v) > 3000 && std::abs(v - std::round(v)) < 1e-9) {
+            value = civilDate(std::llround(v));
+            if (!label.empty())
+                dated.push_back(label);
+        } else if (dates >= 2) {
+            value += " days";
+        }
+        out += (label.empty() ? shown : label + " = " + shown) + " = " + value + "\n";
         tiny = tiny || (v != 0 && std::abs(v) < 0.001);
         if (!label.empty()) {
             named.emplace_back(label, v);
@@ -3894,13 +4294,20 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                 return int(c);
         return -1;
     };
-    auto unknown = [&](const std::string& name) { return "There is no column '" + name + "'. The columns are: " + columns; };
+    auto unknown = [&](const std::string& name) {
+        const std::string l = lower(name);
+        return "There is no column '" + name + "'. The columns are: " + columns +
+               (l == "month" || l == "year" || l == "months"
+                    ? std::string(". For a month, ask it of the column of dates: Date = March (or March 2026, 2026-03).")
+                    : std::string());
+    };
     auto cell = [](const std::vector<std::string>& row, int c) { return size_t(c) < row.size() ? trimmed(row[size_t(c)]) : std::string(); };
 
     // where: "Country = Canada and Units Sold > 1000"
     struct Condition {
         int column;
         std::string op, value;
+        int month = 0, year = 0; // "= March", "contains 2026-03": a month of a date column
     };
     std::vector<Condition> conditions;
     const std::string where = args.getString("where");
@@ -3962,6 +4369,22 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
                 return reply(done, unknown(trimmed(part.substr(0, at))));
             const std::string o = trimmed(op);
             conditions.push_back({c, o == "==" ? std::string("=") : o, trimmed(part.substr(at + std::strlen(op)))});
+            // A month asked of a column of dates: the rows of that month (and year, when said).
+            if (Condition& k = conditions.back(); k.op == "=" || k.op == "contains") {
+                int y = 0, m = 0, d = 0, dated = 0, seen = 0;
+                if (monthAsked(k.value, k.year, k.month)) {
+                    for (const auto& row : rows) {
+                        const std::string v = cell(row, c);
+                        if (v.empty())
+                            continue;
+                        dated += cellDate(v, y, m, d);
+                        if (++seen == 20)
+                            break;
+                    }
+                    if (dated * 2 <= seen)
+                        k.month = k.year = 0;
+                }
+            }
             parsed = true;
             break;
         }
@@ -3971,6 +4394,12 @@ void LocalAgentTools::queryTable(const Json& args, Done done)
     auto matches = [&](const std::vector<std::string>& row) {
         for (const Condition& k : conditions) {
             const std::string value = cell(row, k.column);
+            if (k.month) {
+                int y = 0, m = 0, d = 0;
+                if (!cellDate(value, y, m, d) || m != k.month || (k.year && y != k.year))
+                    return false;
+                continue;
+            }
             double a = 0, b = 0;
             const bool numeric = cellNumber(value, a) && cellNumber(k.value, b);
             const int cmp = numeric ? (a < b ? -1 : a > b ? 1 : 0) : lower(value).compare(lower(k.value));
@@ -4677,21 +5106,30 @@ void LocalAgentTools::transcribe(const Json& args, Done done)
         return reply(done, error);
     if (kindOf(path) != FileKind::Sound)
         return reply(done, path + " is not a recording. " + whichTool(path, hears()));
-    const viewmodel::AgentViewModel::LocalSetup setup = vm_.localSetup();
-    if (!engine_ || !setup.ready || (nativeEars() ? setup.projectorPath.empty() : setup.earsPath.empty()))
-        return reply(done, "Transcribing needs the local model's ears: the user can download them in the agent set-up.");
     const os::fs::FileInfo info = os::fs::stat(absolute);
     if (!info.exists)
         return reply(done, path + " does not exist");
+    // Where the text goes: next to the recording, never over another file. Always word for word: a
+    // small model given a say put its summary in place of the words.
+    std::string target = absolute.substr(0, absolute.find_last_of('.')) + ".transcript.md";
+    const std::string base = target;
+    // Transcribed here before, since the recording last changed: that text again, not a second copy
+    // ("call.transcript (2).md", "(3)": the next question read the wrong one, or all of them).
+    if (const os::fs::FileInfo had = os::fs::stat(base); had.exists && !had.isDirectory && had.modifiedTime >= info.modifiedTime) {
+        const std::string heading = "# Transcript of " + fileName(path) + "\n\n";
+        if (std::optional<std::string> text = os::fs::readFile(base); text && text->rfind(heading, 0) == 0)
+            return reply(done, "Transcribed before: the transcript of " + path + " is " + vm_.workspaceRelative(base) +
+                                   ". The text:\n" + text->substr(heading.size()) +
+                                   othersBeside(path, absolute, fileName(path), false));
+    }
+    const viewmodel::AgentViewModel::LocalSetup setup = vm_.localSetup();
+    if (!engine_ || !setup.ready || (nativeEars() ? setup.projectorPath.empty() : setup.earsPath.empty()))
+        return reply(done, "Transcribing needs the local model's ears: the user can download them in the agent set-up.");
     if (info.size > (200ull << 20))
         return reply(done, path + " is too large to transcribe here (over 200 MB).");
     std::optional<std::string> bytes = os::fs::readFile(absolute);
     if (!bytes)
         return reply(done, "cannot read " + path);
-    // Where the text goes: next to the recording, never over another file. Always word for word: a
-    // small model given a say put its summary in place of the words.
-    std::string target = absolute.substr(0, absolute.find_last_of('.')) + ".transcript.md";
-    const std::string base = target;
     for (int n = 2; os::fs::exists(target) && n < 100; ++n) {
         const size_t dot = base.find_last_of('.');
         target = base.substr(0, dot) + " (" + std::to_string(n) + ")" + base.substr(dot);
